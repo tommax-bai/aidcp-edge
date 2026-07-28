@@ -90,6 +90,8 @@ interface Stub {
   setSlowStart: (opts: { envKey: string; enabled: boolean }) => Promise<unknown>;
   // 不依赖边缘的慢启动读（change slow-start-offline-toggle）：可选——不提供即模拟老客户端退化路径。
   getSlowStart?: (opts: { envKey: string }) => Promise<unknown>;
+  setFacebookRuleMode?: (opts: { envKey: string; enabled: boolean }) => Promise<unknown>;
+  getFacebookRuleMode?: (opts: { envKey: string }) => Promise<unknown>;
   getEnvironmentRisk?: (opts: { envKey: string }) => Promise<unknown>;
   recoverEnvironmentRisk?: (opts: { envKey: string }) => Promise<unknown>;
   getEnvironmentRiskRecoveryResult?: (opts: { envKey: string; commandId: string }) => Promise<unknown>;
@@ -2213,4 +2215,191 @@ test('慢启动行：点勾选框 MUST NOT 连带展开/收起「今日节奏」
   $(w, '#slow-start-toggle-wrap').dispatchEvent(new w.Event('click', { bubbles: true }));
   await tick();
   assert.equal(summary.classList.contains('expanded'), before, '点慢启动开关不得改变今日节奏的展开态');
+});
+
+// ── client-facebook-rule-mode-toggle：规则模式客户开关 ──
+
+function facebookRuleModeReceipt(envKey: string, enabled: boolean) {
+  return {
+    ok: true,
+    data: {
+      data: {
+        envKey,
+        facebookRuleMode: {
+          enabled,
+          definitionId: 'facebook_browse_10_like_1_join_contact_1',
+          definitionVersion: 1,
+          updatedAt: enabled ? '2026-07-28T08:00:00.000Z' : null,
+        },
+      },
+    },
+  };
+}
+
+function facebookRuleModeStub(overrides: Partial<Stub> = {}, platform = 'facebook'): Stub {
+  return slowStartStub({
+    getFacebookRuleMode: async ({ envKey }) => facebookRuleModeReceipt(envKey, false),
+    setFacebookRuleMode: async ({ envKey, enabled }) => facebookRuleModeReceipt(envKey, enabled),
+    ...overrides,
+  }, platform);
+}
+
+test('规则模式行：停止的 Facebook 环境仍读取 Cloud 配置，非 Facebook 整行隐藏', async () => {
+  const calls: string[] = [];
+  const w = await boot(facebookRuleModeStub({
+    getStatus: async () => makeStatus({
+      envId: 'fb-stopped',
+      edge: 'stopped',
+      session: 'idle',
+      browserState: 'closed',
+    }),
+    getFacebookRuleMode: async ({ envKey }) => {
+      calls.push(envKey);
+      return facebookRuleModeReceipt(envKey, true);
+    },
+  }));
+  const row = $(w, '#facebook-rule-mode-row');
+  const toggle = $(w, '#facebook-rule-mode-toggle') as unknown as HTMLInputElement;
+  assert.ok(!hidden(row));
+  assert.equal(toggle.checked, true);
+  assert.equal(toggle.disabled, false);
+  assert.match($(w, '#facebook-rule-mode-badge').textContent || '', /配置已开启/);
+  assert.doesNotMatch($(w, '#facebook-rule-mode-badge').textContent || '', /运行中/);
+  assert.equal(calls.length, 1, '停止环境仍只需一次 env-scoped HTTP 读');
+
+  let nonFacebookReads = 0;
+  const xhs = await boot(facebookRuleModeStub({
+    getFacebookRuleMode: async ({ envKey }) => {
+      nonFacebookReads += 1;
+      return facebookRuleModeReceipt(envKey, true);
+    },
+  }, 'xiaohongshu'));
+  assert.ok(hidden($(xhs, '#facebook-rule-mode-row')));
+  assert.equal(nonFacebookReads, 0, '非 Facebook 不应触发规则模式读取');
+});
+
+test('规则模式行：读取失败或不完整回包保持 unknown，绝不默认成关闭', async () => {
+  const failed = await boot(facebookRuleModeStub({
+    getFacebookRuleMode: async () => ({ ok: false, data: { error: 'binding_unknown' } }),
+  }));
+  const failedToggle = $(failed, '#facebook-rule-mode-toggle') as unknown as HTMLInputElement;
+  assert.equal(failedToggle.indeterminate, true);
+  assert.equal(failedToggle.disabled, true);
+  assert.match($(failed, '#facebook-rule-mode-reason').textContent || '', /binding_unknown/);
+
+  const incomplete = await boot(facebookRuleModeStub({
+    getFacebookRuleMode: async ({ envKey }) => ({
+      ok: true,
+      data: { data: { envKey, facebookRuleMode: { enabled: false } } },
+    }),
+  }));
+  const incompleteToggle = $(incomplete, '#facebook-rule-mode-toggle') as unknown as HTMLInputElement;
+  assert.equal(incompleteToggle.indeterminate, true);
+  assert.equal(incompleteToggle.disabled, true);
+  assert.match($(incomplete, '#facebook-rule-mode-reason').textContent || '', /暂时无法读取/);
+});
+
+test('规则模式行：写入中只显示目标意图，完整 Cloud 回执后才收敛', async () => {
+  const write = deferred<unknown>();
+  let writtenEnvKey = '';
+  const w = await boot(facebookRuleModeStub({
+    setFacebookRuleMode: async (args) => {
+      writtenEnvKey = args.envKey;
+      return write.promise;
+    },
+  }));
+  const toggle = $(w, '#facebook-rule-mode-toggle') as unknown as HTMLInputElement;
+  const row = $(w, '#facebook-rule-mode-row');
+  assert.equal(toggle.checked, false);
+
+  toggle.checked = true;
+  toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
+  assert.equal(toggle.checked, true);
+  assert.equal(toggle.disabled, true);
+  assert.equal(row.getAttribute('aria-busy'), 'true');
+  assert.match($(w, '#facebook-rule-mode-badge').textContent || '', /正在开启/);
+  assert.match($(w, '#facebook-rule-mode-reason').textContent || '', /等待 Cloud 确认/);
+  assert.ok(writtenEnvKey);
+
+  write.resolve(facebookRuleModeReceipt(writtenEnvKey, true));
+  await tick();
+  assert.equal(toggle.checked, true);
+  assert.equal(toggle.disabled, false);
+  assert.equal(row.hasAttribute('aria-busy'), false);
+  assert.match($(w, '#facebook-rule-mode-badge').textContent || '', /配置已开启/);
+  assert.match($(w, '.rule-mode-copy').textContent || '', /慢启动开启时由慢启动优先，规则模式暂停/);
+});
+
+test('规则模式行：写失败或成功回执不完整都回到最近 Cloud 真态', async () => {
+  for (const response of [
+    { ok: false, data: { error: { code: 'binding_conflict', message: '环境绑定冲突' } } },
+    { ok: true, data: { data: { envKey: '__local__', facebookRuleMode: { enabled: true } } } },
+  ]) {
+    const w = await boot(facebookRuleModeStub({
+      setFacebookRuleMode: async () => response,
+    }));
+    const toggle = $(w, '#facebook-rule-mode-toggle') as unknown as HTMLInputElement;
+    toggle.checked = true;
+    toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
+    await tick();
+    assert.equal(toggle.checked, false, '失败不得保留乐观开启态');
+    assert.equal(toggle.disabled, false);
+    assert.equal($(w, '#facebook-rule-mode-row').hasAttribute('aria-busy'), false);
+    assert.ok($(w, '#facebook-rule-mode-reason').classList.contains('is-error'));
+  }
+});
+
+test('规则模式行：A 写入期间切到 B，A 晚到回执不改写 B', async () => {
+  const writeA = deferred<unknown>();
+  let pushStatus: ((status: unknown) => void) | undefined;
+  const configs = new Map([['A', false], ['B', false]]);
+  const statusFor = (envId: string) => makeStatus({
+    envId,
+    envName: `环境 ${envId}`,
+    cloud: 'connected',
+    edge: 'stopped',
+    session: 'idle',
+    updatedAt: new Date().toISOString(),
+  });
+  const w = await boot(facebookRuleModeStub({
+    onStatusUpdate: (cb) => { pushStatus = cb; },
+    getStatus: async () => statusFor('A'),
+    getFacebookRuleMode: async ({ envKey }) => facebookRuleModeReceipt(envKey, configs.get(envKey) ?? false),
+    setFacebookRuleMode: async ({ envKey, enabled }) => {
+      if (envKey === 'A') return writeA.promise;
+      configs.set(envKey, enabled);
+      return facebookRuleModeReceipt(envKey, enabled);
+    },
+  }));
+  const toggle = $(w, '#facebook-rule-mode-toggle') as unknown as HTMLInputElement;
+  toggle.checked = true;
+  toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
+  assert.match($(w, '#facebook-rule-mode-badge').textContent || '', /正在开启/);
+
+  pushStatus?.(statusFor('B'));
+  await tick();
+  const rowB = w.document.querySelector('.rail-row[data-env-id="B"]') as unknown as HTMLElement;
+  assert.ok(rowB);
+  rowB.dispatchEvent(new w.Event('click', { bubbles: true }));
+  for (let i = 0; i < 3; i++) await tick();
+  assert.equal(toggle.checked, false);
+  assert.equal($(w, '#facebook-rule-mode-row').classList.contains('is-pending'), false);
+
+  configs.set('A', true);
+  writeA.resolve(facebookRuleModeReceipt('A', true));
+  await tick();
+  assert.equal(toggle.checked, false, 'A 晚到回执不得改写当前 B');
+
+  const rowA = w.document.querySelector('.rail-row[data-env-id="A"]') as unknown as HTMLElement;
+  rowA.dispatchEvent(new w.Event('click', { bubbles: true }));
+  assert.equal(toggle.checked, true, '切回 A 才显示 A 的写后真态');
+});
+
+test('规则模式行：点击开关不连带展开今日节奏', async () => {
+  const w = await boot(facebookRuleModeStub());
+  const summary = $(w, '#daily-summary');
+  const before = summary.classList.contains('expanded');
+  $(w, '#facebook-rule-mode-toggle-wrap').dispatchEvent(new w.Event('click', { bubbles: true }));
+  await tick();
+  assert.equal(summary.classList.contains('expanded'), before);
 });

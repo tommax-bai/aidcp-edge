@@ -11,6 +11,11 @@ const fields = {
   slowStartToggle: document.querySelector('#slow-start-toggle'),
   slowStartBadge: document.querySelector('#slow-start-badge'),
   slowStartReason: document.querySelector('#slow-start-reason'),
+  facebookRuleModeRow: document.querySelector('#facebook-rule-mode-row'),
+  facebookRuleModeToggleWrap: document.querySelector('#facebook-rule-mode-toggle-wrap'),
+  facebookRuleModeToggle: document.querySelector('#facebook-rule-mode-toggle'),
+  facebookRuleModeBadge: document.querySelector('#facebook-rule-mode-badge'),
+  facebookRuleModeReason: document.querySelector('#facebook-rule-mode-reason'),
   riskRecoveryRow: document.querySelector('#risk-recovery-row'),
   riskRecoveryButton: document.querySelector('#risk-recovery-button'),
   riskRecoveryFeedback: document.querySelector('#risk-recovery-feedback'),
@@ -697,6 +702,11 @@ const slowStartFeedbackByEnv = new Map();
  */
 const slowStartHttpByEnv = new Map();
 
+// Facebook 规则模式配置只由 customer-auth HTTP 读写。按 envKey 隔离读真态与写反馈，
+// checkbox 不落本地持久化，也不参与任何规则计数/动作调度。
+const facebookRuleModeHttpByEnv = new Map();
+const facebookRuleModeFeedbackByEnv = new Map();
+
 // Cloud 环境风险管理真态统一由 customer-auth HTTP 提供；自动化引擎是否连接不参与读取/恢复闸。
 const environmentRiskHttpByEnv = new Map();
 const environmentRiskFetchInFlight = new Set();
@@ -847,6 +857,50 @@ async function ensureSlowStartHttpFetch(envKey) {
   if (context && context.envKey === envKey) renderSlowStart((context.env && context.env.status) || currentStatus);
 }
 
+function facebookRuleModeError(res, fallback = '暂时无法读取规则模式配置') {
+  const rawError = res && res.data && res.data.error;
+  return String((res && res.data && res.data.message)
+    || (rawError && typeof rawError === 'object' && (rawError.message || rawError.code))
+    || (typeof rawError === 'string' && rawError)
+    || (res && res.error)
+    || fallback);
+}
+
+function normalizeFacebookRuleModeResponse(res, expectedEnvKey) {
+  const payload = res && res.ok && res.data && res.data.data;
+  const config = payload && payload.facebookRuleMode;
+  if (!payload || payload.envKey !== expectedEnvKey || !config || typeof config !== 'object'
+      || typeof config.enabled !== 'boolean' || typeof config.definitionId !== 'string'
+      || !config.definitionId.trim() || !Number.isInteger(config.definitionVersion)
+      || (config.updatedAt !== null && typeof config.updatedAt !== 'string')) return null;
+  return {
+    enabled: config.enabled,
+    definitionId: config.definitionId,
+    definitionVersion: config.definitionVersion,
+    updatedAt: config.updatedAt,
+  };
+}
+
+async function ensureFacebookRuleModeHttpFetch(envKey) {
+  if (!envKey || !window.aidcpEdge || typeof window.aidcpEdge.getFacebookRuleMode !== 'function') return;
+  const existing = facebookRuleModeHttpByEnv.get(envKey);
+  if (existing && (existing.kind === 'loading' || existing.kind === 'ok')) return;
+  facebookRuleModeHttpByEnv.set(envKey, { kind: 'loading' });
+  let next;
+  try {
+    const res = await window.aidcpEdge.getFacebookRuleMode({ envKey });
+    const config = normalizeFacebookRuleModeResponse(res, envKey);
+    next = config
+      ? { kind: 'ok', config }
+      : { kind: 'error', message: facebookRuleModeError(res) };
+  } catch (err) {
+    next = { kind: 'error', message: `读取失败：${(err && err.message) || err}` };
+  }
+  facebookRuleModeHttpByEnv.set(envKey, next);
+  const context = selectedFacebookRuleModeContext();
+  if (context && context.envKey === envKey) renderFacebookRuleMode();
+}
+
 function selectedSlowStartContext() {
   const selectedKey = fleetView.selected;
   const env = selectedKey && fleetView.envs.get(selectedKey);
@@ -862,6 +916,11 @@ function selectedSlowStartContext() {
     };
   }
   return env && envKey ? { selectedKey, env, envKey } : null;
+}
+
+function selectedFacebookRuleModeContext() {
+  const context = selectedSlowStartContext();
+  return context && selectedEnvPlatform() === 'facebook' ? context : null;
 }
 
 function selectedEnvironmentRiskContext() {
@@ -1400,6 +1459,7 @@ function renderUsageSummary(status) {
   for (const item of USAGE_ITEMS) renderUsageItem(item, usage);
   renderQuotaWindows(usage);
   renderSlowStart(status);
+  renderFacebookRuleMode();
   renderEnvironmentRiskRecovery(status);
   fields.updatedAt.textContent = usage.managedByOverview && !usage.confirmed
     ? '—'
@@ -1556,6 +1616,88 @@ function applySlowStartView(view, context) {
       ? `parking-hint${error ? ' is-error' : ''}`
       : 'parking-hint hidden';
   }
+}
+
+function hideFacebookRuleModeRow() {
+  if (!fields.facebookRuleModeRow) return;
+  fields.facebookRuleModeRow.classList.add('hidden');
+  fields.facebookRuleModeRow.classList.remove('is-pending');
+  fields.facebookRuleModeRow.removeAttribute('aria-busy');
+  if (fields.facebookRuleModeToggle) fields.facebookRuleModeToggle.indeterminate = false;
+}
+
+function renderFacebookRuleModeUnknown(message, error = false) {
+  if (!fields.facebookRuleModeRow) return;
+  fields.facebookRuleModeRow.classList.remove('hidden', 'is-pending');
+  fields.facebookRuleModeRow.removeAttribute('aria-busy');
+  if (fields.facebookRuleModeToggle) {
+    fields.facebookRuleModeToggle.checked = false;
+    fields.facebookRuleModeToggle.indeterminate = true;
+    fields.facebookRuleModeToggle.disabled = true;
+  }
+  if (fields.facebookRuleModeBadge) {
+    fields.facebookRuleModeBadge.textContent = '';
+    fields.facebookRuleModeBadge.className = 'acct-age rule-mode-badge hidden';
+  }
+  if (fields.facebookRuleModeReason) {
+    fields.facebookRuleModeReason.textContent = message;
+    fields.facebookRuleModeReason.className = `parking-hint${error ? ' is-error' : ''}`;
+  }
+}
+
+function renderFacebookRuleMode() {
+  if (!fields.facebookRuleModeRow) return;
+  const context = selectedFacebookRuleModeContext();
+  if (!context) {
+    hideFacebookRuleModeRow();
+    return;
+  }
+  if (!window.aidcpEdge || typeof window.aidcpEdge.getFacebookRuleMode !== 'function') {
+    renderFacebookRuleModeUnknown('请登录客户端后读取 Cloud 规则模式配置');
+    return;
+  }
+  const http = facebookRuleModeHttpByEnv.get(context.envKey);
+  if (http && http.kind === 'ok') {
+    const feedback = facebookRuleModeFeedbackByEnv.get(context.envKey);
+    const pending = feedback && feedback.kind === 'pending' ? feedback : null;
+    fields.facebookRuleModeRow.classList.remove('hidden');
+    fields.facebookRuleModeRow.classList.toggle('is-pending', Boolean(pending));
+    if (pending) fields.facebookRuleModeRow.setAttribute('aria-busy', 'true');
+    else fields.facebookRuleModeRow.removeAttribute('aria-busy');
+
+    const enabled = pending ? Boolean(pending.enabled) : Boolean(http.config.enabled);
+    const writerUnavailable = typeof window.aidcpEdge.setFacebookRuleMode !== 'function';
+    if (fields.facebookRuleModeToggle) {
+      fields.facebookRuleModeToggle.checked = enabled;
+      fields.facebookRuleModeToggle.indeterminate = false;
+      fields.facebookRuleModeToggle.disabled = Boolean(pending) || writerUnavailable;
+    }
+    if (fields.facebookRuleModeBadge) {
+      fields.facebookRuleModeBadge.textContent = pending
+        ? (enabled ? '规则模式 · 正在开启…' : '规则模式 · 正在关闭…')
+        : (enabled ? '规则模式 · 配置已开启' : '规则模式 · 配置已关闭');
+      fields.facebookRuleModeBadge.className = pending
+        ? 'acct-age rule-mode-badge is-pending'
+        : `acct-age rule-mode-badge${enabled ? ' is-enabled' : ''}`;
+    }
+    if (fields.facebookRuleModeReason) {
+      const error = feedback && feedback.kind === 'error' ? String(feedback.message || '') : '';
+      const text = pending
+        ? '正在等待 Cloud 确认，请稍候'
+        : error || (writerUnavailable ? '当前客户端无法修改规则模式配置' : '');
+      fields.facebookRuleModeReason.textContent = text;
+      fields.facebookRuleModeReason.className = text
+        ? `parking-hint${error || writerUnavailable ? ' is-error' : ' slow-start-feedback'}`
+        : 'parking-hint hidden';
+    }
+    return;
+  }
+  if (http && http.kind === 'error') {
+    renderFacebookRuleModeUnknown(http.message || '暂时无法读取规则模式配置，请稍后重试', true);
+    return;
+  }
+  void ensureFacebookRuleModeHttpFetch(context.envKey);
+  renderFacebookRuleModeUnknown('正在读取规则模式配置…');
 }
 
 // ─── 开发者详情：原始日志（滚动保留 + 连续去重；按 envId 分桶，绝不跨环境串号/相邻误吞）───
@@ -4212,6 +4354,13 @@ fields.slowStartToggle?.addEventListener('change', (event) => {
   event.stopPropagation();
   void submitSlowStart(Boolean(event.target.checked));
 });
+fields.facebookRuleModeToggleWrap?.addEventListener('click', (event) => {
+  event.stopPropagation();
+});
+fields.facebookRuleModeToggle?.addEventListener('change', (event) => {
+  event.stopPropagation();
+  void submitFacebookRuleMode(Boolean(event.target.checked));
+});
 
 fields.riskRecoveryButton?.addEventListener('click', (event) => {
   event.stopPropagation();
@@ -4418,6 +4567,48 @@ async function submitSlowStart(enabled) {
     // 仍在看同一 env（按 envKey，非对象身份）即重绘：无活快照时靠上面的 HTTP/回执缓存以 HTTP 来源渲染真态。
     const ctxNow = selectedSlowStartContext();
     if (ctxNow && ctxNow.envKey === envKey) render((ctxNow.env && ctxNow.env.status) || currentStatus);
+  } catch (err) {
+    settleError(`设置失败：${(err && err.message) || err}`);
+  }
+}
+
+async function submitFacebookRuleMode(enabled) {
+  const context = selectedFacebookRuleModeContext();
+  if (!context || !window.aidcpEdge || typeof window.aidcpEdge.setFacebookRuleMode !== 'function') return;
+  const { envKey } = context;
+  const http = facebookRuleModeHttpByEnv.get(envKey);
+  if (!http || http.kind !== 'ok') return;
+  const existing = facebookRuleModeFeedbackByEnv.get(envKey);
+  if (existing && existing.kind === 'pending') return;
+
+  facebookRuleModeFeedbackByEnv.set(envKey, { kind: 'pending', enabled });
+  renderFacebookRuleMode();
+
+  const settleError = (message) => {
+    facebookRuleModeFeedbackByEnv.set(envKey, {
+      kind: 'error',
+      message: String(message || '设置失败'),
+    });
+    const current = selectedFacebookRuleModeContext();
+    if (current && current.envKey === envKey) renderFacebookRuleMode();
+  };
+
+  try {
+    const res = await window.aidcpEdge.setFacebookRuleMode({ envKey, enabled });
+    const config = normalizeFacebookRuleModeResponse(res, envKey);
+    if (!config) {
+      settleError(facebookRuleModeError(
+        res,
+        res && res.ok
+          ? 'Cloud 已返回，但未带回完整规则模式配置，请稍后重试'
+          : '设置失败',
+      ));
+      return;
+    }
+    facebookRuleModeFeedbackByEnv.delete(envKey);
+    facebookRuleModeHttpByEnv.set(envKey, { kind: 'ok', config });
+    const current = selectedFacebookRuleModeContext();
+    if (current && current.envKey === envKey) renderFacebookRuleMode();
   } catch (err) {
     settleError(`设置失败：${(err && err.message) || err}`);
   }
@@ -4885,6 +5076,8 @@ function applyFleetSnapshot(snap) {
     const goneEnvKey = slowStartEnvKey(fleetView.envs.get(key));
     slowStartFeedbackByEnv.delete(goneEnvKey);
     slowStartHttpByEnv.delete(goneEnvKey); // change slow-start-offline-toggle：连同慢启动 HTTP/回执缓存一并清
+    facebookRuleModeFeedbackByEnv.delete(goneEnvKey);
+    facebookRuleModeHttpByEnv.delete(goneEnvKey);
     environmentRiskHttpByEnv.delete(goneEnvKey);
     environmentRiskFeedbackByEnv.delete(goneEnvKey);
     manualNicknamePendingEnvIds.delete(key);

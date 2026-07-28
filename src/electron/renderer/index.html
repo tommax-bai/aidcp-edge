@@ -502,6 +502,18 @@
           <span id="slow-start-reason" class="parking-hint hidden"></span>
           <span class="parking-hint slow-start-copy">设置跟随当前环境。开启后头 7 天按曲线逐日放开量，7天后按当前账号档位运行。</span>
         </div>
+        <!-- Facebook 规则模式仍是 Cloud 账号级配置：客户端只按当前环境读写同一份权威事实，
+             不在本地选择模式、计数或触发动作。与慢启动相邻，便于看清慢启动优先关系。 -->
+        <div id="facebook-rule-mode-row" class="slow-start-row rule-mode-row hidden">
+          <label class="switch inline-switch" id="facebook-rule-mode-toggle-wrap">
+            <input id="facebook-rule-mode-toggle" type="checkbox" />
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+            <span class="switch-label">规则模式</span>
+          </label>
+          <span id="facebook-rule-mode-badge" class="acct-age rule-mode-badge hidden"></span>
+          <span id="facebook-rule-mode-reason" class="parking-hint hidden"></span>
+          <span class="parking-hint rule-mode-copy">开启后按 Cloud 固定规则配置运行；慢启动开启时由慢启动优先，规则模式暂停。</span>
+        </div>
         <!-- 当前 Facebook 环境受限恢复：保持一行、一个主动作，不扩成大卡片。真态来自 Cloud env-scoped 读。 -->
         <div id="risk-recovery-row" class="risk-recovery-row hidden">
           <button id="risk-recovery-button" class="risk-recovery-button" type="button">解除受限</button>

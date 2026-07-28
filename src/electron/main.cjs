@@ -6324,6 +6324,30 @@ ipcMain.handle('slow-start:get', (_event, raw) => handleInteractionIpc(async () 
   });
 }));
 
+// Facebook 规则模式是 Cloud 账号级配置；renderer 只交当前 envKey（以及写入时的 enabled）。
+// main 固定 customer-auth 路径/方法，accountId、平台和绑定均由 Cloud 权威解析；不要求环境内核在线。
+ipcMain.handle('facebook-rule-mode:set', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'enabled']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  if (typeof args.enabled !== 'boolean') throw new Error('enabled 不合法');
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/facebook-rule-mode`,
+    method: 'PUT',
+    body: { enabled: args.enabled },
+  });
+}));
+
+ipcMain.handle('facebook-rule-mode:get', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/facebook-rule-mode`,
+    method: 'GET',
+  });
+}));
+
 // Facebook 环境风险真态读 / 解除受限：renderer 只交 envKey；accountId、平台、目标状态、审计理由均由 Cloud 解析。
 // 与慢启动读写同样不依赖环境内核在线，停止的环境也必须能看到并解除持久 restricted。
 ipcMain.handle('environment-risk:get', (_event, raw) => handleInteractionIpc(async () => {

@@ -130,6 +130,9 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   setSlowStart: (args) => ipcRenderer.invoke('slow-start:set', args),
   // 不依赖边缘的慢启动读（change slow-start-offline-toggle）：没有活快照时用它把这一行渲染出来。
   getSlowStart: (args) => ipcRenderer.invoke('slow-start:get', args),
+  // Facebook 规则模式：只传 envKey / enabled；账号、平台与规则权威均留在 Cloud。
+  setFacebookRuleMode: (args) => ipcRenderer.invoke('facebook-rule-mode:set', args),
+  getFacebookRuleMode: (args) => ipcRenderer.invoke('facebook-rule-mode:get', args),
   getEnvironmentRisk: (args) => ipcRenderer.invoke('environment-risk:get', args),
   recoverEnvironmentRisk: (args) => ipcRenderer.invoke('environment-risk:recover', args),
   getEnvironmentRiskRecoveryResult: (args) => ipcRenderer.invoke('environment-risk:recovery-result', args),
