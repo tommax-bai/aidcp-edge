@@ -1,45 +1,19 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { JSDOM } from 'jsdom';
 import test from 'node:test';
+import {
+  installXhsDom,
+  runXhsRouter as run,
+  runXhsSearchInput as runSearchInput,
+} from './xhs-dom-fixture.js';
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const source = await readFile(resolve(repoRoot, 'native/page-engine/src/xhs-command-router.js'), 'utf8');
-const run = Function(`return (${source})`)() as (
-  input: { kind: string; params: Record<string, unknown> },
-) => Promise<{ effectPhase: string; output: { kind: string; value: Record<string, unknown> } }>;
-const searchInputSource = await readFile(
-  resolve(repoRoot, 'native/page-engine/src/xhs-search-input-geometry.js'),
-  'utf8',
-);
-const runSearchInput = Function(`return (${searchInputSource})`)() as (
-  mode: 'geometry' | 'focus' | 'focus-clear',
-) => { found: boolean; focused?: boolean; value?: string; x?: number; y?: number };
-
+/**
+ * 夹具（task 1.12）：几何不再钉死在原型上，改由 `installXhsDom` 按元素解析
+ * （用例可用 `setRect` / `data-test-rect` 指定，脱档与 display:none 元素为零几何），
+ * 使注入脚本的可见性判定在测试里真有两态。
+ */
 function install(html: string, url = 'https://www.xiaohongshu.com/explore'): JSDOM {
-  const dom = new JSDOM(html, { url });
-  const win = dom.window as unknown as Record<string, unknown>;
-  Object.assign(globalThis, {
-    window: dom.window,
-    document: dom.window.document,
-    location: dom.window.location,
-    history: dom.window.history,
-    Event: dom.window.Event,
-    MouseEvent: dom.window.MouseEvent,
-    KeyboardEvent: dom.window.KeyboardEvent,
-    HTMLInputElement: dom.window.HTMLInputElement,
-    HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
-    getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
-    innerHeight: 800,
-  });
-  Object.defineProperty(dom.window.HTMLElement.prototype, 'getBoundingClientRect', {
-    value: () => ({ x: 0, y: 0, top: 0, left: 0, right: 100, bottom: 40, width: 100, height: 40 }),
-  });
-  Object.defineProperty(dom.window.HTMLElement.prototype, 'scrollIntoView', { value: () => undefined });
-  win.scrollBy = () => undefined;
-  return dom;
+  return installXhsDom(html, url).dom;
 }
 
 test('extracts bounded feed cards without accepting a selector from the caller', async () => {
