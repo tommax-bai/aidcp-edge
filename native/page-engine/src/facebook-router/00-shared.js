@@ -124,6 +124,40 @@ async function(input){
     }
     return '';
   };
+  // 服务器已签发的评论 id 判据。判的是 provenance（平台点头没有），不是某一种编码：
+  // 真机同时存在 base64 `comment:` 形态（Y29tbWVudD…）与纯数字形态（2026-07-28 越南语群 feed 就地评论，
+  // Enter+73ms 是占位 `client:<uuid>`、Enter+4.29s 换成 1531497545657803 并刷新后仍在）。
+  // 只认 base64 会让数字形态的已上墙评论永远确认不了 = 假失败（照样打去重、烧掉目标）。
+  // 客户端占位一律拒绝：带 client 标记的、或裸 UUID 的都不算服务器确认。
+  const clientPlaceholderCommentId=(id)=>/client/i.test(id)||/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id);
+  const isServerCommentId=(value)=>{
+    const id=String(value||'').trim();
+    if(id.length<6)return false;
+    if(clientPlaceholderCommentId(id))return false;
+    return /^\d{6,}$/.test(id)||/^[A-Za-z0-9_+/=-]{10,}$/.test(id);
+  };
+  // 从一条链接里取出「这是谁」的数字身份。群 feed 里评论作者链接是 /groups/<gid>/user/<uid>/ 形态
+  // （2026-07-28 真机：/groups/600322513093927/user/61591934100810/），只认 ?id= 与 /people/<name>/<id>
+  // 会让群内评论的本人身份判据恒不成立 → 自己刚发的评论永远不被认作自己的 = 假失败。
+  const identityFromHref=(href)=>{
+    try{
+      const url=new URL(href||'',location.origin);
+      return url.searchParams.get('id')
+        ||(url.pathname.match(/\/people\/[^/]+\/(\d{5,})/)||[])[1]
+        ||(url.pathname.match(/\/groups\/[^/]+\/user\/(\d{5,})/)||[])[1]
+        ||'';
+    }catch{return '';}
+  };
+  const carriesOwnIdentity=(row,ownId)=>{
+    const own=String(ownId||'').trim();
+    if(!own)return false;
+    return all('a[href]',row).some((link)=>identityFromHref(link.href||link.getAttribute('href')||'')===own);
+  };
+  const hasServerCommentId=(row)=>all('a[href*="comment_id="]',row).some((link)=>{
+    try{
+      return isServerCommentId(new URL(link.href||link.getAttribute('href')||'',location.origin).searchParams.get('comment_id')||'');
+    }catch{return false;}
+  });
   const firstPostTargetPrefix='aidcp:facebook-group-feed-post:v1:';
   const isFirstPostTarget=(value)=>new RegExp(`^${firstPostTargetPrefix}[0-9a-f]{64}$`).test(String(value||''));
   const firstPostGroupScope=()=>{

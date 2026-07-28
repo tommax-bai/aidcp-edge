@@ -314,17 +314,23 @@ function requiredTextFragments(body: string, contactInfo?: string): string[] {
  * 真机探针实证：回车后 ~68ms 就带 `comment_id=client…`，服务器写入响应 ~3.5s 才到、之后 id 才升级为正式格式。
  * 绝不据乐观占位判成功（会 over-confirm，红线）。
  */
-const FB_CLIENT_COMMENT_ID_RE = /^client/i;
-/** FB 服务器正式评论 id 前缀（base64 "comment:"）——服务器点头**后**才有，是 ack-gated 的硬信号。 */
-const FB_SERVER_COMMENT_ID_RE = /^Y29tbWVudD/;
+const FB_CLIENT_COMMENT_ID_RE = /client/i;
+/** 裸 UUID 也是客户端占位形态（`client:<uuid>` 的后半段），同样不算服务器点头。 */
+const FB_UUID_COMMENT_ID_RE = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+/** FB 服务器正式评论 id 的两种真机形态：纯数字，或 base64 `comment:`（Y29tbWVudD…）等平台编码。 */
+const FB_SERVER_COMMENT_ID_RE = /^\d{6,}$|^[A-Za-z0-9_+/=-]{10,}$/;
 
 /**
  * 判某个 `comment_id` 值是否为**服务器正式 id**（而非乐观占位）。TS 与页内 JS 同源（注入 `.source`）。
- * 保守：只认正式前缀、明确排除 client 占位；前缀变体识别不出时宁可返回 false（退到点赞/回复信号或刷新兜底，安全降级、绝不 over-confirm）。
+ * 判的是 provenance（平台点头没有）而非某一种编码：2026-07-28 真机（越南语群 feed 就地评论）实证服务器 id
+ * 是**纯数字**——Enter+73ms 仍是 `client:<uuid>` 占位，Enter+4.29s 换成 1531497545657803、刷新后仍在；
+ * 另一些界面给的是 base64 `comment:` 形态。只认 base64 会让数字形态的已上墙评论永远确认不了 = 假失败
+ * （照样打去重、烧掉目标）。客户端占位仍一律拒绝，绝不 over-confirm。
  */
 export function isServerFacebookCommentId(value: string): boolean {
   const v = (value ?? '').trim();
-  if (!v || FB_CLIENT_COMMENT_ID_RE.test(v)) return false;
+  if (!v || v.length < 6) return false;
+  if (FB_CLIENT_COMMENT_ID_RE.test(v) || FB_UUID_COMMENT_ID_RE.test(v)) return false;
   return FB_SERVER_COMMENT_ID_RE.test(v);
 }
 
@@ -1252,8 +1258,8 @@ export function buildAckVerifyJs(
     var fragments=${JSON.stringify(requiredFragments)}; var ownId=${jsString(ownId)};
     var submitted=${JSON.stringify(submittedTexts)};
     function hasAllFragments(txt){ return fragments.length>0 && fragments.every(function(f){ return f && txt.indexOf(f)>=0; }); }
-    var CLIENT_RE=/${FB_CLIENT_COMMENT_ID_RE.source}/i; var SERVER_RE=/${FB_SERVER_COMMENT_ID_RE.source}/;
-    function serverId(href){ var m=/[?&](?:reply_comment_id|comment_id)=([^&]+)/i.exec(href||''); if(!m) return false; var v=''; try{ v=decodeURIComponent(m[1]); }catch(e){ v=m[1]; } if(!v||CLIENT_RE.test(v)) return false; return SERVER_RE.test(v); }
+    var CLIENT_RE=/${FB_CLIENT_COMMENT_ID_RE.source}/i; var SERVER_RE=/${FB_SERVER_COMMENT_ID_RE.source}/; var UUID_RE=/${FB_UUID_COMMENT_ID_RE.source}/i;
+    function serverId(href){ var m=/[?&](?:reply_comment_id|comment_id)=([^&]+)/i.exec(href||''); if(!m) return false; var v=''; try{ v=decodeURIComponent(m[1]); }catch(e){ v=m[1]; } if(!v||v.length<6||CLIENT_RE.test(v)||UUID_RE.test(v)) return false; return SERVER_RE.test(v); }
     var EMPTY={ackConfirmed:false,serverId:false,likeAndReply:false};
     var articles=Array.prototype.slice.call(document.querySelectorAll('[role="article"], article'));
     if(articles.length===0) return JSON.stringify(EMPTY);

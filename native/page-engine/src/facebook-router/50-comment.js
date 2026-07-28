@@ -60,28 +60,18 @@
       if(row===root)continue;
       const raw=text(row,8000);
       if(!raw.includes(value))continue;
-      const own=all('a[href]',row).some((link)=>{
-        try{
-          const url=new URL(link.href||link.getAttribute('href')||'',location.origin);
-          const id=url.searchParams.get('id')||(url.pathname.match(/\/people\/[^/]+\/(\d{5,})/)||[])[1]||'';
-          return id===ownId;
-        }catch{return false;}
-      });
-      if(!own)continue;
+      if(!carriesOwnIdentity(row,ownId))continue;
       const status=raw.split(value).join(' ');
       pending=pending||commentPendingApproval.test(status);
       rejected=rejected||/已拒绝|被拒绝|遭拒绝|已(?:被)?驳回|查看反馈|查看意见反馈|đã từ chối|bị từ chối|xem phản hồi|\brejected\b|\bdeclined\b|was not approved|see feedback|view feedback/i.test(status);
       inFlight=inFlight||/发布中|發佈中|发送中|發送中|đang đăng|đang gửi|\bposting\b|\bsending\b/i.test(status);
-      const serverId=all('a[href*="comment_id="]',row).some((link)=>{
-        try{
-          const id=new URL(link.href||link.getAttribute('href')||'',location.origin).searchParams.get('comment_id')||'';
-          return /^Y29tbWVudD/.test(id)&&!/^client/i.test(id);
-        }catch{return false;}
-      });
+      const serverId=hasServerCommentId(row);
       const controls=all('button,[role="button"],a[role="button"]',row).filter(visible).map((el)=>label(el));
       const acknowledged=controls.some((raw)=>/^(赞|讚|点赞|按赞|like|thích)$/i.test(raw))
         &&controls.some((raw)=>/^(回复|回覆|reply|trả lời|phản hồi)$/i.test(raw));
-      if(!pending&&!rejected&&(serverId||acknowledged))return {ok:true,confirmed:true,pending:false,rejected:false,inFlight:false};
+      // 在飞（「发布中 / đang đăng」）与待审 / 被拒一样否决确认：id 判据按 provenance 放宽后，
+      // 这一道把「平台自己说还在发」的行挡在成功之外，绝不 over-confirm。
+      if(!pending&&!rejected&&!inFlight&&(serverId||acknowledged))return {ok:true,confirmed:true,pending:false,rejected:false,inFlight:false};
     }
     pending=pending||participationGate();
     return {ok:true,confirmed:false,pending,rejected,inFlight};

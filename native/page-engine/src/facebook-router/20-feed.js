@@ -142,9 +142,29 @@
     }
     return base;
   };
+  // 滚动位移/到底判据必须读**真正在滚的那个元素**。Facebook 有一类版式（2026-07-28 越南语群页实测）
+  // 文档本身不滚：document.documentElement.scrollHeight === innerHeight、window.scrollY 恒 0，
+  // 真正的滚动条在 feed 的一个祖先 div 上（overflow-y:auto，scrollHeight 2511 / clientHeight 803）。
+  // 照读窗口坐标 ⇒ moved 恒 false、near_bottom 恒 true（scrollHeight-scrollY-innerHeight = 0 ≤ innerHeight），
+  // 引擎从第一次探测起就认为"feed 已到底"、滚动回报 no_target。窗口真的会滚时行为不变。
+  const feedScrollMetrics=()=>{
+    const doc=document.scrollingElement||document.documentElement;
+    const windowMetrics={scrollY:Number(window.scrollY)||0,scrollHeight:Number(doc&&doc.scrollHeight)||0};
+    if(doc&&doc.scrollHeight-doc.clientHeight>1)return windowMetrics;
+    const anchor=first(['div[role="feed"]','[role="main"]','main'])||document.body;
+    for(let node=anchor;node&&node!==document.documentElement;node=node.parentElement){
+      if(node.scrollHeight-node.clientHeight<=1)continue;
+      let overflowY='';
+      try{overflowY=getComputedStyle(node).overflowY||'';}catch{}
+      if(!/(auto|scroll|overlay)/.test(overflowY))continue;
+      return {scrollY:Number(node.scrollTop)||0,scrollHeight:Number(node.scrollHeight)||0};
+    }
+    return windowMetrics;
+  };
   const feedProbe=()=>{
     const output=feedCards();
     const scope=first(['div[role="feed"]','[role="main"]','main'])||document.body;
+    const scrollMetrics=feedScrollMetrics();
     const loading=Boolean(scope&&scope.querySelector('[role="progressbar"],[aria-busy="true"]'));
     const articleCount=reelSurface()?0:topArticles().length;
     const timeOrigin=Number(performance&&performance.timeOrigin);
@@ -173,10 +193,10 @@
       explicitEnd,
       url:String(location.href).slice(0,4096),
       surface:classify(),
-      scrollY:Number(window.scrollY)||0,
+      scrollY:scrollMetrics.scrollY,
       innerWidth:Number(window.innerWidth)||0,
       innerHeight:Number(window.innerHeight)||0,
-      scrollHeight:Number(document.documentElement&&document.documentElement.scrollHeight)||0,
+      scrollHeight:scrollMetrics.scrollHeight,
       documentAgeMs,
     }};
   };

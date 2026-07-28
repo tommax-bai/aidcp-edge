@@ -147,12 +147,7 @@
     await sleep(700);
     const verified=all('[role="article"],article',root).some((el)=>{
       if(!text(el,4000).includes(value))return false;
-      return all('a[href*="comment_id="]',el).some((link)=>{
-        try{
-          const id=new URL(link.href||link.getAttribute('href')||'',location.origin).searchParams.get('comment_id')||'';
-          return /^Y29tbWVudD/.test(id)&&!/^client/i.test(id);
-        }catch{return false;}
-      });
+      return hasServerCommentId(el);
     });
     return verified?done(action('comment',true,undefined,{noteId:String(p.noteId||'')})):ambiguous('comment','verification_ambiguous',{noteId:String(p.noteId||'')});
   }

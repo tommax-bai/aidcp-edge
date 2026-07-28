@@ -1109,6 +1109,44 @@ test('Facebook comment acknowledgement is scoped to the bound account and server
   assert.equal(other.output.value.confirmed, false);
 });
 
+test('Facebook comment acknowledgement accepts a numeric server comment id and still rejects client placeholders', async () => {
+  // 真机（2026-07-28，越南语群 feed 就地首帖评论）：Enter+73ms 是 `client:<uuid>` 占位，
+  // Enter+4.29s 换成纯数字 1531497545657803 且刷新后仍在；「回复」控件 3 分钟内始终未出现，
+  // 故 like+reply 兜底也不成立——只认 base64 形态时该评论永远确认不了（假失败，且照样打去重烧掉目标帖）。
+  const row = (commentId: string): string => `
+    <main>
+      <article role="article">
+        <a href="/Alice/posts/pfbidABC/">permalink</a>
+        <article role="article">
+          <a href="/groups/600322513093927/user/61591934100810/">Hi He</a>
+          <span>Thoughtful reply</span>
+          <a href="?comment_id=${commentId}">timestamp</a>
+        </article>
+      </article>
+    </main>
+  `;
+  const probe = async (): Promise<boolean> => {
+    const result = await run({
+      kind: 'comment_ack_probe',
+      params: {
+        noteId: 'https://www.facebook.com/Alice/posts/pfbidABC',
+        text: 'Thoughtful reply',
+        accountId: '61591934100810',
+      },
+    });
+    return result.output.value.confirmed === true;
+  };
+
+  install(row('1531497545657803'));
+  assert.equal(await probe(), true, '纯数字服务器 id 必须判为已确认');
+
+  install(row('client%3A46fd0dfd-c6b0-4bb5-9444-5232a49192e2'));
+  assert.equal(await probe(), false, '客户端乐观占位绝不判成功');
+
+  install(row('46fd0dfd-c6b0-4bb5-9444-5232a49192e2'));
+  assert.equal(await probe(), false, '裸 UUID 占位绝不判成功');
+});
+
 test('Facebook comment acknowledgement retains the retired pending-approval vocabulary', async () => {
   for (const status of [
     '待审核',
@@ -2072,4 +2110,24 @@ test('Facebook comment focus probe reports failure instead of typing through a w
   assert.equal(result.output.value.focused, false);
   assert.equal(result.output.value.selected, false);
   assert.equal(dom.window.document.activeElement?.id, 'decoy');
+});
+
+test('Facebook feed probe measures scroll from the element that actually scrolls', async () => {
+  // 真机（2026-07-28 越南语群页水合期）：document.documentElement.scrollHeight === innerHeight、
+  // window.scrollY 恒 0，真正的滚动条在 feed 的祖先 div 上（scrollHeight 2511 / clientHeight 803）。
+  // 照读窗口坐标 ⇒ 位移恒 0、near-bottom 恒真，引擎从第一次探测就以为 feed 已到底。
+  install(`
+    <main>
+      <div id="scroller" style="overflow-y: auto">
+        <div role="feed"><div role="article"><a href="/Alice/posts/pfbidABC/">p</a></div></div>
+      </div>
+    </main>
+  `);
+  const scroller = document.getElementById('scroller') as HTMLElement;
+  Object.defineProperty(scroller, 'scrollHeight', { value: 2511, configurable: true });
+  Object.defineProperty(scroller, 'clientHeight', { value: 803, configurable: true });
+  scroller.scrollTop = 316;
+  const probe = await run({ kind: 'feed_probe', params: {} });
+  assert.equal(probe.output.value.scrollY, 316, 'scrollY 必须来自真正在滚的容器');
+  assert.equal(probe.output.value.scrollHeight, 2511, 'scrollHeight 必须来自真正在滚的容器');
 });

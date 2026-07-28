@@ -575,13 +575,20 @@ test('fb-executor: 窗口耗尽仍「发布中」→ verification_ambiguous（�
 test('isServerFacebookCommentId: 服务器正式 id 认、客户端乐观占位/空不认', () => {
   // 真机探针取到的正式 id（base64 "comment:" 前缀）。
   assert.equal(isServerFacebookCommentId('Y29tbWVudDoxNTY0OTc1MzcxOTU0ODUxXzIzMjc1NTgxOTQzMTgxMjc='), true);
-  // 乐观占位（回车后 ~68ms 就有、服务器点头前，绝不据此判成功）。
+  // 另一种真机形态：纯数字（2026-07-28 越南语群 feed 就地评论，Enter+4.29s 出现、刷新后仍在）。
+  // 曾经只认 base64 → 这类已上墙评论永远确认不了 = 假失败（照样打去重、烧掉目标帖）。
+  assert.equal(isServerFacebookCommentId('1531497545657803'), true);
+  assert.equal(isServerFacebookCommentId('99887766'), true);
+  // 乐观占位（回车后 ~73ms 就有、服务器点头前，绝不据此判成功）。
   assert.equal(isServerFacebookCommentId('client:1234567890'), false);
   assert.equal(isServerFacebookCommentId('clientabc'), false);
-  // 空/空白/未知前缀 → 保守不认（安全降级到点赞回复信号或刷新兜底）。
+  assert.equal(isServerFacebookCommentId('client:46fd0dfd-c6b0-4bb5-9444-5232a49192e2'), false);
+  // 裸 UUID（占位去掉前缀后的那一半）同样不算服务器点头。
+  assert.equal(isServerFacebookCommentId('46fd0dfd-c6b0-4bb5-9444-5232a49192e2'), false);
+  // 空/空白/过短 → 不认。
   assert.equal(isServerFacebookCommentId(''), false);
   assert.equal(isServerFacebookCommentId('   '), false);
-  assert.equal(isServerFacebookCommentId('99887766'), false);
+  assert.equal(isServerFacebookCommentId('123'), false);
 });
 
 test('fb-executor: 提交前验证码 fresh 复检命中 → blocked_by_captcha，不提交', async () => {
@@ -966,11 +973,26 @@ test('fb-ack: 🔴 真机被拒行（已拒绝 + 查看反馈，恰好 2 控件�
   assert.equal(r.rejected, true);
 });
 
-test('fb-ack: 数字 comment_id（非服务器 base64）绝不算服务器确认', () => {
+test('fb-ack: 数字 comment_id 是服务器已签发的另一种真机形态 → 算确认', () => {
+  // 本用例原先断言「数字 id 绝不算确认」，依据是「只认 base64 前缀更保守」。2026-07-28 真机把它推翻：
+  // 越南语群 feed 就地评论，Enter+73ms 的 id 是 `client:<uuid>` 占位、Enter+4.29s 换成纯数字
+  // 1531497545657803 且刷新后仍在。判据只认 base64 ⇒ 这类已上墙评论永远确认不了（假失败，照样打去重烧目标）。
+  // 判 provenance（有没有客户端占位标记）而非编码；乐观占位与"发布中"仍一律不确认（见下两条）。
   const dom = editorScopeDom(
     `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
       `<div role="article" id="my-comment">${ownLink}<div>正文XYZ</div>` +
       `<a href="${POST_BBB}?comment_id=4134110716722371">16小时</a></div>` +
+      '</div>',
+    POST_BBB,
+  );
+  assert.equal(ackVerifyFull(dom, ['正文XYZ'], OWN, 'fb:BBB', ['正文XYZ']).ackConfirmed, true);
+});
+
+test('fb-ack: 客户端占位 comment_id（client:<uuid>）仍绝不算确认', () => {
+  const dom = editorScopeDom(
+    `<div role="article" id="main"><a href="${POST_BBB}">1天</a>` +
+      `<div role="article" id="my-comment">${ownLink}<div>正文XYZ</div>` +
+      `<a href="${POST_BBB}?comment_id=client%3A46fd0dfd-c6b0-4bb5-9444-5232a49192e2">刚刚</a></div>` +
       '</div>',
     POST_BBB,
   );
