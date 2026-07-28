@@ -2438,6 +2438,8 @@ function facebookRuleModeReceipt(envKey: string, enabled: boolean) {
     data: {
       data: {
         envKey,
+        // 规则定义的身份与节奏是 Cloud 权威，客户端只做形状校验、不解释它；
+        // 这里跟随 Cloud 当前定义只为让桩不谎报一个已经不存在的版本。
         facebookRuleMode: {
           enabled,
           definitionId: 'cloud-authoritative-rule-definition',
