@@ -1604,7 +1604,7 @@ mod tests {
     use crate::facebook::group_join::{
         FacebookJoinPostDecision, facebook_join_post_decision, facebook_join_readiness_decisive,
     };
-    use crate::facebook::reels::reel_identity_moved;
+    use crate::facebook::reels::{reel_forward_key, reel_identity_moved};
     use crate::facebook::shared::{canonical_facebook_post_id, facebook_scroll_failure};
 
     #[test]
@@ -1815,6 +1815,33 @@ mod tests {
             Some("video-2@element:2"),
             &before
         ));
+
+        let anonymous_before = facebook::FacebookReelProbe {
+            note_id: None,
+            ..before
+        };
+        assert!(!reel_identity_moved(
+            Some("https://www.facebook.com/reel/2"),
+            Some("video-1@element:1"),
+            &anonymous_before
+        ));
+        assert!(reel_identity_moved(
+            Some("https://www.facebook.com/reel/2"),
+            Some("video-2@element:2"),
+            &anonymous_before
+        ));
+    }
+
+    #[test]
+    fn reel_axis_maps_to_one_forward_key() {
+        assert_eq!(
+            reel_forward_key(facebook::FacebookReelAxis::Vertical),
+            ("ArrowDown", 40)
+        );
+        assert_eq!(
+            reel_forward_key(facebook::FacebookReelAxis::Horizontal),
+            ("ArrowRight", 39)
+        );
     }
 
     #[test]
@@ -1847,14 +1874,18 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_reel_returns_one_honest_scroll_terminal() {
-        let (phase, output) = facebook_scroll_failure(EffectPhase::Confirmed, "no_target");
-        assert_eq!(phase, EffectPhase::Confirmed);
+    fn dispatched_unchanged_reel_returns_one_ambiguous_scroll_terminal() {
+        let (phase, output) =
+            facebook_scroll_failure(EffectPhase::Ambiguous, "reels_navigation_unconfirmed");
+        assert_eq!(phase, EffectPhase::Ambiguous);
         let CommandOutput::ActionReceipt(receipt) = output else {
             panic!("scroll failure must be an action receipt");
         };
         assert_eq!(receipt.action, "scroll");
         assert!(!receipt.ok);
-        assert_eq!(receipt.reason.as_deref(), Some("no_target"));
+        assert_eq!(
+            receipt.reason.as_deref(),
+            Some("reels_navigation_unconfirmed")
+        );
     }
 }

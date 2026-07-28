@@ -70,17 +70,36 @@ pub struct FacebookReelProbe {
 }
 
 impl FacebookReelProbe {
+    pub fn active_video_moved_from(&self, previous: &Self) -> bool {
+        self.ok
+            && previous.ok
+            && self.video_key.is_some()
+            && previous.video_key.is_some()
+            && self.video_key != previous.video_key
+    }
+
     pub fn moved_from(&self, previous: &Self) -> bool {
         self.ok
             && previous.ok
             && self.note_id.is_some()
             && self.video_key.is_some()
-            && (self.note_id != previous.note_id || self.video_key != previous.video_key)
+            && if previous.note_id.is_none() {
+                self.active_video_moved_from(previous)
+            } else {
+                self.note_id != previous.note_id || self.video_key != previous.video_key
+            }
     }
 
     pub fn is_reels_surface(&self) -> bool {
         self.reason.as_deref() != Some("not_reel")
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum FacebookReelAxis {
+    Vertical,
+    Horizontal,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -105,6 +124,8 @@ pub struct FacebookReelNextTarget {
     pub cy: Option<f64>,
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(default)]
+    pub axis: Option<FacebookReelAxis>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -1093,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn reel_probe_requires_the_stable_identity_pair_to_move() {
+    fn reel_probe_distinguishes_anonymous_video_motion_from_reportable_progress() {
         let before = FacebookReelProbe {
             ok: true,
             reason: None,
@@ -1113,7 +1134,62 @@ mod tests {
             note_id: None,
             ..video_moved
         };
+        assert!(missing_identity.active_video_moved_from(&before));
         assert!(!missing_identity.moved_from(&before));
+
+        let anonymous_before = FacebookReelProbe {
+            note_id: None,
+            video_key: Some("video-1@element:1".to_owned()),
+            ..before.clone()
+        };
+        let hydrated_same_video = FacebookReelProbe {
+            note_id: Some("https://www.facebook.com/reel/2".to_owned()),
+            ..anonymous_before.clone()
+        };
+        assert!(!hydrated_same_video.moved_from(&anonymous_before));
+        let hydrated_next_video = FacebookReelProbe {
+            video_key: Some("video-2@element:2".to_owned()),
+            ..hydrated_same_video
+        };
+        assert!(hydrated_next_video.moved_from(&anonymous_before));
+    }
+
+    #[test]
+    fn reel_next_target_decodes_only_declared_navigation_axes() {
+        let vertical: FacebookReelNextTarget = serde_json::from_value(json!({
+            "ok": true,
+            "noteId": "https://www.facebook.com/reel/1",
+            "videoKey": "video-1@element:1",
+            "found": true,
+            "ambiguous": false,
+            "cx": 1200.0,
+            "cy": 400.0,
+            "label": "Next",
+            "axis": "vertical"
+        }))
+        .expect("vertical target");
+        assert_eq!(vertical.axis, Some(FacebookReelAxis::Vertical));
+
+        let horizontal: FacebookReelNextTarget = serde_json::from_value(json!({
+            "ok": true,
+            "videoKey": "video-1@element:1",
+            "found": false,
+            "ambiguous": false,
+            "axis": "horizontal"
+        }))
+        .expect("horizontal target");
+        assert_eq!(horizontal.axis, Some(FacebookReelAxis::Horizontal));
+
+        assert!(
+            serde_json::from_value::<FacebookReelNextTarget>(json!({
+                "ok": true,
+                "videoKey": "video-1@element:1",
+                "found": false,
+                "ambiguous": false,
+                "axis": "diagonal"
+            }))
+            .is_err()
+        );
     }
 
     #[test]

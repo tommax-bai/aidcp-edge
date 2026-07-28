@@ -362,6 +362,57 @@ async fn facebook_reel_scroll_uses_trusted_arrow_and_requires_identity_movement(
 }
 
 #[tokio::test]
+async fn facebook_anonymous_reel_scroll_uses_horizontal_arrow_and_requires_canonical_next_identity()
+{
+    let (port, server) = spawn_facebook_reel_anonymous_horizontal_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "reel-scroll-anonymous-horizontal-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 5_000,
+            command: NativeCommand::PageScroll(PageScrollParams {
+                reason: Some("feed_scroll".to_owned()),
+                dwell_ms: None,
+            }),
+        })
+        .await
+        .expect("anonymous horizontal Reel scroll");
+
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::PageCards(cards) = outcome.output.expect("Reel cards") else {
+        panic!("expected Reel cards")
+    };
+    assert_eq!(cards.cards.len(), 1);
+    assert_eq!(
+        cards.cards[0].note_id.as_deref(),
+        Some("https://www.facebook.com/reel/2")
+    );
+
+    engine.shutdown().await;
+    let requests = server.await.expect("anonymous horizontal Reel fake CDP");
+    let input_requests = requests
+        .iter()
+        .filter(|request| request["method"] == "Input.dispatchKeyEvent")
+        .collect::<Vec<_>>();
+    assert_eq!(input_requests.len(), 2);
+    assert_eq!(input_requests[0]["params"]["key"], "ArrowRight");
+    assert_eq!(input_requests[0]["params"]["windowsVirtualKeyCode"], 39);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Input.dispatchMouseEvent")
+    );
+}
+
+#[tokio::test]
 async fn facebook_reel_scroll_uses_one_active_video_wheel_after_unchanged_arrow() {
     let (port, server) = spawn_facebook_reel_wheel_cdp().await;
     let mut engine = Engine::default();
@@ -584,7 +635,8 @@ async fn facebook_group_join_observation_exception_is_not_started_and_diagnostic
 }
 
 #[tokio::test]
-async fn facebook_reel_scroll_returns_no_target_without_fabricated_cards() {
+async fn facebook_reel_scroll_returns_ambiguous_after_dispatched_methods_without_fabricated_cards()
+{
     let (port, server) = spawn_facebook_reel_no_target_cdp().await;
     let mut engine = Engine::default();
     let mut open = session_open(port);
@@ -608,12 +660,16 @@ async fn facebook_reel_scroll_returns_no_target_without_fabricated_cards() {
         .await
         .expect("Reel no-target terminal");
 
+    assert_eq!(outcome.effect_phase, EffectPhase::Ambiguous);
     let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("scroll receipt") else {
         panic!("expected scroll action receipt")
     };
     assert_eq!(receipt.action, "scroll");
     assert!(!receipt.ok);
-    assert_eq!(receipt.reason.as_deref(), Some("no_target"));
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("reels_navigation_unconfirmed")
+    );
 
     engine.shutdown().await;
     let requests = server.await.expect("Facebook Reel no-target fake CDP");
@@ -3238,6 +3294,67 @@ async fn spawn_facebook_reel_arrow_cdp() -> (u16, tokio::task::JoinHandle<Vec<Va
             )
             .await,
         );
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                reel_next_target_cdp(
+                    "https://www.facebook.com/reel/1",
+                    "video-1@element:1",
+                    "vertical",
+                    true,
+                ),
+            )
+            .await,
+        );
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                reel_probe_cdp("https://www.facebook.com/reel/2", "video-2@element:2"),
+            )
+            .await,
+        );
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                reel_cards_cdp("https://www.facebook.com/reel/2"),
+            )
+            .await,
+        );
+        let _ = websocket.close(None).await;
+        requests
+    });
+    (port, server)
+}
+
+async fn spawn_facebook_reel_anonymous_horizontal_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>)
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/reel/").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                anonymous_reel_probe_cdp("video-1@element:1"),
+            )
+            .await,
+        );
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                anonymous_reel_next_target_cdp("video-1@element:1", "horizontal"),
+            )
+            .await,
+        );
         requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
         requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
         requests.push(
@@ -3276,6 +3393,18 @@ async fn spawn_facebook_reel_wheel_cdp() -> (u16, tokio::task::JoinHandle<Vec<Va
             respond_to_call_capture(
                 &mut websocket,
                 reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
+            )
+            .await,
+        );
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                reel_next_target_cdp(
+                    "https://www.facebook.com/reel/1",
+                    "video-1@element:1",
+                    "vertical",
+                    true,
+                ),
             )
             .await,
         );
@@ -3337,6 +3466,18 @@ async fn spawn_facebook_reel_no_target_cdp() -> (u16, tokio::task::JoinHandle<Ve
             )
             .await,
         );
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                reel_next_target_cdp(
+                    "https://www.facebook.com/reel/1",
+                    "video-1@element:1",
+                    "vertical",
+                    true,
+                ),
+            )
+            .await,
+        );
         requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
         requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
         for _ in 0..6 {
@@ -3368,17 +3509,12 @@ async fn spawn_facebook_reel_no_target_cdp() -> (u16, tokio::task::JoinHandle<Ve
         requests.push(
             respond_to_call_capture(
                 &mut websocket,
-                json!({"result":{"value":router_result(
-                    "reel_next_target",
-                    json!({
-                        "ok": true,
-                        "noteId": "https://www.facebook.com/reel/1",
-                        "videoKey": "video-1@element:1",
-                        "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
-                        "found": false,
-                        "ambiguous": false
-                    })
-                )}}),
+                reel_next_target_cdp(
+                    "https://www.facebook.com/reel/1",
+                    "video-1@element:1",
+                    "vertical",
+                    false,
+                ),
             )
             .await,
         );
@@ -3396,6 +3532,50 @@ fn reel_probe_cdp(note_id: &str, video_key: &str) -> Value {
             "noteId": note_id,
             "videoKey": video_key,
             "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0}
+        })
+    )}})
+}
+
+fn anonymous_reel_probe_cdp(video_key: &str) -> Value {
+    json!({"result":{"value":router_result(
+        "reel_probe",
+        json!({
+            "ok": true,
+            "videoKey": video_key,
+            "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0}
+        })
+    )}})
+}
+
+fn anonymous_reel_next_target_cdp(video_key: &str, axis: &str) -> Value {
+    json!({"result":{"value":router_result(
+        "reel_next_target",
+        json!({
+            "ok": true,
+            "videoKey": video_key,
+            "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
+            "found": true,
+            "ambiguous": false,
+            "axis": axis,
+            "cx": 1_230.0,
+            "cy": 400.0
+        })
+    )}})
+}
+
+fn reel_next_target_cdp(note_id: &str, video_key: &str, axis: &str, found: bool) -> Value {
+    json!({"result":{"value":router_result(
+        "reel_next_target",
+        json!({
+            "ok": true,
+            "noteId": note_id,
+            "videoKey": video_key,
+            "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
+            "found": found,
+            "ambiguous": false,
+            "axis": axis,
+            "cx": found.then_some(1_230.0),
+            "cy": found.then_some(400.0)
         })
     )}})
 }

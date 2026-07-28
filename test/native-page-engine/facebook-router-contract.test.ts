@@ -381,7 +381,7 @@ test('Facebook Reels route identity projects one card without a permalink-bearin
   assert.equal(cards[0]?.isVideo, true);
 });
 
-test('Facebook Reels hashtag navigation is not a post identity', async () => {
+test('Facebook Reels anonymous landing video is targetable but not reportable', async () => {
   const dom = install(`
     <main>
       <div>
@@ -390,11 +390,14 @@ test('Facebook Reels hashtag navigation is not a post identity', async () => {
         <a href="/reel/hashtag/?q=%23automation">#automation</a>
       </div>
     </main>
-  `, 'https://www.facebook.com/reels/');
+  `, 'https://www.facebook.com/reel/');
   setRect(dom.window.document.querySelector('video')!, { left: 557, top: 72, right: 959, bottom: 786 });
 
   const probe = await run({ kind: 'reel_probe', params: {} });
-  assert.deepEqual(probe.output.value, { ok: false, reason: 'no_active_identity' });
+  assert.equal(probe.output.value.ok, true);
+  assert.equal(probe.output.value.noteId, undefined);
+  assert.match(String(probe.output.value.videoKey), /unknown-reel\.mp4@element:1$/);
+  assert.deepEqual(probe.output.value.videoRect, { left: 557, top: 72, right: 959, bottom: 786 });
 
   const cardsResult = await run({ kind: 'reel_cards', params: {} });
   assert.deepEqual(cardsResult.output.value.cards, []);
@@ -421,7 +424,7 @@ test('Facebook Reels next target is constrained beside the active video', async 
   const dom = install(`
     <main>
       <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
-      <button id="previous" aria-label="Previous"></button>
+      <button id="previous" aria-label="Previous" aria-disabled="true"></button>
       <button id="next" aria-label="Next"></button>
     </main>
   `, 'https://www.facebook.com/reel/777');
@@ -434,8 +437,56 @@ test('Facebook Reels next target is constrained beside the active video', async 
   assert.equal(target.output.value.ok, true);
   assert.equal(target.output.value.found, true);
   assert.equal(target.output.value.ambiguous, false);
+  assert.equal(target.output.value.axis, 'vertical');
   assert.equal(target.output.value.label, 'Next');
   assert.equal(target.output.value.noteId, 'https://www.facebook.com/reel/777');
+});
+
+test('Facebook Reels next target resolves a horizontal rail around the active video', async () => {
+  const dom = install(`
+    <main>
+      <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
+      <button id="previous" aria-label="Previous"></button>
+      <button id="next" aria-label="Next"></button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setRect(dom.window.document.querySelector('video')!, { left: 400, top: 80, right: 1_040, bottom: 760 });
+  setRect(dom.window.document.querySelector('#previous')!, { left: 280, top: 376, right: 328, bottom: 424 });
+  setRect(dom.window.document.querySelector('#next')!, { left: 1_112, top: 376, right: 1_160, bottom: 424 });
+
+  const target = await run({ kind: 'reel_next_target', params: {} });
+
+  assert.equal(target.output.value.ok, true);
+  assert.equal(target.output.value.found, true);
+  assert.equal(target.output.value.ambiguous, false);
+  assert.equal(target.output.value.axis, 'horizontal');
+  assert.equal(target.output.value.label, 'Next');
+  assert.equal(target.output.value.cx, 1_136);
+  assert.equal(target.output.value.cy, 400);
+});
+
+test('Facebook Reels next target rejects competing vertical and horizontal rails', async () => {
+  const dom = install(`
+    <main>
+      <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
+      <button id="vertical-previous" aria-label="Previous"></button>
+      <button id="vertical-next" aria-label="Next"></button>
+      <button id="horizontal-previous" aria-label="Previous"></button>
+      <button id="horizontal-next" aria-label="Next"></button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setRect(dom.window.document.querySelector('video')!, { left: 400, top: 80, right: 1_040, bottom: 760 });
+  setRect(dom.window.document.querySelector('#vertical-previous')!, { left: 1_230, top: 280, right: 1_278, bottom: 328 });
+  setRect(dom.window.document.querySelector('#vertical-next')!, { left: 1_230, top: 360, right: 1_278, bottom: 408 });
+  setRect(dom.window.document.querySelector('#horizontal-previous')!, { left: 280, top: 376, right: 328, bottom: 424 });
+  setRect(dom.window.document.querySelector('#horizontal-next')!, { left: 1_112, top: 376, right: 1_160, bottom: 424 });
+
+  const target = await run({ kind: 'reel_next_target', params: {} });
+
+  assert.equal(target.output.value.ok, true);
+  assert.equal(target.output.value.found, false);
+  assert.equal(target.output.value.ambiguous, true);
+  assert.equal(target.output.value.axis, undefined);
 });
 
 test('Facebook Reels page.scroll refuses the document-scroll fallback', async () => {

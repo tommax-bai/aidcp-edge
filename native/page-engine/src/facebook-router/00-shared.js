@@ -341,10 +341,9 @@ async function(input){
     }
     const routeHref=cleanPermalink(location.href);
     noteId=noteId||routeHref;
-    if(!noteId)return {ok:false,reason:'no_active_identity'};
     return {
       ok:true,
-      noteId,
+      ...(noteId?{noteId}:{}),
       videoKey:reelVideoKey(active.video),
       videoRect:{
         left:active.rect.left,
@@ -369,35 +368,99 @@ async function(input){
     const rect=active.videoRect;
     const next=/(next|ti[eế]p theo|下一|下一个|下一張|下一张|往下)/i;
     const previous=/(previous|trước|上一|上一个|上一張|上一张|往上)/i;
+    const down=/(arrow down|scroll down|move down|往下|向下)/i;
+    const right=/(arrow right|scroll right|move right|往右|向右)/i;
     const buttons=all('[role="button"],button').filter(visible).map((button)=>({
       button,
       rect:button.getBoundingClientRect(),
       label:label(button),
+      disabled:button.getAttribute('aria-disabled')==='true'||Boolean(button.disabled),
     })).filter((candidate)=>{
       const target=candidate.rect;
       return target.width>=36&&target.width<=68
         &&target.height>=36&&target.height<=68
-        &&target.left>Math.max((window.innerWidth||0)*0.8,rect.right+120)
+        &&target.left>=-2
         &&target.right<=(window.innerWidth||0)+2
-        &&target.top>=Math.max(64,rect.top+(rect.bottom-rect.top)*0.25)
-        &&target.bottom<=Math.min(window.innerHeight||0,rect.bottom-(rect.bottom-rect.top)*0.12)
-        &&candidate.button.getAttribute('aria-disabled')!=='true'
-        &&!candidate.button.disabled;
-    }).sort((left,right)=>left.rect.top-right.rect.top);
-    const labelled=buttons.filter((candidate)=>next.test(candidate.label)&&!previous.test(candidate.label));
-    if(labelled.length>1)return {...reelProbeValue(active),found:false,ambiguous:true};
-    let target=labelled.length===1?labelled[0]:null;
-    if(!target){
-      const unknown=buttons.filter((candidate)=>!previous.test(candidate.label));
-      if(unknown.length===2)target=unknown[1];
-      else return {...reelProbeValue(active),found:false,ambiguous:unknown.length>1};
+        &&target.top>=64
+        &&target.bottom<=(window.innerHeight||0)+2;
+    }).map((candidate)=>({
+      ...candidate,
+      cx:candidate.rect.left+candidate.rect.width/2,
+      cy:candidate.rect.top+candidate.rect.height/2,
+      role:next.test(candidate.label)&&!previous.test(candidate.label)
+        ?'next'
+        :previous.test(candidate.label)&&!next.test(candidate.label)?'previous':'unknown',
+    }));
+    const verticalMember=(candidate)=>
+      candidate.rect.left>Math.max((window.innerWidth||0)*0.8,rect.right+120)
+      &&candidate.rect.top>=Math.max(64,rect.top+(rect.bottom-rect.top)*0.2)
+      &&candidate.rect.bottom<=Math.min(window.innerHeight||0,rect.bottom-(rect.bottom-rect.top)*0.08);
+    const horizontalPrevious=(candidate)=>
+      candidate.rect.right<rect.left-24
+      &&candidate.cy>=rect.top+(rect.bottom-rect.top)*0.2
+      &&candidate.cy<=rect.bottom-(rect.bottom-rect.top)*0.2;
+    const horizontalNext=(candidate)=>
+      candidate.rect.left>rect.right+24
+      &&candidate.cy>=rect.top+(rect.bottom-rect.top)*0.2
+      &&candidate.cy<=rect.bottom-(rect.bottom-rect.top)*0.2;
+    const axisOf=(back,forward)=>{
+      const horizontal=horizontalPrevious(back)&&horizontalNext(forward)&&Math.abs(back.cy-forward.cy)<=80;
+      const vertical=verticalMember(back)&&verticalMember(forward)
+        &&Math.abs(back.cx-forward.cx)<=40&&forward.cy>back.cy+16;
+      return horizontal===vertical?'':horizontal?'horizontal':'vertical';
+    };
+    const previousButtons=buttons.filter((candidate)=>candidate.role==='previous');
+    const nextButtons=buttons.filter((candidate)=>candidate.role==='next');
+    const semanticPairs=[];
+    for(const back of previousButtons){
+      for(const forward of nextButtons){
+        const axis=axisOf(back,forward);
+        if(axis)semanticPairs.push({axis,target:forward});
+      }
     }
+    const uniquePairs=semanticPairs.filter((pair,index,list)=>
+      list.findIndex((candidate)=>candidate.axis===pair.axis&&candidate.target.button===pair.target.button)===index
+    );
+    let choice=uniquePairs.length===1?uniquePairs[0]:null;
+    if(uniquePairs.length>1){
+      return {...reelProbeValue(active),found:false,ambiguous:true};
+    }
+    if(!choice&&nextButtons.length===1){
+      const target=nextButtons[0];
+      if(down.test(target.label)&&verticalMember(target))choice={axis:'vertical',target};
+      else if(right.test(target.label)&&horizontalNext(target))choice={axis:'horizontal',target};
+    }
+    if(!choice){
+      const unknown=buttons.filter((candidate)=>candidate.role==='unknown');
+      const vertical=unknown.filter(verticalMember).sort((left,right)=>left.cy-right.cy);
+      const horizontalLeft=unknown.filter(horizontalPrevious);
+      const horizontalRight=unknown.filter(horizontalNext);
+      const structural=[];
+      if(vertical.length===2&&Math.abs(vertical[0].cx-vertical[1].cx)<=40){
+        structural.push({axis:'vertical',target:vertical[1]});
+      }
+      if(horizontalLeft.length===1&&horizontalRight.length===1
+        &&Math.abs(horizontalLeft[0].cy-horizontalRight[0].cy)<=80){
+        structural.push({axis:'horizontal',target:horizontalRight[0]});
+      }
+      if(structural.length===1)choice=structural[0];
+      else return {...reelProbeValue(active),found:false,ambiguous:structural.length>1};
+    }
+    const target=choice.target;
+    if(target.disabled)return {
+      ...reelProbeValue(active),
+      axis:choice.axis,
+      found:false,
+      ambiguous:false,
+      reason:'next_control_disabled',
+    };
     return {
       ...reelProbeValue(active),
+      axis:choice.axis,
       found:true,
       ambiguous:false,
-      cx:target.rect.left+target.rect.width/2,
-      cy:target.rect.top+target.rect.height/2,
+      cx:target.cx,
+      cy:target.cy,
       label:target.label,
     };
   };
