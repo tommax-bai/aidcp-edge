@@ -49,6 +49,7 @@ const {
   createFacebookBatchPlan,
   failedFacebookBatchReceipt,
 } = require('./facebook-batch-create.cjs');
+const { resolveFacebookCreationIntents } = require('./facebook-create-intents.cjs');
 const {
   buildFacebookSelectedPersona,
   requestFacebookSelectedPersonaFill,
@@ -906,21 +907,37 @@ function addProvisionedEnvironmentToRoster(result) {
 async function finalizeCreatedEnvironmentAssignment(
   result,
   intent,
-  { slowStartEnabled = false, proxyInput = {} } = {},
+  {
+    slowStartEnabled = false,
+    facebookRuleModeEnabled = false,
+    commentApprovalMode = null,
+    proxyInput = {},
+  } = {},
 ) {
   if (!result || !result.ok) return result;
+  const autoApproveComments = commentApprovalMode === 'auto_approve_all';
+  // 只为「本次真的提交了的意图」写确认位：没提交的项在回执里彻底缺席，回执因此说不出任何该项的成功声明。
+  const configuredFlags = (confirmed) => ({
+    ...(slowStartEnabled ? { slowStartConfigured: confirmed } : {}),
+    ...(facebookRuleModeEnabled ? { ruleModeConfigured: confirmed } : {}),
+    ...(autoApproveComments ? { commentApprovalConfigured: confirmed } : {}),
+  });
+  const submittedLabels = [
+    ...(slowStartEnabled ? ['慢启动'] : []),
+    ...(facebookRuleModeEnabled ? ['规则模式'] : []),
+    ...(autoApproveComments ? ['全局免审'] : []),
+  ];
+  const unconfirmedSuffix = submittedLabels.length > 0 ? `；${submittedLabels.join('、')}未确认` : '';
   const proxyAuthority = cloudAuthorityForProxyInput(proxyInput);
   if (!proxyAuthority.ok) {
-    return withAuthoritativeAssignmentNotice(result, '代理权威输入无效');
+    return withAuthoritativeAssignmentNotice({ ...result, ...configuredFlags(false) }, '代理权威输入无效');
   }
-  const pendingResult = slowStartEnabled
-    ? { ...result, slowStartConfigured: false }
-    : result;
+  const pendingResult = { ...result, ...configuredFlags(false) };
   if (!intent || !intent.required) {
-    return slowStartEnabled
+    return submittedLabels.length > 0
       ? {
           ...pendingResult,
-          visibilityWarning: '环境已在本机创建，但当前构建未启用 Cloud 客户归属，Facebook 慢启动未配置。',
+          visibilityWarning: `环境已在本机创建，但当前构建未启用 Cloud 客户归属，${submittedLabels.join('、')}未配置。`,
         }
       : result;
   }
@@ -937,6 +954,8 @@ async function finalizeCreatedEnvironmentAssignment(
         label: String(result.name || '').trim() || null,
         platform: normalizePlatform(result.platform),
         ...(slowStartEnabled ? { slowStartEnabled: true } : {}),
+        ...(facebookRuleModeEnabled ? { facebookRuleModeEnabled: true } : {}),
+        ...(autoApproveComments ? { commentApprovalMode: 'auto_approve_all' } : {}),
         proxyAuthority: proxyAuthority.authority,
       },
     });
@@ -946,19 +965,17 @@ async function finalizeCreatedEnvironmentAssignment(
     onSessionInvalid();
     return withAuthoritativeAssignmentNotice(
       pendingResult,
-      `客户端登录已失效${slowStartEnabled ? '；Facebook 慢启动未确认' : ''}`,
+      `客户端登录已失效${unconfirmedSuffix}`,
     );
   }
   if (!response || !response.ok) {
     const reason = response && response.data && response.data.error;
     return withAuthoritativeAssignmentNotice(
       pendingResult,
-      `${reason || '云端未确认归属'}${slowStartEnabled ? '；Facebook 慢启动未确认' : ''}`,
+      `${reason || '云端未确认归属'}${unconfirmedSuffix}`,
     );
   }
-  const confirmedResult = slowStartEnabled
-    ? { ...result, slowStartConfigured: true }
-    : result;
+  const confirmedResult = { ...result, ...configuredFlags(true) };
   if (proxyAuthority.noProxy) {
     proxyAuthorityStore.remove(result.userId);
   } else {
@@ -7526,6 +7543,12 @@ function safeCreatedEnvironment(finalized) {
     ...(typeof finalized.slowStartConfigured === 'boolean'
       ? { slowStartConfigured: finalized.slowStartConfigured }
       : {}),
+    ...(typeof finalized.ruleModeConfigured === 'boolean'
+      ? { ruleModeConfigured: finalized.ruleModeConfigured }
+      : {}),
+    ...(typeof finalized.commentApprovalConfigured === 'boolean'
+      ? { commentApprovalConfigured: finalized.commentApprovalConfigured }
+      : {}),
     visibilityWarning: finalized.visibilityWarning,
   };
 }
@@ -7538,11 +7561,23 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
   try {
     const platform = normalizePlatform(opts && opts.platform);
     const creationMode = opts && opts.creationMode === 'batch' ? 'batch' : 'single';
-    // 慢启动是 Facebook 专属的环境级每日额度约束；XHS / 视频号不提交这个概念。
-    const slowStartEnabled = platform === 'facebook';
     if (creationMode === 'batch' && platform !== 'facebook') {
       return { ok: false, error: '批量新建当前仅支持 Facebook 环境' };
     }
+    // 运行方式（普通/冷启动/规则）与全局免审都是 Facebook 专属概念，且慢启动与规则模式互斥。
+    // 平台门禁与互斥门禁都在这里、在任何本地环境创建之前判定：渲染层的隐藏只是第一层，绕过界面
+    // 直接提交的调用方必须在这里被诚实拒绝，绝不静默丢弃其中一项意图。
+    const creationIntents = resolveFacebookCreationIntents({ platform, opts });
+    if (!creationIntents.ok) return { ok: false, error: creationIntents.error };
+    const {
+      runMode,
+      slowStartEnabled,
+      facebookRuleModeEnabled,
+      commentApprovalMode,
+    } = creationIntents;
+    // 本批全部环境共用同一份归一后的意图 → 批量对全批一致生效。
+    const provisioningConfig = { slowStartEnabled, facebookRuleModeEnabled, commentApprovalMode };
+    const runModeReceipt = platform === 'facebook' ? { runMode } : {};
     const importText = platform === 'facebook' ? (opts && opts.facebookAccountImport) : '';
     const parsedImport = parseFacebookAccountImport(importText);
     if (!parsedImport.ok) return { ok: false, error: parsedImport.error };
@@ -7593,10 +7628,11 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         groupResolver: envGroupResolver,
       });
       if (result && result.ok) {
-        return finalizeCreatedEnvironmentAssignment(result, intent, {
-          slowStartEnabled,
+        const finalized = await finalizeCreatedEnvironmentAssignment(result, intent, {
+          ...provisioningConfig,
           proxyInput: opts && opts.proxy,
         });
+        return { ...finalized, ...runModeReceipt };
       }
       return result;
     }
@@ -7634,7 +7670,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
         return failedFacebookBatchReceipt(created, i + 1, result.error || '未知错误');
       }
       const finalized = await finalizeCreatedEnvironmentAssignment(result, intent, {
-        slowStartEnabled,
+        ...provisioningConfig,
         proxyInput: item.proxy,
       });
       created.push(safeCreatedEnvironment(finalized));
@@ -7643,9 +7679,18 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
     const unassigned = assignmentHandledByMain
       ? created.filter((item) => item.requiresAdminAssignment || !item.rosterJoinedByMain)
       : [];
-    const slowStartConfigured = platform === 'facebook'
-      ? created.length > 0 && created.every((item) => item.slowStartConfigured === true)
+    // 每项配置的确认位只在本次真的提交了该意图时才出现，且必须全批都被云端确认才算已配置。
+    const allConfirmed = (key) => created.length > 0 && created.every((item) => item[key] === true);
+    const slowStartConfigured = slowStartEnabled ? allConfirmed('slowStartConfigured') : undefined;
+    const ruleModeConfigured = facebookRuleModeEnabled ? allConfirmed('ruleModeConfigured') : undefined;
+    const commentApprovalConfigured = commentApprovalMode === 'auto_approve_all'
+      ? allConfirmed('commentApprovalConfigured')
       : undefined;
+    const unconfirmedConfigLabels = [
+      ...(slowStartEnabled && !slowStartConfigured ? ['慢启动'] : []),
+      ...(facebookRuleModeEnabled && !ruleModeConfigured ? ['规则模式'] : []),
+      ...(commentApprovalMode === 'auto_approve_all' && !commentApprovalConfigured ? ['全局免审'] : []),
+    ];
     const receipt = {
       ok: true,
       userId: creationMode === 'single' && created.length === 1 ? created[0].userId : undefined,
@@ -7661,11 +7706,16 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       requiresAdminAssignment: created.some((item) => item.requiresAdminAssignment),
       assignmentHandledByMain,
       rosterJoinedByMain: assignmentHandledByMain ? unassigned.length === 0 : undefined,
-      ...(platform === 'facebook' ? { slowStartConfigured } : {}),
+      ...runModeReceipt,
+      ...(slowStartConfigured === undefined ? {} : { slowStartConfigured }),
+      ...(ruleModeConfigured === undefined ? {} : { ruleModeConfigured }),
+      ...(commentApprovalConfigured === undefined ? {} : { commentApprovalConfigured }),
       ...(unassigned.length > 0 ? {
-        visibilityWarning: `${created.length - unassigned.length}/${created.length} 个环境已分配并加入运行环境；其余环境未完成权威确认，未加入运行环境且慢启动未确认。`,
-      } : platform === 'facebook' && !slowStartConfigured ? {
-        visibilityWarning: '环境已在本机创建，但 Facebook 慢启动未全部完成 Cloud 权威确认。',
+        visibilityWarning: `${created.length - unassigned.length}/${created.length} 个环境已分配并加入运行环境；其余环境未完成权威确认，未加入运行环境${
+          unconfirmedConfigLabels.length > 0 ? `且${unconfirmedConfigLabels.join('、')}未确认` : ''
+        }。`,
+      } : unconfirmedConfigLabels.length > 0 ? {
+        visibilityWarning: `环境已在本机创建，但${unconfirmedConfigLabels.join('、')}未全部完成 Cloud 权威确认。`,
       } : {}),
     };
     return receipt;

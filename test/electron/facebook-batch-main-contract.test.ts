@@ -20,14 +20,33 @@ test('ads:createEnv: Facebook 批量平台门禁与整批解析早于运行时/�
   assert.ok(ensureRuntime < writeClient, '运行时就绪后才建立写客户端');
 });
 
-test('ads:createEnv: Facebook 单建与批量都请求慢启动，XHS/视频号不提交该概念', () => {
-  assert.match(createBlock, /const slowStartEnabled = platform === 'facebook'/);
+test('ads:createEnv: 运行方式与免审意图由归一门禁翻译，单建与批量共用同一份意图', () => {
+  assert.doesNotMatch(
+    createBlock,
+    /const slowStartEnabled = platform === 'facebook'/,
+    'Facebook 创建不得再写死慢启动意图',
+  );
+  assert.match(createBlock, /resolveFacebookCreationIntents\(\{ platform, opts \}\)/);
+  assert.match(createBlock, /if \(!creationIntents\.ok\) return \{ ok: false, error: creationIntents\.error \}/);
   assert.equal((createBlock.match(
-    /finalizeCreatedEnvironmentAssignment\(result, intent, \{\s*slowStartEnabled,\s*proxyInput:/g,
-  ) ?? []).length, 2, '无账号资料单建分支与账号导入/批量分支必须共用 Facebook 默认值');
+    /finalizeCreatedEnvironmentAssignment\(result, intent, \{\s*\.\.\.provisioningConfig,\s*proxyInput:/g,
+  ) ?? []).length, 2, '无账号资料单建分支与账号导入/批量分支必须共用同一份归一意图');
   assert.match(mainSource, /\.\.\.\(slowStartEnabled \? \{ slowStartEnabled: true \} : \{\}\)/);
+  assert.match(mainSource, /\.\.\.\(facebookRuleModeEnabled \? \{ facebookRuleModeEnabled: true \} : \{\}\)/);
+  assert.match(mainSource, /\.\.\.\(autoApproveComments \? \{ commentApprovalMode: 'auto_approve_all' \} : \{\}\)/);
   assert.match(mainSource, /slowStartConfigured: finalized\.slowStartConfigured/);
-  assert.match(createBlock, /created\.every\(\(item\) => item\.slowStartConfigured === true\)/);
+  assert.match(mainSource, /ruleModeConfigured: finalized\.ruleModeConfigured/);
+  assert.match(mainSource, /commentApprovalConfigured: finalized\.commentApprovalConfigured/);
+  assert.match(createBlock, /created\.every\(\(item\) => item\[key\] === true\)/);
+});
+
+test('ads:createEnv: 平台与互斥门禁早于运行时探测与本地环境创建', () => {
+  const intentGate = createBlock.indexOf('resolveFacebookCreationIntents(');
+  const ensureRuntime = createBlock.indexOf('ensureAdsServiceOnce(null)');
+  const firstIntentCall = createBlock.indexOf('createEnvironmentProvisioningIntent()');
+  assert.ok(intentGate >= 0, '应有归一门禁');
+  assert.ok(intentGate < ensureRuntime, '门禁须在指纹浏览器运行时探测前');
+  assert.ok(intentGate < firstIntentCall, '门禁须在向云端申请归属意图前');
 });
 
 test('ads:createEnv: 批量逐项使用计划中的随机 OS family 与轮询代理，并保留部分失败回执', () => {

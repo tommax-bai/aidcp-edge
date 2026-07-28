@@ -1080,16 +1080,34 @@
                 <option value="batch">批量新建</option>
               </select>
             </label>
+            <!-- 运行方式三选一（change environment-level-rule-mode-and-approval）：下拉本身即互斥，
+                 单个与批量共用同一控件，批量对全批一致生效。仅 Facebook 显示；主进程另有一层平台门禁。 -->
+            <label id="ads-fb-run-mode-field" class="create-field hidden">
+              <span>运行方式</span>
+              <select id="ads-fb-run-mode" class="ads-template" aria-label="Facebook 运行方式" aria-describedby="ads-fb-run-mode-help">
+                <option value="normal">普通</option>
+                <option value="cold_start">冷启动</option>
+                <option value="rule">规则</option>
+              </select>
+            </label>
             <label id="ads-template-field" class="create-field">
               <span>浏览器系统</span>
               <select id="ads-template" class="ads-template" aria-label="操作系统"></select>
             </label>
           </div>
 
+          <div id="ads-fb-run-mode-wrap" class="ads-fb-run-mode hidden">
+            <span id="ads-fb-run-mode-help" class="subtle">三者互斥，对本次创建的全部环境一致生效。冷启动为该环境配置慢启动，只收紧每日操作额度，不改变操作速度；普通与规则不配置慢启动；规则另外为该环境开启规则模式配置。</span>
+            <label id="ads-fb-approval-wrap" class="ads-manual-toggle">
+              <input id="ads-fb-approval" type="checkbox" /> 全局免审（可选，默认关闭）
+            </label>
+            <span id="ads-fb-approval-help" class="subtle">与运行方式相互独立。勾选后该环境的评论不再需要提交前的第二次人工审核；风险控制、每日配额、去重、目标复核与平台确认均不变。</span>
+          </div>
+
           <label id="ads-fb-import-wrap" class="field ads-fb-import hidden">
             <span class="field-label">Facebook 账号资料 <em id="ads-fb-import-requirement" class="opt">可选</em></span>
             <textarea id="ads-fb-import" rows="5" spellcheck="false" autocomplete="off" placeholder="每行自动识别一种受支持格式：&#10;email----password----2FA----cookie&#10;uid|password|cookie|access_token|email|timestamp&#10;uid|password|2FA|email|cookie|access_token"></textarea>
-            <span id="ads-fb-account-format-help" class="subtle">自动识别以上三种常见格式；未知或有歧义的格式会拒绝，不会猜测字段。Access Token 与时间仅用于识别边界，不会导入或保存。Facebook 单个、批量新建环境均默认开启慢启动；它只收紧每日操作额度，不改变操作速度。</span>
+            <span id="ads-fb-account-format-help" class="subtle">自动识别以上三种常见格式；未知或有歧义的格式会拒绝，不会猜测字段。Access Token 与时间仅用于识别边界，不会导入或保存。</span>
             <span id="ads-fb-batch-account-help" class="subtle hidden">每行一个账号；每个账号将独立随机分配操作系统，其余指纹由 AdsPower 生成。</span>
           </label>
 

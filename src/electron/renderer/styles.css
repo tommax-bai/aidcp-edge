@@ -2523,6 +2523,10 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
   margin-top: 5px;
   line-height: 1.55;
 }
+/* 运行方式说明 + 全局免审勾选（change environment-level-rule-mode-and-approval）。 */
+.ads-fb-run-mode { display: flex; flex-direction: column; gap: 6px; }
+.ads-fb-run-mode .subtle { display: block; line-height: 1.55; }
+.ads-fb-run-mode .ads-manual-toggle { align-self: flex-start; }
 /* 创建提示行空着时不占位（否则 grid gap+min-height 会把下拉与「下载 AdsPower」撑开一大截）。 */
 #ads-create-msg:empty { display: none; }
 .ads-template {

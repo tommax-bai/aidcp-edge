@@ -83,7 +83,7 @@ interface Stub {
   adsUpdateEnvProxies: (opts?: unknown) => Promise<unknown>;
   adsOpenCreate: () => { launched: boolean } | Promise<{ launched: boolean }>;
   adsTemplates: () => Promise<Array<{ key: string; label: string }>>;
-  adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; name?: string; template?: string; osFamily?: string; error?: string; createdCount?: number; created?: unknown[]; platform?: string; visibilityWarning?: string; requiresAdminAssignment?: boolean; assignmentHandledByMain?: boolean; rosterJoinedByMain?: boolean }>;
+  adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; name?: string; template?: string; osFamily?: string; error?: string; createdCount?: number; created?: unknown[]; platform?: string; visibilityWarning?: string; requiresAdminAssignment?: boolean; assignmentHandledByMain?: boolean; rosterJoinedByMain?: boolean; runMode?: string; slowStartConfigured?: boolean; ruleModeConfigured?: boolean; commentApprovalConfigured?: boolean }>;
   adsDeleteEnv: (opts?: unknown) => Promise<{ ok: boolean; error?: string; cleanupPending?: boolean; message?: string }>;
   adsGetEnvProxy: (opts?: unknown) => Promise<{ ok: boolean; noProxy?: boolean; proxy?: Record<string, unknown>; error?: string }>;
   adsUpdateEnvProxy: (opts?: unknown) => Promise<{ ok: boolean; error?: string }>;
@@ -844,11 +844,15 @@ test('新增环境可选择视频号，并以 wechat_channels 创建、入册和
   platform.dispatchEvent(new w.Event('change'));
   assert.ok($(w, '#ads-fb-import-wrap').classList.contains('hidden'), '视频号不显示 Facebook 一次性凭据框');
   assert.ok($(w, '#ads-fb-create-mode').classList.contains('hidden'), '视频号不显示 Facebook 批量入口');
+  assert.ok($(w, '#ads-fb-run-mode-field').classList.contains('hidden'), '视频号不显示运行方式');
+  assert.ok($(w, '#ads-fb-run-mode-wrap').classList.contains('hidden'), '视频号不显示全局免审');
 
   $(w, '#ads-create').dispatchEvent(new w.Event('click'));
   for (let i = 0; i < 5; i++) await tick();
   assert.equal(sent.platform, 'wechat_channels');
   assert.equal(sent.facebookAccountImport, '');
+  assert.equal('facebookRunMode' in sent, false, '视频号提交不得携带运行方式');
+  assert.equal('commentApprovalMode' in sent, false, '视频号提交不得携带免审意图');
   assert.equal(savedEnvironments.length, 1);
   assert.equal(savedEnvironments[0]?.profileId, 'u_wechat');
   assert.equal(savedEnvironments[0]?.name, '视频号环境');
@@ -870,6 +874,7 @@ test('Facebook 批量新建：显式模式、隐藏操作系统下拉、多行�
         created: [{ userId: 'u1', osFamily: 'windows' }, { userId: 'u2', osFamily: 'macos' }],
         platform: 'facebook',
         creationMode: 'batch',
+        runMode: 'cold_start',
         slowStartConfigured: true,
       };
     },
@@ -888,7 +893,11 @@ test('Facebook 批量新建：显式模式、隐藏操作系统下拉、多行�
   assert.match(facebookImportPlaceholder, /uid\|password\|2FA\|email\|cookie\|access_token/);
   assert.match($(w, '#ads-fb-account-format-help').textContent ?? '', /未知或有歧义的格式会拒绝/);
   assert.match($(w, '#ads-fb-account-format-help').textContent ?? '', /Access Token.*不会导入或保存/);
-  assert.match($(w, '#ads-fb-account-format-help').textContent ?? '', /单个、批量新建环境均默认开启慢启动/);
+  assert.doesNotMatch(
+    $(w, '#ads-fb-account-format-help').textContent ?? '',
+    /慢启动/,
+    '账号格式说明不得再声称创建默认开启慢启动',
+  );
   assert.ok(!$(w, '#ads-fb-create-mode').classList.contains('hidden'), 'Facebook 平台显示创建方式');
   assert.ok(!$(w, '#ads-template').classList.contains('hidden'), 'Facebook 单个新建仍显示操作系统');
 
@@ -898,6 +907,9 @@ test('Facebook 批量新建：显式模式、隐藏操作系统下拉、多行�
   assert.ok($(w, '#ads-template').classList.contains('hidden'), '批量新建不可选择操作系统');
   assert.equal($(w, '#ads-create').textContent, '批量创建');
   assert.match($(w, '#ads-fb-import-requirement').textContent ?? '', /必填/);
+  const runMode = $(w, '#ads-fb-run-mode') as HTMLSelectElement;
+  runMode.value = 'cold_start';
+  runMode.dispatchEvent(new w.Event('change'));
   ($(w, '#ads-fb-import') as HTMLTextAreaElement).value = `${secretLine}\n${secretLine}`;
   const proxyType = $(w, '#ads-proxy-type') as HTMLSelectElement;
   proxyType.value = 'socks5';
@@ -913,10 +925,12 @@ test('Facebook 批量新建：显式模式、隐藏操作系统下拉、多行�
   assert.equal(sent.facebookAccountImport, `${secretLine}\n${secretLine}`);
   assert.equal(sent.batchProxyType, 'socks5');
   assert.equal(sent.facebookProxyBatch, `${proxySecret}\nproxy-b.example:8081`);
+  assert.equal(sent.facebookRunMode, 'cold_start', '批量提交携带本批统一的运行方式');
+  assert.equal('commentApprovalMode' in sent, false, '未勾选免审时不得携带审批模式字段');
   const msg = $(w, '#ads-create-msg').textContent ?? '';
   assert.match(msg, /已创建 2 个环境/);
   assert.match(msg, /轮询分配/);
-  assert.match(msg, /默认开启慢启动.*只收紧每日操作额度.*不改变操作速度/);
+  assert.match(msg, /已按冷启动为该环境配置慢启动.*只收紧每日操作额度.*不改变操作速度/);
   assert.doesNotMatch(msg, /a@example.com|pw-secret|KEYSECRET|TOKEN|proxy-user|proxy-pass/);
   assert.equal(($(w, '#ads-fb-import') as HTMLTextAreaElement).value, '', '成功后清空一次性输入');
   assert.equal(($(w, '#ads-proxy-batch') as HTMLTextAreaElement).value, '', '成功后清空一次性代理输入');
@@ -961,6 +975,202 @@ test('Facebook 批量部分失败：刷新已建环境并保留一次性输入�
   assert.equal(($(w, '#ads-fb-import') as HTMLTextAreaElement).value, `${accountSecret}\n${accountSecret}`);
   assert.equal(($(w, '#ads-proxy-batch') as HTMLTextAreaElement).value, proxySecret);
   assert.ok(listCalls > initialListCalls, '部分成功后刷新环境列表');
+});
+
+// ── 运行方式三选一 + 全局免审（change environment-level-rule-mode-and-approval） ──
+
+async function bootFacebookCreate(stub: Stub): Promise<DOMWindow> {
+  const w = await boot(stub);
+  for (let i = 0; i < 3; i++) await tick();
+  const platform = $(w, '#ads-platform') as HTMLSelectElement;
+  platform.value = 'facebook';
+  platform.dispatchEvent(new w.Event('change'));
+  return w;
+}
+
+test('运行方式：三选一互斥且只在 Facebook 出现，默认普通、免审默认关闭', async () => {
+  const w = await boot(makeStub());
+  for (let i = 0; i < 3; i++) await tick();
+  assert.ok($(w, '#ads-fb-run-mode-field').classList.contains('hidden'), '小红书不展示运行方式');
+  assert.ok($(w, '#ads-fb-run-mode-wrap').classList.contains('hidden'), '小红书不展示免审入口');
+
+  const platform = $(w, '#ads-platform') as HTMLSelectElement;
+  platform.value = 'facebook';
+  platform.dispatchEvent(new w.Event('change'));
+  assert.ok(!$(w, '#ads-fb-run-mode-field').classList.contains('hidden'), 'Facebook 展示运行方式');
+  assert.ok(!$(w, '#ads-fb-run-mode-wrap').classList.contains('hidden'), 'Facebook 展示免审入口');
+
+  const runMode = $(w, '#ads-fb-run-mode') as HTMLSelectElement;
+  assert.deepEqual(Array.from(runMode.options).map((option) => option.value), ['normal', 'cold_start', 'rule']);
+  assert.deepEqual(Array.from(runMode.options).map((option) => option.textContent), ['普通', '冷启动', '规则']);
+  assert.equal(runMode.multiple, false, '同一时刻只能选中一种运行方式');
+  assert.equal(runMode.value, 'normal', '默认普通：不再写死慢启动');
+  assert.equal(($(w, '#ads-fb-approval') as HTMLInputElement).checked, false, '全局免审默认关闭');
+
+  // 未选冷启动不得追加解释性告警或 Tooltip：说明文字与选择无关，控件也不带 title。
+  const helpBefore = $(w, '#ads-fb-run-mode-help').textContent;
+  for (const value of ['rule', 'normal']) {
+    runMode.value = value;
+    runMode.dispatchEvent(new w.Event('change'));
+    assert.equal($(w, '#ads-fb-run-mode-help').textContent, helpBefore, '运行方式说明不随选择变化');
+    assert.equal(w.document.querySelectorAll('#ads-fb-run-mode-wrap [title], #ads-fb-run-mode-field [title]').length, 0);
+    assert.equal($(w, '#ads-create-msg').textContent, '', '选择运行方式本身不产生任何提示');
+  }
+});
+
+test('运行方式：默认普通提交不带任何开启意图，回执如实说明未配置慢启动', async () => {
+  let sent: Record<string, unknown> = {};
+  const w = await bootFacebookCreate(makeStub({
+    adsCreateEnv: async (opts) => {
+      sent = opts as Record<string, unknown>;
+      return {
+        ok: true,
+        userId: 'u_normal',
+        osFamily: 'windows',
+        platform: 'facebook',
+        runMode: 'normal',
+        assignmentHandledByMain: true,
+        rosterJoinedByMain: true,
+      };
+    },
+  }));
+  $(w, '#ads-create').dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(sent.facebookRunMode, 'normal');
+  assert.equal('slowStartEnabled' in sent, false, '普通不提交慢启动开启意图');
+  assert.equal('facebookRuleModeEnabled' in sent, false, '普通不提交规则模式开启意图');
+  assert.equal('commentApprovalMode' in sent, false, '未勾选免审不提交扩权意图');
+  const msg = $(w, '#ads-create-msg').textContent ?? '';
+  assert.match(msg, /该环境未配置慢启动。/);
+  assert.doesNotMatch(msg, /默认开启慢启动/, '不得沿用旧的默认开启说法');
+  assert.doesNotMatch(msg, /免审/, '未勾选免审时回执不出现任何免审声明');
+  assert.doesNotMatch(msg, /规则模式/);
+});
+
+test('运行方式：选规则提交规则模式意图且不提交慢启动，回执分别如实呈现', async () => {
+  let sent: Record<string, unknown> = {};
+  const w = await bootFacebookCreate(makeStub({
+    adsCreateEnv: async (opts) => {
+      sent = opts as Record<string, unknown>;
+      return {
+        ok: true,
+        userId: 'u_rule',
+        osFamily: 'windows',
+        platform: 'facebook',
+        runMode: 'rule',
+        ruleModeConfigured: true,
+        assignmentHandledByMain: true,
+        rosterJoinedByMain: true,
+      };
+    },
+  }));
+  const runMode = $(w, '#ads-fb-run-mode') as HTMLSelectElement;
+  runMode.value = 'rule';
+  runMode.dispatchEvent(new w.Event('change'));
+  $(w, '#ads-create').dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(sent.facebookRunMode, 'rule');
+  assert.equal('slowStartEnabled' in sent, false);
+  const msg = $(w, '#ads-create-msg').textContent ?? '';
+  assert.match(msg, /该环境未配置慢启动。/);
+  assert.match(msg, /已按规则运行方式为该环境配置规则模式。/);
+});
+
+test('全局免审：批量勾选一次对全批一致生效，云端确认后才标记已配置', async () => {
+  let sent: Record<string, unknown> = {};
+  const w = await bootFacebookCreate(makeStub({
+    adsCreateEnv: async (opts) => {
+      sent = opts as Record<string, unknown>;
+      return {
+        ok: true,
+        createdCount: 3,
+        created: [{ userId: 'u1' }, { userId: 'u2' }, { userId: 'u3' }],
+        platform: 'facebook',
+        runMode: 'normal',
+        commentApprovalConfigured: true,
+      };
+    },
+  }));
+  const mode = $(w, '#ads-fb-create-mode') as HTMLSelectElement;
+  mode.value = 'batch';
+  mode.dispatchEvent(new w.Event('change'));
+  assert.ok(!$(w, '#ads-fb-run-mode-wrap').classList.contains('hidden'), '批量同样使用同一个免审勾选');
+  const approval = $(w, '#ads-fb-approval') as HTMLInputElement;
+  approval.checked = true;
+  ($(w, '#ads-fb-import') as HTMLTextAreaElement).value = 'a@example.com----pw----2fa----cookie\nb@example.com----pw----2fa----cookie\nc@example.com----pw----2fa----cookie';
+
+  $(w, '#ads-create').dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(sent.creationMode, 'batch');
+  assert.equal(sent.commentApprovalMode, 'auto_approve_all', '整批共用同一个免审意图');
+  assert.equal(sent.facebookRunMode, 'normal');
+  const msg = $(w, '#ads-create-msg').textContent ?? '';
+  assert.match(msg, /全局免审已配置（只免去评论提交前的第二次人工审核）。/);
+  assert.doesNotMatch(msg, /风险|配额|去重/, '免审文案不得暗示放宽这些安全闸');
+});
+
+test('云端未确认：回执区分本地创建与各项配置，不宣称任何一项已生效', async () => {
+  const w = await bootFacebookCreate(makeStub({
+    adsCreateEnv: async () => ({
+      ok: true,
+      userId: 'u_pending',
+      osFamily: 'windows',
+      platform: 'facebook',
+      runMode: 'cold_start',
+      slowStartConfigured: false,
+      commentApprovalConfigured: false,
+      createdLocally: true,
+      assignedToCurrentClient: false,
+      requiresAdminAssignment: true,
+      assignmentHandledByMain: true,
+      rosterJoinedByMain: false,
+      visibilityWarning: '环境已在本机创建，但自动分配未完成（云端未确认归属；慢启动、全局免审未确认），因此未加入运行环境。请重试或由管理员分配。',
+    }),
+  }));
+  const runMode = $(w, '#ads-fb-run-mode') as HTMLSelectElement;
+  runMode.value = 'cold_start';
+  runMode.dispatchEvent(new w.Event('change'));
+  ($(w, '#ads-fb-approval') as HTMLInputElement).checked = true;
+  $(w, '#ads-create').dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 5; i++) await tick();
+  const msg = $(w, '#ads-create-msg').textContent ?? '';
+  assert.match(msg, /环境已在本机创建/);
+  assert.match(msg, /冷启动的慢启动尚未获得云端确认。/);
+  assert.match(msg, /全局免审尚未获得云端确认。/);
+  assert.doesNotMatch(msg, /已配置慢启动/);
+  assert.doesNotMatch(msg, /全局免审已配置/);
+  assert.ok($(w, '#ads-create-msg').classList.contains('error'), '未确认必须以异常态呈现');
+});
+
+test('其它平台：切回小红书复位运行方式与免审，提交不携带任何相关键', async () => {
+  let sent: Record<string, unknown> = {};
+  const w = await bootFacebookCreate(makeStub({
+    adsCreateEnv: async (opts) => {
+      sent = opts as Record<string, unknown>;
+      return { ok: true, userId: 'u_xhs', osFamily: 'windows', platform: 'xiaohongshu' };
+    },
+  }));
+  const runMode = $(w, '#ads-fb-run-mode') as HTMLSelectElement;
+  runMode.value = 'rule';
+  runMode.dispatchEvent(new w.Event('change'));
+  ($(w, '#ads-fb-approval') as HTMLInputElement).checked = true;
+
+  const platform = $(w, '#ads-platform') as HTMLSelectElement;
+  platform.value = 'xiaohongshu';
+  platform.dispatchEvent(new w.Event('change'));
+  assert.ok($(w, '#ads-fb-run-mode-field').classList.contains('hidden'));
+  assert.ok($(w, '#ads-fb-run-mode-wrap').classList.contains('hidden'));
+  assert.equal(runMode.value, 'normal', '离开 Facebook 复位运行方式');
+  assert.equal(($(w, '#ads-fb-approval') as HTMLInputElement).checked, false, '离开 Facebook 复位免审');
+
+  $(w, '#ads-create').dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(sent.platform, 'xiaohongshu');
+  for (const key of ['facebookRunMode', 'slowStartEnabled', 'facebookRuleModeEnabled', 'commentApprovalMode']) {
+    assert.equal(key in sent, false, `非 Facebook 提交不得携带 ${key}`);
+  }
+  const msg = $(w, '#ads-create-msg').textContent ?? '';
+  assert.doesNotMatch(msg, /慢启动|规则模式|免审/, '其它平台回执不出现运行方式相关声明');
 });
 
 test('程序化建号成功返回 userId → 自动选中新环境，启动可直接保存并开跑', async () => {

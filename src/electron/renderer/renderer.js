@@ -413,6 +413,11 @@ const settingsUi = {
   adsPlatformButtons: Array.from(document.querySelectorAll('[data-create-platform]')),
   adsFbCreateMode: document.querySelector('#ads-fb-create-mode'),
   adsFbCreateModeField: document.querySelector('#ads-fb-create-mode-field'),
+  // 运行方式三选一 + 全局免审（change environment-level-rule-mode-and-approval）：仅 Facebook 展示。
+  adsFbRunMode: document.querySelector('#ads-fb-run-mode'),
+  adsFbRunModeField: document.querySelector('#ads-fb-run-mode-field'),
+  adsFbRunModeWrap: document.querySelector('#ads-fb-run-mode-wrap'),
+  adsFbApproval: document.querySelector('#ads-fb-approval'),
   adsFbImportWrap: document.querySelector('#ads-fb-import-wrap'),
   adsFbImport: document.querySelector('#ads-fb-import'),
   adsFbImportRequirement: document.querySelector('#ads-fb-import-requirement'),
@@ -611,9 +616,17 @@ function platformLabel(p) {
 function updateFacebookImportVisibility() {
   const facebook = normPlatform(settingsUi.adsPlatform && settingsUi.adsPlatform.value) === 'facebook';
   if (!facebook && settingsUi.adsFbCreateMode) settingsUi.adsFbCreateMode.value = 'single';
+  // 离开 Facebook 就把运行方式与免审复位，避免残留选择在切回时或经其它平台提交时被携带。
+  if (!facebook) {
+    if (settingsUi.adsFbRunMode) settingsUi.adsFbRunMode.value = 'normal';
+    if (settingsUi.adsFbApproval) settingsUi.adsFbApproval.checked = false;
+  }
   const batch = facebook && settingsUi.adsFbCreateMode && settingsUi.adsFbCreateMode.value === 'batch';
   settingsUi.adsFbCreateModeField?.classList.toggle('hidden', !facebook);
   settingsUi.adsFbCreateMode?.classList.toggle('hidden', !facebook);
+  settingsUi.adsFbRunModeField?.classList.toggle('hidden', !facebook);
+  settingsUi.adsFbRunMode?.classList.toggle('hidden', !facebook);
+  settingsUi.adsFbRunModeWrap?.classList.toggle('hidden', !facebook);
   settingsUi.adsFbImportWrap?.classList.toggle('hidden', !facebook);
   settingsUi.adsTemplateField?.classList.toggle('hidden', Boolean(batch));
   settingsUi.adsTemplate?.classList.toggle('hidden', Boolean(batch));
@@ -7457,6 +7470,48 @@ settingsUi.adsProxyType?.addEventListener('change', () => {
   updateFacebookImportVisibility();
 });
 
+// 运行方式三选一 + 全局免审（change environment-level-rule-mode-and-approval）。
+// 只在 Facebook 时组装这些意图；其它平台一个键都不带 —— 主进程对非 Facebook 的携带一律整请求拒绝。
+const CREATE_RUN_MODES = ['normal', 'cold_start', 'rule'];
+function readFacebookCreationIntents(platform) {
+  if (platform !== 'facebook') return {};
+  const raw = settingsUi.adsFbRunMode ? String(settingsUi.adsFbRunMode.value || '') : '';
+  const runMode = CREATE_RUN_MODES.includes(raw) ? raw : 'normal';
+  const autoApprove = Boolean(settingsUi.adsFbApproval && settingsUi.adsFbApproval.checked);
+  return {
+    facebookRunMode: runMode,
+    ...(autoApprove ? { commentApprovalMode: 'auto_approve_all' } : {}),
+  };
+}
+
+/**
+ * 创建回执里的运行方式 / 免审说明。非乐观：只有主进程带回「已确认」才敢说已配置；
+ * 未选冷启动时如实说明该环境未配置慢启动，不追加任何风险告警。
+ */
+function facebookCreateConfigHint(receipt) {
+  const mode = receipt && receipt.runMode;
+  if (!CREATE_RUN_MODES.includes(mode)) return '';
+  const parts = [];
+  if (mode === 'cold_start') {
+    parts.push(receipt.slowStartConfigured === true
+      ? '已按冷启动为该环境配置慢启动（只收紧每日操作额度，不改变操作速度）。'
+      : '冷启动的慢启动尚未获得云端确认。');
+  } else {
+    parts.push('该环境未配置慢启动。');
+    if (mode === 'rule') {
+      parts.push(receipt.ruleModeConfigured === true
+        ? '已按规则运行方式为该环境配置规则模式。'
+        : '规则模式尚未获得云端确认。');
+    }
+  }
+  if (receipt.commentApprovalConfigured === true) {
+    parts.push('全局免审已配置（只免去评论提交前的第二次人工审核）。');
+  } else if (receipt.commentApprovalConfigured === false) {
+    parts.push('全局免审尚未获得云端确认。');
+  }
+  return parts.join('');
+}
+
 // 「创建环境」程序化建号：单建挑 OS family；Facebook 批量由主进程逐账号随机 OS family、代理按行轮询。
 settingsUi.adsCreate.addEventListener('click', async () => {
   const platform = normPlatform(settingsUi.adsPlatform && settingsUi.adsPlatform.value);
@@ -7492,6 +7547,8 @@ settingsUi.adsCreate.addEventListener('click', async () => {
   const batchCount = facebookAccountImport.split(/\r?\n/).filter((line) => line.trim()).length;
   setCreateMsg(batch ? `正在批量创建 ${batchCount} 个环境，请勿关闭客户端…` : '正在创建环境…', false);
   try {
+    // 同一份意图供单个与批量共用；批量时主进程对本批全部环境一致生效。
+    const facebookCreationIntents = readFacebookCreationIntents(platform);
     const payload = batch
       ? {
           ...formAdsOpts(),
@@ -7501,6 +7558,7 @@ settingsUi.adsCreate.addEventListener('click', async () => {
           batchProxyType: proxyType,
           facebookAccountImport,
           facebookProxyBatch,
+          ...facebookCreationIntents,
         }
       : {
           ...formAdsOpts(),
@@ -7509,6 +7567,7 @@ settingsUi.adsCreate.addEventListener('click', async () => {
           platform,
           proxy,
           facebookAccountImport,
+          ...facebookCreationIntents,
         };
     const r = await window.aidcpEdge.adsCreateEnv(payload);
     if (r && r.ok) {
@@ -7543,12 +7602,10 @@ settingsUi.adsCreate.addEventListener('click', async () => {
       const proxyHint = batch && withProxy
         ? '代理已按粘贴顺序轮询分配并随建号写入。'
         : withProxy ? '代理已随建号写入。' : '未配代理，可稍后在环境行「代理」里补配。';
-      const slowStartHint = r.slowStartConfigured === true
-        ? 'Facebook 环境已默认开启慢启动（只收紧每日操作额度，不改变操作速度）。'
-        : '';
+      const configHint = facebookCreateConfigHint(r);
       const visibilityHint = r.visibilityWarning ? r.visibilityWarning : '';
       setCreateMsg(
-        `${countHint}${selectedHint}${proxyHint}${slowStartHint}${visibilityHint}`,
+        `${countHint}${selectedHint}${proxyHint}${configHint}${visibilityHint}`,
         Boolean(r.visibilityWarning),
       );
       resetCreateProxyForm();
