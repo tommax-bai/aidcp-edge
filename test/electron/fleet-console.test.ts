@@ -2784,3 +2784,190 @@ test('环境栏不打扰用户：模型没变的每秒重估不重建、不动�
   assert.equal(list.scrollTop, 90, '不得在用户滚动途中改掉位置');
   assert.deepEqual(scroll.writes, [90], '除用户那一次外不应有多余写入');
 });
+
+// ── change facebook-rule-mode-without-persona：第四种人设呈现「按规则运行、未绑人设」────────────
+//
+// 未绑人设 + 该环境已启用规则模式 = 账号**正在正常运行**，不是待办。客户端 MUST NOT 呈现为待补人设
+// （催运营补一份规则模式根本不读的人设，还会误传成没跑起来），也 MUST NOT 冒充已绑。
+// 判据只认已读到的云端权威规则模式配置；未读到 / 读失败 / 未启用一律逐字回到既有三态与既有引导。
+
+function deferredValue<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
+function ruleModeReceipt(envKey: string, enabled: boolean) {
+  return {
+    ok: true,
+    data: {
+      data: {
+        envKey,
+        facebookRuleMode: {
+          enabled,
+          definitionId: 'facebook_browse_10_like_1_join_contact_1',
+          definitionVersion: 1,
+          updatedAt: enabled ? '2026-07-28T08:00:00.000Z' : null,
+        },
+      },
+    },
+  };
+}
+
+const facebookRosterEnv = {
+  envId: 'ads-fb',
+  kind: 'adspower',
+  profileId: 'fb',
+  name: 'FB 账号',
+  platform: 'facebook',
+};
+
+async function bootFacebookPersona(apiOver: Record<string, unknown> = {}) {
+  return boot({
+    fleetGet: async () => ({
+      provider: 'adspower',
+      selectedEnvId: 'ads-fb',
+      railCollapsed: false,
+      environments: [{
+        ...facebookRosterEnv,
+        status: makeStatus({ envId: 'ads-fb', envName: 'FB 账号', personaBound: false }),
+      }],
+    }),
+    ...apiOver,
+  }, {
+    adsProfileId: 'fb',
+    adsProfileName: 'FB 账号',
+    platform: 'facebook',
+    environments: [{ profileId: 'fb', name: 'FB 账号', platform: 'facebook' }],
+    railCollapsed: false,
+  });
+}
+
+const unboundFacebookStatus = () => makeStatus({ envId: 'ads-fb', envName: 'FB 账号', personaBound: false });
+
+test('人设呈现：未绑人设 + 规则模式已开启 → 呈现为「按规则运行」，不弹向导、不发补人设通知', async () => {
+  const reads: string[] = [];
+  const { w, calls, pushStatus } = await bootFacebookPersona({
+    getFacebookRuleMode: async ({ envKey }: { envKey: string }) => {
+      reads.push(envKey);
+      return ruleModeReceipt(envKey, true);
+    },
+  });
+  pushStatus(unboundFacebookStatus());
+  for (let i = 0; i < 6; i++) await tick();
+  await new Promise((r) => setTimeout(r, 50)); // 等再久也不该弹：这个账号正按规则运行
+
+  // 判据必须来自 env-scoped 的云端权威读，且只按 envKey 提问（accountId / 平台留给 Cloud 解析）。
+  assert.ok(reads.includes('fb'), '必须为该环境发起一次 env-scoped 规则模式读');
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), false, '规则模式账号不得自动弹人设向导');
+  assert.equal(calls.notify.length, 0, '规则模式账号不得收到补人设通知');
+  const badge = w.document.querySelector('#persona-state-badge')!.textContent;
+  assert.equal(badge, '按规则运行');
+  assert.notEqual(badge, '未设置', 'MUST NOT 呈现为待补人设');
+  assert.notEqual(badge, '已设置', 'MUST NOT 冒充已绑');
+  const icon = w.document.querySelector('.rail-row[data-env-id="ads-fb"] .rail-persona') as HTMLElement;
+  assert.ok(icon);
+  assert.equal(icon.classList.contains('set'), false, '左栏图标不得用「已设置」样式冒充已绑');
+  assert.equal(icon.classList.contains('rule-mode'), true);
+  assert.match(icon.title, /未绑定/);
+  assert.match(icon.title, /规则模式/);
+  assert.doesNotMatch(icon.title, /未设置（点击设置）/);
+});
+
+test('人设呈现：未绑人设 + 规则模式关闭 → 既有补人设引导逐字不变', async () => {
+  const { w, calls, pushStatus } = await bootFacebookPersona({
+    getFacebookRuleMode: async ({ envKey }: { envKey: string }) => ruleModeReceipt(envKey, false),
+  });
+  pushStatus(unboundFacebookStatus());
+  for (let i = 0; i < 6; i++) await tick();
+
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), true, '规则模式关闭时仍须弹向导');
+  assert.equal(calls.notify.length, 1, '规则模式关闭时仍须发补人设通知');
+  assert.match(String((calls.notify[0] as { title: string }).title), /需要设置账号人设/);
+  assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '未设置');
+  const icon = w.document.querySelector('.rail-row[data-env-id="ads-fb"] .rail-persona') as HTMLElement;
+  assert.equal(icon.classList.contains('rule-mode'), false);
+  assert.match(icon.title, /未设置/);
+});
+
+test('人设呈现：规则模式读失败 → fail-closed 回到既有补人设引导，绝不猜成已启用', async () => {
+  const { w, calls, pushStatus } = await bootFacebookPersona({
+    getFacebookRuleMode: async () => ({ ok: false, data: { error: 'binding_unknown' } }),
+  });
+  pushStatus(unboundFacebookStatus());
+  for (let i = 0; i < 6; i++) await tick();
+
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), true, '读不到规则模式不得静默吞掉引导');
+  assert.equal(calls.notify.length, 1);
+  assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '未设置');
+});
+
+test('人设呈现：规则模式真态未到期间不误弹，回包到达后才按真态收敛', async () => {
+  const read = deferredValue<unknown>();
+  const { w, calls, pushStatus } = await bootFacebookPersona({
+    getFacebookRuleMode: async () => read.promise,
+  });
+  pushStatus(unboundFacebookStatus());
+  for (let i = 0; i < 6; i++) await tick();
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), false, '事实未到时不得抢先弹「待补人设」');
+  assert.equal(calls.notify.length, 0);
+
+  read.resolve(ruleModeReceipt('fb', false)); // 真相是「规则模式没开」→ 既有引导必须补上，不能被永久按住
+  for (let i = 0; i < 6; i++) await tick();
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), true);
+  assert.equal(calls.notify.length, 1);
+});
+
+test('人设呈现：非 Facebook 未绑账号不读规则模式，引导与徽标逐字不变', async () => {
+  let reads = 0;
+  const { w, calls, pushStatus } = await boot({
+    getFacebookRuleMode: async ({ envKey }: { envKey: string }) => {
+      reads += 1;
+      return ruleModeReceipt(envKey, true);
+    },
+  });
+  pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一', personaBound: false }));
+  for (let i = 0; i < 6; i++) await tick();
+
+  assert.equal(reads, 0, '例外只在 Facebook 成立，别的平台连读都不该发起');
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), true);
+  assert.equal(calls.notify.length, 1);
+  assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '未设置');
+});
+
+test('人设呈现：规则模式已开启也不改变已绑与未知两态', async () => {
+  const { w, calls, pushStatus } = await bootFacebookPersona({
+    getFacebookRuleMode: async ({ envKey }: { envKey: string }) => ruleModeReceipt(envKey, true),
+  });
+  // 已绑：仍是「已设置」，规则模式不得把它降级成别的说法。
+  pushStatus(makeStatus({ envId: 'ads-fb', envName: 'FB 账号', personaBound: true }));
+  for (let i = 0; i < 6; i++) await tick();
+  assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '已设置');
+
+  // 未知：仍是「待绑定」，既不弹窗也不冒充「按规则运行」。
+  pushStatus(makeStatus({ envId: 'ads-fb', envName: 'FB 账号', personaBound: null }));
+  for (let i = 0; i < 6; i++) await tick();
+  assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '待绑定');
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), false);
+  assert.equal(calls.notify.length, 0);
+});
+
+test('人设浮层：规则模式账号手动打开时说清「按规则运行」，不催补人设、不冒充已绑', async () => {
+  const { w, calls, pushStatus } = await bootFacebookPersona({
+    getFacebookRuleMode: async ({ envKey }: { envKey: string }) => ruleModeReceipt(envKey, true),
+  });
+  pushStatus(unboundFacebookStatus());
+  for (let i = 0; i < 6; i++) await tick();
+
+  const icon = w.document.querySelector('.rail-row[data-env-id="ads-fb"] .rail-persona') as HTMLElement;
+  icon.click(); // 运营自己点开：向导仍可用（想补人设照样能补），但说法必须如实
+  for (let i = 0; i < 6; i++) await tick();
+
+  assert.equal(w.document.querySelector('#persona-pop')!.classList.contains('open'), true, '手动打开的浮层不得被自动收走');
+  assert.equal(w.document.querySelector('#persona-state-badge')!.textContent, '按规则运行');
+  const hint = w.document.querySelector('#persona-hint')!.textContent || '';
+  assert.match(hint, /按云端规则模式运行/);
+  assert.doesNotMatch(hint, /确认后账号才会开始自动运营/, '这个账号已经在跑了，不得再说成没跑起来');
+  assert.equal(w.document.querySelector('#persona-wizard-body')!.classList.contains('hidden'), false, '仍可手动补人设');
+  assert.equal(calls.notify.length, 0, '手动打开也不得顺带发补人设通知');
+});

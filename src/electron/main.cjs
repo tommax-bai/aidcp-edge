@@ -3097,6 +3097,71 @@ function resetPersonaNoticeGrace(handle) {
   if (handle.personaNoticeTimer) { clearTimeout(handle.personaNoticeTimer); handle.personaNoticeTimer = null; }
 }
 
+// ── 规则模式免人设的横幅判据（change facebook-rule-mode-without-persona）────────────────────────
+//
+// 未绑人设的 Facebook 账号，如果它的环境已启用规则模式，那「没有人设」是它的正常运行态，不是待办：
+// 推「去设置人设」的横幅会让运营补一份规则模式根本不读的配置。
+//
+// 事实只能来自云端权威配置的现读（与规则模式开关行同一个 env-scoped 端点），MUST NOT 由本地状态推断。
+// 按 envKey 缓存有限时长；读失败也记一笔「读过、读不到」，那一格按未启用处理（fail-closed 回既有横幅），
+// 避免读不到时反复重读，也避免因为读不到就永久静默。
+const FACEBOOK_RULE_MODE_FACT_TTL_MS = 60_000;
+const facebookRuleModeFacts = new Map(); // envKey -> { enabled: boolean|null, at: number }
+// envKey -> 在途那次读的 Promise。并发到达的调用方**共用同一个 Promise**，等的是真正那次读。
+// 若改成「在途就直接返回已 resolve 的空 Promise」，等待方的续跳会在事实仍然未知时立刻再等一次，
+// 形成微任务自旋——事件循环被饿死，那次 fetch 反而永远回不来。
+const facebookRuleModeFactReads = new Map();
+
+/** 把一次权威读/写的回包记成事实；回包不完整视为读不到（enabled=null）。 */
+function rememberFacebookRuleModeFact(envKey, res) {
+  if (!envKey) return;
+  const payload = res && res.ok && res.data && res.data.data;
+  const config = payload && payload.facebookRuleMode;
+  const enabled = payload && payload.envKey === envKey && config && typeof config === 'object'
+    && typeof config.enabled === 'boolean'
+    ? config.enabled
+    : null;
+  facebookRuleModeFacts.set(envKey, { enabled, at: Date.now() });
+}
+
+/** 仍在有效期内的事实条目；没有（或已过期）返回 null = 这个环境此刻完全没有已知事实。 */
+function freshFacebookRuleModeFact(envKey) {
+  const fact = envKey && facebookRuleModeFacts.get(envKey);
+  if (!fact) return null;
+  return Date.now() - fact.at < FACEBOOK_RULE_MODE_FACT_TTL_MS ? fact : null;
+}
+
+function readFacebookRuleModeFact(envKey) {
+  if (!envKey) return Promise.resolve();
+  const inFlight = facebookRuleModeFactReads.get(envKey);
+  if (inFlight) return inFlight;
+  const read = (async () => {
+    try {
+      const res = await interactionCustomerRequest({
+        envKey,
+        pathname: `/environments/${encodeURIComponent(envKey)}/facebook-rule-mode`,
+        method: 'GET',
+      });
+      rememberFacebookRuleModeFact(envKey, res);
+    } catch {
+      facebookRuleModeFacts.set(envKey, { enabled: null, at: Date.now() }); // 读不到也是一次已知结论
+    } finally {
+      facebookRuleModeFactReads.delete(envKey);
+    }
+  })();
+  facebookRuleModeFactReads.set(envKey, read);
+  return read;
+}
+
+/** 事实变化后重评所有该 envKey 的受控页横幅（规则模式一开，待补人设的横幅必须撤下）。 */
+function resyncPersonaNoticesForEnvKey(envKey) {
+  if (!envKey) return;
+  for (const handle of envs.values()) {
+    if (!handle || handle.removed || String(handle.profileId || '').trim() !== envKey) continue;
+    syncBrowserPersonaNotice(handle);
+  }
+}
+
 function syncBrowserPersonaNotice(handle, force = false) {
   if (!handle || !handle.browserParkingReady) return;
   if (!personaApplicable(handle)) {
@@ -3108,7 +3173,12 @@ function syncBrowserPersonaNotice(handle, force = false) {
   if (!ready) handle.personaNoticeReadySince = 0;
   else if (!handle.personaNoticeReadySince) handle.personaNoticeReadySince = Date.now();
 
-  let notice = browserPersonaNoticeForStatus(handle.status, handle);
+  const envKey = String(handle.profileId || '').trim();
+  const isFacebook = normalizePlatform(handle.platform) === 'facebook';
+  const fact = isFacebook ? freshFacebookRuleModeFact(envKey) : null;
+  let notice = browserPersonaNoticeForStatus(handle.status, handle, fact && typeof fact.enabled === 'boolean'
+    ? { platform: 'facebook', enabled: fact.enabled }
+    : null);
   if (notice.active && ready) {
     const elapsed = Date.now() - handle.personaNoticeReadySince;
     if (elapsed < PERSONA_NOTICE_GRACE_MS) {
@@ -3121,6 +3191,16 @@ function syncBrowserPersonaNotice(handle, force = false) {
         }, Math.max(0, PERSONA_NOTICE_GRACE_MS - elapsed));
       }
     }
+  }
+  // 规则模式事实完全未知时先不推：这个未绑人设的 Facebook 账号可能正按规则运行，宁可晚推也不误推。
+  // 排在人设宽限之后：宽限内本来就不推，那段时间还不需要这个事实，也就不必为随后会翻成「已绑」的账号白读一次。
+  // 发一次权威读，成功或失败都会落成已知结论并回到这里重评——读不到即按未启用处理，横幅照常推出。
+  if (notice.active && isFacebook && envKey && !fact) {
+    notice = { active: false };
+    void readFacebookRuleModeFact(envKey).then(() => {
+      if (handle.removed || !handle.child) return;
+      syncBrowserPersonaNotice(handle);
+    });
   }
   const stateKey = browserPersonaNoticeKey(notice);
   if (!force && handle.browserPersonaNoticeState === stateKey) return;
@@ -6403,22 +6483,30 @@ ipcMain.handle('facebook-rule-mode:set', (_event, raw) => handleInteractionIpc(a
   const args = interactionArgs(raw, new Set(['envKey', 'enabled']));
   const envKey = interactionId(args.envKey, 'envKey');
   if (typeof args.enabled !== 'boolean') throw new Error('enabled 不合法');
-  return interactionCustomerRequest({
+  const res = await interactionCustomerRequest({
     envKey,
     pathname: `/environments/${encodeURIComponent(envKey)}/facebook-rule-mode`,
     method: 'PUT',
     body: { enabled: args.enabled },
   });
+  // 这次回包就是最新权威真态：顺手更新受控页横幅判据，规则模式一开就立刻撤下补人设横幅
+  // （change facebook-rule-mode-without-persona）。回包不完整时记为「读不到」，横幅回既有行为。
+  rememberFacebookRuleModeFact(envKey, res);
+  resyncPersonaNoticesForEnvKey(envKey);
+  return res;
 }));
 
 ipcMain.handle('facebook-rule-mode:get', (_event, raw) => handleInteractionIpc(async () => {
   const args = interactionArgs(raw, new Set(['envKey']));
   const envKey = interactionId(args.envKey, 'envKey');
-  return interactionCustomerRequest({
+  const res = await interactionCustomerRequest({
     envKey,
     pathname: `/environments/${encodeURIComponent(envKey)}/facebook-rule-mode`,
     method: 'GET',
   });
+  rememberFacebookRuleModeFact(envKey, res);
+  resyncPersonaNoticesForEnvKey(envKey);
+  return res;
 }));
 
 // Facebook 环境风险真态读 / 解除受限：renderer 只交 envKey；accountId、平台、目标状态、审计理由均由 Cloud 解析。

@@ -944,6 +944,38 @@
     return out;
   }
 
+  // ── 规则模式免人设的呈现口径（change facebook-rule-mode-without-persona）──
+  //
+  // Facebook 规则模式的四个动作（浏览、点赞、加群、模板评论）一个字都不读人设，所以云端为这类账号取消了
+  // 「必须先绑人设才能起会话」的入口闸。界面上因此出现第四种真实状态：**账号确实没有人设，但它正在正常运行**。
+  //
+  // 呈现红线（每条对着一个具体的谎）：
+  // - MUST NOT 沿用「待补人设」的说法与引导：那会让运营去补一份系统根本不会读的配置（纯空转），
+  //   还会把「正在按规则跑」误传成「没跑起来」。
+  // - MUST NOT 说成「已绑」：它确实没有人设。谎称已绑之后，真正需要人设的路径（普通浏览、发布、
+  //   生成式评论）被诚实拒绝时就无从解释。
+  // - 判据只认**已经读到的云端权威规则模式配置**。没读到 / 读失败 / 回包不完整一律按「未启用」处理，
+  //   回到既有三态呈现——照 personaBound 三态判例：未知绝不等同已启用，绝不由本地状态反推。
+  //
+  // 同一条判据在受控页横幅侧另有一份（`persona-notice.cjs`，主进程不加载本模块）；两处改动必须同步。
+  const RULE_MODE_WITHOUT_PERSONA_BADGE = '按规则运行';
+  const RULE_MODE_WITHOUT_PERSONA_NOTE = '这个账号没有人设，正按云端规则模式运行：选卡、点赞与模板评论都不读人设，无需为它补人设。若要让它做普通浏览或发布，仍需先设置人设。';
+
+  /**
+   * 判定某账号此刻是否应呈现为「按规则运行、未绑人设」。
+   *
+   * - `platform`：该环境的平台（规范 id）。例外只在 Facebook 成立。
+   * - `personaBound`：云端权威绑定态三态。只有 `=== false`（云端确认未绑）才算数；true/未知都不是这一态。
+   * - `ruleMode`：客户端**已拿到的**云端权威规则模式配置对象（含 `enabled`）；null / undefined = 还没读到。
+   */
+  function facebookRuleModeWithoutPersona(input) {
+    const raw = input && typeof input === 'object' ? input : {};
+    if (raw.platform !== 'facebook') return false;
+    if (raw.personaBound !== false) return false;
+    const ruleMode = raw.ruleMode;
+    return Boolean(ruleMode && typeof ruleMode === 'object' && ruleMode.enabled === true);
+  }
+
   function formatReceivedBytes(value) {
     const bytes = Number(value);
     if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -1004,5 +1036,5 @@
     };
   }
 
-  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, batchStartReady, resolveEnvironmentDisplayName, railDisplayName, slowStartLine, formatReceivedBytes, proxyRuntimeView, FLEET_STALE_MS };
+  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, batchStartReady, resolveEnvironmentDisplayName, railDisplayName, slowStartLine, facebookRuleModeWithoutPersona, RULE_MODE_WITHOUT_PERSONA_BADGE, RULE_MODE_WITHOUT_PERSONA_NOTE, formatReceivedBytes, proxyRuntimeView, FLEET_STALE_MS };
 });

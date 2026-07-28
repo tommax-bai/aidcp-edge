@@ -56,6 +56,9 @@ const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   };
   railDisplayName: (row: Record<string, unknown>) => string;
   slowStartLine: (dailyUsage: Record<string, unknown> | null | undefined, connState: string, source?: string) => SlowStartV;
+  facebookRuleModeWithoutPersona: (input: unknown) => boolean;
+  RULE_MODE_WITHOUT_PERSONA_BADGE: string;
+  RULE_MODE_WITHOUT_PERSONA_NOTE: string;
   PRESENCE_FRESH_MS: number;
 };
 
@@ -1057,4 +1060,52 @@ test('slowStartLine：文案红线 —— 全域不出现「新账号」、不�
     // 让违规在写文案的地方就红，而不是在一条看起来无关的旧用例里红。
     assert.doesNotMatch(text, /已达|上限|额度|释放|已满/);
   }
+});
+
+// ── change facebook-rule-mode-without-persona：第四种人设呈现「按规则运行、未绑人设」 ──
+// 红线：这一态既不得沿用「待补人设」的引导，也不得冒充「已绑」；判据只认已读到的云端权威规则模式配置。
+
+const ruleModeConfig = (enabled: boolean) => ({
+  enabled,
+  definitionId: 'facebook_browse_10_like_1_join_contact_1',
+  definitionVersion: 1,
+  updatedAt: enabled ? '2026-07-28T08:00:00.000Z' : null,
+});
+
+test('facebookRuleModeWithoutPersona：只有 Facebook + 云端确认未绑 + 规则模式已开启三者同时成立', () => {
+  assert.equal(uiLogic.facebookRuleModeWithoutPersona({
+    platform: 'facebook', personaBound: false, ruleMode: ruleModeConfig(true),
+  }), true);
+  assert.equal(uiLogic.facebookRuleModeWithoutPersona({
+    platform: 'xiaohongshu', personaBound: false, ruleMode: ruleModeConfig(true),
+  }), false, '例外只在 Facebook 成立');
+  assert.equal(uiLogic.facebookRuleModeWithoutPersona({
+    platform: 'facebook', personaBound: false, ruleMode: ruleModeConfig(false),
+  }), false, '规则模式关闭 → 仍是既有的「未绑」呈现');
+});
+
+test('facebookRuleModeWithoutPersona：人设三态未被破坏 —— 已绑与未知都不是这一态', () => {
+  for (const personaBound of [true, null, undefined]) {
+    assert.equal(uiLogic.facebookRuleModeWithoutPersona({
+      platform: 'facebook', personaBound, ruleMode: ruleModeConfig(true),
+    }), false, `personaBound=${String(personaBound)} 不得被当成未绑`);
+  }
+});
+
+test('facebookRuleModeWithoutPersona：规则模式配置未读到一律按未启用（未知绝不等同已启用）', () => {
+  for (const ruleMode of [null, undefined, {}, { enabled: 'true' }, { enabled: null }, 'enabled']) {
+    assert.equal(uiLogic.facebookRuleModeWithoutPersona({
+      platform: 'facebook', personaBound: false, ruleMode,
+    }), false, `ruleMode=${JSON.stringify(ruleMode)} 不得被推断成已启用`);
+  }
+  assert.equal(uiLogic.facebookRuleModeWithoutPersona(null), false);
+  assert.equal(uiLogic.facebookRuleModeWithoutPersona(undefined), false);
+});
+
+test('facebookRuleModeWithoutPersona：文案既不催补人设，也不宣称已绑', () => {
+  const text = `${uiLogic.RULE_MODE_WITHOUT_PERSONA_BADGE}${uiLogic.RULE_MODE_WITHOUT_PERSONA_NOTE}`;
+  assert.match(text, /按规则运行/);
+  assert.match(text, /没有人设/, '必须如实说出「没有人设」，不得含糊成已设置');
+  assert.doesNotMatch(text, /已设置|已绑定/);
+  assert.doesNotMatch(text, /待补|请先设置人设|才会开始自动运营/);
 });

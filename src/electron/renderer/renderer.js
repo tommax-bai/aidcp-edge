@@ -899,6 +899,58 @@ async function ensureFacebookRuleModeHttpFetch(envKey) {
   facebookRuleModeHttpByEnv.set(envKey, next);
   const context = selectedFacebookRuleModeContext();
   if (context && context.envKey === envKey) renderFacebookRuleMode();
+  // 规则模式真态一到就重评人设呈现（change facebook-rule-mode-without-persona）：未绑人设 + 规则模式已开启
+  // 是「按规则运行」，不是「待补人设」。读回来之前 maybePromptPersonaSetup 会先按住不弹，这里是它的续跳点。
+  syncPersonaPresentationForRuleMode(envKey);
+}
+
+/** 规则模式配置读到之后，把依赖它的人设呈现（左栏图标 + 人设浮层徽标/文案/弹窗）重算一次。 */
+function syncPersonaPresentationForRuleMode(envKey) {
+  if (!envKey) return;
+  const affected = [...fleetView.envs.values()].some((env) => slowStartEnvKey(env) === envKey);
+  if (!affected) return;
+  fleetView.lastRailSig = ''; // 人设图标口径随之变化，强制重建一次左栏
+  renderRail();
+  const env = fleetView.envs.get(currentEnvId());
+  if (!env || slowStartEnvKey(env) !== envKey || !personaAppliesToEnvironment(env)) return;
+  updatePersonaGate(env.status || currentStatus || null);
+}
+
+/**
+ * 该环境**已读到的**云端权威规则模式配置；loading / 读失败 / 从未读过一律返回 null（未知）。
+ * 未知交给纯逻辑按「未启用」处理——绝不把「还没读到」当成「已启用」。
+ */
+function authoritativeFacebookRuleMode(envKey) {
+  const http = envKey && facebookRuleModeHttpByEnv.get(envKey);
+  return http && http.kind === 'ok' ? http.config : null;
+}
+
+/** 某环境此刻是否应呈现为「按规则运行、未绑人设」（change facebook-rule-mode-without-persona）。 */
+function personaRuleModeWithoutPersona(env, status) {
+  if (!env) return false;
+  const state = status || env.status || null;
+  return uiLogic.facebookRuleModeWithoutPersona({
+    platform: normPlatform(env.platform),
+    personaBound: state && typeof state.personaBound === 'boolean' ? state.personaBound : null,
+    ruleMode: authoritativeFacebookRuleMode(slowStartEnvKey(env)),
+  });
+}
+
+/**
+ * 规则模式事实还没到（且这个客户端确实读得到）→ 人设弹窗/通知先按住不发。
+ *
+ * 这一小段窗口里我们还不知道这个「云端确认未绑」的 Facebook 账号是不是正按规则运行，宁可晚弹也不误弹。
+ * 非 Facebook、老客户端（没有这个读能力）、以及已经读到结果（成功或失败）都逐字走既有路径，不受影响。
+ */
+function facebookRuleModePendingForPersona(env) {
+  if (!env || normPlatform(env.platform) !== 'facebook') return false;
+  if (!window.aidcpEdge || typeof window.aidcpEdge.getFacebookRuleMode !== 'function') return false;
+  const envKey = slowStartEnvKey(env);
+  if (!envKey) return false;
+  const http = facebookRuleModeHttpByEnv.get(envKey);
+  if (http && (http.kind === 'ok' || http.kind === 'error')) return false;
+  void ensureFacebookRuleModeHttpFetch(envKey);
+  return true;
 }
 
 function selectedSlowStartContext() {
@@ -5438,7 +5490,9 @@ function renderRail() {
     // platform 必须进签名：改平台后行才会重建上色（漏掉则签名未变、UI 停留旧平台）。
     rows: model.rows.map((r) => [r.envId, r.level, r.state, r.railGroup, r.needsAction, railDisplayName(r), r.nameSource,
       r.nameSyncState, manualNicknamePendingEnvIds.has(r.envId), r.label, r.detail, r.queuePosition,
-      Boolean(r.status && r.status.personaBound), normPlatform(r.platform)]),
+      Boolean(r.status && r.status.personaBound), normPlatform(r.platform),
+      // 规则模式真态是异步读回来的：不进签名，人设图标就会停留在读到之前的「未设置」口径。
+      personaRuleModeWithoutPersona(r, r.status)]),
   });
   if (sig === fleetView.lastRailSig) return;
   fleetView.lastRailSig = sig;
@@ -5615,11 +5669,18 @@ function makeRailRow(row) {
   nameLine.appendChild(nameEl);
   if (personaAppliesToEnvironment(row)) {
     const bound = Boolean(row.status && row.status.personaBound);
+    // 第四种呈现（change facebook-rule-mode-without-persona）：云端确认未绑 + 该环境规则模式已开启 →
+    // 「按规则运行、未绑人设」。既不说「未设置（点击设置）」（那是催运营做无用功），也不冒充已设置。
+    const ruleModeUnbound = !bound && personaRuleModeWithoutPersona(row, row.status);
     const pIcon = document.createElement('button');
     pIcon.type = 'button';
-    pIcon.className = `rail-persona${bound ? ' set' : ''}`;
+    pIcon.className = `rail-persona${bound ? ' set' : ruleModeUnbound ? ' rule-mode' : ''}`;
     pIcon.textContent = '✦';
-    pIcon.title = bound ? '账号人设：已设置（点击查看 / 调整）' : '账号人设：未设置（点击设置）';
+    pIcon.title = bound
+      ? '账号人设：已设置（点击查看 / 调整）'
+      : ruleModeUnbound
+        ? '账号人设：未绑定 · 该环境按规则模式运行，无需补人设（点击查看 / 设置）'
+        : '账号人设：未设置（点击设置）';
     pIcon.setAttribute('aria-label', pIcon.title);
     pIcon.addEventListener('click', (e) => { e.stopPropagation(); openPersonaPop(row.envId); });
     nameLine.appendChild(pIcon);
@@ -8271,13 +8332,26 @@ function renderCloudPersonaGate(status, view) {
   personaLocallyBound = false;
   personaUi.boundNote?.classList.add('hidden');
   personaUi.wizardBody?.classList.remove('hidden');
-  setPersonaBadge(personaDraftYaml ? '待确认' : '未设置', personaDraftYaml ? 'warning' : 'checking');
+  // 未绑 + 规则模式已开启 → 徽标说「按规则运行」、正文说清它为何不需要人设；向导仍留着（运营想补也能补），
+  // 但绝不再用「确认后账号才会开始自动运营」这种把它说成没跑起来的文案。
+  // 走到这里的前提就是云端权威读回了「没有人设」（读不到会走上面的 error 分支），所以此处按确认未绑判定，
+  // 不再等状态心跳里的 personaBound——两者同源，等它只会让这一屏先误说一次「未设置」。
+  const ruleModeUnbound = personaRuleModeWithoutPersona(
+    fleetView.envs.get(targetEnvId),
+    { ...(status && typeof status === 'object' ? status : {}), personaBound: false },
+  );
+  setPersonaBadge(
+    personaDraftYaml ? '待确认' : ruleModeUnbound ? uiLogic.RULE_MODE_WITHOUT_PERSONA_BADGE : '未设置',
+    personaDraftYaml ? 'warning' : 'checking',
+  );
   if (personaUi.generate) personaUi.generate.disabled = personaInFlight;
   if (personaUi.hint) {
     const preferences = selectedEnvPlatform() === 'facebook'
       ? '发言语言、语气、点赞倾向和内容偏好'
       : '语气、点赞倾向和内容偏好';
-    personaUi.hint.textContent = `设置${preferences}，自动生成这个账号的人设；确认后账号才会开始自动运营。`;
+    personaUi.hint.textContent = ruleModeUnbound
+      ? uiLogic.RULE_MODE_WITHOUT_PERSONA_NOTE
+      : `设置${preferences}，自动生成这个账号的人设；确认后账号才会开始自动运营。`;
   }
   syncPersonaFoot('wizard');
   if (status?.personaBound === false) maybePromptPersonaSetup(status);
@@ -8298,7 +8372,13 @@ function clearPersonaPromptForCurrentEnv() {
 
 // 只在云端权威地说「这个账号没有人设」时才弹。调用方已保证 status.personaBound === false。
 function maybePromptPersonaSetup(status) {
-  if (!personaAppliesToEnvironment(fleetView.envs.get(currentEnvId()))) return;
+  const promptEnv = fleetView.envs.get(currentEnvId());
+  if (!personaAppliesToEnvironment(promptEnv)) return;
+  // 规则模式免人设（change facebook-rule-mode-without-persona）：这个账号没有人设、但正按规则运行 →
+  // 既不弹向导也不发补人设通知。补一份规则模式根本不读的人设是纯空转，通知本身也会误导成「它没跑起来」。
+  if (personaRuleModeWithoutPersona(promptEnv, status)) return;
+  // 规则模式事实还没读回来：先按住这一次判定（不记入已提醒集），等真态到达再由续跳点重评。
+  if (facebookRuleModePendingForPersona(promptEnv)) return;
   const key = personaPromptKey(status);
   if (personaPrompted.has(key)) return;
   personaPrompted.add(key);
@@ -8499,9 +8579,16 @@ function updatePersonaGate(status) {
     // 更新中：继续往下走到向导分支（③），但绝不改徽标、绝不弹提醒。
   }
   // 未绑或未知：徽标区分——云端权威说未绑=「未设置」；信号未到=「待启动」（宁缺毋假，不谎称未设置）。
+  // 第四种（change facebook-rule-mode-without-persona）：确认未绑 + 该环境规则模式已开启=「按规则运行」，
+  // 它既不是待补人设，也不是已绑。规则模式真态未读到时按未启用处理，逐字回到既有三态。
   // 本会话刚生成的「待确认」草稿态不被状态推送覆盖。
+  const ruleModeUnbound = knownUnbound
+    && personaRuleModeWithoutPersona(fleetView.envs.get(currentEnvId()), status);
   if (!bound && personaUi.stateBadge && personaUi.stateBadge.textContent !== '待确认') {
-    setPersonaBadge(knownUnbound ? '未设置' : '待绑定', 'checking');
+    setPersonaBadge(
+      ruleModeUnbound ? uiLogic.RULE_MODE_WITHOUT_PERSONA_BADGE : knownUnbound ? '未设置' : '待绑定',
+      'checking',
+    );
   }
 
   // ② 闸未就绪（未登录 / 未连云 / 权威信号还没到）：空态面板，绝不弹窗。
@@ -8530,7 +8617,9 @@ function updatePersonaGate(status) {
       : '语气、点赞倾向和内容偏好';
     personaUi.hint.textContent = updatingBound
       ? `重新选择${preferences}并生成新草稿，确认后会覆盖当前账号的人设；生成失败不会影响现有人设。`
-      : `设置${preferences}，自动生成这个账号的人设；确认后账号才会开始自动运营。`;
+      : ruleModeUnbound
+        ? uiLogic.RULE_MODE_WITHOUT_PERSONA_NOTE
+        : `设置${preferences}，自动生成这个账号的人设；确认后账号才会开始自动运营。`;
   }
   syncPersonaFoot('wizard');
   // 自动弹窗只对「云端权威说未绑」的账号；已绑账号手动进入更新时绝不再弹、也绝不发未设置通知。
