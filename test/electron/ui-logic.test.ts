@@ -1065,10 +1065,13 @@ test('slowStartLine：文案红线 —— 全域不出现「新账号」、不�
 // ── change facebook-rule-mode-without-persona：第四种人设呈现「按规则运行、未绑人设」 ──
 // 红线：这一态既不得沿用「待补人设」的引导，也不得冒充「已绑」；判据只认已读到的云端权威规则模式配置。
 
+// 定义号/版本对客户端是**不透明值**：呈现判据只读 enabled，客户端从不解释节奏本身。
+// 这里**故意不写云端当下的真定义号**：节奏归云端权威定义，客户端不得内置或推断任何节奏数字，
+// 云端改节奏时也不该有任何 edge 用例跟着改（spec `client-facebook-rule-mode-toggle`：客户端不内置节奏数字）。
 const ruleModeConfig = (enabled: boolean) => ({
   enabled,
-  definitionId: 'facebook_browse_10_like_1_join_contact_1',
-  definitionVersion: 1,
+  definitionId: 'cloud-authoritative-rule-definition',
+  definitionVersion: 7,
   updatedAt: enabled ? '2026-07-28T08:00:00.000Z' : null,
 });
 

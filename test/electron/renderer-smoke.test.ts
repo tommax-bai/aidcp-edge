@@ -2219,6 +2219,9 @@ test('慢启动行：点勾选框 MUST NOT 连带展开/收起「今日节奏」
 
 // ── client-facebook-rule-mode-toggle：规则模式客户开关 ──
 
+// 定义号/版本对客户端是**不透明值**：只被校验成非空字符串 + 整数，从不被解释成节奏。
+// 这里**故意不写云端当下的真定义号**：节奏归云端权威定义，客户端不得内置或推断任何节奏数字，
+// 云端改节奏时也不该有任何 edge 用例跟着改（spec `client-facebook-rule-mode-toggle`：客户端不内置节奏数字）。
 function facebookRuleModeReceipt(envKey: string, enabled: boolean) {
   return {
     ok: true,
@@ -2227,8 +2230,8 @@ function facebookRuleModeReceipt(envKey: string, enabled: boolean) {
         envKey,
         facebookRuleMode: {
           enabled,
-          definitionId: 'facebook_browse_10_like_1_join_contact_1',
-          definitionVersion: 1,
+          definitionId: 'cloud-authoritative-rule-definition',
+          definitionVersion: 7,
           updatedAt: enabled ? '2026-07-28T08:00:00.000Z' : null,
         },
       },
