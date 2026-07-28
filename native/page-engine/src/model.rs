@@ -404,6 +404,32 @@ impl ActionReceipt {
     }
 }
 
+/// 「动作回执 + 随行观测」的载体。
+///
+/// 一条命令只能回一个输出，而有两类命令的终局既要让云端的动作角色结案（回执），
+/// 又必须把本次真看到的东西一并送到云端：看图翻页中新加载的图片是云端参考图刷新与
+/// 观测笔记的唯一来源，分类通知栏的条目是联系人名册的唯一来源。二选一都会静默丢掉
+/// 另一半，故用这个载体让两者随同一个终局到达。回执结构本身不加宽（它在多处被穷举式构造）。
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ObservedActionReceipt {
+    pub receipt: ActionReceipt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_detail: Option<NoteDetail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_items: Option<NotificationItems>,
+}
+
+impl ObservedActionReceipt {
+    pub fn bounded(self) -> Self {
+        Self {
+            receipt: self.receipt.bounded(),
+            note_detail: self.note_detail.map(NoteDetail::bounded),
+            notification_items: self.notification_items.map(NotificationItems::bounded),
+        }
+    }
+}
+
 impl FacebookGroupJoinObservation {
     fn bound(&mut self) {
         truncate_optional(&mut self.group_url, MAX_URL_CHARS);

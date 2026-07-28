@@ -2,8 +2,8 @@ use crate::command::NativeCommand;
 use crate::engine::CommandOutput;
 use crate::error::{EngineError, ErrorCode};
 use crate::model::{
-    ActionReceipt, NoteDetail, NotificationHome, NotificationItems, PageCards, PlanResults,
-    ProfileDetail, PublishReceipt,
+    ActionReceipt, NoteDetail, NotificationHome, NotificationItems, ObservedActionReceipt,
+    PageCards, PlanResults, ProfileDetail, PublishReceipt,
 };
 use crate::protocol::EffectPhase;
 use serde::Deserialize;
@@ -106,6 +106,15 @@ pub fn typed_output(command: &NativeCommand, output: Value) -> Result<CommandOut
                 .map_err(|_| invalid_result())?
                 .bounded(),
         )),
+        // 回执 + 随行观测：只给浏览侧命令用。发布命令 MUST NOT 用该 kind——落到 `_` 分支
+        // 诚实报无效结果，绝不静默降级成发布回执（发布回执的 recordId / seq 无从填）。
+        "action_receipt_with_observation" if publish_identity(command).is_none() => {
+            Ok(CommandOutput::ActionReceiptWithObservation(Box::new(
+                serde_json::from_value::<ObservedActionReceipt>(value)
+                    .map_err(|_| invalid_result())?
+                    .bounded(),
+            )))
+        }
         "action_receipt" if publish_identity(command).is_none() => {
             Ok(CommandOutput::ActionReceipt(Box::new(
                 serde_json::from_value::<ActionReceipt>(value)

@@ -56,9 +56,26 @@ test('search input helper selects the visible instance and confirms exact focus 
 });
 
 test('binds an interaction to the current note and verifies the changed state', async () => {
-  const dom = install('<main><div class="note-detail-mask"><button id="like">点赞</button></div></main>', 'https://www.xiaohongshu.com/explore/n1');
+  // 互动栏按真机形态搭：无 aria-label、无 role=button、无「点赞」文本，
+  // 状态位写在图标的 <use xlink:href> 上（#like → #liked），计数是裸数字。
+  // 评论区自带同款控件 —— 放进夹具是为了钉住「作用域限定在互动栏内」，
+  // 它一旦被点到就说明作用域又松回去了（真机实测过「卡片 311 赞 vs 详情 1 赞」这类误读）。
+  const dom = install(
+    `<main><div class="note-detail-mask">
+       <div class="interactions engage-bar">
+         <span class="like-wrapper" id="like"><svg><use xlink:href="#like"></use></svg><span class="count">311</span></span>
+       </div>
+       <div class="comments-container">
+         <div class="comment-item"><span class="like-wrapper" id="comment-like"><svg><use xlink:href="#like"></use></svg><span class="count">1</span></span></div>
+       </div>
+     </div></main>`,
+    'https://www.xiaohongshu.com/explore/n1',
+  );
   dom.window.document.querySelector('#like')?.addEventListener('click', (event) => {
-    (event.currentTarget as Element).classList.add('liked');
+    (event.currentTarget as Element).querySelector('use')?.setAttribute('xlink:href', '#liked');
+  });
+  dom.window.document.querySelector('#comment-like')?.addEventListener('click', () => {
+    throw new Error('comment-section like control must never be actuated by interaction_like');
   });
   const result = await run({ kind: 'interaction_like', params: { noteId: 'n1' } });
   assert.equal(result.effectPhase, 'confirmed');

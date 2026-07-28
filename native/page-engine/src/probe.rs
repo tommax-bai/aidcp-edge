@@ -33,6 +33,44 @@ pub enum PageKind {
     Unknown,
 }
 
+/// 通知未读读数的三态。
+///
+/// 「读不到」（`Unreadable`）与「没有未读」（`Clear`）必须可区分：下游把「没有未读」
+/// 当成已清零直接跳过，一次读取失败若静默变成「已清零」，真通知就永远不会被处理。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationUnreadState {
+    Unread,
+    Clear,
+    #[default]
+    Unreadable,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NotificationUnreadSignal {
+    pub state: NotificationUnreadState,
+    /// 附带计数（红点无数字时为 0），不参与「有没有未读」的判定。
+    pub count: u32,
+}
+
+impl NotificationUnreadSignal {
+    /// 「读不到」是缺省态：线上不带该字段与带一个 unreadable 读数等价，
+    /// 宿主两种情况都解析成 unreadable。故序列化时省略这一态，既有探针契约无需随之变形。
+    fn is_unreadable(&self) -> bool {
+        matches!(self.state, NotificationUnreadState::Unreadable)
+    }
+}
+
+/// 页面规则侧的宽松读数（与 `RawPageSignals` 一样不拒绝未知字段）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RawNotificationUnread {
+    pub state: String,
+    #[serde(default)]
+    pub count: u32,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RawPageSignals {
@@ -52,6 +90,8 @@ pub struct RawPageSignals {
     #[serde(default)]
     pub error_signal_count: u32,
     pub main_count: u32,
+    #[serde(default)]
+    pub notification_unread: Option<RawNotificationUnread>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -84,6 +124,13 @@ pub struct ProbeResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocking_text: Option<String>,
     pub signals: StructuralSignals,
+    /// 通知未读读数。刻意**不**并进 `signals` —— 那组字段全是页型分类用的计数（u32），
+    /// 塞进去要么污染分类输入，要么把三态压扁成计数、丢掉「读不到」这一态。
+    #[serde(
+        default,
+        skip_serializing_if = "NotificationUnreadSignal::is_unreadable"
+    )]
+    pub notification_unread: NotificationUnreadSignal,
 }
 
 pub fn result_from_cdp(
@@ -127,6 +174,26 @@ pub fn build_result(target_id: String, raw: RawPageSignals) -> Result<ProbeResul
         error_signal_count: raw.error_signal_count.min(999),
         main_count: raw.main_count.min(999),
     };
+    // 只有恰为这两个已知取值才认；其余（页面规则抛错 / 取值漂移 / 字段缺失）一律「读不到」。
+    // MUST NOT 回落成「无未读」。
+    let notification_unread = match raw.notification_unread {
+        Some(value) => {
+            let state = match value.state.as_str() {
+                "unread" => NotificationUnreadState::Unread,
+                "clear" => NotificationUnreadState::Clear,
+                _ => NotificationUnreadState::Unreadable,
+            };
+            NotificationUnreadSignal {
+                state,
+                count: if matches!(state, NotificationUnreadState::Unread) {
+                    value.count.min(999)
+                } else {
+                    0
+                },
+            }
+        }
+        None => NotificationUnreadSignal::default(),
+    };
     let page_kind = classify_page(host, &path, &signals);
     Ok(ProbeResult {
         target_id,
@@ -137,6 +204,7 @@ pub fn build_result(target_id: String, raw: RawPageSignals) -> Result<ProbeResul
         blocking_kind: None,
         blocking_text: None,
         signals,
+        notification_unread,
     })
 }
 
@@ -220,7 +288,66 @@ mod tests {
             publish_signal_count: 0,
             error_signal_count: 0,
             main_count: 1,
+            notification_unread: None,
         }
+    }
+
+    #[test]
+    fn keeps_unread_read_failures_distinguishable_from_no_unread() {
+        let mut signals = raw("https://www.xiaohongshu.com/explore");
+        signals.notification_unread = Some(RawNotificationUnread {
+            state: "unread".to_owned(),
+            count: 3,
+        });
+        assert_eq!(
+            build_result("target".to_owned(), signals)
+                .expect("unread")
+                .notification_unread,
+            NotificationUnreadSignal {
+                state: NotificationUnreadState::Unread,
+                count: 3
+            }
+        );
+
+        let mut clear = raw("https://www.xiaohongshu.com/explore");
+        clear.notification_unread = Some(RawNotificationUnread {
+            state: "clear".to_owned(),
+            // 非未读态不带计数：避免「已清零但计数残留」被下游读成还有未读。
+            count: 7,
+        });
+        assert_eq!(
+            build_result("target".to_owned(), clear)
+                .expect("clear")
+                .notification_unread,
+            NotificationUnreadSignal {
+                state: NotificationUnreadState::Clear,
+                count: 0
+            }
+        );
+
+        // 取值漂移与字段缺失都是「读不到」，绝不静默变成「无未读」。
+        let mut drifted = raw("https://www.xiaohongshu.com/explore");
+        drifted.notification_unread = Some(RawNotificationUnread {
+            state: "none".to_owned(),
+            count: 0,
+        });
+        assert_eq!(
+            build_result("target".to_owned(), drifted)
+                .expect("drifted")
+                .notification_unread
+                .state,
+            NotificationUnreadState::Unreadable
+        );
+        assert_eq!(
+            build_result(
+                "target".to_owned(),
+                raw("https://www.xiaohongshu.com/explore")
+            )
+            .expect("missing")
+            .notification_unread
+            .state,
+            NotificationUnreadState::Unreadable
+        );
     }
 
     #[test]

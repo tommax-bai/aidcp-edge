@@ -440,51 +440,31 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       case 'notification_items':
         this.options.client.send('notification.items', value as never);
         return;
-      case 'action_receipt': {
-        const receipt = value as {
-          action: string;
-          ok: boolean;
-          reason?: string;
-          groupObservation?: unknown;
-          observation?: unknown;
-        };
-        if (this.options.platform === 'facebook') {
-          const action = this.diagnosticToken(receipt.action);
-          const reason = this.diagnosticToken(receipt.reason ?? execution.reasonCode ?? 'none');
-          this.logger(
-            `[native-page] action.completed action=${action} ok=${receipt.ok} effectPhase=${execution.effectPhase} reason=${reason}`,
-          );
+      case 'action_receipt':
+        this.reportActionReceipt(value, execution, env);
+        return;
+      case 'action_receipt_with_observation': {
+        // 「回执 + 随行观测」：一条命令只能回一个输出，但这两类终局既要让云端的动作角色结案，
+        // 又必须把本次真看到的东西送到云端。顺序是契约——观测先、回执后：角色一收到回执就结案，
+        // 观测晚到会落在结案之后被漏掉（参考图刷新与联系人名册都只挂在观测上）。
+        const noteDetail = value.noteDetail;
+        if (noteDetail && typeof noteDetail === 'object') {
+          // refreshOnly 由宿主强制置真：这是一次「刷新参考图」的随行快照，
+          // 绝不能被云端当成一次新的详情打开而多记一笔浏览。
+          this.options.client.reportNoteDetail({
+            ...(noteDetail as Record<string, unknown>),
+            refreshOnly: true,
+          } as unknown as NoteDetailPayload);
         }
-        if (env?.type === 'search.execute') {
-          const ok = receipt.ok && execution.effectPhase === 'confirmed';
-          if (!ok) {
-            this.reportFailure(env, receipt.reason ?? execution.reasonCode, execution.effectPhase);
-            return;
-          }
-          this.options.client.reportActionCompleted({
-            action: 'search',
-            ok: true,
-            ...this.searchContext(env),
-            actuated: true,
-            searchOutcome: 'results_ready',
-            resultCount: Number.isInteger(value.resultCount) && Number(value.resultCount) >= 0
-              ? Number(value.resultCount)
-              : undefined,
-          });
-          return;
+        const notificationItems = value.notificationItems;
+        if (notificationItems && typeof notificationItems === 'object') {
+          this.options.client.send('notification.items', notificationItems as never);
         }
-        const completed = {
-          ...receipt,
-          ...((receipt.observation === undefined || receipt.observation === null)
-            && receipt.groupObservation !== undefined
-            && receipt.groupObservation !== null
-            ? { observation: receipt.groupObservation }
-            : {}),
-          ok: receipt.ok && execution.effectPhase === 'confirmed',
-        } as ActionCompletedPayload;
-        delete (completed as ActionCompletedPayload & { groupObservation?: unknown }).groupObservation;
-        this.options.client.reportActionCompleted(completed);
-        if (this.options.platform === 'facebook') this.emitFacebookAction(completed);
+        const receipt = value.receipt;
+        if (!receipt || typeof receipt !== 'object') {
+          throw new Error('Native browse output action_receipt_with_observation carries no receipt');
+        }
+        this.reportActionReceipt(receipt as Record<string, unknown>, execution, env);
         return;
       }
       case 'page_probe':
@@ -498,6 +478,61 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       default:
         throw new Error(`Unexpected Native browse output: ${output.kind}`);
     }
+  }
+
+  /**
+   * 动作回执的唯一处理段。裸回执与「回执 + 随行观测」共用这一段：
+   * `ok = 回执自称成功 且 效果阶段已确认` 这条口径只许存在一份，复制一份就会漂。
+   */
+  private reportActionReceipt(
+    value: Record<string, unknown>,
+    execution: NativePageCommandExecution,
+    env?: Envelope,
+  ): void {
+    const receipt = value as {
+      action: string;
+      ok: boolean;
+      reason?: string;
+      groupObservation?: unknown;
+      observation?: unknown;
+    };
+    if (this.options.platform === 'facebook') {
+      const action = this.diagnosticToken(receipt.action);
+      const reason = this.diagnosticToken(receipt.reason ?? execution.reasonCode ?? 'none');
+      this.logger(
+        `[native-page] action.completed action=${action} ok=${receipt.ok} effectPhase=${execution.effectPhase} reason=${reason}`,
+      );
+    }
+    if (env?.type === 'search.execute') {
+      const ok = receipt.ok && execution.effectPhase === 'confirmed';
+      if (!ok) {
+        this.reportFailure(env, receipt.reason ?? execution.reasonCode, execution.effectPhase);
+        return;
+      }
+      this.options.client.reportActionCompleted({
+        action: 'search',
+        ok: true,
+        ...this.searchContext(env),
+        actuated: true,
+        searchOutcome: 'results_ready',
+        resultCount: Number.isInteger(value.resultCount) && Number(value.resultCount) >= 0
+          ? Number(value.resultCount)
+          : undefined,
+      });
+      return;
+    }
+    const completed = {
+      ...receipt,
+      ...((receipt.observation === undefined || receipt.observation === null)
+        && receipt.groupObservation !== undefined
+        && receipt.groupObservation !== null
+        ? { observation: receipt.groupObservation }
+        : {}),
+      ok: receipt.ok && execution.effectPhase === 'confirmed',
+    } as ActionCompletedPayload;
+    delete (completed as ActionCompletedPayload & { groupObservation?: unknown }).groupObservation;
+    this.options.client.reportActionCompleted(completed);
+    if (this.options.platform === 'facebook') this.emitFacebookAction(completed);
   }
 
   private ownedTaskId(env: Envelope): string | undefined {

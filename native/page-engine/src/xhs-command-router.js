@@ -3,7 +3,20 @@ async function(input){
   const kind=String(input.kind||'');
   const p=input.params&&typeof input.params==='object'?input.params:{};
   const sleep=(ms)=>new Promise((resolve)=>setTimeout(resolve,ms));
-  const norm=(v,n=2000)=>String(v??'').replace(/\s+/g,' ').trim().slice(0,n);
+  // 截断按 code point，不按 UTF-16：按 UTF-16 切会在 emoji 的代理对中间劈开，
+  // 留下半个字符（下游渲染成乱码）。
+  const clip=(raw,n)=>{
+    if(raw.length<=n)return raw;
+    const points=Array.from(raw);
+    return points.length>n?points.slice(0,n).join(''):raw;
+  };
+  const norm=(v,n=2000)=>clip(String(v??'').replace(/\s+/g,' ').trim(),n);
+  // 字段级截断：超长时补一个可见的省略号，让「被截断了」这件事在下游看得见。
+  const cut=(value,n)=>{
+    const raw=String(value??'');
+    const kept=clip(raw,n);
+    return kept===raw?raw:kept+'…';
+  };
   const visible=(el)=>{
     if(!el||!el.getBoundingClientRect)return false;
     const r=el.getBoundingClientRect();
@@ -51,8 +64,45 @@ async function(input){
   };
   const active=(el)=>Boolean(el&&(el.getAttribute('aria-pressed')==='true'||el.getAttribute('data-active')==='true'||/(active|selected|liked|collected|followed)/i.test(el.className||'')));
   const selected=(el)=>Boolean(el&&(active(el)||el.checked===true||['aria-checked','aria-selected','aria-current'].some((name)=>['true','page'].includes(String(el.getAttribute(name)||'')))||el.getAttribute('data-cover')==='true'));
+  // 互动栏（详情页里赞 / 收藏 / 评论那一条）。它常比笔记本体晚一拍渲染（总结流式重排 / 卡片回收），
+  // 定位前有界等一等，避免在渲染完成前误报「找不到互动栏」。
+  const ENGAGE_BAR_SELECTORS=['.interactions.engage-bar','.engage-bar','[class*="engage-bar"]'];
+  // 图标状态位：赞 / 收藏的当下状态写在 <svg><use xlink:href="#like|#liked"> 上，不在文案里。
+  const iconState=(el)=>{
+    if(!el||!el.querySelectorAll)return '';
+    return Array.from(el.querySelectorAll('use')).map((use)=>String(use.getAttribute('xlink:href')||use.getAttribute('href')||'')).join(' ');
+  };
+  // 关注按钮的两种上下文：笔记浮层作者区、作者主页；裸 .follow-button 兜底两者。
+  const FOLLOW_SELECTORS=['.note-detail-mask .author-wrapper .follow-button','.author-wrapper .follow-button','.user-info .follow-button','.user-page .follow-button','[class*="author"] [class*="follow-button"]','button.follow-button','.follow-button'];
+  const followedState=(el)=>{
+    if(!el)return false;
+    if(el.getAttribute('aria-pressed')==='true')return true;
+    return /已关注|互相关注|互关|following/i.test(text(el,64));
+  };
   const action=(name,ok,reason,extra={})=>({kind:'action_receipt',value:{action:name,ok,...(reason?{reason}:{}),...extra}});
+  // 回执 + 随行观测：一条命令只能回一个输出，但有的终局既要让云端动作角色结案，
+  // 又必须把本次真看到的东西一并送到（翻页新图 / 分类栏通知条目）。二选一都会静默丢掉另一半。
+  const observed=(receipt,observation)=>({kind:'action_receipt_with_observation',value:{receipt:receipt.value,...(observation||{})}});
   const done=(output,effectPhase='confirmed')=>({effectPhase,output});
+  // 有界轮询：在窗口内反复复采，命中即返回（快路径省时），超时返回 false。
+  // 取代「固定睡一觉后单次采样」——那种采样点常落在状态翻转窗口正中间，把已生效的动作误报为未生效。
+  const waitFor=async(check,timeoutMs=1500,stepMs=60)=>{
+    const deadline=Date.now()+Math.max(0,Number(timeoutMs)||0);
+    for(;;){
+      let hit=false;
+      try{hit=Boolean(check());}catch{hit=false;}
+      if(hit)return true;
+      if(Date.now()>=deadline)return false;
+      await sleep(stepMs);
+    }
+  };
+  const engageBar=async(root)=>{
+    const pick=()=>first(ENGAGE_BAR_SELECTORS,root);
+    const early=pick();
+    if(early)return early;
+    await waitFor(()=>Boolean(pick()),1200,80);
+    return pick();
+  };
   const fail=(name,reason)=>done(action(name,false,reason),'not_started');
   const ambiguous=(name,reason)=>done(action(name,false,reason),'ambiguous');
   // 编辑器读写口径：受控框读 value，contenteditable 读文本节点（与 dispatchInput 的两条分支一一对应）。
@@ -61,6 +111,37 @@ async function(input){
   const clearEditor=(el)=>{dispatchInput(el,'');return norm(readEditor(el),32000)==='';};
   // 分段写入：正文一段、联系方式串码另起一段，各自整段写入（段界保留，便于后续换成逐字/整段插入两条通道）。
   const appendEditor=(el,segment)=>{dispatchInput(el,readEditor(el)+segment);};
+  // 按 code point 切块：按 UTF-16 切会把代理对劈成两半（emoji 变问号）。
+  const chunksOf=(value,size)=>{const points=Array.from(String(value||''));const parts=[];for(let i=0;i<points.length;i+=size)parts.push(points.slice(i,i+size).join(''));return parts;};
+  const pressEnter=(el)=>{
+    if(el.focus)el.focus();
+    for(const type of ['keydown','keypress','keyup'])el.dispatchEvent(new KeyboardEvent(type,{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,composed:true}));
+  };
+  // 光标归尾：后续内容都在光标处继续写，光标停在中间会把话题 / @ 插进正文里。
+  const cursorToEnd=(el)=>{
+    try{
+      if('value' in el&&typeof el.setSelectionRange==='function'){const end=String(el.value||'').length;el.setSelectionRange(end,end);return;}
+      const selection=window.getSelection&&window.getSelection();
+      if(!selection||!document.createRange)return;
+      const range=document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }catch{}
+  };
+  // 相似度（字符二元组 Dice 系数，线性开销）：编辑器的空白规整 / 全半角替换是无害改写，
+  // 严格等值会把它们误杀；但内容缺失会显著拉低系数，阈值仍拦得住「只写进去一半」。
+  const similarity=(a,b)=>{
+    if(a===b)return 1;
+    if(!a||!b)return 0;
+    const grams=(value)=>{const map=new Map();for(let i=0;i<value.length-1;i++){const gram=value.slice(i,i+2);map.set(gram,(map.get(gram)||0)+1);}return map;};
+    const left=grams(a);const right=grams(b);
+    let shared=0;let total=0;
+    for(const [gram,n] of left){total+=n;shared+=Math.min(n,right.get(gram)||0);}
+    for(const [,n] of right)total+=n;
+    return total?2*shared/total:0;
+  };
   // 笔记级访问限制 / 错误页判据：容器机械信号（与页型分类 PageKind::Error 同一组类名）+ 退役实现的词库。
   // 错误页地址同样是 /explore/<id>，所以「地址里解析得出笔记 id」永远不能当成打开成功。
   const ERROR_PAGE_SELECTOR='[class*="not-found"],[class*="notFound"],[class*="error-page"],[class*="errorPage"]';
@@ -111,7 +192,8 @@ async function(input){
     const bodyEl=first(['#detail-desc','[class*="desc"]','[class*="content"]','article'],root);
     const authorEl=first(['a[href*="/user/profile/"]','[class*="author"]'],root);
     const authorHref=authorEl&&authorEl.href||'';
-    const images=all('img',root).filter(visible).map((img,index)=>({
+    // swiper loop 会复制首尾图片，复制片不是真图——上报它等于把同一张图重复灌给云端参考图。
+    const images=all('img',root).filter((img)=>visible(img)&&!(img.closest&&img.closest('.swiper-slide-duplicate'))).map((img,index)=>({
       index,
       url:String(img.currentSrc||img.src||'').slice(0,4096),
       width:Number(img.naturalWidth||img.width)||undefined,
@@ -128,7 +210,9 @@ async function(input){
       author:authorEl?text(authorEl,200):undefined,
       authorId:(authorHref.match(/\/user\/profile\/([A-Za-z0-9]+)/)||[])[1]||undefined,
       likeCount:count(text(likes,64)),collectCount:count(text(collects,64)),
-      authorFollowed:active(first(['[class*="follow"]','button'],root)),
+      // 与关注动作逐字镜像同一套具名候选与判定：对「会被判已关注」的同一元素返回 true，
+      // 会去点击（未关注）的返回 false；读不到按钮也返回 false，让云端回退主页评估流程。
+      authorFollowed:followedState(first(FOLLOW_SELECTORS,root)||first(FOLLOW_SELECTORS)),
       // 诚实置空：仅当地址栏确含访问令牌时才作为真实可点链接上报，否则不带——绝不用打不开的裸链充数。
       url:String(location.href).includes('xsec_token=')?String(location.href).slice(0,4096):undefined,images,comments,
     }};
@@ -147,21 +231,93 @@ async function(input){
     const stats=all('[class*="data"],[class*="count"],[class*="info"] span').filter(visible).map((el)=>text(el,80));
     return {kind:'profile_detail',value:{authorId:id,postsCount:count(stats[0]),followersCount:count(stats[1]),likesCollects:count(stats[2]),extracted:Boolean(id),nickname:text(nickname,200)||undefined,url:String(location.href).slice(0,4096)}};
   };
+  // 通知行的两级容器结构（分类内容区 > 行容器）出自真机 dump。
+  // 不再按模糊 class 猜 + 收纳裸 <li>：那会把头像行、侧栏菜单项一起当成通知行。
+  const notificationRows=()=>all('.tabs-content-container > .container,.tabs-content-container > div > .container,[class*="tabs-content"] > [class*="container"]').filter(visible);
   const notificationItems=(expected)=>{
-    const roots=all('[class*="notification-item"],[class*="notice-item"],[class*="message-item"],li').filter(visible);
-    const items=roots.map((root)=>{
-      const raw=text(root,2200); if(!raw)return null;
-      const author=first(['a[href*="/user/profile/"]','[class*="user"]','[class*="name"]'],root);
+    const items=[];
+    for(const row of notificationRows()){
+      const author=first(['.user-info a[href*="/user/profile/"]','[class*="user-info"] a','a[href*="/user/profile/"]:not([class*="avatar"])'],row);
       const href=author&&author.href||'';
-      const kindGuess=expected||(/关注/.test(raw)?'follow':/收藏/.test(raw)?'collect':/赞/.test(raw)?'like':/提到|@/.test(raw)?'mention':'comment');
-      return {kind:kindGuess,fromUser:text(author,200)||'unknown',fromUserId:(href.match(/\/user\/profile\/([A-Za-z0-9]+)/)||[])[1]||undefined,content:raw,noteTitle:text(first(['[class*="title"]'],root),200)||undefined,itemKey:norm(root.getAttribute('data-id')||href||raw,256)};
-    }).filter(Boolean).slice(0,100);
-    return {kind:'notification_items',value:{items,epoch:Date.now()}};
+      // 字段级上限（昵称 40 / 正文 200 / 笔记标题 80），不再统一走整行 blob 量级。
+      const fromUser=cut(text(author,400),40);
+      const fromUserId=(href.match(/\/user\/profile\/([A-Za-z0-9]+)/)||[])[1]||undefined;
+      // 正文只取正文容器：缺失就发空串。回落成整行文本会把「昵称 + 动作标签 + 时间」
+      // 一起当正文送出去，还会把时间灌进云端的回退去重键、使同一条通知每次都算新的。
+      const content=cut(text(first(['.interaction-content','[class*="interaction-content"]'],row),4000),200);
+      const raw=text(row,2200);
+      // 赞和收藏是同一栏两类：按行内动作文案区分，别一栏之内全标成赞。
+      const kindGuess=expected==='like'
+        ?(/收藏/.test(raw)?'collect':'like')
+        :(expected||(/关注/.test(raw)?'follow':/收藏/.test(raw)?'collect':/赞/.test(raw)?'like':/提到|@/.test(raw)?'mention':'comment'));
+      // 无逐条身份的互动行诚实跳过：昵称与主页 ID 都拿不到就没有联系人可言，
+      // 造一个占位昵称出来会被云端当成真实身份写进名册、还参与去重键。
+      if(kindGuess!=='comment'&&kindGuess!=='mention'&&!fromUser&&!fromUserId)continue;
+      // 去重键必须逐条稳定：绝不用发送者主页链——同一个人的多条通知会被折叠成一条丢掉。
+      // 拿不到逐条身份就留空，让云端走它自己的回退口径，而不是在这里造一个假的稳定键。
+      const noteLink=first(['a[href*="/explore/"]','a[href*="/discovery/item/"]'],row);
+      const itemKey=norm(row.getAttribute('note-id')||row.getAttribute('data-note-id')||row.getAttribute('data-id')||noteIdFrom(noteLink&&noteLink.href||''),256);
+      items.push({kind:kindGuess,fromUser,fromUserId,content,noteTitle:cut(text(first(['[class*="note-title"]','[class*="title"]'],row),400),80)||undefined,itemKey:itemKey||undefined});
+      if(items.length>=100)break;
+    }
+    // 批次序号不在这里造：墙钟毫秒每条上报都不同，同一波未读的多次上报因此关联不上。
+    // 唯一合法来源是未读「无→有」翻转时取的单调序号，归未读监测体。
+    return {kind:'notification_items',value:{items}};
   };
-  const notificationHome=()=>{
-    const body=text(document.body,5000);
-    const named=(word)=>{const hit=body.match(new RegExp(word+'[^0-9]{0,8}([0-9万w千k.]+)','i'));return hit?count(hit[1]):0;};
-    return {kind:'notification_home',value:{comments:named('评论|comment'),likes:named('赞|like'),follows:named('关注|follow'),epoch:Date.now()}};
+  // 分类栏是真机标定的叶子节点（class 含 tab-item）。包裹容器（tab 列表 / 吸顶条 / 内容区）
+  // 同样带 tab 字样，它的拼接文本会把一类的角标数字泄漏给另一类，点它更等于没切栏。
+  const LEAF_TAB_SELECTOR='[class*="tab-item"]';
+  const leafTabs=()=>all(LEAF_TAB_SELECTOR).filter((el)=>visible(el)&&!el.querySelector(LEAF_TAB_SELECTOR));
+  // 严格文本判据（长度上限用于容纳角标数字），不做全页三级文本回落：
+  // 页面上任何含「赞 / 关注 / 评论」的按钮、笔记卡片、侧栏项都不该被当成分类栏。
+  const TAB_MATCHERS={
+    comment:(value)=>value==='评论和@'||(value.indexOf('评论')===0&&value.indexOf('@')>=0)||(value.length<=24&&/^(comments?|mentions?)\b/i.test(value)),
+    like:(value)=>(value.length<=8&&/赞|收藏/.test(value))||(value.length<=24&&/^(likes?|collect(s|ions?)?)\b/i.test(value)),
+    follow:(value)=>(value.length<=8&&/关注/.test(value))||(value.length<=24&&/^(follow(s|ers|ing)?|new followers?)\b/i.test(value)),
+  };
+  const notificationTab=(category)=>{
+    const match=TAB_MATCHERS[category];
+    return leafTabs().find((el)=>match(text(el,64)))||null;
+  };
+  // 每类的未读角标只认该叶子分类栏内部的「纯数字叶子」（1–3 位）。
+  // 整页正文正则会把笔记赞数 / 粉丝数 / 页面 chrome 里的计数当成未读；
+  // 带单位的「1.2万」不是条数，不折算；读不到就是 0，绝不「解析不出就当 1」。
+  const tabBadgeCount=(tab)=>{
+    if(!tab)return 0;
+    for(const leaf of all('*',tab)){
+      if(leaf.childElementCount>0||!visible(leaf))continue;
+      const raw=text(leaf,16);
+      if(/^[0-9]{1,3}$/.test(raw))return Number(raw);
+    }
+    return 0;
+  };
+  const notificationHome=()=>({kind:'notification_home',value:{
+    comments:tabBadgeCount(notificationTab('comment')),
+    likes:tabBadgeCount(notificationTab('like')),
+    follows:tabBadgeCount(notificationTab('follow')),
+  }});
+  // 清零循环：滚到底 / 直到不再出新行（连续 2 轮行数不增即判到底），硬上限取
+  // max(云端下发的滚动预算, 12) 轮作有界兜底。固定滚几屏在未读多于一屏时会留下未清项，
+  // 破坏「清零」前提；而云端下发的预算必须真参与上限，否则它就是个没人读的悬空参数。
+  const sweepNotificationList=async()=>{
+    const bound=Math.min(100,Math.max(12,Math.floor(Number(p.scrollMax)||0)));
+    const scroller=first(['.tabs-content-container','[class*="tabs-content"]']);
+    const step=Math.max(320,Math.round((Number(window.innerHeight)||Number(innerHeight)||800)*0.8));
+    const scrollOnce=()=>{
+      if(scroller&&typeof scroller.scrollBy==='function'&&scroller.scrollHeight>scroller.clientHeight){scroller.scrollBy(0,step);return;}
+      window.scrollBy(0,step);
+    };
+    let previous=notificationRows().length;
+    let stable=0;
+    for(let round=0;round<bound;round++){
+      scrollOnce();
+      // 每轮留出加载等待，但一出新行就立刻进入下一轮（不做固定睡眠空等）。
+      await waitFor(()=>notificationRows().length>previous,600,60);
+      const now=notificationRows().length;
+      if(now>previous){previous=now;stable=0;continue;}
+      stable+=1;
+      if(stable>=2)break;
+    }
   };
   const exactNote=()=>{
     const current=noteIdFrom(location.href)||noteIdFrom((first(['.note-detail-mask a[href*="/explore/"]','[class*="note-detail"] a[href*="/explore/"]'])||{}).href);
@@ -235,16 +391,111 @@ async function(input){
     click(close);await sleep(350);return detailRoot()?ambiguous('close','detail_still_open'):done(action('close',true));
   }
   if(kind==='navigation_back'){
-    history.back();await sleep(800);return done(action('navigation_back',true),/\/(explore|search|search_result)/.test(location.pathname)?'confirmed':'ambiguous');
+    // 「返回」的语义是回到来源列表并确认列表真可用，不是按浏览器后退键
+    // （后退会回踩过期的详情路由并触发平台的访问限制弹窗）。
+    // 严格的 feed 判据：`/explore` 本身算列表，`/explore/<笔记 id>` 是详情页，不算
+    // ——松判据会把详情页当 feed，扫不到卡后边云互等。
+    const onListUrl=()=>/^\/explore\/?$/.test(location.pathname)||/^\/(search|search_result\w*)/.test(location.pathname);
+    const listReady=()=>onListUrl()&&cardNodes().length>0;
+    const modal=detailRoot();
+    if(modal){const close=first(['[class*="close"]','button[aria-label*="关闭"]','button[title*="关闭"]'],modal);if(close)click(close);}
+    if(!listReady()){
+      // 先给刚关掉的浮层一点重绘时间，真回到列表就不必再导航。
+      await waitFor(listReady,600,80);
+    }
+    if(!listReady()){
+      const target=p.targetPage==='search'&&/^\/(search|search_result\w*)/.test(location.pathname)?location.href:'/explore';
+      try{location.assign(target);}catch{}
+      // 落地后轮询等真扫到可见卡片（与卡片上报同口径）；固定睡一觉后瞬时判断会把
+      // 「重渲染还没完成」误报成「列表为空」。
+      await waitFor(listReady,2500,150);
+    }
+    // 回执 ok 由「观察到的列表面真可用」推导，绝不硬编码为真——云端读的就是这个 ok。
+    // 动作名用云端角色关联键的规范名 `back`（宿主的规范名表与退役实现都是它）：
+    // 回执名对不上，云端就会当成未知失败动作处理，诚实回执反而落空。
+    if(!listReady())return ambiguous('back','list_not_confirmed');
+    return done(action('back',true,'list_ready'));
   }
   if(kind==='note_browse_images'){
-    if(!exactNote())return fail('browse_images','note_page_mismatch');
-    const root=detailRoot()||document;const next=first(['[class*="next"]','button[aria-label*="下一"]'],root)||findByWords(['下一张','next'],root);
-    const iterations=Math.min(20,Math.max(1,Number(p.count)||1));for(let i=0;i<iterations&&next;i++){click(next);await sleep(250);}const out=detail();out.value.refreshOnly=true;return done(out);
+    // 终局恒为「回执 + 随行观测」：云端深读角色按动作名 browse_images 精确匹配才清等待表，
+    // 只回详情会让它一直挂着；而翻页中新加载的图片又是云端参考图刷新与观测笔记的唯一来源。
+    const receiptOnly=(ok,reason,phase)=>done(observed(action('browse_images',ok,reason,{noteId:p.noteId})),phase);
+    if(!exactNote())return receiptOnly(false,'note_page_mismatch','not_started');
+    const root=detailRoot()||document;
+    // 真图张数：swiper loop 会复制首尾，复制片不算真图。
+    const realSlides=()=>all('.swiper-slide:not(.swiper-slide-duplicate)',root);
+    // 图序标记：优先读轮播激活片的下标，读不到退到「首张可见图的地址」。两者都没变 = 图序没真前进。
+    const progressMark=()=>{
+      const slides=realSlides();
+      const index=slides.findIndex((slide)=>slide.classList&&slide.classList.contains('swiper-slide-active'));
+      if(index>=0)return 'slide:'+index;
+      const img=all('img',root).filter(visible)[0];
+      return 'img:'+String(img&&(img.currentSrc||img.src)||'');
+    };
+    // 每一步都重新解析翻页控件：翻页后它常被整体替换或移出可见区，
+    // 循环外只取一次的旧引用点不动，而调用方无从知晓（实际前进恒为 0 却回报请求张数）。
+    const nextArrow=()=>first(['.arrow-controller.right:not(.forbidden):not(.disabled)','.swiper-button-next:not(.swiper-button-disabled)','[class*="arrow"][class*="right"]:not(.forbidden)','button[aria-label*="下一"]'],root);
+    const total=realSlides().length;
+    if(total<=0&&!nextArrow())return receiptOnly(false,'no_target','not_started');
+    const requested=Math.min(20,Math.max(1,Number(p.count)||1));
+    // 目标张数受真实图数封顶：n 张图最多只能前进 n-1 次。
+    const limit=total>0?Math.min(requested,Math.max(0,total-1)):requested;
+    let viewed=0;
+    let stop='';
+    for(let i=0;i<limit;i++){
+      const arrow=nextArrow();
+      if(!arrow){stop='exhausted';break;}
+      const before=progressMark();
+      if(!click(arrow)){stop='not_actuated';break;}
+      // 点得动 ≠ 翻得动：只有图序真前进才计一张。
+      if(!(await waitFor(()=>progressMark()!==before,1200,50))){stop='no_advance';break;}
+      viewed+=1;
+      await sleep(220);
+    }
+    if(viewed<=0){
+      // 没有下一张可翻（单图笔记 / 已在末张）是良性终局，如实回 0；
+      // 控件在却点不动 / 翻不动，是诚实失败，绝不回报请求张数。
+      if(stop==='not_actuated')return receiptOnly(false,'no_target','not_started');
+      if(stop==='no_advance')return receiptOnly(false,'no_advance','ambiguous');
+    }
+    const snapshot=detail();
+    const images=snapshot.value.images||[];
+    // 抽不到图就不带随行快照：绝不用一份空快照去覆盖云端已有的参考图。
+    return done(observed(
+      action('browse_images',true,'browsed='+viewed,{noteId:p.noteId}),
+      images.length?{noteDetail:{...snapshot.value,refreshOnly:true}}:undefined,
+    ));
   }
   if(kind==='note_scroll_comments'){
     if(!exactNote())return fail('scroll_comments','note_page_mismatch');
-    const root=detailRoot()||document;const scroller=first(['[class*="comments"]','[class*="detail"]'],root)||document.scrollingElement;const before=scroller.scrollTop||window.scrollY;scroller.scrollBy?scroller.scrollBy({top:500,behavior:'smooth'}):window.scrollBy(0,500);await sleep(350);return done(action('scroll_comments',true,undefined,{noteId:p.noteId,observation:{articleIndex:Number(p.count)||1,reactionText:String((scroller.scrollTop||window.scrollY)!==before)}}));
+    const root=detailRoot()||document;
+    const scroller=first(['[class*="comment-list"]','[class*="comments"]','[class*="detail"]'],root)||document.scrollingElement;
+    const positionOf=()=>Number(scroller&&scroller.scrollTop||0)||Number(window.scrollY||0);
+    // 滚动后页面上真实可见的评论条数（云端 comment-reviewer 按此记「已读评论数」），
+    // 不是「下发了几步就报几条」。
+    // 逐个选择器试，取第一个真数出条目的那个：几个选择器求并集会把「评论行」与
+    // 「评论行里的正文块」重复计一次，回报的条数就比页面上多出一倍。
+    const commentRows=()=>{
+      for(const selector of ['[class*="comment-item"]','[class*="commentItem"]','[class*="comment"] [class*="content"]']){
+        const rows=all(selector,root).filter(visible);
+        if(rows.length)return rows;
+      }
+      return [];
+    };
+    const steps=Math.min(20,Math.max(1,Number(p.count)||1));
+    let moved=false;
+    for(let i=0;i<steps;i++){
+      const before=positionOf();
+      if(scroller&&scroller.scrollBy)scroller.scrollBy({top:500,behavior:'smooth'});else window.scrollBy(0,500);
+      // 有界等待落定 + 新评论加载；位置没变就是到底/不可滚，停手而不是继续空转。
+      if(!(await waitFor(()=>positionOf()!==before,700,50)))break;
+      moved=true;
+      await sleep(150);
+    }
+    // 未发生任何位移 = 没滚动成功，诚实回 no_scroll（旧实现把位移塞进观测字符串、ok 恒真）。
+    if(!moved)return ambiguous('scroll_comments','no_scroll');
+    const visibleRows=commentRows().length;
+    return done(action('scroll_comments',true,'scrolled='+visibleRows,{noteId:p.noteId,observation:{articleIndex:visibleRows}}));
   }
   if(kind==='profile_open'){
     if(/\/user\/profile\//.test(location.pathname)&&(!p.authorId||location.pathname.includes('/'+String(p.authorId))))return done(profile());
@@ -252,19 +503,89 @@ async function(input){
     if(!author)return fail('open_profile','profile_target_not_found');const targetId=(String(author.href||'').match(/\/user\/profile\/([A-Za-z0-9_-]+)/)||[])[1]||'';if(p.authorId&&targetId!==p.authorId)return fail('open_profile','profile_target_mismatch');click(author);await sleep(900);if(!/\/user\/profile\//.test(location.pathname)||p.authorId&&!location.pathname.includes('/'+String(p.authorId)))return ambiguous('open_profile','profile_navigation_unconfirmed');return done(profile());
   }
   if(kind==='notification_open'){
-    const link=first(['a[href*="/notification"]','a[href*="/notice"]'])||findByWords(['通知','消息','notification']);if(!link)return fail('notification_open','notification_entry_not_found');click(link);await sleep(800);return /\/(notification|notice)/.test(location.pathname)?done(notificationHome()):ambiguous('notification_open','notification_navigation_unconfirmed');
+    // 动作名用云端 / 宿主的规范名（open_notifications），不是命令 kind：名字对不上，
+    // 云端既不结案、还会把它当未知失败动作处理。
+    const onNotificationPage=()=>/\/(notification|notice)/.test(location.pathname);
+    if(!onNotificationPage()){
+      const link=first(['a[href*="/notification"]','a[href*="/notice"]'])||findByWords(['通知','消息','notification']);
+      if(!link)return fail('open_notifications','notification_entry_not_found');
+      if(!click(link))return fail('open_notifications','notification_entry_not_actuated');
+      await waitFor(onNotificationPage,1800,120);
+      if(!onNotificationPage())return ambiguous('open_notifications','notification_navigation_unconfirmed');
+    }
+    // 「读不到分类栏」与「三栏都是 0」必须可区分：云端把计数 ≤0 当成该类已清零直接跳过，
+    // 读不到时若回一份全 0 的读数，整条巡视会静默什么都不做。
+    if(!leafTabs().length)await waitFor(()=>leafTabs().length>0,1500,120);
+    if(!leafTabs().length)return ambiguous('open_notifications','notification_tabs_not_found');
+    return done(notificationHome());
   }
   if(kind==='notification_browse_comments'||kind==='notification_browse_likes'||kind==='notification_browse_follows'){
-    const expected=kind.endsWith('likes')?'like':kind.endsWith('follows')?'follow':'comment';const tab=findByWords(expected==='like'?['赞和收藏','赞','like']:expected==='follow'?['新增关注','关注','follow']:['评论和@','评论','comment']);if(!tab)return fail(kind,'notification_tab_not_found');if(!selected(tab))click(tab);await sleep(500);return selected(tab)?done(notificationItems(expected)):ambiguous(kind,'notification_tab_unconfirmed');
+    const category=kind.endsWith('likes')?'like':kind.endsWith('follows')?'follow':'comment';
+    // 规范动作名：云端两个分类浏览角色按 browse_notification_likes / _follows 精确匹配，
+    // 且只有 ok===true 才判该类已处理。
+    const actionName=category==='like'?'browse_notification_likes':category==='follow'?'browse_notification_follows':'browse_notification_comments';
+    // 「评论和@」这一类的成功终局仍是 notification_items（云端凭 items 到达即结案，
+    // 没有任何角色等它的回执）；只有失败时才需要一个诚实的失败终局。
+    const missed=(reason)=>category==='comment'
+      ?fail(actionName,reason)
+      :done(observed(action(actionName,false,reason)),'not_started');
+    const tab=notificationTab(category);
+    // 分类栏没命中就是「没有这个目标」：诚实 no_target 才能暴露选择器漂移。
+    // 绝不退化成「点页面上第一个含赞 / 关注字样的元素」——那多半是包裹容器或笔记卡片，
+    // 点了等于没切栏，却会被当成看过了。
+    if(!tab)return missed('no_target');
+    // 是否命中由点击结果推导，不用类名激活态猜：激活态类名在包裹容器上同样出现。
+    if(!click(tab))return missed('tab_not_actuated');
+    await sleep(500);
+    if(category==='comment'){
+      await sweepNotificationList();
+      return done(notificationItems(category));
+    }
+    // 「看一眼」两类：清零是首要目的，发送者抽取只是清零的旁路只读输出——
+    // 抽不出来只少一份名册增量，绝不反过来毙掉清零回执。
+    let items=[];
+    try{items=notificationItems(category).value.items;}catch(error){items=[];}
+    return done(observed(action(actionName,true,'viewed'),items.length?{notificationItems:{items}}:undefined));
   }
   if(kind==='notification_back_home'){
     const home=first(['a[href="/explore"]','a[href*="/explore"]'])||findByWords(['首页','发现','home']);if(!home)return fail('notification_back_home','home_entry_not_found');click(home);await sleep(700);return /\/explore/.test(location.pathname)?done(cards()):ambiguous('notification_back_home','home_navigation_unconfirmed');
   }
   if(kind==='interaction_like'||kind==='interaction_collect'||kind==='interaction_follow'){
-    const name=kind.replace('interaction_','');if(!exactNote())return fail(name,'note_page_mismatch');const root=detailRoot()||document;
-    if(name==='follow'&&p.authorId){const author=first(['a[href*="/user/profile/"]'],root);const observed=(String(author&&author.href||location.href).match(/\/user\/profile\/([A-Za-z0-9_-]+)/)||[])[1]||'';if(!observed||observed!==p.authorId)return fail(name,'author_identity_mismatch');}
-    const words=name==='like'?['点赞','赞','like']:name==='collect'?['收藏','collect','save']:['关注','follow'];
-    const control=findByWords(words,root);if(!control)return fail(name,'control_not_found');if(active(control))return done(action(name,true,'already_active',{noteId:p.noteId}));click(control);await sleep(450);return active(control)||text(control,100).includes('已')?done(action(name,true,undefined,{noteId:p.noteId})):ambiguous(name,'postcondition_unconfirmed');
+    const name=kind.replace('interaction_','');
+    if(!exactNote())return fail(name,'note_page_mismatch');
+    const root=detailRoot()||document;
+    if(name==='follow'){
+      if(p.authorId){const author=first(['a[href*="/user/profile/"]'],root);const seen=(String(author&&author.href||location.href).match(/\/user\/profile\/([A-Za-z0-9_-]+)/)||[])[1]||'';if(!seen||seen!==p.authorId)return fail(name,'author_identity_mismatch');}
+      const control=first(FOLLOW_SELECTORS,root)||first(FOLLOW_SELECTORS);
+      // 找不到具名关注按钮就诚实报找不到；绝不退化成「点页面上第一个含『关注』二字的元素」
+      //（关注数标签、导航项都含这两个字）。
+      if(!control)return done(action(name,false,'control_not_found',{noteId:p.noteId,observation:{surface:'no_btn'}}),'not_started');
+      // 目标状态本就达成 = 良性 no-op 成功；云端据 reason 区分真实新关注与 no-op（不计配额、不计冷却）。
+      if(followedState(control))return done(action(name,true,'already_followed',{noteId:p.noteId}));
+      if(!click(control))return done(action(name,false,'control_not_actuated',{noteId:p.noteId}),'not_started');
+      // 后置校验必须新写：旧实现点完只睡一觉就无条件报成功，等于没有后置校验。
+      const flipped=await waitFor(()=>{const now=first(FOLLOW_SELECTORS,root)||first(FOLLOW_SELECTORS);return Boolean(now&&followedState(now));},1500,60);
+      return flipped?done(action(name,true,undefined,{noteId:p.noteId})):ambiguous(name,'state_unchanged');
+    }
+    // 点赞 / 收藏：作用域限定在详情页互动栏内。互动栏不暴露任何无障碍语义
+    //（无 aria-label、无 role=button、无「点赞」文本，图标是纯 SVG、计数是裸数字），
+    // 唯一稳定可读的锚点是手写语义 class；按文本找只会命中评论区 / 反向控件 / 聚合计数。
+    const bar=await engageBar(root);
+    if(!bar)return done(action(name,false,'control_not_found',{noteId:p.noteId,observation:{surface:'no_bar'}}),'not_started');
+    const spec=name==='like'?{selectors:['.like-wrapper','[class*="like-wrapper"]'],on:'liked',doneReason:'already_liked'}
+                            :{selectors:['.collect-wrapper','[class*="collect-wrapper"]'],on:'collected',doneReason:'already_collected'};
+    const locate=()=>first(spec.selectors,bar);
+    const control=locate();
+    if(!control)return done(action(name,false,'control_not_found',{noteId:p.noteId,observation:{surface:'no_btn'}}),'not_started');
+    // 状态位读图标本身（svg use 的 #like→#liked / #collect→#collected），不看文案：
+    // 平台上「已」字文案随处可见（已关注 / 已读…），把它当成功证据必然误报。
+    const engaged=(el)=>iconState(el).includes(spec.on)||el.getAttribute('aria-pressed')==='true';
+    if(engaged(control))return done(action(name,true,spec.doneReason,{noteId:p.noteId}));
+    if(!click(control))return done(action(name,false,'control_not_actuated',{noteId:p.noteId}),'not_started');
+    // 有界轮询等状态位翻转（真机多在 300–600ms 翻转，上限 1500ms）：
+    // 固定睡 450ms 后单次采样正好落在翻转窗口中间，会把已生效的互动误报成未生效。
+    const flipped=await waitFor(()=>{const now=locate();return Boolean(now&&engaged(now));},1500,60);
+    return flipped?done(action(name,true,undefined,{noteId:p.noteId})):ambiguous(name,'state_unchanged');
   }
   if(kind==='interaction_comment'){
     if(!exactNote())return fail('comment','note_page_mismatch');
@@ -298,10 +619,23 @@ async function(input){
     return appeared?done(action('comment',true,undefined,{noteId:p.noteId})):ambiguous('comment','submitted_unconfirmed');
   }
   if(kind==='interaction_like_comment'){
-    if(!exactNote())return fail('like_comment','note_page_mismatch');const anchor=all('[data-comment-id],[data-id],[id]',detailRoot()||document).find((el)=>String(el.getAttribute('data-comment-id')||el.getAttribute('data-id')||el.id||'')===String(p.commentAnchorId||''));if(!anchor)return fail('like_comment','comment_target_not_found');const control=findByWords(['赞','like'],anchor);if(!control)return fail('like_comment','control_not_found');if(active(control))return done(action('like_comment',true,'already_active',{noteId:p.noteId}));click(control);await sleep(350);return active(control)?done(action('like_comment',true,undefined,{noteId:p.noteId})):ambiguous('like_comment','postcondition_unconfirmed');
+    // 动作名规范化为云端的关联键 `comment_like`：云端按这个名字才写风控事实、扣评论赞配额，
+    // 回执名对不上就既不记账也不结案（失败时还会被当未知动作、在详情页上补发一次列表滚动）。
+    if(!exactNote())return fail('comment_like','note_page_mismatch');const anchor=all('[data-comment-id],[data-id],[id]',detailRoot()||document).find((el)=>String(el.getAttribute('data-comment-id')||el.getAttribute('data-id')||el.id||'')===String(p.commentAnchorId||''));if(!anchor)return fail('comment_like','comment_target_not_found');const control=findByWords(['赞','like'],anchor);if(!control)return fail('comment_like','control_not_found');if(active(control))return done(action('comment_like',true,'already_active',{noteId:p.noteId}));click(control);await sleep(350);return active(control)?done(action('comment_like',true,undefined,{noteId:p.noteId})):ambiguous('comment_like','postcondition_unconfirmed');
   }
   if(kind==='plan_execute'){
-    const results=[];for(const step of p.steps||[]){const map={'note.like_button':['赞','like'],'note.collect_button':['收藏','collect'],'note.follow_button':['关注','follow'],'note.comment_input':['评论','comment'],'page.scroll':[]};if(step.actionId==='page.scroll'){window.scrollBy(0,Math.max(200,Number(step.value)||500));results.push({actionId:step.actionId,ok:true,outcome:'success',attempts:1,reason:'confirmed'});continue;}const el=findByWords(map[step.actionId]||[]);if(!el){results.push({actionId:step.actionId,ok:false,outcome:'no_target',attempts:1,reason:'allowlisted_target_not_found'});continue;}if(step.op==='input'){dispatchInput(el,String(step.value||''));const read='value' in el?String(el.value||''):text(el,32000);const ok=norm(read,32000)===norm(step.value,32000);results.push({actionId:step.actionId,ok,outcome:ok?'success':'escalated',attempts:1,reason:ok?'confirmed':'input_readback_mismatch'});}else{click(el);await sleep(150);const ok=selected(el)||step.actionId==='note.comment_input';results.push({actionId:step.actionId,ok,outcome:ok?'success':'escalated',attempts:1,reason:ok?'confirmed':'postcondition_unconfirmed'});}}
+    const results=[];for(const step of p.steps||[]){const map={'note.like_button':['赞','like'],'note.collect_button':['收藏','collect'],'note.follow_button':['关注','follow'],'note.comment_input':['评论','comment'],'page.scroll':[]};if(step.actionId==='page.scroll'){
+      // 兼容路径仍有活跃产出方（云端规划器的 LLM 兜底可自由产出 scroll 步骤），故不删；
+      // 但结果必须按实测位移回报，不再无条件 success。
+      const scroller=document.scrollingElement||document.documentElement;
+      const before=Number(scroller&&scroller.scrollTop||0)||Number(window.scrollY||0);
+      window.scrollBy(0,Math.max(200,Number(step.value)||500));
+      await waitFor(()=>(Number(scroller&&scroller.scrollTop||0)||Number(window.scrollY||0))!==before,700,50);
+      const after=Number(scroller&&scroller.scrollTop||0)||Number(window.scrollY||0);
+      const moved=after!==before;
+      results.push({actionId:step.actionId,ok:moved,outcome:moved?'success':'escalated',attempts:1,reason:moved?('scrolled='+Math.abs(after-before)+'px'):'no_scroll'});
+      continue;
+    }const el=findByWords(map[step.actionId]||[]);if(!el){results.push({actionId:step.actionId,ok:false,outcome:'no_target',attempts:1,reason:'allowlisted_target_not_found'});continue;}if(step.op==='input'){dispatchInput(el,String(step.value||''));const read='value' in el?String(el.value||''):text(el,32000);const ok=norm(read,32000)===norm(step.value,32000);results.push({actionId:step.actionId,ok,outcome:ok?'success':'escalated',attempts:1,reason:ok?'confirmed':'input_readback_mismatch'});}else{click(el);await sleep(150);const ok=selected(el)||step.actionId==='note.comment_input';results.push({actionId:step.actionId,ok,outcome:ok?'success':'escalated',attempts:1,reason:ok?'confirmed':'postcondition_unconfirmed'});}}
     return done({kind:'plan_results',value:{results}});
   }
   if(kind==='publish_select_mode'){
@@ -310,7 +644,49 @@ async function(input){
     const mode=findByWords(['上传图文','图文','image']);if(!mode)return fail('select_mode','publish_mode_not_found');click(mode);await sleep(500);return ready()?done(action('select_mode',true)):ambiguous('select_mode','publish_mode_unconfirmed');
   }
   if(kind==='publish_fill_field'){
-    const field=p.fieldType==='title'?first(['input[placeholder*="标题"]','textarea[placeholder*="标题"]','input[class*="title"]']):first(['[contenteditable="true"]','textarea[placeholder*="正文"]','textarea[placeholder*="描述"]']);if(!field)return fail('fill_field','publish_field_not_found');dispatchInput(field,String(p.value||''));const read='value' in field?String(field.value||''):text(field,32000);return norm(read,32000)===norm(p.value,32000)?done(action('fill_field',true)):ambiguous('fill_field','publish_field_readback_mismatch');
+    const field=p.fieldType==='title'?first(['input[placeholder*="标题"]','textarea[placeholder*="标题"]','input[class*="title"]']):first(['[contenteditable="true"]','textarea[placeholder*="正文"]','textarea[placeholder*="描述"]']);
+    if(!field)return fail('fill_field','publish_field_not_found');
+    const target=String(p.value||'');
+    // 清场：内容是在光标处增量写入的，上一次留下的残文不清干净就会与本次拼在一起发出去。
+    if(!clearEditor(field))return fail('fill_field','publish_field_not_clean');
+    const plainValueField='value' in field;
+    const paragraphs=target.split('\n');
+    for(let i=0;i<paragraphs.length;i++){
+      if(i>0){
+        // 每个换行单独派发一次回车。派发之后立刻复读：换行没落到内容里就补写一个，
+        // 宁可段落结构不理想，也绝不把正文丢掉半截。
+        pressEnter(field);
+        if(readEditor(field).split('\n').length<=i)appendEditor(field,'\n');
+      }
+      // 增量写入而非一次性赋值：让编辑器自己的输入处理逐段跑起来。
+      for(const chunk of chunksOf(paragraphs[i],24)){
+        appendEditor(field,chunk);
+        await sleep(20);
+      }
+    }
+    const wanted=norm(target,32000);
+    const head=Array.from(wanted).slice(0,20).join('');
+    const expectedParagraphs=paragraphs.filter((line)=>line.trim().length>0).length;
+    // 有界确认（编辑器常在下一帧才把内容规整完，写完立刻单次读会把已生效的写入判成失败）：
+    // ① 已写内容以目标开头——被截了半截 / 写进了别的框都会在这里露馅；
+    // ② 语义相似度达阈值——编辑器做的空白规整、全半角替换是无害改写，严格等值会误杀；
+    // ③ 受控框（value 语义）里换行是明确的，段落数必须对得上。
+    const settled=await waitFor(()=>{
+      const read=norm(readEditor(field),32000);
+      if(!read||(head&&read.indexOf(head)!==0))return false;
+      if(plainValueField&&expectedParagraphs>1){
+        if(String(field.value||'').split('\n').filter((line)=>line.trim().length>0).length<expectedParagraphs)return false;
+      }
+      return read===wanted||similarity(read,wanted)>=0.9;
+    },2000,80);
+    if(!settled){
+      // 失败清场：留着半截草稿会被下一次填写拼上，或被提交原样发出去。
+      clearEditor(field);
+      return ambiguous('fill_field','publish_field_readback_mismatch');
+    }
+    // 光标归尾：后续的话题 / @ 候选都是在光标处继续写的，光标不在尾部会插到正文中间。
+    cursorToEnd(field);
+    return done(action('fill_field',true));
   }
   if(kind==='publish_add_with_candidate'){
     const candidateWords=(p.candidates||[]).concat([String(p.value||'')]);
@@ -331,7 +707,32 @@ async function(input){
     const schedule=findByWords(['定时发布','定时','schedule']);if(!schedule)return fail('set_schedule','schedule_control_not_found');click(schedule);await sleep(200);const field=first(['input[type="datetime-local"]','input[placeholder*="时间"]']);if(!field)return fail('set_schedule','schedule_input_not_found');const date=new Date(Number(p.publishTime));if(!Number.isFinite(date.getTime()))return fail('set_schedule','invalid_schedule_time');const local=new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16);dispatchInput(field,local);return String(field.value||'').startsWith(local.slice(0,13))?done(action('set_schedule',true)):ambiguous('set_schedule','schedule_readback_mismatch');
   }
   if(kind==='publish_submit'){
-    const submit=findByWords(['发布','submit']);if(!submit)return fail('submit','publish_submit_not_found');if(submit.disabled||submit.getAttribute('aria-disabled')==='true')return fail('submit','publish_submit_disabled');click(submit);await sleep(1200);const success=/success|published|发布成功/i.test(location.href+' '+text(document.body,3000));return success?done({kind:'publish_receipt',value:{recordId:Number(p.recordId),seq:Number(p.seq),kind:'submit',ok:true,submitDispatched:true,postUrl:String(location.href).slice(0,4096)}}):done({kind:'publish_receipt',value:{recordId:Number(p.recordId),seq:Number(p.seq),kind:'submit',ok:false,submitDispatched:true,error:'publish_submit_unconfirmed'}},'ambiguous');
+    const receipt=(value,phase)=>done({kind:'publish_receipt',value:{recordId:Number(p.recordId),seq:Number(p.seq),kind:'submit',...value}},phase);
+    // 目标只在「发布」/「定时发布」两种精确文案里挑，并排除左侧的「暂存离开」。
+    // 「首个含『发布』二字的可见元素」常是定时发布开关一类，点它等于改了模式而不是提交。
+    const SUBMIT_LABEL=/^(定时发布|发布)$/;
+    const candidates=all('button,[role="button"],a,span,div').filter(visible)
+      .filter((el)=>SUBMIT_LABEL.test(text(el,32))&&!/暂存|离开|草稿/.test(text(el,32)));
+    // 只取叶子：包着按钮的容器文本同样恰等于「发布」，点它等于没点中。
+    const leaves=candidates.filter((el)=>!candidates.some((other)=>other!==el&&el.contains&&el.contains(other)));
+    // 同时命中多个叶子时取最靠右的：发布在右、暂存离开在左。
+    const submit=leaves.sort((a,b)=>a.getBoundingClientRect().x-b.getBoundingClientRect().x).pop()||null;
+    // 没找到目标就压根没点：submitDispatched 必须保持假，否则云端按「已提交」不重投 → 稿子静默丢失。
+    if(!submit)return receipt({ok:false,submitDispatched:false,error:'publish_submit_not_found'},'not_started');
+    if(submit.disabled||submit.getAttribute('aria-disabled')==='true')return receipt({ok:false,submitDispatched:false,error:'publish_submit_disabled'},'not_started');
+    // 后置校验只认页面上的成功文案这条正证据。地址判据被明令删除：抢占方 / 恢复导航会在
+    // 提交窗口内把发布页导走，一篇可能根本没发出去的稿会因此被记成已发布。
+    const SUCCESS_COPY=/发布成功|发布中|笔记已发布|笔记发布成功|成功发布|稍后可在/;
+    const toastHit=()=>all('[class*="toast"],[class*="message"],[class*="notice"],[class*="tip"],[class*="success"],[class*="result"],[role="alert"],[role="status"]').filter(visible).some((el)=>SUCCESS_COPY.test(text(el,800)));
+    const bodyHit=()=>SUCCESS_COPY.test(text(document.body,20000));
+    // 绑定本次提交：点击前就在页面上的同款文案不是本次的证据（草稿箱文案、历史提示都可能含它）。
+    const copyBefore=bodyHit();
+    if(!click(submit))return receipt({ok:false,submitDispatched:false,error:'publish_submit_not_actuated'},'not_started');
+    // 提交点已跨过：15s 有界轮询，只认正证据；未确认也必须如实带上「已派发」。
+    const confirmed=await waitFor(()=>toastHit()||(!copyBefore&&bodyHit()),15000,500);
+    return confirmed
+      ?receipt({ok:true,submitDispatched:true,postUrl:String(location.href).slice(0,4096)},'confirmed')
+      :receipt({ok:false,submitDispatched:true,error:'post_validate_failed'},'ambiguous');
   }
   if(kind==='publish_capture_post_id'){
     const link=first(['a[href*="/explore/"]','a[href*="/discovery/item/"]']);const href=link&&link.href||location.href;const id=noteIdFrom(href)||norm((String(href).match(/[?&](?:note_id|id)=([^&]+)/)||[])[1]||'',256);return done({kind:'publish_receipt',value:{recordId:Number(p.recordId),seq:Number(p.seq),kind:'capture_post_id',ok:Boolean(id),value:id||undefined,postUrl:id?String(href).slice(0,4096):undefined,error:id?undefined:'publish_evidence_not_found'}});

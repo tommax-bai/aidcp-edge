@@ -64,6 +64,18 @@ export interface NativePageProbeResult {
   blockingKind?: 'none' | 'login' | 'captcha' | 'unknown';
   blockingText?: string;
   signals: NativePageStructuralSignals;
+  /**
+   * 通知未读读数（三态）。`unreadable` = 读不到，与 `clear`（确实没有未读）必须区分：
+   * 把读不到当成没有未读，等于静默把一次读取失败说成「已清零」。
+   * 缺失 / 非法一律解析成 `unreadable`。周期调用由承接方装配，此处只定契约与解析。
+   */
+  notificationUnread: NativePageNotificationUnread;
+}
+
+export interface NativePageNotificationUnread {
+  state: 'unread' | 'clear' | 'unreadable';
+  /** 附带计数；红点无数字时为 0，不参与「有没有未读」的判定。 */
+  count: number;
 }
 
 export interface NativePageProbeInput {
@@ -1127,7 +1139,25 @@ function parseProbeResult(value: unknown): NativePageProbeResult | undefined {
       typeof signals[name] === 'number' && Number.isInteger(signals[name])
     ))
   ) return undefined;
-  return value as unknown as NativePageProbeResult;
+  return {
+    ...value,
+    notificationUnread: parseNotificationUnread(value.notificationUnread),
+  } as unknown as NativePageProbeResult;
+}
+
+/**
+ * 未读读数的解析：缺失、结构不对、取值不认识，一律回「读不到」。
+ * MUST NOT 回落成 `clear` —— 下游把「没有未读」当已清零跳过，读取失败静默变成已清零
+ * 会让真通知永远不被处理。
+ */
+function parseNotificationUnread(value: unknown): NativePageNotificationUnread {
+  const unreadable: NativePageNotificationUnread = { state: 'unreadable', count: 0 };
+  if (!isRecord(value)) return unreadable;
+  if (value.state !== 'unread' && value.state !== 'clear') return unreadable;
+  const count = typeof value.count === 'number' && Number.isInteger(value.count) && value.count >= 0
+    ? Math.min(999, value.count)
+    : 0;
+  return { state: value.state, count: value.state === 'unread' ? count : 0 };
 }
 
 function isKnownErrorCode(value: unknown): value is NativePageEngineErrorCode {

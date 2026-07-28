@@ -8,7 +8,7 @@ use crate::input::{TextInputFailure, type_captcha_with_key_events, type_text_hum
 use crate::model::{
     ActionReceipt, CaptchaSnapshot, FacebookIdentityReceipt, IdentityObservation,
     IdentityObservationSource, IdentityPageEffect, NoteDetail, NotificationHome, NotificationItems,
-    PageCards, PlanResults, ProfileDetail, PublishReceipt,
+    ObservedActionReceipt, PageCards, PlanResults, ProfileDetail, PublishReceipt,
 };
 use crate::probe::PageKind;
 use crate::probe::ProbeResult;
@@ -57,6 +57,8 @@ pub enum CommandOutput {
     NotificationItems(NotificationItems),
     NotificationHome(NotificationHome),
     ActionReceipt(Box<ActionReceipt>),
+    /// 回执 + 随行观测（线上 kind = `action_receipt_with_observation`）。
+    ActionReceiptWithObservation(Box<ObservedActionReceipt>),
     PlanResults(PlanResults),
     PublishReceipt(PublishReceipt),
     CaptchaSnapshot(CaptchaSnapshot),
