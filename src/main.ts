@@ -46,8 +46,10 @@ import {
   resolveStartupIdentity,
   type BrowserLaunchOptions,
   type ChromeInstance,
+  type LaunchedBrowser,
   type ReadSelfIdentityOptions,
   ProxyRuntimeObserver,
+  requireActiveProxyEgressMatch,
 } from './cdp/index.js';
 import { selectPlatformDriver, startupIdentityReadPolicy } from './platform/index.js';
 import { runWechatChannelsRuntime } from './wechat-channels/runtime.js';
@@ -235,10 +237,12 @@ async function main(): Promise<void> {
   // AdsPower 每次启动的 debug_port 都不同，留着旧的会让后续所有生命周期闭包对着一个死端口操作。
   let chrome: ChromeInstance | undefined;
   let endpoint = { host: cdpHost, port: cdpPort };
+  let activeProxyTakeover: LaunchedBrowser['activeProxyTakeover'];
   if (!startBrowserAbsent) {
     const launched = await provider.launch(launchOpts);
     chrome = launched.instance;
     endpoint = launched.endpoint;
+    activeProxyTakeover = launched.activeProxyTakeover;
   } else {
     console.log(`[aidcp-edge] 浏览器槽位缺席：以控制面待机态启动（accountId=${controlAccountId}），暂不调用 provider.launch`);
   }
@@ -255,21 +259,42 @@ async function main(): Promise<void> {
   }
   const attachOpts: Parameters<typeof attachToPage>[0] = { host: endpoint.host, port: endpoint.port, stealth };
   const observesFacebookProxy = provider.kind === 'adspower' && platformDriver.platform === 'facebook';
-  if (observesFacebookProxy) attachOpts.network = true;
+  const observesConfiguredProxy = provider.kind === 'adspower'
+    && Boolean(process.env.AIDCP_ADS_PROXY_AUTHORITY_FD?.trim());
+  const observesProxyRuntime = observesFacebookProxy || observesConfiguredProxy;
+  if (observesProxyRuntime) attachOpts.network = true;
   if (pageUrl) attachOpts.urlIncludes = pageUrl;
   else if (provider.kind === 'adspower') {
     attachOpts.urlIncludes = platformDriver.attachUrlIncludes;
     attachOpts.targetPredicate = (target) => platformDriver.isAllowedTargetUrl(target.url);
   }
   const session = startBrowserAbsent ? createDetachedSession() : await attachToPage(attachOpts);
-  const proxyRuntime = observesFacebookProxy
+  const proxyRuntime = observesProxyRuntime
     ? new ProxyRuntimeObserver({
         cdp: session.cdp,
         probeUrl: process.env.AIDCP_EGRESS_PROBE_URL ?? '',
         emit: (event) => console.log(`[ui-event] ${JSON.stringify(event)}`),
       })
     : undefined;
-  if (proxyRuntime && !startBrowserAbsent) void proxyRuntime.startGeneration();
+  const verifyActiveProxyTakeover = async (
+    evidence: LaunchedBrowser['activeProxyTakeover'],
+  ): Promise<void> => {
+    if (!evidence) return;
+    const snapshot = proxyRuntime ? await proxyRuntime.startGeneration() : undefined;
+    const matched = requireActiveProxyEgressMatch({
+      profileId: evidence.profileId,
+      expectedEgressIp: evidence.expectedEgressIp,
+      browserEgressIp: snapshot?.browserIp,
+    });
+    console.log(
+      `[aidcp-edge] AdsPower Active profile=${evidence.profileId} 真实出口匹配本次权威代理` +
+        `（egress=${matched.browserEgressIp}），接管现有浏览器`,
+    );
+  };
+  if (!startBrowserAbsent) {
+    if (activeProxyTakeover) await verifyActiveProxyTakeover(activeProxyTakeover);
+    else if (proxyRuntime) void proxyRuntime.startGeneration();
+  }
   let parkingControlInstalled = !startBrowserAbsent;
   if (!startBrowserAbsent) console.log('[aidcp-edge] 已附着到 page，CDP 就绪（反检测脚本已注入）');
   // 停放校验失败会抛（bounds 与兜底位都过不了可见性探针）；绝不能因此跳过下面的 stdin 控制通道安装，
@@ -1338,6 +1363,7 @@ async function main(): Promise<void> {
         const relaunched = await provider.launch(launchOpts);
         chrome = relaunched.instance;
         endpoint = relaunched.endpoint;
+        activeProxyTakeover = relaunched.activeProxyTakeover;
         attachOpts.host = endpoint.host;
         attachOpts.port = endpoint.port;
 
@@ -1345,7 +1371,8 @@ async function main(): Promise<void> {
         //    重连配置在这里被重新构造，classify/rediscover 闭包里的端口随之更新——不换它，唤醒后第一次
         //    瞬断就会拿旧端口探活、探不到即误判「进程已死 = 终局」，把可续跑的连接直接判死。
         await reattachSession(session, attachOpts);
-        void proxyRuntime?.startGeneration();
+        if (activeProxyTakeover) await verifyActiveProxyTakeover(activeProxyTakeover);
+        else void proxyRuntime?.startGeneration();
 
         // 3) 停放（最小化 / 移出视野）要重新施加：新浏览器窗口不继承上一代的位置。
         try {

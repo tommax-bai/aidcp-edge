@@ -321,3 +321,20 @@ test('classifyAdsInUse：普通崩溃 / 缺内核 / 无关失败 / 空 → 一�
   assert.equal(fleet.classifyAdsInUse('').inUse, false);
   assert.equal(fleet.classifyAdsInUse(undefined).inUse, false);
 });
+
+test('classifyAdsActiveProxyTakeoverFailure：稳定 token 判为终局，其余失败不误判', () => {
+  assert.equal(
+    fleet.classifyAdsActiveProxyTakeoverFailure(
+      '[aidcp-edge] [adspower_active_proxy_takeover_rejected] AdsPower profile=k1 出口不匹配',
+    ).rejected,
+    true,
+  );
+  assert.equal(
+    fleet.classifyAdsActiveProxyTakeoverFailure('AdsPowerActiveProxyTakeoverError: unavailable').rejected,
+    true,
+  );
+  assert.equal(
+    fleet.classifyAdsActiveProxyTakeoverFailure('[aidcp-edge] 启动失败: ECONNREFUSED').rejected,
+    false,
+  );
+});

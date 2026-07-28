@@ -22,6 +22,7 @@ import {
   type AdsPowerApiResponse,
 } from './ads-api-broker.js';
 import { launchChrome, type ChromeInstance } from './chrome-launcher.js';
+import { normalizeObservedIp } from './proxy-runtime-observer.js';
 
 export type BrowserProviderKind = 'self' | 'adspower';
 
@@ -43,6 +44,11 @@ export interface LaunchedBrowser {
   instance: ChromeInstance;
   /** CDP 附着端点：self=传入端口；adspower=V2 active/start 返回或已验证失联 marker 的 debug_port。 */
   endpoint: { host: string; port: number };
+  /** 已存在的配置代理浏览器；附着后必须完成一次精确出口匹配才可接管。 */
+  activeProxyTakeover?: {
+    profileId: string;
+    expectedEgressIp?: string;
+  };
 }
 
 export interface BrowserProvider {
@@ -115,6 +121,8 @@ export interface AdsPowerProxyAuthority {
   authorityRevision: number;
   originalProxy: AdsPowerProxyConfig;
   targetProxy: AdsPowerProxyConfig;
+  /** Electron 通过本次冻结有效代理观测到的公网出口；仅用于 Active 浏览器的一次性接管闸。 */
+  expectedEgressIp?: string;
 }
 
 export interface AdsPowerDeps {
@@ -164,17 +172,6 @@ const PROFILE_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
 const DEVTOOLS_BROWSER_PATH_RE = /^\/devtools\/browser\/[A-Za-z0-9._-]+$/;
 const ADS_PROFILE_IN_USE_RE = /^\s*\[[^\]]+\]\s+is being used by\s+\[([^\]]+)\]\s+and is not allowed to open\s*$/i;
 const ADS_RATE_LIMIT_RE = /too\s+many|rate.?limit|frequen|requests?\s+per\s+second|请求过快|请求频繁|频率|限频/i;
-
-export class AdsPowerProxyAuthorityRestartRequiredError extends Error {
-  readonly code = 'adspower_proxy_authority_restart_required';
-
-  constructor(readonly profileId: string) {
-    super(
-      `[aidcp-edge] AdsPower profile=${profileId} 已在运行，无法证明当前浏览器应用了本代际代理配置；请先关闭该环境后重新启动`,
-    );
-    this.name = 'AdsPowerProxyAuthorityRestartRequiredError';
-  }
-}
 
 function normalizeAdsPowerProxyConfig(raw: unknown): AdsPowerProxyConfig {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -237,8 +234,20 @@ export function readAdsPowerProxyAuthority(
     throw new Error('[aidcp-edge] 原环境代理安全通道 Cloud revision 无效');
   }
   const originalProxy = normalizeAdsPowerProxyConfig(parsed.originalProxy);
+  const expectedEgressIp = parsed.expectedEgressIp === undefined
+    ? undefined
+    : normalizeObservedIp(parsed.expectedEgressIp);
+  if (parsed.expectedEgressIp !== undefined && !expectedEgressIp) {
+    throw new Error('[aidcp-edge] 原环境代理安全通道出口证据无效');
+  }
   if (mode === 'direct') {
-    return { mode, authorityRevision, originalProxy, targetProxy: { ...originalProxy } };
+    return {
+      mode,
+      authorityRevision,
+      originalProxy,
+      targetProxy: { ...originalProxy },
+      ...(expectedEgressIp ? { expectedEgressIp } : {}),
+    };
   }
   const relayPort = Number(parsed.relayPort);
   if (!Number.isInteger(relayPort) || relayPort < 1 || relayPort > 65_535) {
@@ -248,6 +257,7 @@ export function readAdsPowerProxyAuthority(
     mode,
     authorityRevision,
     originalProxy,
+    ...(expectedEgressIp ? { expectedEgressIp } : {}),
     targetProxy: {
       proxy_soft: 'other',
       proxy_type: 'http',
@@ -405,9 +415,15 @@ export class AdsPowerProvider implements BrowserProvider {
     });
     const activeStatus = String(active?.status ?? '').trim().toLowerCase();
     let port = 0;
+    let activeProxyTakeover: LaunchedBrowser['activeProxyTakeover'];
     if (activeStatus === 'active') {
       if (this.cfg.proxyAuthority) {
-        throw new AdsPowerProxyAuthorityRestartRequiredError(this.cfg.userId);
+        activeProxyTakeover = {
+          profileId: this.cfg.userId,
+          ...(this.cfg.proxyAuthority.expectedEgressIp
+            ? { expectedEgressIp: this.cfg.proxyAuthority.expectedEgressIp }
+            : {}),
+        };
       }
       port = Number(active?.debug_port);
       if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
@@ -420,7 +436,12 @@ export class AdsPowerProvider implements BrowserProvider {
       const orphan = await this.findValidatedOrphanCdp();
       if (orphan) {
         if (this.cfg.proxyAuthority) {
-          throw new AdsPowerProxyAuthorityRestartRequiredError(this.cfg.userId);
+          activeProxyTakeover = {
+            profileId: this.cfg.userId,
+            ...(this.cfg.proxyAuthority.expectedEgressIp
+              ? { expectedEgressIp: this.cfg.proxyAuthority.expectedEgressIp }
+              : {}),
+          };
         }
         port = orphan.port;
         this.log(
@@ -479,7 +500,11 @@ export class AdsPowerProvider implements BrowserProvider {
       // 无法确认绝不假成功（红线：绝不静默假成功）。endpoint 端口即此处交付的 debug_port。
       killAndConfirmDead: closeAndRestore,
     };
-    return { instance, endpoint: { host, port } };
+    return {
+      instance,
+      endpoint: { host, port },
+      ...(activeProxyTakeover ? { activeProxyTakeover } : {}),
+    };
   }
 
   private async apiV1<T>(

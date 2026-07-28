@@ -1,6 +1,8 @@
 'use strict';
 
+const http = require('node:http');
 const https = require('node:https');
+const { isIP } = require('node:net');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { SocksProxyAgent } = require('socks-proxy-agent');
 const { normalizeProxyInput } = require('./ads-proxy-config.cjs');
@@ -40,6 +42,110 @@ function reasonForError(error) {
   if (message.includes('407') || message.includes('proxy authentication')) return 'authentication_failed';
   if (message.includes('proxy connection') || message.includes('connect')) return 'proxy_connect_failed';
   return 'request_failed';
+}
+
+function normalizeEgressIp(value) {
+  let candidate = String(value || '').trim();
+  if (!candidate) return null;
+  if (candidate.startsWith('[')) {
+    const closing = candidate.indexOf(']');
+    if (closing > 0) candidate = candidate.slice(1, closing);
+  } else if (/^\d{1,3}(?:\.\d{1,3}){3}:\d+$/.test(candidate)) {
+    candidate = candidate.slice(0, candidate.lastIndexOf(':'));
+  }
+  if (candidate.toLowerCase().startsWith('::ffff:')) {
+    const mapped = candidate.slice(7);
+    if (isIP(mapped) === 4) candidate = mapped;
+  }
+  return isIP(candidate) ? candidate.toLowerCase() : null;
+}
+
+function responseHeader(response, name) {
+  const headers = response && response.headers;
+  if (!headers || typeof headers !== 'object') return undefined;
+  const match = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  const value = match && match[1];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+/**
+ * 使用同一冻结有效代理访问受控出口探针。结果只保留规范化公网 IP 和固定枚举，
+ * 不保留代理 URL、认证信息或底层错误正文。
+ */
+async function probeProxyEgress(proxy, options = {}) {
+  const checkedAt = new Date((options.now || Date.now)()).toISOString();
+  const parsed = proxyUrlForConfig(proxy);
+  if (!parsed.ok) return { state: 'unavailable', checkedAt, reason: parsed.reason };
+  if (parsed.noProxy) return { state: 'skipped', checkedAt, reason: 'no_proxy' };
+
+  let target;
+  try {
+    target = new URL(String(options.targetUrl || ''));
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') throw new Error('unsupported');
+  } catch {
+    return { state: 'unknown', checkedAt, reason: 'egress_probe_unavailable' };
+  }
+  const timeoutMs = Math.max(100, Number(options.timeoutMs) || DEFAULT_TIMEOUT_MS);
+  const requestImpl = options.requestImpl || (target.protocol === 'http:' ? http.request : https.request);
+  let agent;
+  try {
+    agent = (options.agentFactory || defaultAgentFactory)(parsed.proxyType, parsed.url);
+  } catch {
+    return { state: 'unknown', checkedAt, reason: 'detector_unavailable' };
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ...result, checkedAt });
+    };
+    let request;
+    const timer = setTimeout(() => {
+      const error = new Error('proxy_egress_timeout');
+      error.code = 'ETIMEDOUT';
+      request?.destroy?.(error);
+      finish({ state: 'unavailable', reason: 'timeout' });
+    }, timeoutMs);
+    timer.unref?.();
+
+    try {
+      request = requestImpl(target, {
+        method: 'GET',
+        agent,
+        headers: {
+          accept: 'application/json',
+          'cache-control': 'no-cache',
+          connection: 'close',
+          'user-agent': 'AIDCP-Proxy-Egress/1.0',
+        },
+      }, (response) => {
+        response.resume?.();
+        if (Number(response.statusCode) === 407) {
+          finish({ state: 'unavailable', reason: 'authentication_failed' });
+          return;
+        }
+        if (Number(response.statusCode) >= 400) {
+          finish({ state: 'unavailable', reason: 'egress_probe_failed' });
+          return;
+        }
+        const expectedEgressIp = normalizeEgressIp(responseHeader(response, 'x-aidcp-egress-ip'));
+        if (!expectedEgressIp) {
+          finish({ state: 'unknown', reason: 'egress_ip_missing' });
+          return;
+        }
+        finish({ state: 'available', reason: 'egress_observed', expectedEgressIp });
+      });
+      request.once('error', (error) => {
+        finish({ state: 'unavailable', reason: reasonForError(error) });
+      });
+      request.end();
+    } catch {
+      finish({ state: 'unknown', reason: 'detector_unavailable' });
+    }
+  });
 }
 
 /**
@@ -191,7 +297,9 @@ function createProxyPreflightController(options = {}) {
       entries.set(key, {
         result,
         authorityRevision: result.authorityRevision || requestedRevision,
-        expiresAt: result.state === 'unknown' ? now() : now() + ttlMs,
+        // Facebook 可达但受控出口证据暂缺时仍允许 Inactive 环境按既有路径启动；
+        // 该结果不得缓存，否则稍后的 Active 接管会在 TTL 内复用一份无出口证据的旧结果。
+        expiresAt: result.state === 'unknown' || result.expectedEgressReason ? now() : now() + ttlMs,
       });
       notify(key, result);
       return result;
@@ -214,7 +322,9 @@ module.exports = {
   DEFAULT_TIMEOUT_MS,
   DEFAULT_TTL_MS,
   createProxyPreflightController,
+  normalizeEgressIp,
   preflightFacebookProxy,
+  probeProxyEgress,
   publicSnapshot,
   proxyUrlForConfig,
   reasonForError,

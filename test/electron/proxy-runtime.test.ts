@@ -88,10 +88,12 @@ test('浏览器证据缺失时展示预检状态，当前运行证据始终优�
   assert.equal(runtimeWins.label, '疑似直连');
 });
 
-test('装配契约：仅 Facebook AdsPower 启用 Network，注入 /egress，IP 事件落盘前脱敏', () => {
+test('装配契约：Facebook 或配置代理接管证据启用 Network，注入 /egress，IP 事件落盘前脱敏', () => {
   assert.match(sessionSource, /if \(opts\.network\) await cdp\.send\('Network\.enable'\)/);
   assert.match(coreSource, /provider\.kind === 'adspower' && platformDriver\.platform === 'facebook'/);
-  assert.match(mainSource, /AIDCP_EGRESS_PROBE_URL = `\$\{clientAuthBase\}\/egress`/);
+  assert.match(coreSource, /observesFacebookProxy \|\| observesConfiguredProxy/);
+  assert.match(mainSource, /return clientAuthBase \? `\$\{clientAuthBase\}\/egress` : ''/);
+  assert.match(mainSource, /spawnEnv\.AIDCP_EGRESS_PROBE_URL = egressProbeUrl/);
   assert.match(mainSource, /proxyRuntime updated \(redacted\)/);
   assert.match(html, /本次会话接收流量/);
   assert.match(html, /不是代理商计费流量/);

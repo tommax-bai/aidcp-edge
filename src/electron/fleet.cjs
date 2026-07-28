@@ -611,6 +611,17 @@ function classifyAdsInUse(line) {
   return { inUse: true, account };
 }
 
+/**
+ * 配置代理的既有 Active 浏览器未通过一次性真实出口匹配，是确定性的本次启动终局。
+ * 核心错误使用稳定 machine token；外壳据此停止自动重起，但不触碰那个预先存在的浏览器。
+ */
+function classifyAdsActiveProxyTakeoverFailure(line) {
+  const raw = String(line || '');
+  return {
+    rejected: /\[adspower_active_proxy_takeover_rejected\]|AdsPowerActiveProxyTakeoverError/.test(raw),
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 核心日志行的语义分类（change honest-core-log-severity）
 //
@@ -719,6 +730,7 @@ module.exports = {
   MEM_RESERVE_BYTES_DEFAULT,
   duplicateAccountGroups,
   decideRespawn,
+  classifyAdsActiveProxyTakeoverFailure,
   classifyAdsInUse,
   declaresCoreHalt,
   isFailureShapedLine,

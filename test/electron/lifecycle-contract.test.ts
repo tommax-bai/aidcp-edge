@@ -44,6 +44,24 @@ test('managed AdsPower child uses the parent FIFO without receiving the API key'
     'the still-current child must retain broker access while close/restore advances lifecycle generation');
 });
 
+test('configured Active-browser egress rejection is terminal without touching no-proxy startup', () => {
+  const spawn = functionSource('spawnEdgeChild', 'stopLoginPoller');
+  assert.match(spawn, /expectedProxyEgressIp = network\.expectedEgressIp/);
+  assert.match(spawn, /expectedEgressIp: expectedProxyEgressIp/);
+  assert.match(spawn, /if \(proxyAuthorityPayload\) spawnEnv\.AIDCP_ADS_PROXY_AUTHORITY_FD = '4'/,
+    'only configured-proxy payloads opt into the Active egress gate');
+
+  const start = functionSource('startEdge', 'stopLoginPoller');
+  assert.match(start, /activeProxyTakeoverRejectedThisRun = false/);
+  assert.match(start, /const decision = envInUse \|\| activeProxyTakeoverRejected[\s\S]{0,80}?\{ action: 'stop', streak: 0 \}/);
+  assert.match(start, /已停止本次启动且未关闭现有浏览器/);
+  assert.doesNotMatch(start, /activeProxyTakeoverRejected[\s\S]{0,200}?confirmOwnedProfileClosedFromShell/,
+    'terminal classification must not stop the pre-existing Active browser');
+
+  assert.match(edgeMain, /if \(activeProxyTakeover\) await verifyActiveProxyTakeover\(activeProxyTakeover\)/);
+  assert.match(edgeMain, /requireActiveProxyEgressMatch\(/);
+});
+
 test('every Electron AdsPower write client uses the same parent FIFO', () => {
   const constructors = main.match(/createAdsWriteApi\(\{[\s\S]*?\}\)/g) ?? [];
   assert.ok(constructors.length > 0, 'main process should construct managed write clients');

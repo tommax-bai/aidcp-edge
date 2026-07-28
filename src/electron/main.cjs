@@ -57,7 +57,11 @@ const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
 const commandDiagnostics = require('./command-diagnostics.cjs');
 const { normalizeProxyRuntime } = require('./proxy-runtime.cjs');
-const { createProxyPreflightController } = require('./proxy-preflight.cjs');
+const {
+  createProxyPreflightController,
+  preflightFacebookProxy,
+  probeProxyEgress,
+} = require('./proxy-preflight.cjs');
 const { createProxyChainManager } = require('./proxy-chain-manager.cjs');
 const { createProxyChainOrphanRegistry } = require('./proxy-chain-orphans.cjs');
 const { resolveGostBinaryPath } = require('./gost-binary.cjs');
@@ -428,6 +432,12 @@ function resolveClientAuthBase() {
   const enabled = process.env.AIDCP_CLIENT_AUTH_ENABLE === '1' || Boolean(settings && settings.clientAuthEnabled);
   if (!enabled) return '';
   return deriveClientAuthBaseFromCloudUrl(cloud.url);
+}
+function resolveEgressProbeUrl() {
+  const explicit = normalizeClientAuthUrl(process.env.AIDCP_EGRESS_PROBE_URL || '');
+  if (explicit) return explicit;
+  const clientAuthBase = resolveClientAuthBase();
+  return clientAuthBase ? `${clientAuthBase}/egress` : '';
 }
 function clientAuthEnabled() {
   return Boolean(resolveClientAuthBase());
@@ -1764,6 +1774,17 @@ async function readProxyForPreflight(profileId) {
 
 const proxyPreflight = createProxyPreflightController({
   readProxy: readProxyForPreflight,
+  probe: async (proxy, options) => {
+    const reachable = await preflightFacebookProxy(proxy, options);
+    if (reachable.state !== 'available') return reachable;
+    const egress = await probeProxyEgress(proxy, {
+      ...options,
+      targetUrl: resolveEgressProbeUrl(),
+    });
+    return egress.state === 'available'
+      ? { ...reachable, expectedEgressIp: egress.expectedEgressIp }
+      : { ...reachable, expectedEgressReason: egress.reason };
+  },
   onUpdate: (envId, snapshot) => {
     const handle = envs.get(envId);
     if (!handle || handle.removed) return;
@@ -4106,6 +4127,7 @@ async function spawnEdgeChild(handle, {
   const edgeCwd = appRoot.endsWith('.asar') ? path.dirname(appRoot) : appRoot;
   let spawnEnv;
   let proxyAuthorityPayload = null;
+  let expectedProxyEgressIp = null;
   if (handle.kind === 'adspower') {
     if (!cleanupBootstrap) {
       // 真正轮到 spawn 时再读取一次 Cloud revision；排队前的预检只可复用同 revision 的证据。
@@ -4113,6 +4135,9 @@ async function spawnEdgeChild(handle, {
       if (network.state === 'unavailable') {
         stopStartForProxyFailure(handle, network);
         return false;
+      }
+      if (typeof network.expectedEgressIp === 'string') {
+        expectedProxyEgressIp = network.expectedEgressIp;
       }
     }
     // 身份闸（红线）：冻结 env 注入唯一稳定身份；无法派生（缺分身 id）则诚实拒绝，绝不回落主机名。
@@ -4160,6 +4185,7 @@ async function spawnEdgeChild(handle, {
         originalProxy: handle.proxyAuthority,
         relayPort: endpoint.proxyPort,
         authorityRevision: handle.proxyAuthorityRevision,
+        ...(expectedProxyEgressIp ? { expectedEgressIp: expectedProxyEgressIp } : {}),
       };
       updateStatus(handle, { proxyMode: 'system_then_environment' });
     } else if (handle.proxyAuthority) {
@@ -4168,6 +4194,7 @@ async function spawnEdgeChild(handle, {
         mode: 'direct',
         originalProxy: handle.proxyAuthority,
         authorityRevision: handle.proxyAuthorityRevision,
+        ...(expectedProxyEgressIp ? { expectedEgressIp: expectedProxyEgressIp } : {}),
       };
       updateStatus(handle, { proxyMode: 'direct' });
     } else if (!cleanupBootstrap) {
@@ -4215,10 +4242,8 @@ async function spawnEdgeChild(handle, {
   handle.spawnCloudKey = resolvedCloudKey;
   // 出口探测复用与当前 dev/ol/custom 云选择一致的 Client Auth 公网基址。显式 env 仍可覆盖；
   // 不存在可用基址时不猜第三方服务，核心会诚实投影 unavailable。
-  const clientAuthBase = resolveClientAuthBase();
-  const explicitEgressProbe = normalizeClientAuthUrl(process.env.AIDCP_EGRESS_PROBE_URL || '');
-  if (explicitEgressProbe) spawnEnv.AIDCP_EGRESS_PROBE_URL = explicitEgressProbe;
-  else if (clientAuthBase) spawnEnv.AIDCP_EGRESS_PROBE_URL = `${clientAuthBase}/egress`;
+  const egressProbeUrl = resolveEgressProbeUrl();
+  if (egressProbeUrl) spawnEnv.AIDCP_EGRESS_PROBE_URL = egressProbeUrl;
   if (controlBootstrap) {
     // 与 AIDCP_ACCOUNT_ID 严格分离：后者会覆盖页面真实身份，绝不能承载可能陈旧的启动引导。
     spawnEnv.AIDCP_START_BROWSER_ABSENT = '1';
@@ -4250,6 +4275,7 @@ async function spawnEdgeChild(handle, {
   // 同理清「本次运行遇同账号并发占用拒启」标记：只反映本 core run 是否撞过 in-use 拒启，退出处据此判终局。
   handle.envInUseThisRun = false;
   handle.envInUseHolder = null;
+  handle.activeProxyTakeoverRejectedThisRun = false;
   handle.spawnedAtMs = Date.now();
   // 换会话把人设绑定态重置回**未知**（change persona-bound-tristate）：上一会话的 stale-true 不能残留成
   // 误显示「已设置」，但也绝不能归零成 false——那等于替云端宣布「未绑」，正是「已设置账号被反复误弹向导」
@@ -4745,8 +4771,12 @@ async function spawnEdgeChild(handle, {
     const envInUse = exitedAbnormally && handle.envInUseThisRun === true;
     const inUseHolder = handle.envInUseHolder ? `（AdsPower 账号 ${handle.envInUseHolder}）` : '';
     const inUseMsg = `环境被其它设备或窗口占用${inUseHolder}；已停止启动，请在占用它的一端关闭后再点「启动」重试。`;
+    const activeProxyTakeoverRejected = exitedAbnormally
+      && handle.activeProxyTakeoverRejectedThisRun === true;
+    const activeProxyTakeoverMsg =
+      'Active 浏览器真实出口与本次权威代理不匹配或无法核验；已停止本次启动且未关闭现有浏览器。请关闭该环境后重新启动。';
     // 有界重起决策（仅对异常退出计入；有意停止 / 不可重起终局一律 stop）。
-    const decision = envInUse
+    const decision = envInUse || activeProxyTakeoverRejected
       ? { action: 'stop', streak: 0 }
       : exitedAbnormally
         ? fleet.decideRespawn(
@@ -4807,6 +4837,8 @@ async function spawnEdgeChild(handle, {
       respawnGaveUp: gaveUp,
       lastMessage: envInUse
         ? inUseMsg
+        : activeProxyTakeoverRejected
+        ? activeProxyTakeoverMsg
         : stopReason === 'user_pause'
         ? '自动化已暂停，引擎和浏览器已关闭；数据管理仍可继续使用。'
         : stopReason === 'user_close'
@@ -4839,8 +4871,8 @@ async function spawnEdgeChild(handle, {
               ? '已暂停，随时可以恢复'
               : '引擎已停止',
       ),
-      ...(envInUse
-        ? edgeFailurePatch(inUseMsg)
+      ...(envInUse || activeProxyTakeoverRejected
+        ? edgeFailurePatch(envInUse ? inUseMsg : activeProxyTakeoverMsg)
         : exitedAbnormally
           ? abnormalExitFailurePatch(handle, code, signal)
           : clearEdgeFailurePatch(handle)),
@@ -4850,6 +4882,11 @@ async function spawnEdgeChild(handle, {
     if (envInUse) {
       // 不可重起终局：给专门的「环境被占用」通知，不带「重新登录」这类误导性提示。
       surfaceFailure(`AIDCP Edge${handle.name ? `（${handle.name}）` : ''} 环境被占用`, inUseMsg);
+    } else if (activeProxyTakeoverRejected) {
+      surfaceFailure(
+        `AIDCP Edge${handle.name ? `（${handle.name}）` : ''} 已停止接管 Active 浏览器`,
+        activeProxyTakeoverMsg,
+      );
     } else if (exitedAbnormally && (decision.streak === 1 || gaveUp)) {
       const adspowerHint = handle.kind === 'adspower'
         ? '请在该分身的浏览器窗口登录后，点击「重新登录」重试；并确认分身 ID 正确、指纹浏览器已就绪。'
@@ -5361,6 +5398,9 @@ function handleEdgeLogLine(handle, message, isError = false) {
       handle.envInUseThisRun = true;
       if (inUse.account) handle.envInUseHolder = inUse.account;
     }
+  }
+  if (!stopping && fleet.classifyAdsActiveProxyTakeoverFailure(message).rejected) {
+    handle.activeProxyTakeoverRejectedThisRun = true;
   }
   if (stopping) {
     if (!handle.removed) updateStatus(handle, { lastMessage: message });

@@ -7,7 +7,6 @@ import {
   SelfChromeProvider,
   AdsPowerProvider,
   BrowserProfileInUseError,
-  AdsPowerProxyAuthorityRestartRequiredError,
   readAdsPowerProxyAuthority,
   selectBrowserProvider,
 } from '../../src/cdp/index.js';
@@ -298,28 +297,33 @@ test('AdsPowerProvider.launch：V2 Active 返回有效端点时直接接管，�
   );
   const out = await provider.launch({ host: '127.0.0.1', port: 9222 });
   assert.equal(out.endpoint.port, 59167);
+  assert.equal(out.activeProxyTakeover, undefined, '未配置代理的 Active 环境不得进入代理接管闸');
   assert.equal(calls.filter((call) => call.url.includes('browser-profile/start')).length, 0);
 });
 
-test('AdsPowerProvider.launch：已配置代理权威时拒绝接管既有 Active 浏览器', async () => {
+test('AdsPowerProvider.launch：已配置代理权威的 Active 浏览器交付一次性出口接管证据，不改 profile、不重复 start', async () => {
   const calls: FetchCall[] = [];
   const fetchImpl = routedFetch([
     ['/api/v2/browser-profile/active', () => ({ code: 0, data: { status: 'Active', debug_port: '59167' } })],
+    ['/json/version', () => ({})],
   ], calls);
   const provider = new AdsPowerProvider(
     {
       apiBase: 'http://x:50325',
       userId: 'k1',
-      proxyAuthority: doubleHopAuthority,
+      proxyAuthority: { ...doubleHopAuthority, expectedEgressIp: '203.0.113.7' },
     },
     { fetchImpl, ...noopDeps },
   );
-  await assert.rejects(
-    provider.launch({ host: '127.0.0.1', port: 9222 }),
-    (error) => error instanceof AdsPowerProxyAuthorityRestartRequiredError
-      && error.code === 'adspower_proxy_authority_restart_required',
-  );
+  const out = await provider.launch({ host: '127.0.0.1', port: 9222 });
+  assert.equal(out.endpoint.port, 59167);
+  assert.deepEqual(out.activeProxyTakeover, {
+    profileId: 'k1',
+    expectedEgressIp: '203.0.113.7',
+  });
   assert.equal(calls.filter((call) => call.url.includes('browser-profile/start')).length, 0);
+  assert.equal(calls.filter((call) => call.url.includes('/api/v1/user/update')).length, 0);
+  assert.equal(calls.filter((call) => call.url.includes('/api/v1/user/list')).length, 0);
 });
 
 test('代理权威从匿名 fd 读取，direct 目标严格等于原环境代理且不读取旧 override env', () => {
@@ -328,6 +332,7 @@ test('代理权威从匿名 fd 读取，direct 目标严格等于原环境代理
     mode: 'direct',
     authorityRevision: 7,
     originalProxy,
+    expectedEgressIp: '::ffff:203.0.113.7',
   })) as any;
   const authority = readAdsPowerProxyAuthority(
     {
@@ -336,7 +341,13 @@ test('代理权威从匿名 fd 读取，direct 目标严格等于原环境代理
     },
     readFile,
   );
-  assert.deepEqual(authority, { mode: 'direct', authorityRevision: 7, originalProxy, targetProxy: originalProxy });
+  assert.deepEqual(authority, {
+    mode: 'direct',
+    authorityRevision: 7,
+    originalProxy,
+    targetProxy: originalProxy,
+    expectedEgressIp: '203.0.113.7',
+  });
   assert.equal(readAdsPowerProxyAuthority({}), undefined);
   assert.throws(
     () => readAdsPowerProxyAuthority(
@@ -350,6 +361,19 @@ test('代理权威从匿名 fd 读取，direct 目标严格等于原环境代理
       })) as any,
     ),
     /GOST loopback/,
+  );
+  assert.throws(
+    () => readAdsPowerProxyAuthority(
+      { AIDCP_ADS_PROXY_AUTHORITY_FD: '4' },
+      (() => JSON.stringify({
+        version: 1,
+        mode: 'direct',
+        authorityRevision: 7,
+        originalProxy,
+        expectedEgressIp: 'not-an-ip',
+      })) as any,
+    ),
+    /出口证据无效/,
   );
 });
 
