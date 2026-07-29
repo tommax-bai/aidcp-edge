@@ -154,6 +154,12 @@ const DEFAULT_BLOCKING_POLL_MS = 250;
 // 留在 30s 会让内层几乎顶满外层（已被 fake-CDP 用例当场抓到倒挂）。
 // 抬默认档只放大**容错**，不改变任何成功路径的行为；对另两个平台的唯一影响是诚实失败晚 15s 暴露。
 const DEFAULT_NATIVE_COMMAND_TIMEOUT_MS = 45_000;
+/**
+ * Facebook Feed 到底确认最多经历八轮固定 12.5s 五样本序列；再叠加滚轮、判稳、
+ * 身份采集与恢复，合法有界路径可超过 135s。沿用 Facebook 会话现有 180s 上限，
+ * 防止外层先把具名 Feed 结论合成为 CdpTimeout。
+ */
+const FACEBOOK_FEED_SCROLL_TIMEOUT_MS = 180_000;
 const FACEBOOK_GROUP_JOIN_TIMEOUT_MS = 135_000;
 /**
  * 空关键词首帖开帖的原子上限（change restore-facebook-post-join-comment-continuity）。
@@ -439,6 +445,9 @@ export class NativeBrowseSession implements EdgeBrowseSession {
 
   private facebookCommandTimeoutMs(command: Parameters<NativePageRuntime['execute']>[1]): number {
     if (this.options.platform !== 'facebook') return DEFAULT_NATIVE_COMMAND_TIMEOUT_MS;
+    if (command.kind === 'browse_scroll' || command.kind === 'page_scroll') {
+      return FACEBOOK_FEED_SCROLL_TIMEOUT_MS;
+    }
     if (command.kind === 'group_join') return FACEBOOK_GROUP_JOIN_TIMEOUT_MS;
     if (
       command.kind === 'note_open'

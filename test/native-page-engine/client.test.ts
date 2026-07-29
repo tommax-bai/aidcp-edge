@@ -75,7 +75,7 @@ test('permits only the capability-specific Facebook long command ceilings', asyn
   const session = await client('success').openSession({
     ...input,
     platform: 'facebook',
-    timeoutMs: 90_000,
+    timeoutMs: 180_000,
     sessionId: 'session-facebook-join',
     taskId: 'task-facebook-join',
   });
@@ -91,6 +91,14 @@ test('permits only the capability-specific Facebook long command ceilings', asyn
       accountId: '61591824155856',
     },
   }, 90_000);
+  await session.execute({
+    kind: 'browse_scroll',
+    params: { reason: 'initial_scan' },
+  }, 180_000);
+  await session.execute({
+    kind: 'page_scroll',
+    params: { reason: 'feed_scroll' },
+  }, 180_000);
   // 空关键词首帖开帖（change restore-facebook-post-join-comment-continuity）。
   // 这一条**必须走真实准入校验**：桩运行时的单测只看「请求了多少毫秒」、绕过本校验，
   // 于是 2026-07-29 真机上每一次首帖开帖都被判 invalid_request、毫秒级被拒，
@@ -120,6 +128,17 @@ test('permits only the capability-specific Facebook long command ceilings', asyn
       value: 'Vietnamese body',
     },
   }, 400_000);
+  await assert.rejects(
+    session.execute({
+      kind: 'page_scroll',
+      params: { reason: 'feed_scroll' },
+    }, 180_001),
+    (error: unknown) => {
+      assert.ok(error instanceof NativePageEngineError);
+      assert.equal(error.code, 'invalid_request');
+      return true;
+    },
+  );
   await assert.rejects(
     session.execute({
       kind: 'interaction_comment',

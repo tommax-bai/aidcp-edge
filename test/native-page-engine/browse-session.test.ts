@@ -257,7 +257,7 @@ test('Native Facebook keeps an existing generic observation authoritative over g
   assert.equal('groupObservation' in h.actions[0]!, false);
 });
 
-test('Native Facebook assigns only Join and length-aware comments a long command budget', async () => {
+test('Native Facebook keeps Join, comments, and ordinary refresh on their command-specific budgets', async () => {
   const h = harness(async () => ({
     ok: true,
     effectPhase: 'confirmed',
@@ -707,9 +707,11 @@ test('Native Facebook task resume preserves the current page until the next deli
     ['browse_scroll'],
     'task release must not issue another initial_scan that navigates Facebook home',
   );
+  assert.equal(h.executions[0]?.timeoutMs, 180_000, 'initial Feed scroll uses the long budget');
 
   await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
   assert.equal(h.executions.at(-1)?.command.kind, 'page_scroll', 'resume still unblocks the next explicit command');
+  assert.equal(h.executions.at(-1)?.timeoutMs, 180_000, 'explicit Feed scroll uses the long budget');
   h.session.close();
 });
 

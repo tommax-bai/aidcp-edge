@@ -388,7 +388,8 @@ pub(crate) async fn execute_facebook_feed_scroll(
             continue;
         }
 
-        let (confirmation, confirmed) = confirm_facebook_feed_bottom(session, &after).await?;
+        let (confirmation, confirmed) =
+            confirm_facebook_feed_bottom(session, &after, cancellation, deadline_unix_ms).await?;
         saw_any_card |= !confirmed.cards.is_empty();
         let movement = PageMovement {
             before: start_y,
@@ -660,6 +661,14 @@ fn facebook_feed_settle_key(
 /// 于是面别守卫放开了、证据链仍然走不到，到底确认在三个列表面上都拿不到。
 /// 语义不变——只要页面还在长就继续下滚、绝不判到底。取值是否仍适用于 Native 版式见真机项 9.12。
 const FACEBOOK_FEED_LAZYLOAD_GROWTH_PX: f64 = 100.0;
+const FACEBOOK_FEED_BOTTOM_SAMPLE_OFFSETS: [Duration; 5] = [
+    Duration::from_secs(0),
+    Duration::from_secs(5),
+    Duration::from_millis(7_500),
+    Duration::from_secs(10),
+    Duration::from_millis(12_500),
+];
+const FACEBOOK_FEED_BOTTOM_SAMPLE_COUNT: usize = FACEBOOK_FEED_BOTTOM_SAMPLE_OFFSETS.len();
 
 fn facebook_feed_height_grew(
     before: &facebook::FacebookFeedProbe,
@@ -668,20 +677,25 @@ fn facebook_feed_height_grew(
     after.scroll_height > before.scroll_height + FACEBOOK_FEED_LAZYLOAD_GROWTH_PX
 }
 
+fn record_facebook_explicit_end_sample(samples: usize, explicit_end: bool) -> usize {
+    if explicit_end { samples + 1 } else { 0 }
+}
+
 fn classify_facebook_bottom_confirmation(
     initial: &facebook::FacebookFeedProbe,
     current: &facebook::FacebookFeedProbe,
+    samples_seen: usize,
     explicit_end_samples: usize,
-    elapsed: Duration,
-    confirmation_window: Duration,
 ) -> FacebookBottomConfirmationState {
     let same_generation =
         current.url == initial.url && current.document_generation == initial.document_generation;
-    // 面别条件：两次探测都在**已声明的列表面**上，且确认窗内不许换面。
-    // 只放开循环里的守卫而不动这里，确认会照样判无效 → 到底状态依然不可达。
+    // 每个样本都必须留在同一个已声明列表面。确认函数会在任一样本失效时立即退出，
+    // 因而这里逐样本与 initial 对比即可锁住完整五样本证据链。
     let invalidated = !facebook_list_surface(&initial.surface)
         || initial.surface != current.surface
         || !same_generation
+        || initial.loading
+        || !facebook_near_bottom(initial)
         || current.loading
         || !facebook_near_bottom(current)
         || facebook_feed_height_grew(initial, current)
@@ -689,42 +703,105 @@ fn classify_facebook_bottom_confirmation(
     if invalidated {
         return FacebookBottomConfirmationState::Invalidated;
     }
-    if current.explicit_end && explicit_end_samples >= 2 {
+    if samples_seen < FACEBOOK_FEED_BOTTOM_SAMPLE_COUNT {
+        return FacebookBottomConfirmationState::Waiting;
+    }
+    if explicit_end_samples == FACEBOOK_FEED_BOTTOM_SAMPLE_COUNT {
         return FacebookBottomConfirmationState::ExplicitEnd;
     }
-    if elapsed >= confirmation_window {
-        return FacebookBottomConfirmationState::WindowStable;
-    }
-    FacebookBottomConfirmationState::Waiting
+    FacebookBottomConfirmationState::WindowStable
 }
 
 async fn confirm_facebook_feed_bottom(
     session: &mut EngineSession,
     initial: &facebook::FacebookFeedProbe,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
 ) -> Result<(FacebookBottomConfirmationState, facebook::FacebookFeedProbe), EngineError> {
     let started = tokio::time::Instant::now();
-    let deadline = started + FACEBOOK_FEED_SETTLE_IN_PLACE;
     let mut explicit_end_samples = usize::from(initial.explicit_end);
-    loop {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let current = probe_facebook_feed(session).await?;
-        explicit_end_samples = if current.explicit_end {
-            explicit_end_samples + 1
-        } else {
-            0
-        };
+    let initial_state =
+        classify_facebook_bottom_confirmation(initial, initial, 1, explicit_end_samples);
+    if initial_state != FacebookBottomConfirmationState::Waiting {
+        return Ok((initial_state, initial.clone()));
+    }
+
+    let mut current = initial.clone();
+    for (sample_index, offset) in FACEBOOK_FEED_BOTTOM_SAMPLE_OFFSETS
+        .iter()
+        .enumerate()
+        .skip(1)
+    {
+        // 以 t=0 为锚点等待绝对偏移，避免探针本身的耗时逐轮累积到采样节奏里。
+        wait_for_facebook_bottom_sample(started, *offset, cancellation, deadline_unix_ms).await?;
+        let sample = probe_facebook_feed(session).await?;
+        explicit_end_samples =
+            record_facebook_explicit_end_sample(explicit_end_samples, sample.explicit_end);
         let state = classify_facebook_bottom_confirmation(
             initial,
-            &current,
+            &sample,
+            sample_index + 1,
             explicit_end_samples,
-            started.elapsed(),
-            FACEBOOK_FEED_SETTLE_IN_PLACE,
         );
         if state != FacebookBottomConfirmationState::Waiting {
-            return Ok((state, current));
+            return Ok((state, sample));
         }
-        if tokio::time::Instant::now() >= deadline {
-            return Ok((FacebookBottomConfirmationState::WindowStable, current));
+        current = sample;
+    }
+
+    // 固定计划的第五个样本必然会返回终态；若未来有人改坏计数关系，保守回非耗尽，
+    // 不把内部不一致提升成切换 Reels 的授权。
+    Ok((FacebookBottomConfirmationState::WindowStable, current))
+}
+
+async fn wait_for_facebook_bottom_sample(
+    started: tokio::time::Instant,
+    offset: Duration,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<(), EngineError> {
+    if facebook_command_cancelled(cancellation) {
+        return Err(EngineError::new(
+            ErrorCode::Cancelled,
+            "native Facebook bottom confirmation cancelled",
+        ));
+    }
+    let remaining_ms = deadline_unix_ms.saturating_sub(unix_time_ms());
+    if remaining_ms == 0 {
+        return Err(EngineError::new(
+            ErrorCode::CdpTimeout,
+            "native Facebook bottom confirmation exceeded its command deadline",
+        ));
+    }
+
+    let sample_wait = tokio::time::sleep_until(started + offset);
+    let deadline_wait = tokio::time::sleep(Duration::from_millis(remaining_ms));
+    tokio::pin!(sample_wait);
+    tokio::pin!(deadline_wait);
+
+    if let Some(flag) = cancellation {
+        let cancellation_wait = wait_for_cancellation(flag);
+        tokio::pin!(cancellation_wait);
+        tokio::select! {
+            biased;
+            _ = &mut cancellation_wait => Err(EngineError::new(
+                ErrorCode::Cancelled,
+                "native Facebook bottom confirmation cancelled",
+            )),
+            _ = &mut deadline_wait => Err(EngineError::new(
+                ErrorCode::CdpTimeout,
+                "native Facebook bottom confirmation exceeded its command deadline",
+            )),
+            _ = &mut sample_wait => Ok(()),
+        }
+    } else {
+        tokio::select! {
+            biased;
+            _ = &mut deadline_wait => Err(EngineError::new(
+                ErrorCode::CdpTimeout,
+                "native Facebook bottom confirmation exceeded its command deadline",
+            )),
+            _ = &mut sample_wait => Ok(()),
         }
     }
 }
@@ -1263,15 +1340,92 @@ mod tests {
         let grown = feed_probe(2_900.0, 2_000.0, false, false);
 
         assert_eq!(
-            classify_facebook_bottom_confirmation(
-                &initial,
-                &grown,
-                0,
-                FACEBOOK_FEED_SETTLE_IN_PLACE,
-                FACEBOOK_FEED_SETTLE_IN_PLACE,
-            ),
+            classify_facebook_bottom_confirmation(&initial, &grown, 2, 0),
             FacebookBottomConfirmationState::Invalidated
         );
+    }
+
+    #[test]
+    fn any_structural_change_invalidates_bottom_confirmation() {
+        let initial = feed_probe(2_400.0, 1_500.0, false, true);
+
+        let mut loading = initial.clone();
+        loading.loading = true;
+        let mut left_bottom = initial.clone();
+        left_bottom.scroll_y = 0.0;
+        let mut changed_generation = initial.clone();
+        changed_generation.document_generation = Some("doc-2".to_owned());
+        let mut new_card = initial.clone();
+        new_card.cards = probe_with_one_card(false).cards;
+
+        for (change, sample) in [
+            ("loading", loading),
+            ("left bottom", left_bottom),
+            ("document generation", changed_generation),
+            ("card identity set", new_card),
+        ] {
+            assert_eq!(
+                classify_facebook_bottom_confirmation(&initial, &sample, 2, 2),
+                FacebookBottomConfirmationState::Invalidated,
+                "{change} must invalidate the sequence"
+            );
+        }
+
+        let initial_loading = feed_probe(2_400.0, 1_500.0, true, true);
+        assert_eq!(
+            classify_facebook_bottom_confirmation(&initial_loading, &initial_loading, 1, 1,),
+            FacebookBottomConfirmationState::Invalidated,
+            "t=0 证据无效时不得由后续样本覆盖"
+        );
+    }
+
+    #[test]
+    fn bottom_confirmation_uses_the_exact_five_sample_schedule() {
+        assert_eq!(
+            FACEBOOK_FEED_BOTTOM_SAMPLE_OFFSETS,
+            [
+                Duration::from_secs(0),
+                Duration::from_secs(5),
+                Duration::from_millis(7_500),
+                Duration::from_secs(10),
+                Duration::from_millis(12_500),
+            ]
+        );
+        assert_eq!(FACEBOOK_FEED_BOTTOM_SAMPLE_COUNT, 5);
+    }
+
+    #[tokio::test]
+    async fn bottom_confirmation_wait_obeys_cancellation_and_command_deadline() {
+        let cancellation = AtomicBool::new(false);
+        let cancel = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            cancellation.store(true, std::sync::atomic::Ordering::Release);
+        };
+        let wait = wait_for_facebook_bottom_sample(
+            tokio::time::Instant::now(),
+            Duration::from_secs(5),
+            Some(&cancellation),
+            unix_time_ms() + 60_000,
+        );
+        let (_, cancelled) = tokio::time::timeout(Duration::from_millis(250), async {
+            tokio::join!(cancel, wait)
+        })
+        .await
+        .expect("cancellation must interrupt the five-second wait");
+        assert_eq!(
+            cancelled.expect_err("cancelled wait must fail").code,
+            ErrorCode::Cancelled
+        );
+
+        let expired = wait_for_facebook_bottom_sample(
+            tokio::time::Instant::now(),
+            Duration::from_secs(5),
+            None,
+            unix_time_ms(),
+        )
+        .await
+        .expect_err("expired command deadline must interrupt the wait");
+        assert_eq!(expired.code, ErrorCode::CdpTimeout);
     }
 
     #[test]
@@ -1280,23 +1434,11 @@ mod tests {
         let stable = initial.clone();
 
         assert_eq!(
-            classify_facebook_bottom_confirmation(
-                &initial,
-                &stable,
-                0,
-                FACEBOOK_FEED_SETTLE_IN_PLACE - Duration::from_millis(1),
-                FACEBOOK_FEED_SETTLE_IN_PLACE,
-            ),
+            classify_facebook_bottom_confirmation(&initial, &stable, 4, 0),
             FacebookBottomConfirmationState::Waiting
         );
         assert_eq!(
-            classify_facebook_bottom_confirmation(
-                &initial,
-                &stable,
-                0,
-                FACEBOOK_FEED_SETTLE_IN_PLACE,
-                FACEBOOK_FEED_SETTLE_IN_PLACE,
-            ),
+            classify_facebook_bottom_confirmation(&initial, &stable, 5, 0),
             FacebookBottomConfirmationState::WindowStable
         );
         assert_eq!(
@@ -1306,24 +1448,59 @@ mod tests {
     }
 
     #[test]
-    fn stable_explicit_end_marker_is_terminal_on_home_bottom() {
-        let initial = feed_probe(2_400.0, 1_500.0, false, false);
+    fn explicit_end_cannot_finish_before_the_fifth_sample() {
+        let initial = feed_probe(2_400.0, 1_500.0, false, true);
         let terminal = feed_probe(2_400.0, 1_500.0, false, true);
 
+        for samples_seen in 1..FACEBOOK_FEED_BOTTOM_SAMPLE_COUNT {
+            assert_eq!(
+                classify_facebook_bottom_confirmation(
+                    &initial,
+                    &terminal,
+                    samples_seen,
+                    samples_seen,
+                ),
+                FacebookBottomConfirmationState::Waiting,
+                "第 {samples_seen} 次样本不得提前确认耗尽"
+            );
+        }
         assert_eq!(
-            classify_facebook_bottom_confirmation(
-                &initial,
-                &terminal,
-                2,
-                Duration::from_millis(500),
-                FACEBOOK_FEED_SETTLE_IN_PLACE,
-            ),
-            FacebookBottomConfirmationState::ExplicitEnd
+            classify_facebook_bottom_confirmation(&initial, &terminal, 5, 5),
+            FacebookBottomConfirmationState::ExplicitEnd,
         );
         assert_eq!(
             facebook_bottom_completion_reason(FacebookBottomConfirmationState::ExplicitEnd),
             Some("feed_exhausted")
         );
+    }
+
+    #[test]
+    fn any_missing_explicit_end_sample_finishes_as_window_stable() {
+        for missing_index in 0..FACEBOOK_FEED_BOTTOM_SAMPLE_COUNT {
+            let initial = feed_probe(2_400.0, 1_500.0, false, missing_index != 0);
+            let mut explicit_end_samples = usize::from(initial.explicit_end);
+            let mut state =
+                classify_facebook_bottom_confirmation(&initial, &initial, 1, explicit_end_samples);
+
+            for sample_index in 1..FACEBOOK_FEED_BOTTOM_SAMPLE_COUNT {
+                let sample = feed_probe(2_400.0, 1_500.0, false, sample_index != missing_index);
+                explicit_end_samples =
+                    record_facebook_explicit_end_sample(explicit_end_samples, sample.explicit_end);
+                state = classify_facebook_bottom_confirmation(
+                    &initial,
+                    &sample,
+                    sample_index + 1,
+                    explicit_end_samples,
+                );
+            }
+
+            assert_eq!(
+                state,
+                FacebookBottomConfirmationState::WindowStable,
+                "第 {} 次缺少 explicit_end 时不得确认耗尽",
+                missing_index + 1
+            );
+        }
     }
 
     #[test]
@@ -1347,29 +1524,17 @@ mod tests {
     #[test]
     fn every_declared_list_surface_can_reach_a_terminal_bottom_state() {
         for surface in ["home", "search", "group"] {
-            let initial = surfaced_feed_probe(surface, 2_400.0, 1_500.0, false, false);
+            let initial = surfaced_feed_probe(surface, 2_400.0, 1_500.0, false, true);
             let terminal = surfaced_feed_probe(surface, 2_400.0, 1_500.0, false, true);
             assert_eq!(
-                classify_facebook_bottom_confirmation(
-                    &initial,
-                    &terminal,
-                    2,
-                    Duration::from_millis(500),
-                    FACEBOOK_FEED_SETTLE_IN_PLACE,
-                ),
+                classify_facebook_bottom_confirmation(&initial, &terminal, 5, 5),
                 FacebookBottomConfirmationState::ExplicitEnd,
                 "{surface} must be able to reach an explicit end"
             );
 
-            let stable = initial.clone();
+            let stable = surfaced_feed_probe(surface, 2_400.0, 1_500.0, false, false);
             assert_eq!(
-                classify_facebook_bottom_confirmation(
-                    &initial,
-                    &stable,
-                    0,
-                    FACEBOOK_FEED_SETTLE_IN_PLACE,
-                    FACEBOOK_FEED_SETTLE_IN_PLACE,
-                ),
+                classify_facebook_bottom_confirmation(&stable, &stable, 5, 0),
                 FacebookBottomConfirmationState::WindowStable,
                 "{surface} must be able to reach a stable window"
             );
@@ -1381,25 +1546,13 @@ mod tests {
         let initial = surfaced_feed_probe("group", 2_400.0, 1_500.0, false, true);
         let moved = surfaced_feed_probe("home", 2_400.0, 1_500.0, false, true);
         assert_eq!(
-            classify_facebook_bottom_confirmation(
-                &initial,
-                &moved,
-                2,
-                Duration::from_millis(500),
-                FACEBOOK_FEED_SETTLE_IN_PLACE,
-            ),
+            classify_facebook_bottom_confirmation(&initial, &moved, 2, 2),
             FacebookBottomConfirmationState::Invalidated
         );
 
         let detail = surfaced_feed_probe("group_post", 2_400.0, 1_500.0, false, true);
         assert_eq!(
-            classify_facebook_bottom_confirmation(
-                &detail,
-                &detail.clone(),
-                2,
-                Duration::from_millis(500),
-                FACEBOOK_FEED_SETTLE_IN_PLACE,
-            ),
+            classify_facebook_bottom_confirmation(&detail, &detail.clone(), 1, 1),
             FacebookBottomConfirmationState::Invalidated,
             "非列表面上根本不该做到底确认"
         );
@@ -1476,13 +1629,7 @@ mod tests {
             let initial = surfaced_feed_probe(surface, 2_400.0, 1_500.0, false, true);
             let reflowed = surfaced_feed_probe(surface, 2_460.0, 1_500.0, false, true);
             assert_eq!(
-                classify_facebook_bottom_confirmation(
-                    &initial,
-                    &reflowed,
-                    2,
-                    Duration::from_millis(500),
-                    FACEBOOK_FEED_SETTLE_IN_PLACE,
-                ),
+                classify_facebook_bottom_confirmation(&initial, &reflowed, 5, 5),
                 FacebookBottomConfirmationState::ExplicitEnd,
                 "{surface} 上 60px 重排不该把到底确认打掉"
             );

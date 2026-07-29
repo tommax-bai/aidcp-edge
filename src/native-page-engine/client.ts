@@ -21,6 +21,7 @@ const DEFAULT_NATIVE_TIMEOUT_MS = 5_000;
  * 桩运行时的单测**绕过本校验**，故 `client.test.ts` 里另有走真实校验的回归。
  */
 const MAX_NATIVE_TIMEOUT_MS = 45_000;
+const MAX_FACEBOOK_FEED_SCROLL_TIMEOUT_MS = 180_000;
 const MAX_FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS = 60_000;
 const MAX_FACEBOOK_COMMENT_TIMEOUT_MS = 180_000;
 const MAX_FACEBOOK_GROUP_JOIN_TIMEOUT_MS = 135_000;
@@ -1187,7 +1188,9 @@ function validateCommandTimeout(
 ): void {
   const maxTimeoutMs = platform !== 'facebook'
     ? MAX_NATIVE_TIMEOUT_MS
-    : command.kind === 'publish_fill_field'
+    : command.kind === 'browse_scroll' || command.kind === 'page_scroll'
+      ? MAX_FACEBOOK_FEED_SCROLL_TIMEOUT_MS
+      : command.kind === 'publish_fill_field'
       ? MAX_FACEBOOK_PUBLISH_FILL_TIMEOUT_MS
       : command.kind === 'interaction_comment'
         ? MAX_FACEBOOK_COMMENT_TIMEOUT_MS

@@ -42,6 +42,12 @@ const engine = read('native/page-engine/src/engine.rs');
 /** 每个命令族：① 请求值 → ② 准入上限 → ④ 引擎天花板。 */
 const FAMILIES = [
   {
+    name: 'Feed 滚动',
+    request: constMs(browseSession, 'FACEBOOK_FEED_SCROLL_TIMEOUT_MS'),
+    admission: constMs(client, 'MAX_FACEBOOK_FEED_SCROLL_TIMEOUT_MS'),
+    ceiling: constMs(engine, 'FACEBOOK_FEED_SCROLL_TIMEOUT_MS'),
+  },
+  {
     name: '加群',
     request: constMs(browseSession, 'FACEBOOK_GROUP_JOIN_TIMEOUT_MS'),
     admission: constMs(client, 'MAX_FACEBOOK_GROUP_JOIN_TIMEOUT_MS'),
