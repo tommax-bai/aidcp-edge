@@ -34,6 +34,7 @@ const MAX_CAPTCHA_SNAPSHOTS: usize = 8;
 //   ③ 会话超时 src/native-page-engine/runtime.ts（此处取 session.min(ceiling)，会话值小就静默夹回）
 // 四层任缺其一都不会有编译错误，失败形态却各不相同（被拒 / 静默失效）。
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 45_000;
+const FACEBOOK_FEED_SCROLL_TIMEOUT_MS: u64 = 180_000;
 const FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS: u64 = 60_000;
 const FACEBOOK_COMMENT_TIMEOUT_MS: u64 = 180_000;
 const FACEBOOK_GROUP_JOIN_TIMEOUT_MS: u64 = 135_000;
@@ -1660,6 +1661,13 @@ fn command_timeout_ceiling(platform: Platform, command: &NativeCommand) -> u64 {
     if platform == Platform::Facebook && matches!(command, NativeCommand::PublishFillField(_)) {
         FACEBOOK_PUBLISH_FILL_TIMEOUT_MS
     } else if platform == Platform::Facebook
+        && matches!(
+            command,
+            NativeCommand::BrowseScroll(_) | NativeCommand::PageScroll(_)
+        )
+    {
+        FACEBOOK_FEED_SCROLL_TIMEOUT_MS
+    } else if platform == Platform::Facebook
         && matches!(command, NativeCommand::InteractionComment(_))
     {
         FACEBOOK_COMMENT_TIMEOUT_MS
@@ -1757,6 +1765,8 @@ mod tests {
             reason: None,
             think_ms: None,
         });
+        let browse_scroll = NativeCommand::BrowseScroll(crate::command::ReasonParams::default());
+        let page_scroll = NativeCommand::PageScroll(crate::command::PageScrollParams::default());
         let probe = NativeCommand::PageProbe(crate::command::EmptyParams::default());
         assert_eq!(
             command_timeout_ceiling(Platform::Facebook, &join),
@@ -1773,6 +1783,14 @@ mod tests {
         assert_eq!(
             command_timeout_ceiling(Platform::Facebook, &comment),
             FACEBOOK_COMMENT_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ceiling(Platform::Facebook, &browse_scroll),
+            FACEBOOK_FEED_SCROLL_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ceiling(Platform::Facebook, &page_scroll),
+            FACEBOOK_FEED_SCROLL_TIMEOUT_MS
         );
         assert_eq!(
             command_timeout_ceiling(Platform::Facebook, &probe),
@@ -1806,6 +1824,22 @@ mod tests {
         assert_eq!(
             command_timeout_ms_for(Platform::Facebook, FACEBOOK_SESSION_TIMEOUT_MS, &comment),
             FACEBOOK_COMMENT_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ms_for(
+                Platform::Facebook,
+                FACEBOOK_SESSION_TIMEOUT_MS,
+                &browse_scroll,
+            ),
+            FACEBOOK_FEED_SCROLL_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ms_for(
+                Platform::Facebook,
+                FACEBOOK_SESSION_TIMEOUT_MS,
+                &page_scroll,
+            ),
+            FACEBOOK_FEED_SCROLL_TIMEOUT_MS
         );
         // 会话超时偏小时天花板**被静默夹回**——这正是 2026-07-29 那类漏改的失败形态：
         // 看着改了天花板，实际跑的还是旧值，且没有任何错误可看。
