@@ -950,8 +950,8 @@ async fn recover_facebook_feed_prompt(
         ));
     }
 
-    // 前台化可能引发布局重排，因此坐标必须在 bringToFront 之后重新读取，不能使用 feed_probe 的旧点位。
-    session.cdp.bring_to_front().await?;
+    // feed_probe 的坐标只证明当时可见；可信点击前必须重新读取，不能使用可能已随布局变化的旧点位。
+    // 是否允许前台化由 page_scroll 公共入口按 watchdog reason 单点决定，本恢复分支不得再抢焦点。
     let target = probe_facebook_feed_recovery_target(session).await?;
     if !target.ok {
         return Ok(match target.reason.as_deref() {

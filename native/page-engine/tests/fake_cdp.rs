@@ -266,6 +266,12 @@ async fn facebook_feed_scroll_dispatches_a_humanized_multi_frame_wheel_gesture()
 
     engine.shutdown().await;
     let requests = server.await.expect("Facebook Feed scroll fake CDP");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Page.bringToFront"),
+        "routine Feed scroll must remain in the background"
+    );
     let move_index = requests
         .iter()
         .position(|request| {
@@ -309,9 +315,9 @@ async fn facebook_feed_recovery_uses_one_trusted_cdp_click_before_returning_card
     let mut open = session_open(port);
     open.params.platform = Platform::Facebook;
     // 与「等不到后置状态」那条同源：命令原子预算 = min(会话 timeout_ms, 命令种类上限)，
-    // 而 `session_open` 默认只有 2s。恢复链是「导航 + 判稳 + 前台化 + 取点 + 点击 + 后置确认」，
+    // 而 `session_open` 默认只有 2s。恢复链是「导航 + 判稳 + 取点 + 点击 + 后置确认」，
     // 机器有负载时这 2s 会在点到之前就用光，回执退化成合成 CdpTimeout（trace 里只到 feed_probe，
-    // 没有 bringToFront / dispatchMouseEvent）。取 90s，让判定与机器负载无关。
+    // 没有 dispatchMouseEvent）。取 90s，让判定与机器负载无关。
     open.params.timeout_ms = 90_000;
     engine.open(&open).await.expect("open Facebook session");
     let mut command = browse_command(1);
@@ -346,9 +352,59 @@ async fn facebook_feed_recovery_uses_one_trusted_cdp_click_before_returning_card
     );
 
     assert_eq!(router_call_count(&requests, "feed_recovery_target"), 1);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Page.bringToFront"),
+        "initial Feed recovery must not independently foreground AdsPower"
+    );
     assert_humanized_single_click(&requests);
     // 落点判据从「所有鼠标事件都恰在目标坐标」改为「按下 / 抬起落在目标的有界抖动内且同点」：
     // 移动帧本来就沿轨迹分布，逐帧钉死目标坐标等于要求瞬移。抖动上限与原语的落点抖动同源。
+    assert_pointer_commit_near(&requests, 540.0, 330.0);
+}
+
+#[tokio::test]
+async fn facebook_watchdog_feed_recovery_foregrounds_once_without_duplicate_activation() {
+    let (port, server) = spawn_facebook_feed_recovery_cdp(true).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 90_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "watchdog-feed-recovery-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 30_000,
+            command: NativeCommand::PageScroll(PageScrollParams {
+                reason: Some("idle_recover_nudge".to_owned()),
+                dwell_ms: None,
+            }),
+        })
+        .await
+        .expect("watchdog Feed recovery");
+
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    engine.shutdown().await;
+    let requests = server
+        .await
+        .expect("watchdog Facebook Feed recovery fake CDP");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "Page.bringToFront")
+            .count(),
+        1,
+        "Feed recovery must not add a second foreground activation"
+    );
+    assert_eq!(router_call_count(&requests, "feed_recovery_target"), 1);
+    assert_eq!(pointer_event_count(&requests, "mousePressed"), 1);
+    assert_eq!(pointer_event_count(&requests, "mouseReleased"), 1);
     assert_pointer_commit_near(&requests, 540.0, 330.0);
 }
 
@@ -388,11 +444,17 @@ async fn facebook_feed_recovery_click_without_home_postcondition_is_ambiguous() 
         Some("feed_recovery_navigation_unconfirmed")
     );
 
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Page.bringToFront"),
+        "unconfirmed Feed recovery must remain in the background"
+    );
     assert_humanized_single_click(&requests);
 }
 
 #[tokio::test]
-async fn facebook_reel_scroll_uses_trusted_arrow_and_requires_identity_movement() {
+async fn facebook_watchdog_reel_scroll_foregrounds_once_before_trusted_arrow() {
     let (port, server) = spawn_facebook_reel_arrow_cdp().await;
     let mut engine = Engine::default();
     let mut open = session_open(port);
@@ -408,7 +470,7 @@ async fn facebook_reel_scroll_uses_trusted_arrow_and_requires_identity_movement(
             command_id: 1,
             deadline_unix_ms: unix_time_ms() + 5_000,
             command: NativeCommand::PageScroll(PageScrollParams {
-                reason: Some("feed_scroll".to_owned()),
+                reason: Some("idle_recover_nudge".to_owned()),
                 dwell_ms: Some(7_000),
             }),
         })
@@ -434,7 +496,15 @@ async fn facebook_reel_scroll_uses_trusted_arrow_and_requires_identity_movement(
     let foreground = requests
         .iter()
         .position(|request| request["method"] == "Page.bringToFront")
-        .expect("Facebook page scroll must foreground the exact target");
+        .expect("watchdog Facebook page scroll must foreground the exact target");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "Page.bringToFront")
+            .count(),
+        1,
+        "one watchdog scroll must foreground exactly once"
+    );
     let first_input = requests
         .iter()
         .position(|request| request["method"] == "Input.dispatchKeyEvent")
@@ -498,6 +568,12 @@ async fn facebook_anonymous_reel_scroll_uses_horizontal_arrow_and_requires_canon
     assert!(
         requests
             .iter()
+            .all(|request| request["method"] != "Page.bringToFront"),
+        "routine Reels scroll must remain in the background"
+    );
+    assert!(
+        requests
+            .iter()
             .all(|request| request["method"] != "Input.dispatchMouseEvent")
     );
 }
@@ -535,6 +611,12 @@ async fn facebook_reel_scroll_uses_one_active_video_wheel_after_unchanged_arrow(
 
     engine.shutdown().await;
     let requests = server.await.expect("Facebook Reel wheel fake CDP");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Page.bringToFront"),
+        "routine Reels wheel fallback must remain in the background"
+    );
     let wheel_requests = requests
         .iter()
         .filter(|request| {
@@ -749,6 +831,48 @@ async fn facebook_group_join_observation_exception_is_not_started_and_diagnostic
 }
 
 #[tokio::test]
+async fn facebook_reel_scroll_without_active_video_does_not_foreground_or_dispatch() {
+    let (port, server) = spawn_facebook_reel_missing_active_video_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "reel-scroll-missing-active-video-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 5_000,
+            command: NativeCommand::PageScroll(PageScrollParams {
+                reason: Some("feed_scroll".to_owned()),
+                dwell_ms: None,
+            }),
+        })
+        .await
+        .expect("Reel scroll without active video");
+
+    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("scroll receipt") else {
+        panic!("expected scroll action receipt")
+    };
+    assert_eq!(receipt.reason.as_deref(), Some("no_target"));
+
+    engine.shutdown().await;
+    let requests = server
+        .await
+        .expect("Facebook missing active video fake CDP");
+    assert!(requests.iter().all(|request| {
+        request["method"] != "Page.bringToFront"
+            && !request["method"]
+                .as_str()
+                .is_some_and(|method| method.starts_with("Input."))
+    }));
+}
+
+#[tokio::test]
 async fn facebook_reel_scroll_returns_ambiguous_after_dispatched_methods_without_fabricated_cards()
 {
     let (port, server) = spawn_facebook_reel_no_target_cdp().await;
@@ -787,6 +911,12 @@ async fn facebook_reel_scroll_returns_ambiguous_after_dispatched_methods_without
 
     engine.shutdown().await;
     let requests = server.await.expect("Facebook Reel no-target fake CDP");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Page.bringToFront"),
+        "routine ambiguous Reels scroll must remain in the background"
+    );
     assert!(
         requests
             .iter()
@@ -3019,6 +3149,13 @@ async fn spawn_facebook_feed_recovery_cdp(
                 clicked = true;
             }
             let result = match router_kind(&request).as_deref() {
+                Some("reel_probe") => router_cdp(
+                    "reel_probe",
+                    json!({
+                        "ok": false,
+                        "reason": "not_reel"
+                    }),
+                ),
                 Some("page_probe") => facebook_feed_page_probe_cdp(),
                 Some("consent_probe") => facebook_consent_absent_cdp(),
                 Some("feed_probe") => {
@@ -3636,7 +3773,6 @@ async fn spawn_facebook_reel_anonymous_horizontal_cdp() -> (u16, tokio::task::Jo
         for _ in 0..3 {
             requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
         }
-        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
         requests.push(
             respond_to_call_capture(
                 &mut websocket,
@@ -3684,7 +3820,6 @@ async fn spawn_facebook_reel_wheel_cdp() -> (u16, tokio::task::JoinHandle<Vec<Va
         for _ in 0..3 {
             requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
         }
-        requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
         requests.extend(
             respond_to_call_capture_all(
                 &mut websocket,
@@ -3744,6 +3879,31 @@ async fn spawn_facebook_reel_wheel_cdp() -> (u16, tokio::task::JoinHandle<Vec<Va
     (port, server)
 }
 
+async fn spawn_facebook_reel_missing_active_video_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>)
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/reel/1").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                router_cdp("reel_probe", json!({"ok": false, "reason": "no_target"})),
+            )
+            .await,
+        );
+        let _ = websocket.close(None).await;
+        requests
+    });
+    (port, server)
+}
+
 async fn spawn_facebook_reel_no_target_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let port = listener.local_addr().expect("address").port();
@@ -3755,7 +3915,6 @@ async fn spawn_facebook_reel_no_target_cdp() -> (u16, tokio::task::JoinHandle<Ve
         for _ in 0..3 {
             requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
         }
-        requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
         requests.extend(
             respond_to_call_capture_all(
                 &mut websocket,
@@ -4434,6 +4593,12 @@ async fn facebook_identity_acquisition_hovers_without_ever_pressing() {
 
     engine.shutdown().await;
     let requests = server.await.expect("identity acquisition fake CDP");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Page.bringToFront"),
+        "routine identity-acquisition scroll must remain in the background"
+    );
     assert!(
         requests.iter().any(|request| {
             request["method"] == "Input.dispatchMouseEvent"

@@ -182,7 +182,13 @@ pub(crate) async fn execute_facebook_page_scroll(
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
-    session.cdp.bring_to_front().await?;
+    if matches!(
+        command,
+        NativeCommand::PageScroll(params)
+            if params.reason.as_deref() == Some("idle_recover_nudge")
+    ) {
+        session.cdp.bring_to_front().await?;
+    }
     let before = probe_facebook_reel(session).await?;
     if !before.is_reels_surface() {
         return execute_facebook_feed_scroll(session, cancellation, deadline_unix_ms).await;
