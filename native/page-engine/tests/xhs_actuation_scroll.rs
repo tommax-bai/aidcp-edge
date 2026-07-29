@@ -44,6 +44,12 @@ struct Observed {
     inertia_left: usize,
     /// 还要读几次可滚区，位移才**开始**动。平滑滚动的起步比一次探针还慢时的现场。
     stall_left: usize,
+    /// 可滚区一共被读了几次（含手势前那一次基准读数）。用来钉「一次位移都没读到时的最小耐心」。
+    area_reads: usize,
+    /// 已经收到几帧滚轮：用来把「手势之后的读数」与手势前那次基准读数分开。
+    wheels_seen: usize,
+    /// 手势之后可滚区被读了几次。「读不到」的注入窗口按这个序号开合。
+    area_reads_after_gesture: usize,
 }
 
 impl Observed {
@@ -99,6 +105,24 @@ struct FakePage {
     /// 平滑滚动的**起步延迟**：手势派完之后还要读几次可滚区，位移才开始动。
     /// 这几拍里位置逐字等于滚动前那一个值 —— 与「不会再动了」长得一模一样。
     startup_probes: usize,
+    /// 「读不到」注入窗口的起点：手势之后第几次读可滚区**之后**开始瞎（0 = 从第一次就瞎）。
+    blind_after_reads: usize,
+    /// 连着几次读可滚区**读不到**（分片这一轮解析不出可滚区，回 `found:false`）。
+    /// 这几拍既不推进惯性、也不改变位置 —— 引擎这一轮什么都没学到。
+    blind_reads: usize,
+    /// 「读不到」那几拍之后，位置还会**停住**几次可读的读数才继续走。
+    /// 真机成因是同一件事：懒渲染换掉了滚动容器 —— 换的那一拍分片解析不出容器（读不到），
+    /// 换完那一拍新容器的 scrollTop 还停在换之前那个值。于是读数长成「p、读不到、p」，
+    /// 与「连读两次 p」只差中间那一拍是不是真读到了。
+    frozen_reads_after_blind: usize,
+    /// 评论可滚区**不给** `rows` 判定：分片数不出页面上有几行评论。
+    /// 与「数到了 0 行」是两态 —— 折成任何一个具体数字都是拿读不到的量冒充实测量。
+    omit_comment_rows: bool,
+    /// 详情浮层探针**不给** `overlay` 判定：关闭控件认出来了，浮层在不在却读不到。
+    omit_overlay_verdict: bool,
+    /// 可滚区的 `atBottom` 判定。`None` = 分片不给这一项（读不到），
+    /// **不是** `false`（读到了、不在底部）。
+    at_bottom: Option<bool>,
 }
 
 impl Default for FakePage {
@@ -111,6 +135,12 @@ impl Default for FakePage {
             comment_rows: 0,
             inertia_probes: 0,
             startup_probes: 0,
+            blind_after_reads: 0,
+            blind_reads: 0,
+            frozen_reads_after_blind: 0,
+            omit_comment_rows: false,
+            omit_overlay_verdict: false,
+            at_bottom: Some(false),
         }
     }
 }
@@ -248,6 +278,10 @@ async fn feed_paging_waits_for_the_position_to_stop_changing_before_it_rescans()
 /// 不足以断言到底 —— 那一步之差恰好复现「只刷不点」活锁：位移回报 `moved=false`，
 /// 重扫拿到的还是滚动前那一屏卡片，云端于是反复选中已访问过的笔记或继续下发翻页。
 /// 而回执本身是诚实的（位移确实是实测的），现场没有任何错误码指向这里。
+///
+/// **这一条钉的是「有耐心」这件事本身，不是耐心的具体轮数**：起步拖了 3 拍，所以它只证明
+/// 最小耐心 ≥ 4 轮，常量从 6 削到 4 仍会照绿。轮数下界由下面那条
+/// `a_page_that_never_moves_is_declared_settled_only_after_the_minimum_patience` 单独钉。
 #[tokio::test]
 async fn feed_paging_gives_a_slow_starting_scroll_the_rounds_to_prove_it_is_moving() {
     let cancellation = Arc::new(AtomicBool::new(false));
@@ -295,6 +329,126 @@ async fn feed_paging_gives_a_slow_starting_scroll_the_rounds_to_prove_it_is_movi
         cards.cards.first().and_then(|card| card.note_id.as_deref()),
         Some("note-fresh"),
         "重扫发生在页面真正动起来之前",
+    );
+}
+
+/// 「这一轮读不到」是第三态，既不算「还在动」也不算「不会再动了」。
+///
+/// 把它计进落定连击、就此收工，就是拿一次读不到冒充「位置不再变化」——「只刷不点」活锁换个门
+/// 原样回来：位移还在惯性里走，引擎却已经去重扫，拿到的是滚动前那一屏卡片，云端于是反复选中
+/// 已访问过的笔记。这一场里位移**已经动过**（`moved` 为真），所以「最小耐心轮次」那道闸兜不住它 ——
+/// 唯一挡在中间的就是「读不到必须把连击清零、继续有界重试」。
+///
+/// 现场铺的读数是「p、读不到、p」，因此**两个折叠方向都能杀**：
+///  - 读不到直接计进连击并收工 ⇒ 停在第一个 p；
+///  - 只把连击 +1、不清 `previous` ⇒ 后面那个 p 与前面那个 p 接上，凑成一次假的「连读两次同值」。
+///
+/// 真机成因是同一件事：懒渲染换掉了滚动容器 —— 换的那一拍分片解析不出容器，换完那一拍
+/// 新容器的 scrollTop 还停在换之前那个值。而回执本身始终是诚实的（位移确实是实测的），
+/// 现场没有任何错误码指向这里。
+#[tokio::test]
+async fn feed_paging_never_counts_an_unreadable_round_as_a_settled_position() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            // 惯性要走 4 拍；手势之后第 2 次读**读不到**，第 3 次读得到、位置却还停在原处。
+            inertia_probes: 4,
+            blind_after_reads: 1,
+            blind_reads: 1,
+            frozen_reads_after_blind: 1,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let result = engine
+        .execute(&scroll_command(
+            1,
+            command(r#"{"kind":"browse_scroll","params":{"reason":"feed_paging"}}"#),
+            25_000,
+        ))
+        .await
+        .expect("command result");
+
+    let CommandOutput::PageCards(cards) = result.output.expect("output") else {
+        panic!("expected page cards");
+    };
+    let movement = cards.movement.expect("翻页必须带上实测位移");
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    let total: f64 = observed.wheel_deltas.iter().sum();
+    assert!(total > 0.0, "这一场确实滚出去了");
+    assert!(movement.moved);
+    assert_eq!(
+        movement.after, total,
+        "中途一次读不到被当成了落定：读到的是惯性中间值 {} 而不是终值 {total}",
+        movement.after
+    );
+    // 后果面：读不到被当成落定就会提前重扫，拿到的还是滚动前那一屏 ——「只刷不点」活锁。
+    assert_eq!(
+        cards.cards.first().and_then(|card| card.note_id.as_deref()),
+        Some("note-fresh"),
+        "重扫发生在位移真正落定之前",
+    );
+}
+
+/// 一次位移都没读到时的**最小耐心轮次**：不到轮数不许断言「不会再动了」。
+///
+/// 上面那条起步慢的用例只证明「有耐心」，证不出耐心有多长（它只需要 4 轮就能通过）。
+/// 这一条直接数引擎读了几次可滚区：页面**从头到尾一动不动**，引擎必须读满最小耐心轮次
+/// 才允许收工 —— 常量被削小，这里当场少几次读数。
+///
+/// 断言取的是**下界**：物理量其实是「轮次 × 探针间隔」≈ 300ms 的起步耐心，6 是实测经验值、
+/// 不是推导出来的精确值。所以这里只拦「变小」，不拦「变大」；若日后把间隔改大、轮次改小
+/// 而总耐心不变，这条断言需要跟着改口径，而不是照着数字硬凑。
+#[tokio::test]
+async fn a_page_that_never_moves_is_declared_settled_only_after_the_minimum_patience() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            scrolls: false,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let result = engine
+        .execute(&scroll_command(
+            1,
+            command(r#"{"kind":"browse_scroll","params":{"reason":"feed_paging"}}"#),
+            25_000,
+        ))
+        .await
+        .expect("command result");
+
+    let CommandOutput::PageCards(cards) = result.output.expect("output") else {
+        panic!("expected page cards");
+    };
+    assert!(
+        !cards.movement.expect("翻页必须带上实测位移").moved,
+        "这一场页面确实一步没动",
+    );
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    // 1 次基准读数 + 最小耐心 6 轮 = 7。少于这个数就是「还没开始动」被当成了「不会再动了」。
+    assert!(
+        observed.area_reads >= 7,
+        "最小耐心轮次被削短：可滚区只读了 {} 次",
+        observed.area_reads
+    );
+    // 另一头：耐心是**有界**的，不许把命令预算耗在这里空转。
+    assert!(
+        observed.area_reads <= 15,
+        "等落定必须按迭代次数限界，实得 {} 次读数",
+        observed.area_reads
     );
 }
 
@@ -439,6 +593,44 @@ async fn browse_next_closes_the_detail_overlay_before_it_scrolls() {
     assert!(press_at < wheel_at, "关闭浮层必须发生在第一帧滚轮之前");
 }
 
+/// 「浮层不在」与「浮层在不在读不到」是两态。
+///
+/// 把读不到当成「浮层不在」就直接跳过关闭，手势于是落在浮层上 —— 浮层自己也能滚：
+/// 位移**读到了**、feed 却一步没动，回执还是诚实的（位移确实实测），云端照单全收当成翻了一页。
+/// 这一场里关闭控件本身认出来了、坐标也给了，只有「浮层在不在」这一项分片给不出来；
+/// 该走的处置是「按浮层可能在办」，照常去点关闭。
+#[tokio::test]
+async fn browse_next_still_closes_the_overlay_when_the_overlay_verdict_is_unreadable() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            omit_overlay_verdict: true,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    engine
+        .execute(&scroll_command(
+            1,
+            command(r#"{"kind":"browse_next","params":{"reason":"feed_paging"}}"#),
+            25_000,
+        ))
+        .await
+        .expect("command result");
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    let press_at = observed
+        .first_index("mousePressed")
+        .expect("「浮层在不在」读不到被当成了「浮层不在」：关闭一次都没点");
+    let wheel_at = observed.first_index("mouseWheel").expect("随后才滚");
+    assert!(press_at < wheel_at, "关闭浮层必须发生在第一帧滚轮之前");
+}
+
 #[tokio::test]
 async fn comment_scrolling_stops_when_the_position_stops_changing() {
     let cancellation = Arc::new(AtomicBool::new(false));
@@ -524,6 +716,122 @@ async fn comment_scrolling_reports_the_row_count_it_measured_not_the_step_count(
         2,
         "两步都真的派发了手势"
     );
+}
+
+/// 「滚了几条」数不出来时必须回**读不到**，MUST NOT 顶成 1。
+///
+/// 这正是红线原文点名的那个反模式（「按真实数量如实回报，不再 `count||1`」）：
+/// `scrolled=1` 与「确实只滚出一条」逐字不可分，云端据此判定这条笔记的评论区已经见底、
+/// 不再往下读，而页面上其实还有几十条。回执照样 `ok=true`，没有任何一层会发现。
+#[tokio::test]
+async fn comment_scrolling_reports_an_unreadable_row_count_as_unknown_never_as_one() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            omit_comment_rows: true,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let result = engine
+        .execute(&scroll_command(
+            1,
+            command(r#"{"kind":"note_scroll_comments","params":{"noteId":"note-1","count":2}}"#),
+            25_000,
+        ))
+        .await
+        .expect("command result");
+
+    let CommandOutput::ActionReceipt(receipt) = result.output.expect("output") else {
+        panic!("expected an action receipt");
+    };
+    // 页面确实滚动了，所以这条动作本身是成功的 —— 不诚实的只会是那个数字。
+    assert!(receipt.ok);
+    assert_eq!(result.effect_phase, EffectPhase::Confirmed);
+    assert_eq!(
+        receipt.reason, None,
+        "行数读不到却报了个数：{:?}",
+        receipt.reason
+    );
+    assert_eq!(
+        receipt
+            .observation
+            .as_ref()
+            .and_then(|observation| observation.article_index),
+        None,
+        "读不到的量被顶成了实测量",
+    );
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    assert_eq!(
+        observed.mouse_events("mouseMoved").len(),
+        2,
+        "两步都真的派发了手势 —— 不诚实的只会是那个行数"
+    );
+}
+
+/// 「到底了」是**三态**，两个折叠方向都是错的，所以这一条要双向可杀。
+///
+/// 折成「没到底」⇒ 云端永远等不到停止信号，在一条已经见底的 feed 上无限翻页；
+/// 折成「到底了」⇒ 云端提前收工，这个账号这一轮就少刷了大半个 feed。
+/// 断言因此落在**云端真正看到的那份回执**上：读不到时这一项必须是空的，让上游回落到它自己的
+/// 推断（`browse-session.ts` 的 `afterProbe.atBottom ?? …`）；任何一个确定的布尔值都会
+/// 顶掉那条兜底，把「不知道」变成一句替云端拍的板。
+#[tokio::test]
+async fn the_at_bottom_verdict_reaches_the_cloud_exactly_as_the_page_reported_it() {
+    for reported in [Some(true), Some(false), None] {
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let (port, server) = spawn_page(
+            FakePage {
+                at_bottom: reported,
+                ..FakePage::default()
+            },
+            cancellation.clone(),
+        )
+        .await;
+        let mut engine = Engine::default();
+        engine.open(&session_open(port)).await.expect("open");
+
+        let result = engine
+            .execute(&scroll_command(
+                1,
+                command(r#"{"kind":"browse_scroll","params":{"reason":"feed_paging"}}"#),
+                25_000,
+            ))
+            .await
+            .expect("command result");
+
+        let CommandOutput::PageCards(cards) = result.output.expect("output") else {
+            panic!("expected page cards");
+        };
+        // 上线形态就是这份 JSON：云端读的是它，不是 Rust 里的那个 Option。
+        let wire = serde_json::to_value(&cards).expect("serialize page cards");
+        let at_bottom = wire
+            .pointer("/movement/atBottom")
+            .cloned()
+            .unwrap_or(Value::Null);
+
+        match reported {
+            Some(verdict) => assert_eq!(
+                at_bottom,
+                Value::Bool(verdict),
+                "页面给了确定判定却没原样带出去",
+            ),
+            None => assert!(
+                !at_bottom.is_boolean(),
+                "「到底了」读不到，却给云端递了一个确定的 {at_bottom} —— \
+                 false 会让它无限翻页，true 会让它提前收工，两个方向都是替云端拍板",
+            ),
+        }
+
+        drop(engine);
+        let _ = server.await.expect("fake page");
+    }
 }
 
 #[tokio::test]
@@ -632,6 +940,9 @@ async fn spawn_page(
             pending: 0.0,
             inertia_left: 0,
             stall_left: 0,
+            area_reads: 0,
+            wheels_seen: 0,
+            area_reads_after_gesture: 0,
         };
         let mut wheels = 0_usize;
         while let Some(Ok(Message::Text(text))) = websocket.next().await {
@@ -652,6 +963,7 @@ async fn spawn_page(
             let mut rejected = false;
             if method == "Input.dispatchMouseEvent" && event == "mouseWheel" {
                 wheels += 1;
+                observed.wheels_seen += 1;
                 if page.reject_wheel_at > 0 && wheels == page.reject_wheel_at {
                     rejected = true;
                 } else {
@@ -702,19 +1014,41 @@ fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value
     // 位置不再变化，才会拿到终值。
     let reads_scroll_area = expression.contains(r#""kind":"feed_scroll_area""#)
         || expression.contains(r#""kind":"comment_scroll_area""#);
-    // 起步延迟这几拍里位置**逐字不动**：读数与「不会再动了」完全一样，只有多等几轮才分得开。
-    if reads_scroll_area && observed.stall_left > 0 {
-        observed.stall_left -= 1;
-    } else if reads_scroll_area && observed.inertia_left > 0 {
-        observed.inertia_left -= 1;
-        // 最后一拍**精确**归零：位置的终值必须逐位等于目标值，否则用例分不清
-        // 「引擎没等落定」与「假页面自己算出了浮点残差」。
-        observed.pending = if observed.inertia_left == 0 {
-            0.0
-        } else {
-            observed.pending * observed.inertia_left as f64 / (observed.inertia_left + 1) as f64
-        };
-        observed.position = observed.target - observed.pending;
+    if reads_scroll_area {
+        observed.area_reads += 1;
+        if observed.wheels_seen > 0 {
+            observed.area_reads_after_gesture += 1;
+        }
+    }
+    // 「这一轮读不到」的现场：分片解析不出可滚区，回 `found:false`。位置与惯性**都不推进** ——
+    // 这一拍引擎什么都没学到，所以它既不算「还在动」也不算「已停」。
+    let blind_ends = page.blind_after_reads + page.blind_reads;
+    if reads_scroll_area && page.blind_reads > 0 {
+        let since = observed.area_reads_after_gesture;
+        if since > page.blind_after_reads && since <= blind_ends {
+            return value(json!({"found": false}));
+        }
+    }
+    // 读不到那几拍之后位置还停住几拍：这一拍照常可读，但惯性不推进 ——
+    // 读数因此长成「p、读不到、p」。
+    let frozen = page.frozen_reads_after_blind > 0
+        && observed.area_reads_after_gesture > blind_ends
+        && observed.area_reads_after_gesture <= blind_ends + page.frozen_reads_after_blind;
+    if reads_scroll_area && !frozen {
+        // 起步延迟这几拍里位置**逐字不动**：读数与「不会再动了」完全一样，只有多等几轮才分得开。
+        if observed.stall_left > 0 {
+            observed.stall_left -= 1;
+        } else if observed.inertia_left > 0 {
+            observed.inertia_left -= 1;
+            // 最后一拍**精确**归零：位置的终值必须逐位等于目标值，否则用例分不清
+            // 「引擎没等落定」与「假页面自己算出了浮点残差」。
+            observed.pending = if observed.inertia_left == 0 {
+                0.0
+            } else {
+                observed.pending * observed.inertia_left as f64 / (observed.inertia_left + 1) as f64
+            };
+            observed.position = observed.target - observed.pending;
+        }
     }
     if expression.contains("feedCardCount") {
         return json!({"result":{"value":{
@@ -737,6 +1071,10 @@ fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value
         return value(json!({"found": true, "match": wanted, "noteId": "note-1"}));
     }
     if expression.contains(r#""kind":"detail_close""#) {
+        // 判定缺席的现场：关闭控件认出来了、坐标也给了，只有「浮层在不在」这一项分片给不出来。
+        if page.omit_overlay_verdict {
+            return value(json!({"found": true, "x": 180.0, "y": 96.0}));
+        }
         return if page.overlay {
             value(json!({"found": true, "overlay": true, "x": 180.0, "y": 96.0}))
         } else {
@@ -744,29 +1082,38 @@ fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value
         };
     }
     if expression.contains(r#""kind":"feed_scroll_area""#) {
-        return value(json!({
+        let mut area = json!({
             "found": true,
             "scroller": "element",
             "position": observed.position,
             "windowPosition": observed.position,
             "viewportHeight": VIEWPORT_HEIGHT,
-            "atBottom": false,
             "x": AREA_X,
             "y": AREA_Y,
-        }));
+        });
+        if let Some(at_bottom) = page.at_bottom {
+            area["atBottom"] = json!(at_bottom);
+        }
+        return value(area);
     }
     if expression.contains(r#""kind":"comment_scroll_area""#) {
-        return value(json!({
+        let mut area = json!({
             "found": true,
             "scroller": "element",
             "position": observed.position,
             "windowPosition": 0.0,
             "viewportHeight": VIEWPORT_HEIGHT,
-            "atBottom": false,
-            "rows": page.comment_rows,
             "x": AREA_X,
             "y": AREA_Y,
-        }));
+        });
+        if let Some(at_bottom) = page.at_bottom {
+            area["atBottom"] = json!(at_bottom);
+        }
+        // 「数不出来」与「数到了 0」是两态：前者把这一项整个拿掉，后者给出 0。
+        if !page.omit_comment_rows {
+            area["rows"] = json!(page.comment_rows);
+        }
+        return value(area);
     }
     // 只读扫描（注入路由唯一不带副作用的分支）。
     // 位移还没落定时页面上仍是**滚动前那一屏**——feed 是滚动触发懒渲染的。

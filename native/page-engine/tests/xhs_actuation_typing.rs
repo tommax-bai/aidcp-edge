@@ -116,6 +116,10 @@ struct FakePage {
     omit_plain_value: bool,
     /// 第几次归尾探针**之后**置位接管信号（0 = 从不）。
     cancel_at_caret_probe: usize,
+    /// 清场**自称成功**（`cleared:true`、当场回读也报空），编辑器里其实还躺着这段残文。
+    /// 这是清场分片的判据与真实 DOM 不一致时的现场：受控框走原型 setter 生效了、
+    /// 富文本的编辑器实例把内容又同步了回来，清场那一拍的读数因此是干净的。
+    residual_after_clear: Option<&'static str>,
 }
 
 impl Default for FakePage {
@@ -137,6 +141,7 @@ impl Default for FakePage {
             omit_paragraphs: false,
             omit_plain_value: false,
             cancel_at_caret_probe: 0,
+            residual_after_clear: None,
         }
     }
 }
@@ -900,6 +905,66 @@ async fn a_probe_that_threw_is_reported_as_unreadable_and_never_as_a_dirty_edito
     );
 }
 
+/// 清场分片**自称**清干净了，落焦回读却发现编辑器里还躺着上一条评论的残文 —— 以回读为准。
+///
+/// 这道复核是「审=发」的最后一环，也是唯一一环：清场那一拍的读数是分片自己给的，
+/// 它说干净就干净；只有换一拍、换一道 `op` 再读一次，才可能撞见判据与真实 DOM 不一致的现场。
+/// 少了它，新评论会被逐字追加到残文后面发出去 —— 人审看到的终稿与真正发出去的不是同一份。
+/// 而后面那道回读比对用的是 `find(body)`（子串命中即可），残文在前照样命中、顺序照样正确，
+/// 于是 `ok=true`：这条链路上**没有任何一层**会发现，只能靠这条用例守。
+#[tokio::test]
+async fn a_draft_that_survived_a_clear_claiming_success_is_refused_before_any_keystroke() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            residual_after_clear: Some("上一条没发出去的评论"),
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(
+                1,
+                command(
+                    r#"{"kind":"interaction_comment","params":{"noteId":"note-1","text":"好文，收藏了"}}"#,
+                ),
+                12_000,
+            ),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::ActionReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected an action receipt");
+    };
+    assert!(!receipt.ok);
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("editor_not_clean"),
+        "残文还在就往里写，发出去的是「残文 + 新评论」",
+    );
+    assert_eq!(result.effect_phase, EffectPhase::NotStarted);
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    assert!(
+        observed.inserted_chunks().is_empty(),
+        "零派发：编辑器不干净时一个字符都不许写",
+    );
+    assert_eq!(
+        observed.mouse_events("mousePressed"),
+        1,
+        "只该有落焦那一次点击：提交一次都没被按下去",
+    );
+}
+
 /// 降级判据不是死码：一次慢往返（单调 `max` 放大器）足以把剩余尾巴推进「买不起拟人粒度」的区间，
 /// 真的产生一次远超人感上限的整块写入。内容仍然一个字符都不许少。
 ///
@@ -1487,7 +1552,9 @@ fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value
             }});
         }
         if expression.contains(r#""op":"clear""#) {
-            observed.editor.clear();
+            // 清场自称成功那一拍的读数照样是干净的（`cleared:true` / `value:""`），
+            // 残文只有在**下一次**读编辑器时才现形 —— 那正是落焦回读那一拍。
+            observed.editor = page.residual_after_clear.unwrap_or_default().to_owned();
             return value(json!({
                 "found": true, "cleared": true, "focused": true, "value": "",
                 "plainValue": page.plain_value, "x": 240.0, "y": 300.0, "paragraphs": 0,
