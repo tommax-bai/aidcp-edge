@@ -41,6 +41,7 @@ import {
   reattachSession,
   browserParkingConfigFromEnv,
   installBrowserParkingStdinControl,
+  readPageContext,
   selectBrowserProvider,
   waitForLoginIdentity,
   resolveStartupIdentity,
@@ -83,6 +84,14 @@ import {
   nativeActionNameForCommand,
   readNativeFacebookIdentity,
 } from './native-page-engine/index.js';
+import {
+  createIdentityReestablishment,
+  IdentityRevalidator,
+  DEFAULT_IDENTITY_CHECK_MS,
+  DEFAULT_IDENTITY_FAIL_THRESHOLD,
+  DEFAULT_OBSERVATION_INTERVAL_MS,
+  type IdentityInvalidReason,
+} from './native-page-engine/identity-guard.js';
 import {
   buildCaptchaClickResultFacts,
   type NativeCaptchaClickReceipt,
@@ -467,9 +476,13 @@ async function main(): Promise<void> {
   // 迁前那条按平台分叉到 JavaScript Facebook 会话的装配已随恒假块一并删除，别按旧注释去找它。
   let browse: EdgeBrowseSession | undefined;
   // 同一个会话对象的 Native 具体类型句柄。`EdgeBrowseSession` 契约里没有周期观测的三个方法
-  // （suspendObservation / resumeObservation / observationStatus），而生命周期托管要用它们。
+  // （suspendObservation / resumeObservation / observationStatus），而生命周期托管与身份校验都要用它们。
   // 在装配处一并赋上，避免为此去动平台无关的 `EdgeBrowseSession` 契约。
   let nativeBrowse: NativeBrowseSession | undefined;
+  // 运行期身份持续校验体（§5）。装配在自动浏览会话之后；无浏览器 / 启动即暂停时「装配但不启动」。
+  let identityGuard: IdentityRevalidator | undefined;
+  // 启动校验体（含失效回调 → 身份重立链）。回调闭包要捕获浏览会话，故在装配处赋值。
+  let startIdentityGuard: (() => void) | undefined;
   // 关浏览器前等浏览循环排空的预算。有界是刚性要求：某个动作卡住时，无界等待会把冷待机 / 退出本身卡死
   // （浏览器关不掉 = 待机失效、回收挂僵尸），比原 bug 更糟。超时即诚实告警后照常关。
   const BROWSE_DRAIN_MS = Math.max(0, Number(process.env.AIDCP_BROWSE_DRAIN_MS ?? 5_000) || 5_000);
@@ -1078,6 +1091,82 @@ async function main(): Promise<void> {
       browse.start().catch((err) => console.error('[aidcp-edge] Native 浏览会话异常:', err));
     }
     console.log(`[aidcp-edge] ${platformDriver.platform} 页面执行已切换为 Native-only（无 shadow、无 JavaScript fallback）`);
+
+    // —— 运行期身份持续校验 + 身份重立链（§5）——
+    // 身份是持续校验的状态，不是握手时定死一次：只在启动与冷待机唤醒各读一次，长跑会话中途换号 /
+    // 掉登录一秒都发现不了，之后全部记账挂在错账号上。判定表与重立链在 native-page-engine/identity-guard.ts
+    // （纯注入、可单测），这里只做薄接线。
+    const identityCheckMs = (() => {
+      const n = Number(process.env.AIDCP_IDENTITY_CHECK_MS ?? DEFAULT_IDENTITY_CHECK_MS);
+      return Number.isFinite(n) && n > 0 ? n : DEFAULT_IDENTITY_CHECK_MS;
+    })();
+    const identityFailThreshold = (() => {
+      const n = Number(process.env.AIDCP_IDENTITY_FAIL_THRESHOLD ?? DEFAULT_IDENTITY_FAIL_THRESHOLD);
+      return Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_IDENTITY_FAIL_THRESHOLD;
+    })();
+    // 正向登出探针读数的陈旧预算按周期观测的**实配**节拍推导。这里与 NativeBrowseSession 读同一个 env
+    // （它的节拍事实源在会话内、未公开），两处默认值一致；改一处务必对齐另一处。
+    const observationIntervalMs = (() => {
+      const n = Number(process.env.AIDCP_NATIVE_OBSERVATION_MS ?? DEFAULT_OBSERVATION_INTERVAL_MS);
+      return Number.isFinite(n) && n > 0 ? n : DEFAULT_OBSERVATION_INTERVAL_MS;
+    })();
+    // 身份读取一律 allowNavigate:false —— 只读、不导航，绝不每轮把页面拽走（红线）。
+    // 平台分叉已在装配层由 `readPlatformIdentity` 做掉（Facebook 走 Native cookie 派生、其它走 TS CDP
+    // 就地扫描，两条都不导航），校验体与重立链只消费它，自己不认平台。
+    const readIdentityInPlace = (): Promise<SelfIdentityResult> => readPlatformIdentity({
+      allowNavigate: false,
+      hydrateTimeoutMs: 1_000,
+      logger: () => undefined,
+    });
+    identityGuard = new IdentityRevalidator(accountId ?? '', {
+      intervalMs: identityCheckMs,
+      threshold: identityFailThreshold,
+      observationIntervalMs,
+      logger: (message) => console.log(message),
+      readPageContext: () => readPageContext(session.cdp),
+      readIdentity: readIdentityInPlace,
+      // 正向登出探针取周期阻断观测的读数（sticky 缓存）。陈旧 / 暂停 / 从未成功探测过一律判「无法确认」
+      // 并跳过——绝不压成「真登出」（「读不到」与「没有」是两态）。判据在 identity-guard.probeLogout()。
+      observationStatus: () => nativeSession.observationStatus(),
+    });
+    const consumerHomeUrl = process.env.AIDCP_EXPLORE_URL ?? platformDriver.defaultStartUrl;
+    const reestablishIdentity = createIdentityReestablishment({
+      logger: (message) => console.log(message),
+      suspendObservation: (reason) => nativeSession.suspendObservation(reason),
+      stopBrowse: async () => {
+        reportBrowseDrainTimeout(await nativeSession.stopAndWait(BROWSE_DRAIN_MS), 'identity_flip');
+      },
+      failInFlightPublishesHonestly,
+      hasActiveLease: () => taskCoordinator.hasActiveLease(),
+      resetTaskCoordinator: (reason) => taskCoordinator.reset(reason),
+      disconnectCloud: async () => {
+        await client.closeAndWait(1500).catch(() => undefined);
+      },
+      navigateToConsumerHome: () => session.cdp.send('Page.navigate', { url: consumerHomeUrl }).then(() => undefined),
+      readIdentity: readIdentityInPlace,
+      decideIdentity: (res) => platformDriver.decideIdentity(res, overrideAccountId),
+      nicknameFor: verifiedAccountNickname,
+      applyIdentity: (nextAccountId, nickname) => {
+        accountId = nextAccountId;
+        accountNickname = nickname;
+        client.setAccountIdentity(accountId, accountNickname);
+      },
+      connectCloud: () => client.connect(),
+      rebaseline: (nextAccountId) => identityGuard?.rebaseline(nextAccountId),
+      resumeObservation: () => nativeSession.resumeObservation(),
+      startBrowse: () => {
+        nativeSession.start().catch((err) => console.error('[aidcp-edge] 身份重立后浏览会话异常:', err));
+      },
+    });
+    startIdentityGuard = (): void => {
+      if (!accountId) return; // 无身份态不启动校验体：没有基线可比，跑起来只会每拍打日志。
+      identityGuard?.start((reason: IdentityInvalidReason) => {
+        void reestablishIdentity(reason).catch((err) => {
+          console.error('[aidcp-edge] 身份重立链异常（自动化保持停止，等待人工介入）:', err);
+        });
+      });
+    };
+    if (!coldStandbyActive && !startAutomationPaused) startIdentityGuard();
   }
   // —— 退出 / 回收统一路径（节点终态诚实下线 + 看护可重起；真关机干净退出）——
   let recycleRequested = false;
@@ -1086,6 +1175,8 @@ async function main(): Promise<void> {
       console.log('\n[aidcp-edge] 正在暂停自动化：客户端核心、Cloud 连接与浏览器资源保持不变...');
       failInFlightPublishesHonestly('user_pause');
       taskCoordinator.reset('user_pause');
+      // 身份校验体随自动化一起停：暂停期若判失效，重立链会把浏览重新拉起来 —— 那是对「暂停」的违背。
+      identityGuard?.stop();
       reportBrowseDrainTimeout((await browse?.stopAndWait(BROWSE_DRAIN_MS)) ?? true, 'user_pause');
     },
     resumeAutomation: async () => {
@@ -1093,11 +1184,13 @@ async function main(): Promise<void> {
       browse?.start().catch((error) => {
         console.error('[aidcp-edge] 恢复自动化失败:', error);
       });
+      startIdentityGuard?.();
     },
     deactivate: async (reason) => {
       coldStandbyActive = false;
       clearColdStandbyCloudRetry();
       console.log(`\n[aidcp-edge] 自动运营停用流程启动（reason=${reason}）...`);
+      identityGuard?.stop();
       // 暂停/关闭/回收都先诚实终止在途发布，绝不让半截命令跨恢复重放。
       failInFlightPublishesHonestly(reason);
       // 终态关闭：用 closeAndWait()（非 close()/stop()）——置 closing 使停用窗口内迟到的云端命令绝不唤醒
@@ -1152,6 +1245,8 @@ async function main(): Promise<void> {
       coldStandbyActive = true;
       clearColdStandbyWakeLatch();
       failInFlightPublishesHonestly('cold_standby');
+      // 身份校验体随待机停手：浏览器马上就要被关掉，再读页面只会每拍打一行「无法判定」。
+      identityGuard?.stop();
       // 关浏览器前必须等浏览循环真正退出原子区（红线）：stop() 只是请求停止，循环可能正卡在首屏扫描 /
       // 停留等待里，醒来后照样摸页面——那时浏览器已被下面 killAndConfirmDead() 杀掉，调用直接打在死 CDP 上。
       // 用 stopAndWait（非 closeAndWait）：待机是**可回来的**，close() 的 closing 是终态、唤醒后就再也起不来了。
@@ -1258,6 +1353,9 @@ async function main(): Promise<void> {
         nativeBrowse?.resumeObservation();
         if (resumeAutomation) {
           browse?.start().catch((err) => console.error('[aidcp-edge] 唤醒后浏览会话异常:', err));
+          // 新一代浏览器里的身份刚刚重新确认过，基线按它重设后再开跑校验体。
+          if (accountId) identityGuard?.rebaseline(accountId);
+          startIdentityGuard?.();
         }
         console.log(`[aidcp-edge] ✓ 唤醒完成：浏览器已重建、身份已确认、自动化${resumeAutomation ? '已恢复' : '保持暂停'}`);
         return true;
@@ -1347,6 +1445,8 @@ async function main(): Promise<void> {
     // cdp.control_unavailable 两条终态路径的共同收口，且自带 executorFailureTransitioning 去重闩，
     // 与 suspendObservation 的幂等叠加不会重复打日志。**别顺手把它挪进 enterStandby。**
     nativeBrowse?.suspendObservation(reason);
+    // 身份校验体同理：连接死了就读不出身份，留着只会每拍打一行「无法确认」。
+    identityGuard?.stop();
     sendLifecycleIpc({ type: 'lifecycle.executor_failed', reason });
     void lifecycle.request('standby').finally(() => {
       executorFailureTransitioning = false;
@@ -1390,13 +1490,16 @@ async function main(): Promise<void> {
     isolateExecutorFailure('cdp_unrecoverable');
   });
 
-  // 重连成功 → 整批重启周期观测（resumeObservation 幂等：没停过是空操作，停过则干净恢复）。
-  // 少了这一半，任何一次「连接掉了又回来」都会让观测永久哑火——外部看到的是「一切正常」，
+  // 重连成功 → 整批重启周期观测与身份校验（两者都幂等：没停过是空操作，停过则干净恢复）。
+  // 少了这一半，任何一次「连接掉了又回来」都会让观测与校验永久哑火——外部看到的是「一切正常」，
   // 实际是传感层全灭（静默假成功）。
   session.cdp.on('cdp.reconnected', () => {
     // 待机期由 wakeFromStandby 统一恢复，此处不抢：那时浏览器还没重建，起了也只是对空页面轮询。
     if (coldStandbyActive) return;
     nativeBrowse?.resumeObservation();
+    // 暂停态不重开身份校验：它一旦判失效就会走重立链、把浏览重新拉起来，那是对「暂停」的违背。
+    // 恢复自动化时由 resumeAutomation 统一开。
+    if (lifecycle.state === 'active') startIdentityGuard?.();
   });
 
   process.on('SIGINT', () => void shutdown({ exitCode: 0, recycle: false, reason: 'SIGINT' }));
