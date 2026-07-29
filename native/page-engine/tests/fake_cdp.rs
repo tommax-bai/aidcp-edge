@@ -1663,6 +1663,76 @@ async fn xiaohongshu_search_focus_rejection_stops_before_text_dispatch() {
     );
 }
 
+/// 搜索框探针**自己炸了**，MUST NOT 被报成「页面上没有搜索框」。
+///
+/// 求值固定带 `silent: true`，页内异常不产生任何错误码，只让 `/result/value` 缺席。
+/// 几何量那两处 `let Some(..) else` 与 `xhs_search_input_flag` 的 `unwrap_or(false)` 都会把它读成
+/// `found=false`，于是一个从未被观测到的「页面上没有搜索框」被当成结构确定的结论回报。
+/// 两档探针各有各的读法，所以两档各测一次——只测一档，另一档的兜底会静默留在原地。
+async fn assert_search_probe_exception_is_not_a_missing_search_box(mode: &'static str) {
+    let (port, server) = spawn_xhs_search_input_cdp_with(true, Some(mode)).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.timeout_ms = 30_000;
+    engine.open(&open).await.expect("open XHS session");
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "search-probe-raised-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            // 给足预算：本例要钉的是「页内异常怎么归类」，与时限无关。预算给紧了，
+            // 机器一忙就会先撞 DeadlineExpired，用例变成一条时序 flake、测不到它该测的东西。
+            deadline_unix_ms: unix_time_ms() + 30_000,
+            command: NativeCommand::SearchExecute(SearchExecuteParams {
+                keyword: "raise".to_owned(),
+                container: None,
+                source: None,
+                max_results: None,
+                sort: None,
+                time_window: None,
+            }),
+        })
+        .await
+        .expect("search outcome");
+
+    // 探测失败如实回报成一次**失败的探测**，而不是一份关于页面的结论。
+    if let Some(CommandOutput::ActionReceipt(receipt)) = &outcome.output {
+        assert_ne!(
+            receipt.reason.as_deref(),
+            Some("search_input_not_found"),
+            "{mode} 探针抛异常 = 这一次没读到搜索框状态，MUST NOT 报成「页面上没有搜索框」",
+        );
+    }
+    let error = outcome
+        .error
+        .unwrap_or_else(|| panic!("{mode} 的页内异常必须如实变成一次探测失败"));
+    assert_eq!(error.code, ErrorCode::ProbeFailed);
+
+    engine.shutdown().await;
+    let requests = server.await.expect("XHS search probe fake CDP");
+    // 读不到就绝不继续动作：既不打字、也不回车。
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Input.insertText")
+    );
+    assert!(requests.iter().all(|request| {
+        request["method"] != "Input.dispatchKeyEvent" || request["params"]["key"] != "Enter"
+    }));
+}
+
+#[tokio::test]
+async fn xiaohongshu_search_geometry_exception_is_not_reported_as_a_missing_search_box() {
+    assert_search_probe_exception_is_not_a_missing_search_box("(\"geometry\")").await;
+}
+
+#[tokio::test]
+async fn xiaohongshu_search_focus_probe_exception_is_not_reported_as_a_missing_search_box() {
+    assert_search_probe_exception_is_not_a_missing_search_box("(\"focus-clear\")").await;
+}
+
 #[tokio::test]
 async fn captcha_text_uses_real_key_pairs_with_shift_and_zero_insert_text() {
     let (port, server) = spawn_captcha_text_input_cdp(false, true).await;
@@ -2586,6 +2656,17 @@ fn assert_pointer_commit_near(requests: &[Value], x: f64, y: f64) {
 async fn spawn_xhs_search_input_cdp(
     allow_focus: bool,
 ) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    spawn_xhs_search_input_cdp_with(allow_focus, None).await
+}
+
+/// `raise_on_mode`：哪一档搜索框探针的**页内表达式抛异常**（按模式串匹配，如 `("geometry")`）。
+///
+/// 这不是「CDP 调用失败」——求值固定带 `silent: true`，页内异常回的是一个格式完好的成功响应 +
+/// `exceptionDetails`，`/result/value` 恰好缺席。所以必须照这个形状造，用错误码冒充测不到那口坑。
+async fn spawn_xhs_search_input_cdp_with(
+    allow_focus: bool,
+    raise_on_mode: Option<&'static str>,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let port = listener.local_addr().expect("address").port();
     let server = tokio::spawn(async move {
@@ -2625,6 +2706,24 @@ async fn spawn_xhs_search_input_cdp(
                     on_search_page = true;
                 }
                 json!({})
+            } else if method == "Runtime.evaluate"
+                && raise_on_mode.is_some_and(|mode| expression.contains(mode))
+            {
+                json!({
+                    "result": {"type": "object", "subtype": "error", "className": "TypeError"},
+                    "exceptionDetails": {
+                        "exceptionId": 1,
+                        "text": "Uncaught",
+                        "lineNumber": 0,
+                        "columnNumber": 0,
+                        "exception": {
+                            "type": "object",
+                            "subtype": "error",
+                            "className": "TypeError",
+                            "description": "TypeError: Cannot read properties of null (reading 'getBoundingClientRect')"
+                        }
+                    }
+                })
             } else if method == "Runtime.evaluate" && expression.contains("(\"geometry\")") {
                 json!({"result":{"value":{"found":true,"x":640.0,"y":52.0}}})
             } else if method == "Runtime.evaluate" && expression.contains("(\"focus-clear\")") {

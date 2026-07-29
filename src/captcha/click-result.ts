@@ -5,10 +5,16 @@
  * 现有的全部 main.ts 用例都是源码正则断言，而正则断言恰恰是「死码把检查喂绿」的高发形态。
  *
  * 本文件守的那条不变量只有一句：
- *   **`inputMode: 'click_type'` 是一个关于「已经发生的事」的断言。**
- * 它只能由引擎回执里「确有字符派发」这一取证支撑，MUST NOT 由「云端下发了什么」推断出来——
- * 迁移后的宿主正是按请求载荷推断的，于是「下发了文本、一个字符都没打进去」也照样标成
- * 「点击并键入」，云端那道版本偏斜探测器因此永久静默。
+ *   **`inputMode` 说的是「哪条执行路径驱动了这次协助」，而且只能由回执里的取证支撑。**
+ * MUST NOT 由「云端下发了什么」推断出来——迁移后的宿主正是按请求载荷推断的，于是
+ * 「下发了文本、边缘整段忽略」也照样标成「点击并键入」，云端那道版本偏斜探测器因此永久静默。
+ *
+ * 反过来也不许过头：`inputMode` **不是**「有没有真派发成字符」的同义词。云端那道判据
+ * （`textNotExecuted = 下发了文本 && inputMode !== 'click_type'`）诊断的是**客户端太旧**——
+ * 老边缘收到 text 却整段忽略、只点了 points（能力闸漏网）。把「零派发」也算进去，就会让
+ * 一个最新客户端「点位没点中输入框」的常见失败被控制台说成「客户端太旧、请重装」，
+ * 诊断被指向完全错误的方向。「有没有真派发」这个事实由 `typeReport.typed` 单独承载，
+ * 云端本来就收得到；原始缺陷仍然被治住——老边缘根本不产出 `typeReport`。
  */
 import type {
   CaptchaAssistClickResultPayload,
@@ -90,9 +96,10 @@ export function buildCaptchaClickResultFacts(
     status,
     ...(receipt.reason ? { reason: receipt.reason } : {}),
     replayMode: 'synthetic',
-    // 唯一判据：取证在场**且**确有字符派发。取证缺席或零派发一律回落 'click'，
-    // 让云端「下发了文本却未键入」的探测器如实响。
-    inputMode: (typeReport?.typed ?? 0) > 0 ? 'click_type' : 'click',
+    // 唯一判据：**键入执行路径真的跑过**（回执带取证即为跑过），与 `typed` 是否为 0 无关。
+    // 取证缺席 ⇒ 这次协助根本没走键入路径（老边缘忽略 text 就是这个形态），回落 'click'，
+    // 让云端「客户端太旧」的版本偏斜探测器如实响。
+    inputMode: typeReport ? 'click_type' : 'click',
     ...(typeReport ? { typeReport } : {}),
   };
 }

@@ -13,6 +13,7 @@ use crate::model::{
 };
 use crate::probe::PageKind;
 use crate::probe::ProbeResult;
+use crate::probe::exception_diagnostic;
 use crate::protocol::{
     CancelRecord, CommandRecord, EffectPhase, NativeCommand, Platform, SessionCloseRecord,
     SessionOpenRecord, SessionStatusRecord,
@@ -813,6 +814,9 @@ async fn execute_search(
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let search_input_geometry = xhs::search_input_expression("geometry")?;
     let geometry = session.cdp.evaluate(&search_input_geometry, false).await?;
+    // 页内异常 ⇒ 这一次没读到几何量，**不是**「页面上没有搜索框」。放行下去两个
+    // `let Some(..) else` 会把探针自炸原样说成结构确定的 `search_input_not_found`。
+    evaluated_value(&geometry)?;
     let Some(x) = geometry
         .pointer("/result/value/x")
         .and_then(serde_json::Value::as_f64)
@@ -980,12 +984,38 @@ async fn execute_search(
     ))
 }
 
+/// 从一次 `Runtime.evaluate` 的回包里取值，**把「页内抛了异常」与「页面确实回了这个值」分成两态**。
+///
+/// 这一层非有不可，是因为求值固定带 `silent: true`（见 `cdp.rs` 的 `evaluate`）：**页内异常
+/// 不会让这次调用失败，也不会出现在 `error` 字段里**，回来的是一个格式完好的成功响应 +
+/// `exceptionDetails`，而 `/result/value` 恰好缺席。于是任何
+/// `pointer("/result/value").…unwrap_or(默认值)` 的读法都会把「探针自己炸了」悄悄读成
+/// 「页面确实是那个默认值」——反爬页面改一改 `document.activeElement` 就能触发，
+/// 而操作员看到的是一个结构确定的结论。这是「静默假成功」红线在求值层的形态，MUST NOT 复现。
+///
+/// `Err` = 页内抛了异常（**这一次没读到**）；`Ok(None)` = 回包里根本没有 `/result/value` 这一格；
+/// `Ok(Some(v))` = 页面确实回了 `v`（含 JSON `null`）。
+fn evaluated_value(result: &serde_json::Value) -> Result<Option<&serde_json::Value>, EngineError> {
+    if let Some(exception) = result.get("exceptionDetails") {
+        return Err(EngineError::new(
+            ErrorCode::ProbeFailed,
+            "native page evaluation raised an exception",
+        )
+        .with_decode_diagnostic(exception_diagnostic(exception)));
+    }
+    Ok(result.pointer("/result/value"))
+}
+
 async fn probe_xhs_search_input(
     session: &mut EngineSession,
     mode: &str,
 ) -> Result<serde_json::Value, EngineError> {
     let expression = xhs::search_input_expression(mode)?;
-    session.cdp.evaluate(&expression, false).await
+    let result = session.cdp.evaluate(&expression, false).await?;
+    // 页内异常 ⇒ 这一次**没读到**搜索框状态。放行下去会被 `xhs_search_input_flag` 的
+    // `unwrap_or(false)` 读成「页面上没有搜索框」，把探针自炸说成结构确定的找不到目标。
+    evaluated_value(&result)?;
+    Ok(result)
 }
 
 fn xhs_search_input_flag(value: &serde_json::Value, name: &str) -> bool {
@@ -1007,8 +1037,10 @@ async fn clear_xhs_search_input_best_effort(session: &mut EngineSession) {
 
 /// 回读焦点元素的文本，**把「读不到」与「读到了」分成两态**。
 ///
-/// `Err` = 回读通道本身失败（求值发不出去）；`Ok(None)` = 通道通了但页面回了 null
-/// （此刻没有可读的焦点元素）；`Ok(Some(v))` = 真读到了 `v`。
+/// `Err` = 回读**本身**失败：求值发不出去，**或页内表达式抛了异常**（后者靠 `evaluated_value`
+/// 认出来——`silent: true` 下它不会变成一个 `Err`，只会让 `/result/value` 悄悄缺席）；
+/// `Ok(None)` = 通道通了、表达式跑完了，页面回的是 null（此刻没有可读的焦点元素）；
+/// `Ok(Some(v))` = 真读到了 `v`。
 /// 三者压成一个布尔会让「没读到」和「读到了不一样的东西」变成同一个结论——
 /// 那正是退役实现把 null 记成「不匹配」的那处失真，MUST NOT 照抄。
 async fn focused_text_readback(session: &mut EngineSession) -> Result<Option<String>, EngineError> {
@@ -1019,17 +1051,9 @@ async fn focused_text_readback(session: &mut EngineSession) -> Result<Option<Str
             false,
         )
         .await?;
-    Ok(readback
-        .pointer("/result/value")
+    Ok(evaluated_value(&readback)?
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned))
-}
-
-async fn focused_text_matches(
-    session: &mut EngineSession,
-    expected: &str,
-) -> Result<bool, EngineError> {
-    Ok(focused_text_readback(session).await?.as_deref() == Some(expected))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1043,6 +1067,12 @@ enum FocusTier {
 ///
 /// 结果编码成 `"<档>"` 或 `"<档>:<标签>"` 一个字符串而不是一个对象：档位是判据、标签只是取证，
 /// 放同一格能让「只认档位」的既有读法原样成立，也让页面侧表达式保持单值返回。
+///
+/// **「没探到」是第四态，不是第三档**：`Err` = 这一次没探到（通道失败 / 页内抛异常 / 回了个
+/// 认不出的档位串）；`Ok((FocusTier::None, _))` = 页面确凿地说「焦点不在可编辑元素上」。
+/// 两者压成一态就会让「探针自己炸了」
+/// 一路升级成宿主的 `no_target`（「结构确定的找不到目标」），操作员照着一个从未被观测到的
+/// 事实去排查。`silent: true` 让页内异常不产生 `Err`，所以这里必须由 `evaluated_value` 认。
 async fn probe_active_focus_tier(
     session: &mut EngineSession,
 ) -> Result<(FocusTier, Option<String>), EngineError> {
@@ -1053,33 +1083,55 @@ async fn probe_active_focus_tier(
             false,
         )
         .await?;
-    let raw = result
-        .pointer("/result/value")
+    let raw = evaluated_value(&result)?
         .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
+        .ok_or_else(|| {
+            EngineError::new(
+                ErrorCode::ProbeFailed,
+                "native focus probe returned no tier",
+            )
+        })?;
     let (tier, tag) = match raw.split_once(':') {
         Some((tier, tag)) => (tier, (!tag.is_empty()).then(|| tag.to_owned())),
         None => (raw, None),
     };
-    Ok((
-        match tier {
-            "editable" => FocusTier::Editable,
-            "opaque" => FocusTier::Opaque,
-            _ => FocusTier::None,
-        },
-        tag,
-    ))
+    let tier = match tier {
+        "editable" => FocusTier::Editable,
+        "opaque" => FocusTier::Opaque,
+        "none" => FocusTier::None,
+        // 探针回了一个没见过的档位串 ⇒ 页面侧规则漂了，**我们不知道**焦点在哪。
+        // 归成 `none` 等于把「读不到」说成「页面上确实没有可编辑焦点」。
+        _ => {
+            return Err(EngineError::new(
+                ErrorCode::ProbeFailed,
+                "native focus probe returned an unknown tier",
+            ));
+        }
+    };
+    Ok((tier, tag))
+}
+
+/// 清空焦点目标失败的**三态**。
+///
+/// `NotClean` 是一个关于已观测事实的断言（全选没成 / 回读到了残留），`Unverifiable` 则相反：
+/// 清空动作发出去了，但回读通道或页内求值本身失败，**残留与否从未被观测**。
+/// 压成一态就会把「不知道清没清掉」上报成「确认没清掉」，运营侧照着一个没发生过的现象排查。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClearFailure {
+    /// 焦点档里根本没有可清的目标。
+    NoTarget,
+    /// **读到了**：清空确实没生效。
+    NotClean,
+    /// 清空动作已派发，但结果验不了。
+    Unverifiable,
 }
 
 async fn clear_focused_target(
     session: &mut EngineSession,
     focus_tier: FocusTier,
-) -> Result<(), EngineError> {
+) -> Result<(), ClearFailure> {
     if focus_tier == FocusTier::None {
-        return Err(EngineError::new(
-            ErrorCode::ProbeFailed,
-            "native text input has no focused target",
-        ));
+        return Err(ClearFailure::NoTarget);
     }
     if focus_tier == FocusTier::Editable {
         let selection = session
@@ -1088,41 +1140,49 @@ async fn clear_focused_target(
                 "(()=>{const e=document.activeElement;if(!e)return false;try{if(typeof e.select==='function'){e.select();return true}const r=document.createRange();r.selectNodeContents(e);const s=getSelection();s.removeAllRanges();s.addRange(r);return true}catch{return false}})()",
                 false,
             )
-            .await?;
-        if selection
-            .pointer("/result/value")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
-        {
-            return Err(EngineError::new(
-                ErrorCode::ProbeFailed,
-                "native text input could not select the focused target",
-            ));
+            .await
+            .map_err(|_| ClearFailure::Unverifiable)?;
+        // 页内异常 ⇒ 全选到底成没成**不知道**，MUST NOT 归成「确认没选中」。
+        match evaluated_value(&selection) {
+            Err(_) => return Err(ClearFailure::Unverifiable),
+            Ok(value) => {
+                if value.and_then(serde_json::Value::as_bool) != Some(true) {
+                    return Err(ClearFailure::NotClean);
+                }
+            }
         }
     } else {
         let modifier = if cfg!(target_os = "macos") { 4 } else { 2 };
         session
             .cdp
             .dispatch_key_with_modifiers("rawKeyDown", "a", "KeyA", 65, modifier)
-            .await?;
+            .await
+            .map_err(|_| ClearFailure::Unverifiable)?;
         session
             .cdp
             .dispatch_key_with_modifiers("keyUp", "a", "KeyA", 65, modifier)
-            .await?;
+            .await
+            .map_err(|_| ClearFailure::Unverifiable)?;
     }
     session
         .cdp
         .dispatch_key("keyDown", "Backspace", "Backspace", 8)
-        .await?;
+        .await
+        .map_err(|_| ClearFailure::Unverifiable)?;
     session
         .cdp
         .dispatch_key("keyUp", "Backspace", "Backspace", 8)
-        .await?;
-    if focus_tier == FocusTier::Editable && !focused_text_matches(session, "").await? {
-        return Err(EngineError::new(
-            ErrorCode::ProbeFailed,
-            "native text input could not clear the focused target",
-        ));
+        .await
+        .map_err(|_| ClearFailure::Unverifiable)?;
+    if focus_tier == FocusTier::Editable {
+        match focused_text_readback(session).await {
+            Ok(Some(text)) if text.is_empty() => {}
+            // 读到了残留：结构确定的「没清干净」。
+            Ok(Some(_)) => return Err(ClearFailure::NotClean),
+            // 「页面此刻没有可读焦点元素」与「回读炸了」都属于**验不了**：
+            // 清空动作已发出，残留与否未观测，绝不冒充「确认没清掉」。
+            Ok(None) | Err(_) => return Err(ClearFailure::Unverifiable),
+        }
     }
     Ok(())
 }
@@ -1448,15 +1508,17 @@ pub(crate) async fn click_captcha(
             }
         };
         text_focus_tier = Some(focus_tier);
-        if clear_focused_target(session, focus_tier).await.is_err() {
+        if let Err(failure) = clear_focused_target(session, focus_tier).await {
             // 清空失败 ⇒ `cleared` 留空（既不是 verified 也不是 attempted），零派发、未提交。
+            // 「确认没清干净」与「清了但验不了」是两态，原因码不合并——后者是**未观测**，
+            // 冒充前者就等于把一个没被看见的现象写成结论。
             return Ok(captcha_click_result(
                 EffectPhase::Dispatched,
                 false,
-                if focus_tier == FocusTier::Editable {
-                    "captcha_input_not_clean"
-                } else {
-                    "captcha_input_clear_failed"
+                match failure {
+                    ClearFailure::NotClean => "captcha_input_not_clean",
+                    ClearFailure::Unverifiable => "captcha_input_clear_unverifiable",
+                    ClearFailure::NoTarget => "captcha_input_clear_failed",
                 },
                 &forensics,
             ));
