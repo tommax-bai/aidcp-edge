@@ -140,8 +140,63 @@
       outOfScopeJoinCount:candidates.filter((item)=>item.kind==='join'&&!item.inTargetScope).length,
       ctaCandidates:candidates.slice(0,50).map((item)=>({text:item.raw||null,kind:item.kind,inTargetScope:item.inTargetScope})),
     };
-    return {observation,candidates,scope};
+    return {observation,candidates,scope,blocking};
   };
+  const groupRootPath=(value)=>{
+    const path=String(value||'');
+    return path==='/'?path:path.replace(/\/+$/,'');
+  };
+  const firstPostGroupRootProbe=()=>{
+    const context=joinContext();
+    const scrollMetrics=feedScrollMetrics();
+    return {
+      origin:String(location.origin),
+      path:String(location.pathname),
+      search:String(location.search),
+      hash:String(location.hash),
+      surface:classify(),
+      readyState:['loading','interactive','complete'].includes(document.readyState)?document.readyState:'unknown',
+      blockingKind:context.blocking.kind,
+      visibleMainCount:all('main,[role="main"]').filter(visible).length,
+      visibleDialogCount:all('[role="dialog"],[aria-modal="true"]').filter(visible).length,
+      targetGroupId:context.observation.targetGroupId||null,
+      scopeResolved:Boolean(context.scope.region),
+      scopeAmbiguous:Boolean(context.scope.ambiguous),
+      feedLoading:feedLoading(),
+      scrollY:scrollMetrics.scrollY,
+    };
+  };
+  const expectedFirstPostGroupRoot=(container)=>{
+    try{
+      const url=new URL(String(container||''));
+      const parts=url.pathname.split('/').filter(Boolean);
+      if(parts.length!==2||parts[0]!=='groups'||!parts[1]||url.search||url.hash)return null;
+      const targetGroupId=groupIdFromValue(url.pathname);
+      return targetGroupId?{origin:url.origin,path:groupRootPath(url.pathname),targetGroupId}:null;
+    }catch{return null;}
+  };
+  const firstPostGroupRootMatches=(container,requireScrollOrigin=false)=>{
+    const expected=expectedFirstPostGroupRoot(container);
+    if(!expected)return false;
+    const probe=firstPostGroupRootProbe();
+    return probe.origin===expected.origin
+      &&groupRootPath(probe.path)===expected.path
+      &&probe.search===''&&probe.hash===''
+      &&probe.surface==='group'
+      &&probe.targetGroupId===expected.targetGroupId
+      &&probe.scopeResolved&&!probe.scopeAmbiguous
+      &&(!requireScrollOrigin||(Number.isFinite(probe.scrollY)&&probe.scrollY>=0&&probe.scrollY<=1));
+  };
+  const firstPostTargetContextMismatchCards=()=>({
+    kind:'page_cards',
+    value:{
+      cards:[],
+      documentGeneration:'first-commentable-group-post|target-context-mismatch',
+      listKind:'feed',
+      listState:'present_unreportable',
+      selectionReason:'target_context_mismatch',
+    },
+  });
   const joinObservation=()=>joinContext().observation;
   const joinActuation=()=>{
     const blocking=blockingProbe();

@@ -93,9 +93,219 @@ test('Facebook feed projection keeps canonical permalink identity and bounded pa
   assert.equal(cards[0]?.likeCount, 1_200);
 });
 
+test('Facebook first-post group-root probe returns exact reusable page facts', async () => {
+  install(`
+    <main>
+      <h1>Agent Builders</h1>
+      <div role="feed"></div>
+    </main>
+  `, 'https://www.facebook.com/groups/42');
+  Object.defineProperty(document, 'readyState', { configurable: true, value: 'complete' });
+
+  const result = await run({ kind: 'first_post_group_root_probe', params: {} });
+
+  assert.equal(result.output.kind, 'first_post_group_root_probe');
+  assert.deepEqual(result.output.value, {
+    origin: 'https://www.facebook.com',
+    path: '/groups/42',
+    search: '',
+    hash: '',
+    surface: 'group',
+    readyState: 'complete',
+    blockingKind: 'none',
+    visibleMainCount: 1,
+    visibleDialogCount: 0,
+    targetGroupId: '42',
+    scopeResolved: true,
+    scopeAmbiguous: false,
+    feedLoading: false,
+    scrollY: 0,
+  });
+});
+
+test('Facebook first-post group-root probe reports loading, dialog, and blocker facts', async () => {
+  install(`
+    <main>
+      <h1>Agent Builders</h1>
+      <div role="feed"><div role="progressbar"></div></div>
+      <div role="dialog">Temporarily blocked</div>
+    </main>
+  `, 'https://www.facebook.com/groups/42');
+
+  const result = await run({ kind: 'first_post_group_root_probe', params: {} });
+
+  assert.equal(result.output.kind, 'first_post_group_root_probe');
+  assert.equal(result.output.value.blockingKind, 'unknown');
+  assert.equal(result.output.value.visibleDialogCount, 1);
+  assert.equal(result.output.value.feedLoading, true);
+});
+
+test('Facebook first-post group-root probe reads the actual nested feed scroller', async () => {
+  install(`
+    <main>
+      <h1>Agent Builders</h1>
+      <div id="scroller" style="overflow-y: auto">
+        <div role="feed"></div>
+      </div>
+    </main>
+  `, 'https://www.facebook.com/groups/42');
+  const scroller = document.getElementById('scroller') as HTMLElement;
+  Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 2_511 });
+  Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 803 });
+  scroller.scrollTop = 316;
+
+  const result = await run({ kind: 'first_post_group_root_probe', params: {} });
+
+  assert.equal(result.output.value.scrollY, 316);
+});
+
+test('Facebook first-post refresh rejects a group root whose real scroller left the origin', async () => {
+  install(`
+    <main>
+      <h1>Agent Builders</h1>
+      <div id="scroller" style="overflow-y: auto">
+        <div role="feed">
+          <article role="article">
+            <h2><a href="/groups/42/user/10001/">Alice</a></h2>
+            <div data-ad-rendering-role="story_message">Not necessarily the first post</div>
+            <a href="/groups/42/posts/7">2h</a>
+            <button aria-label="Comment">Comment</button>
+          </article>
+        </div>
+      </div>
+    </main>
+  `, 'https://www.facebook.com/groups/42');
+  const scroller = document.getElementById('scroller') as HTMLElement;
+  Object.defineProperty(scroller, 'scrollHeight', { configurable: true, value: 2_511 });
+  Object.defineProperty(scroller, 'clientHeight', { configurable: true, value: 803 });
+  scroller.scrollTop = 2;
+
+  const result = await run({
+    kind: 'feed_refresh',
+    params: {
+      reason: 'first_commentable_group_post_probe',
+      container: 'https://www.facebook.com/groups/42',
+    },
+  });
+
+  assert.deepEqual(result.output.value.cards, []);
+  assert.equal(result.output.value.selectionReason, 'target_context_mismatch');
+});
+
+test('Facebook first-post refresh post-check rejects a route change during card hydration', async () => {
+  const dom = install(`
+    <main>
+      <h1>Agent Builders</h1>
+      <div role="feed">
+        <section>
+          <h2><a href="/groups/42/user/10001/">Alice</a></h2>
+          <div data-ad-rendering-role="story_message">A permalinkless group post</div>
+          <button aria-label="Comment">Comment</button>
+        </section>
+      </div>
+    </main>
+  `, 'https://www.facebook.com/groups/42');
+  const digestDescriptor = Object.getOwnPropertyDescriptor(globalThis.crypto.subtle, 'digest');
+  let mutated = false;
+  Object.defineProperty(globalThis.crypto.subtle, 'digest', {
+    configurable: true,
+    value: async () => {
+      if (!mutated) {
+        mutated = true;
+        dom.window.history.pushState({}, '', '/groups/42/about');
+      }
+      return new Uint8Array(32).buffer;
+    },
+  });
+
+  try {
+    const result = await run({
+      kind: 'feed_refresh',
+      params: {
+        reason: 'first_commentable_group_post_probe',
+        container: 'https://www.facebook.com/groups/42',
+      },
+    });
+
+    assert.equal(mutated, true);
+    assert.deepEqual(result.output.value.cards, []);
+    assert.equal(result.output.value.selectionReason, 'target_context_mismatch');
+  } finally {
+    if (digestDescriptor) {
+      Object.defineProperty(globalThis.crypto.subtle, 'digest', digestDescriptor);
+    } else {
+      delete (globalThis.crypto.subtle as unknown as Record<string, unknown>).digest;
+    }
+  }
+});
+
+test('Facebook first-post candidate probes reject non-exact group-root contexts', async () => {
+  const contexts = [
+    { label: 'subroute', url: 'https://www.facebook.com/groups/42/about' },
+    { label: 'query', url: 'https://www.facebook.com/groups/42?sorting_setting=CHRONOLOGICAL' },
+    { label: 'hash', url: 'https://www.facebook.com/groups/42#recent_activity' },
+    { label: 'wrong group', url: 'https://www.facebook.com/groups/99' },
+  ];
+  const kinds = ['feed_refresh', 'browse_scroll'];
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void) => {
+    callback();
+    return 0 as unknown as NodeJS.Timeout;
+  }) as typeof setTimeout;
+
+  try {
+    for (const context of contexts) {
+      for (const kind of kinds) {
+        const dom = install(`
+          <main>
+            <h1>Agent Builders</h1>
+            <div role="feed">
+              <article role="article">
+                <h2><a href="/groups/42/user/10001/">Alice</a></h2>
+                <div data-ad-rendering-role="story_message">A valid-looking target-group post</div>
+                <a href="/groups/42/posts/7">2h</a>
+                <button aria-label="Comment">Comment</button>
+              </article>
+            </div>
+          </main>
+        `, context.url);
+        let windowScrolls = 0;
+        Object.defineProperty(dom.window, 'scrollBy', {
+          configurable: true,
+          value: () => { windowScrolls += 1; },
+        });
+
+        const result = await run({
+          kind,
+          params: {
+            reason: 'first_commentable_group_post_probe',
+            container: 'https://www.facebook.com/groups/42',
+          },
+        });
+
+        assert.equal(result.output.kind, 'page_cards', `${kind}: ${context.label}`);
+        assert.deepEqual(result.output.value.cards, [], `${kind}: ${context.label}`);
+        assert.equal(
+          result.output.value.selectionReason,
+          'target_context_mismatch',
+          `${kind}: ${context.label}`,
+        );
+        assert.ok(
+          String(result.output.value.documentGeneration).length <= 256,
+          `${kind}: ${context.label}`,
+        );
+        assert.equal(windowScrolls, 0, `${kind}: ${context.label} must fail before scrolling`);
+      }
+    }
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
 test('Facebook first-post scroll settles for two seconds before probing hydrated cards', async () => {
   const dom = install(`
     <main>
+      <h1>Agent Builders</h1>
       <div role="feed"></div>
     </main>
   `, 'https://www.facebook.com/groups/945390701793119');
@@ -120,7 +330,10 @@ test('Facebook first-post scroll settles for two seconds before probing hydrated
   try {
     const result = await run({
       kind: 'browse_scroll',
-      params: { reason: 'first_commentable_group_post_probe' },
+      params: {
+        reason: 'first_commentable_group_post_probe',
+        container: 'https://www.facebook.com/groups/945390701793119',
+      },
     });
     assert.deepEqual(waits, [450, 2_000]);
     const cards = result.output.value.cards as Array<Record<string, unknown>>;
@@ -141,6 +354,7 @@ test('Facebook first-post scroll settles for two seconds before probing hydrated
 test('Facebook first-post binds a Vietnamese commentable container without a permalink', async () => {
   const dom = install(`
     <main>
+      <h1>TUYỂN DỤNG VIỆC LÀM</h1>
       <div role="feed">
         <section id="post">
           <h2><a href="/groups/718145812202687/user/100014995179767/">Việt Nhật Hà Nam</a></h2>
@@ -157,7 +371,10 @@ test('Facebook first-post binds a Vietnamese commentable container without a per
 
   const selected = await run({
     kind: 'feed_refresh',
-    params: { reason: 'first_commentable_group_post_probe' },
+    params: {
+      reason: 'first_commentable_group_post_probe',
+      container: 'https://www.facebook.com/groups/718145812202687',
+    },
   });
   const cards = selected.output.value.cards as Array<Record<string, unknown>>;
   assert.equal(cards.length, 1);
@@ -193,6 +410,7 @@ test('Facebook first-post binds a Vietnamese commentable container without a per
 test('Facebook first-post returns comment-action coordinates without invoking DOM click', async () => {
   const dom = install(`
     <main>
+      <h1>TUYỂN DỤNG VIỆC LÀM</h1>
       <div role="feed">
         <section id="post">
           <h2><a href="/groups/718145812202687/user/100014995179767/">Việt Nhật Hà Nam</a></h2>
@@ -224,7 +442,10 @@ test('Facebook first-post returns comment-action coordinates without invoking DO
 
   const selected = await run({
     kind: 'feed_refresh',
-    params: { reason: 'first_commentable_group_post_probe' },
+    params: {
+      reason: 'first_commentable_group_post_probe',
+      container: 'https://www.facebook.com/groups/718145812202687',
+    },
   });
   const cards = selected.output.value.cards as Array<Record<string, unknown>>;
   assert.equal(cards.length, 1);
@@ -248,6 +469,7 @@ test('Facebook first-post returns comment-action coordinates without invoking DO
 test('Facebook first-post rejects an in-place boundary with multiple peer editors', async () => {
   install(`
     <main>
+      <h1>TUYỂN DỤNG VIỆC LÀM</h1>
       <div role="feed">
         <section>
           <h2><a href="/groups/718145812202687/user/100014995179767/">Việt Nhật Hà Nam</a></h2>
@@ -261,7 +483,10 @@ test('Facebook first-post rejects an in-place boundary with multiple peer editor
 
   const selected = await run({
     kind: 'feed_refresh',
-    params: { reason: 'first_commentable_group_post_probe' },
+    params: {
+      reason: 'first_commentable_group_post_probe',
+      container: 'https://www.facebook.com/groups/718145812202687',
+    },
   });
   assert.deepEqual(selected.output.value.cards, []);
   assert.equal(selected.output.value.selectionReason, 'ambiguous_target');
@@ -2253,6 +2478,7 @@ test('Facebook first-post probe scrolls and measures the element that actually s
   // Native 的「没动且到底」判据从第一轮起就成立 —— 四轮下滚预算实际只跑一轮，首帖找不到就放弃。
   const dom = install(`
     <main>
+      <h1>Agent Builders</h1>
       <div id="scroller" style="overflow-y: auto">
         <div role="feed"><div role="article"><a href="/Alice/posts/pfbidABC/">p</a></div></div>
       </div>
@@ -2266,7 +2492,10 @@ test('Facebook first-post probe scrolls and measures the element that actually s
 
   const result = await run({
     kind: 'browse_scroll',
-    params: { reason: 'first_commentable_group_post_probe' },
+    params: {
+      reason: 'first_commentable_group_post_probe',
+      container: 'https://www.facebook.com/groups/945390701793119',
+    },
   });
 
   const movement = result.output.value.movement as {

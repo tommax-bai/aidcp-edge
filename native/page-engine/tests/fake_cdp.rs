@@ -15,7 +15,7 @@ use aidcp_page_engine::protocol::{
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -1148,10 +1148,23 @@ async fn facebook_first_post_scrolls_until_the_below_fold_candidate_hydrates() {
     assert_eq!(router_call_count(&requests, "browse_scroll"), 2);
     assert_eq!(router_call_count(&requests, "comment_editor_probe"), 1);
     assert_eq!(router_call_count(&requests, "note_open"), 1);
+    assert_eq!(
+        page_navigation_count_to(&requests, "https://www.facebook.com/groups/945390701793119"),
+        0,
+        "a reusable exact group root must not be navigated again"
+    );
+    assert_eq!(
+        page_navigation_count_to(
+            &requests,
+            "https://www.facebook.com/groups/945390701793119/posts/333"
+        ),
+        1,
+        "the permalink candidate still requires exactly one detail navigation"
+    );
 }
 
 #[tokio::test]
-async fn facebook_first_post_reads_a_bound_container_without_second_navigation() {
+async fn facebook_first_post_reuses_an_exact_group_root_for_a_bound_container() {
     let target_ref = format!("aidcp:facebook-group-feed-post:v1:{}", "a1".repeat(32));
     let (port, server) = spawn_facebook_bound_first_post_cdp(target_ref.clone()).await;
     let mut engine = Engine::default();
@@ -1178,12 +1191,265 @@ async fn facebook_first_post_reads_a_bound_container_without_second_navigation()
     assert_eq!(router_call_count(&requests, "comment_editor_probe"), 1);
     assert_eq!(router_call_count(&requests, "note_open"), 1);
     assert_eq!(
+        page_navigation_count_to(&requests, "https://www.facebook.com/groups/945390701793119"),
+        0,
+        "a ready exact group root with a bound target needs no navigation"
+    );
+    assert_eq!(
         requests
             .iter()
             .filter(|request| request["method"] == "Page.navigate")
             .count(),
+        0,
+        "a bound first post must stay entirely on the reusable group page"
+    );
+}
+
+#[tokio::test]
+async fn facebook_first_post_navigates_once_when_the_current_root_is_not_reusable() {
+    let cases = vec![
+        (
+            "wrong group",
+            "https://www.facebook.com/groups/42",
+            facebook_first_post_group_root_probe_cdp("/groups/42", "group", Some("42"), true),
+        ),
+        (
+            "group subroute",
+            "https://www.facebook.com/groups/945390701793119/posts/333",
+            facebook_first_post_group_root_probe_cdp(
+                "/groups/945390701793119/posts/333",
+                "group",
+                Some("945390701793119"),
+                true,
+            ),
+        ),
+        (
+            "unknown surface",
+            "https://www.facebook.com/",
+            facebook_unknown_first_post_group_root_probe_cdp(),
+        ),
+        (
+            "malformed probe",
+            "https://www.facebook.com/groups/945390701793119",
+            router_cdp(
+                "first_post_group_root_probe",
+                json!({
+                    "origin": "https://www.facebook.com",
+                    "path": "/groups/945390701793119"
+                }),
+            ),
+        ),
+    ];
+
+    for (label, initial_url, root_probe) in cases {
+        let target_ref = format!("aidcp:facebook-group-feed-post:v1:{}", "c3".repeat(32));
+        let (port, server) = spawn_facebook_first_post_root_fallback_cdp(
+            initial_url,
+            root_probe,
+            target_ref.clone(),
+            false,
+        )
+        .await;
+        let mut engine = Engine::default();
+        let mut open = session_open(port);
+        open.params.platform = Platform::Facebook;
+        open.params.timeout_ms = 30_000;
+        engine.open(&open).await.expect("open Facebook session");
+
+        let outcome = engine
+            .execute(&facebook_first_post_command(1, 30_000))
+            .await
+            .expect("Facebook first-post fallback detail");
+        let CommandOutput::NoteDetail(detail) = outcome.output.expect("first-post detail output")
+        else {
+            panic!("{label}: expected note detail")
+        };
+        assert_eq!(detail.note_id, target_ref, "{label}");
+
+        engine.shutdown().await;
+        let requests = server.await.expect("Facebook first-post fallback fake CDP");
+        assert_eq!(
+            page_navigation_count_to(&requests, "https://www.facebook.com/groups/945390701793119"),
+            1,
+            "{label}: a non-reusable page must navigate to the canonical group root exactly once"
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request["method"] == "Page.navigate")
+                .count(),
+            1,
+            "{label}: a bound target must not add a detail navigation"
+        );
+    }
+}
+
+#[tokio::test]
+async fn facebook_first_post_scroll_race_restores_the_root_once_before_selecting() {
+    let target_ref = format!("aidcp:facebook-group-feed-post:v1:{}", "d4".repeat(32));
+    let (port, server) = spawn_facebook_first_post_root_fallback_cdp(
+        "https://www.facebook.com/groups/945390701793119",
+        facebook_first_post_group_root_probe_cdp(
+            "/groups/945390701793119",
+            "group",
+            Some("945390701793119"),
+            true,
+        ),
+        target_ref.clone(),
+        true,
+    )
+    .await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 30_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&facebook_first_post_command(1, 30_000))
+        .await
+        .expect("Facebook first-post scroll-race recovery");
+    let CommandOutput::NoteDetail(detail) = outcome.output.expect("first-post detail output")
+    else {
+        panic!("expected note detail")
+    };
+    assert_eq!(detail.note_id, target_ref);
+
+    engine.shutdown().await;
+    let requests = server
+        .await
+        .expect("Facebook first-post scroll-race fake CDP");
+    assert_eq!(router_call_count(&requests, "feed_refresh"), 2);
+    assert_eq!(
+        page_navigation_count_to(&requests, "https://www.facebook.com/groups/945390701793119"),
         1,
-        "bound first post must stay on the group page after the initial navigation"
+        "a scroll-origin race gets one canonical-root recovery"
+    );
+    assert_eq!(router_call_count(&requests, "comment_editor_probe"), 1);
+    assert_eq!(router_call_count(&requests, "note_open"), 1);
+}
+
+#[tokio::test]
+async fn facebook_first_post_context_recovery_keeps_the_remaining_scroll_budget() {
+    let (port, server) = spawn_facebook_first_post_late_context_mismatch_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 30_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&facebook_first_post_command(1, 30_000))
+        .await
+        .expect("stored Facebook first-post exhausted result");
+    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+    let CommandOutput::ActionReceipt(receipt) =
+        outcome.output.expect("first-post exhausted receipt")
+    else {
+        panic!("expected first-post exhausted receipt")
+    };
+    assert_eq!(receipt.reason.as_deref(), Some("no_candidates"));
+
+    engine.shutdown().await;
+    let requests = server
+        .await
+        .expect("Facebook first-post remaining-budget fake CDP");
+    assert_eq!(
+        router_call_count(&requests, "browse_scroll"),
+        4,
+        "canonical recovery must not reset already consumed scroll rounds"
+    );
+    assert_eq!(
+        page_navigation_count_to(&requests, "https://www.facebook.com/groups/945390701793119"),
+        1
+    );
+    assert_eq!(router_call_count(&requests, "comment_editor_probe"), 0);
+    assert_eq!(router_call_count(&requests, "note_open"), 0);
+}
+
+#[tokio::test]
+async fn facebook_first_post_reuse_context_mismatch_falls_back_only_once() {
+    let (port, server) = spawn_facebook_first_post_reuse_context_mismatch_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 30_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&facebook_first_post_command(1, 30_000))
+        .await
+        .expect("stored Facebook first-post context mismatch");
+    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+    let CommandOutput::ActionReceipt(receipt) =
+        outcome.output.expect("first-post mismatch receipt")
+    else {
+        panic!("expected first-post mismatch receipt")
+    };
+    assert_eq!(receipt.reason.as_deref(), Some("target_context_mismatch"));
+
+    engine.shutdown().await;
+    let requests = server
+        .await
+        .expect("Facebook first-post context mismatch fake CDP");
+    assert_eq!(
+        router_call_count(&requests, "first_post_group_root_probe"),
+        1,
+        "the live-state reuse decision is made once"
+    );
+    assert_eq!(
+        router_call_count(&requests, "feed_refresh"),
+        2,
+        "the candidate probe is retried once after canonical navigation"
+    );
+    assert_eq!(
+        page_navigation_count_to(&requests, "https://www.facebook.com/groups/945390701793119"),
+        1,
+        "a reused-page context mismatch gets one canonical-root fallback"
+    );
+    assert_eq!(router_call_count(&requests, "comment_editor_probe"), 0);
+    assert_eq!(router_call_count(&requests, "note_open"), 0);
+}
+
+#[tokio::test]
+async fn facebook_first_post_cancellation_after_root_probe_never_navigates() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) =
+        spawn_facebook_first_post_cancel_after_root_probe_cdp(cancellation.clone()).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 30_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute_cancellable(
+            &facebook_first_post_command(1, 30_000),
+            cancellation.clone(),
+        )
+        .await
+        .expect("stored Facebook first-post cancellation");
+    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+    assert_eq!(
+        outcome.error.expect("cancellation error").code,
+        ErrorCode::Cancelled
+    );
+
+    engine.shutdown().await;
+    let requests = server
+        .await
+        .expect("Facebook first-post cancellation fake CDP");
+    assert_eq!(
+        router_call_count(&requests, "first_post_group_root_probe"),
+        1
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "Page.navigate")
+            .count(),
+        0,
+        "cancellation observed after the reuse probe must stop before fallback navigation"
     );
 }
 
@@ -2148,6 +2414,7 @@ fn router_kind(request: &Value) -> Option<String> {
         "page_probe",
         "consent_probe",
         "feed_probe",
+        "first_post_group_root_probe",
         "identity_candidates",
         "feed_recovery_target",
         "feed_refresh",
@@ -2178,10 +2445,69 @@ fn facebook_consent_absent_cdp() -> Value {
     )
 }
 
+fn facebook_first_post_group_root_probe_cdp(
+    path: &str,
+    surface: &str,
+    target_group_id: Option<&str>,
+    scope_resolved: bool,
+) -> Value {
+    router_cdp(
+        "first_post_group_root_probe",
+        json!({
+            "origin": "https://www.facebook.com",
+            "path": path,
+            "search": "",
+            "hash": "",
+            "surface": surface,
+            "readyState": "complete",
+            "blockingKind": "none",
+            "visibleMainCount": 1,
+            "visibleDialogCount": 0,
+            "targetGroupId": target_group_id,
+            "scopeResolved": scope_resolved,
+            "scopeAmbiguous": false,
+            "feedLoading": false,
+            "scrollY": 0
+        }),
+    )
+}
+
+fn facebook_unknown_first_post_group_root_probe_cdp() -> Value {
+    router_cdp(
+        "first_post_group_root_probe",
+        json!({
+            "origin": "https://www.facebook.com",
+            "path": "/",
+            "search": "",
+            "hash": "",
+            "surface": "unknown",
+            "readyState": "complete",
+            "blockingKind": "none",
+            "visibleMainCount": 1,
+            "visibleDialogCount": 0,
+            "targetGroupId": null,
+            "scopeResolved": false,
+            "scopeAmbiguous": false,
+            "feedLoading": false,
+            "scrollY": 0
+        }),
+    )
+}
+
 fn router_call_count(requests: &[Value], kind: &str) -> usize {
     requests
         .iter()
         .filter(|request| router_kind(request).as_deref() == Some(kind))
+        .count()
+}
+
+fn page_navigation_count_to(requests: &[Value], url: &str) -> usize {
+    requests
+        .iter()
+        .filter(|request| {
+            request["method"] == "Page.navigate"
+                && request.pointer("/params/url").and_then(Value::as_str) == Some(url)
+        })
         .count()
 }
 
@@ -3394,6 +3720,12 @@ async fn spawn_facebook_first_post_below_fold_cdp() -> (u16, tokio::task::JoinHa
             let request: Value = serde_json::from_str(&text).expect("request JSON");
             let id = request["id"].as_u64().expect("request id");
             let result = match router_kind(&request).as_deref() {
+                Some("first_post_group_root_probe") => facebook_first_post_group_root_probe_cdp(
+                    "/groups/945390701793119",
+                    "group",
+                    Some("945390701793119"),
+                    true,
+                ),
                 Some("page_probe") => facebook_ready_cdp("/groups/945390701793119/posts/333"),
                 Some("consent_probe") => facebook_consent_absent_cdp(),
                 Some("feed_refresh") => router_cdp(
@@ -3462,6 +3794,272 @@ async fn spawn_facebook_first_post_below_fold_cdp() -> (u16, tokio::task::JoinHa
     (port, server)
 }
 
+async fn spawn_facebook_first_post_root_fallback_cdp(
+    initial_url: &str,
+    initial_root_probe: Value,
+    target_ref: String,
+    reject_first_feed_refresh: bool,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let initial_url = initial_url.to_owned();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, &initial_url).await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        let mut navigated_to_group_root = false;
+        let mut feed_refresh_count = 0_usize;
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            if request["method"] == "Page.navigate"
+                && request.pointer("/params/url").and_then(Value::as_str)
+                    == Some("https://www.facebook.com/groups/945390701793119")
+            {
+                navigated_to_group_root = true;
+            }
+            let result = match router_kind(&request).as_deref() {
+                Some("first_post_group_root_probe") if navigated_to_group_root => {
+                    facebook_first_post_group_root_probe_cdp(
+                        "/groups/945390701793119",
+                        "group",
+                        Some("945390701793119"),
+                        true,
+                    )
+                }
+                Some("first_post_group_root_probe") => initial_root_probe.clone(),
+                Some("page_probe") => facebook_ready_cdp("/groups/945390701793119"),
+                Some("consent_probe") => facebook_consent_absent_cdp(),
+                Some("feed_refresh") if reject_first_feed_refresh && feed_refresh_count == 0 => {
+                    feed_refresh_count += 1;
+                    router_cdp(
+                        "page_cards",
+                        json!({
+                            "cards": [],
+                            "selectionReason": "target_context_mismatch",
+                            "listKind": "feed",
+                            "listState": "present_unreportable"
+                        }),
+                    )
+                }
+                Some("feed_refresh") => {
+                    feed_refresh_count += 1;
+                    router_cdp(
+                        "page_cards",
+                        json!({
+                            "cards": [{
+                                "index": 0,
+                                "title": "fallback first post",
+                                "likeCount": 0,
+                                "collectCount": 0,
+                                "noteId": target_ref.clone()
+                            }],
+                            "listKind": "feed",
+                            "listState": "ready"
+                        }),
+                    )
+                }
+                Some("comment_editor_probe") => router_cdp(
+                    "text_target",
+                    json!({
+                        "ok": true,
+                        "noteId": target_ref.clone(),
+                        "cx": 640.0,
+                        "cy": 700.0,
+                        "focused": false,
+                        "selected": false
+                    }),
+                ),
+                Some("note_open") => facebook_note_detail_cdp(&target_ref, "fallback first post"),
+                _ => json!({}),
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
+        requests
+    });
+    (port, server)
+}
+
+async fn spawn_facebook_first_post_reuse_context_mismatch_cdp()
+-> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(
+            &listener,
+            port,
+            "https://www.facebook.com/groups/945390701793119",
+        )
+        .await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            let result = match router_kind(&request).as_deref() {
+                Some("first_post_group_root_probe") => facebook_first_post_group_root_probe_cdp(
+                    "/groups/945390701793119",
+                    "group",
+                    Some("945390701793119"),
+                    true,
+                ),
+                Some("page_probe") => facebook_ready_cdp("/groups/945390701793119"),
+                Some("consent_probe") => facebook_consent_absent_cdp(),
+                Some("feed_refresh") => router_cdp(
+                    "page_cards",
+                    json!({
+                        "cards": [],
+                        "selectionReason": "target_context_mismatch",
+                        "listKind": "feed",
+                        "listState": "present_unreportable"
+                    }),
+                ),
+                _ => json!({}),
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
+        requests
+    });
+    (port, server)
+}
+
+async fn spawn_facebook_first_post_late_context_mismatch_cdp()
+-> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(
+            &listener,
+            port,
+            "https://www.facebook.com/groups/945390701793119",
+        )
+        .await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        let mut scrolls = 0_usize;
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            let result = match router_kind(&request).as_deref() {
+                Some("first_post_group_root_probe") => facebook_first_post_group_root_probe_cdp(
+                    "/groups/945390701793119",
+                    "group",
+                    Some("945390701793119"),
+                    true,
+                ),
+                Some("page_probe") => facebook_ready_cdp("/groups/945390701793119"),
+                Some("consent_probe") => facebook_consent_absent_cdp(),
+                Some("feed_refresh") => router_cdp(
+                    "page_cards",
+                    json!({
+                        "cards": [],
+                        "listKind": "feed",
+                        "listState": "present_unreportable"
+                    }),
+                ),
+                Some("browse_scroll") => {
+                    scrolls += 1;
+                    let selection_reason = (scrolls == 3).then_some("target_context_mismatch");
+                    router_cdp(
+                        "page_cards",
+                        json!({
+                            "cards": [],
+                            "selectionReason": selection_reason,
+                            "listKind": "feed",
+                            "listState": "present_unreportable"
+                        }),
+                    )
+                }
+                _ => json!({}),
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
+        requests
+    });
+    (port, server)
+}
+
+async fn spawn_facebook_first_post_cancel_after_root_probe_cdp(
+    cancellation: Arc<AtomicBool>,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/groups/42").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            let is_root_probe =
+                router_kind(&request).as_deref() == Some("first_post_group_root_probe");
+            let result = if is_root_probe {
+                facebook_first_post_group_root_probe_cdp("/groups/42", "group", Some("42"), true)
+            } else {
+                json!({})
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+            if is_root_probe {
+                cancellation.store(true, Ordering::Release);
+            }
+        }
+        requests
+    });
+    (port, server)
+}
+
 async fn spawn_facebook_bound_first_post_cdp(
     target_ref: String,
 ) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
@@ -3487,6 +4085,12 @@ async fn spawn_facebook_bound_first_post_cdp(
             let request: Value = serde_json::from_str(&text).expect("request JSON");
             let id = request["id"].as_u64().expect("request id");
             let result = match router_kind(&request).as_deref() {
+                Some("first_post_group_root_probe") => facebook_first_post_group_root_probe_cdp(
+                    "/groups/945390701793119",
+                    "group",
+                    Some("945390701793119"),
+                    true,
+                ),
                 Some("page_probe") => facebook_ready_cdp("/groups/945390701793119"),
                 Some("consent_probe") => facebook_consent_absent_cdp(),
                 Some("feed_refresh") => router_cdp(
@@ -3563,6 +4167,12 @@ async fn spawn_facebook_bound_first_post_click_hydration_cdp(
                 editor_ready = true;
             }
             let result = match router_kind(&request).as_deref() {
+                Some("first_post_group_root_probe") => facebook_first_post_group_root_probe_cdp(
+                    "/groups/945390701793119",
+                    "group",
+                    Some("945390701793119"),
+                    true,
+                ),
                 Some("page_probe") => facebook_ready_cdp("/groups/945390701793119"),
                 Some("consent_probe") => facebook_consent_absent_cdp(),
                 Some("feed_refresh") => router_cdp(

@@ -1,6 +1,6 @@
   const blocking=blockingProbe();
   const blocked=blocker(blocking);
-  if(!['identity_read','page_probe','consent_probe','feed_probe','identity_candidates','feed_home_target','feed_recovery_target','feed_like_target_probe','feed_like_commit','feed_like_verify','feed_like_picker_probe','feed_like_clear','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_action_probe','comment_editor_probe','comment_ack_probe','join_probe','join_click','publish_home_probe','publish_entry_probe','publish_editor_probe','publish_bound_editor_probe','publish_upload_target_probe','publish_upload_preview_probe','publish_submit_probe','publish_submitted_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
+  if(!['identity_read','page_probe','consent_probe','feed_probe','identity_candidates','feed_home_target','feed_recovery_target','feed_like_target_probe','feed_like_commit','feed_like_verify','feed_like_picker_probe','feed_like_clear','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_action_probe','comment_editor_probe','comment_ack_probe','join_probe','join_click','first_post_group_root_probe','publish_home_probe','publish_entry_probe','publish_editor_probe','publish_bound_editor_probe','publish_upload_target_probe','publish_upload_preview_probe','publish_submit_probe','publish_submitted_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
     return fail(kind||'page',blocked);
   }
   if(kind==='identity_read')return done(identity());
@@ -24,6 +24,7 @@
   if(kind==='comment_ack_probe')return done({kind:'comment_ack_probe',value:commentAckProbe()});
   if(kind==='join_probe')return done({kind:'join_probe',value:joinProbe()});
   if(kind==='join_click')return done({kind:'join_click',value:joinActuation()});
+  if(kind==='first_post_group_root_probe')return done({kind:'first_post_group_root_probe',value:firstPostGroupRootProbe()});
   if(kind==='publish_home_probe')return done({kind:'publish_home_probe',value:publishHomeProbe()});
   if(kind==='publish_entry_probe')return done({kind:'point_target',value:publishEntryProbe()});
   if(kind==='publish_editor_probe')return done({kind:'text_target',value:publishEditorProbe()});
@@ -56,19 +57,34 @@
       return fail('scroll','native_reels_actuator_required');
     }
     if(p.reason!=='initial_scan'){
+      const firstPostProbe=p.reason==='first_commentable_group_post_probe';
+      if(firstPostProbe&&!firstPostGroupRootMatches(p.container)){
+        return done(firstPostTargetContextMismatchCards());
+      }
       // 滚动与位移/到底回报都必须落在**真正在滚的那个元素**上（20-feed.js `feedScrollNode`）。
       // 群页有一类版式文档本身不滚，照滚窗口 ⇒ 位移恒 0、到底恒真，Native 的「没动且到底」判据
       // 从第一轮起就成立，四轮下滚预算实际只跑一轮——首帖没找到就直接放弃。窗口真的会滚时行为不变。
       const before=feedScrollBy(Math.max(420,Math.round((window.innerHeight||800)*0.8)));
       await sleep(450);
-      if(p.reason==='first_commentable_group_post_probe')await sleep(2000);
-      const output=p.reason==='first_commentable_group_post_probe'?await firstPostCards():await feedCards();
+      if(firstPostProbe)await sleep(2000);
+      if(firstPostProbe&&!firstPostGroupRootMatches(p.container)){
+        return done(firstPostTargetContextMismatchCards());
+      }
+      const output=firstPostProbe?await firstPostCards():await feedCards();
+      if(firstPostProbe&&!firstPostGroupRootMatches(p.container)){
+        return done(firstPostTargetContextMismatchCards());
+      }
       output.value.movement=feedScrollMovement(before);
       return done(output);
     }
     return done(await feedCards());
   }
-  if(kind==='feed_refresh')return done(p.reason==='first_commentable_group_post_probe'?await firstPostCards():await feedCards());
+  if(kind==='feed_refresh'){
+    if(p.reason!=='first_commentable_group_post_probe')return done(await feedCards());
+    if(!firstPostGroupRootMatches(p.container,true))return done(firstPostTargetContextMismatchCards());
+    const output=await firstPostCards();
+    return done(firstPostGroupRootMatches(p.container,true)?output:firstPostTargetContextMismatchCards());
+  }
   if(kind==='search_execute'){
     if(!p.container)return fail('search','permission_gated');
     const output=await feedCards();

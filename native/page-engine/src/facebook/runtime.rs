@@ -1,11 +1,11 @@
 use super::capability::{self, FacebookCapability};
 use super::shared::{
     cancelled_before_dispatch, canonical_facebook_post_id, dispatch_facebook_click,
-    ensure_facebook_action_gate, evaluate_facebook_router,
+    ensure_facebook_action_gate, evaluate_facebook_first_post_router, evaluate_facebook_router,
     evaluate_facebook_router_until_requested_detail, facebook_action_result,
     facebook_command_cancelled, is_facebook_content_ref, probe_facebook_comment_action,
-    probe_facebook_comment_editor, validate_facebook_origin, validated_facebook_group_url,
-    wait_for_facebook_ready,
+    probe_facebook_comment_editor, probe_facebook_first_post_group_root, validate_facebook_origin,
+    validated_facebook_group_url, wait_for_facebook_ready,
 };
 use super::{comment, feed, feed_like, group_join, publish, reels, session};
 use crate::command::{
@@ -16,6 +16,7 @@ use crate::engine::{CommandOutput, EngineSession};
 use crate::error::{EngineError, ErrorCode};
 use crate::model::PageCards;
 use crate::protocol::{EffectPhase, NativeCommand};
+use serde_json::json;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use url::Url;
@@ -41,6 +42,43 @@ impl FirstPostTarget {
         match self {
             Self::Permalink(url) => url.to_string(),
             Self::BoundRef(target_ref) => target_ref.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FirstPostGroupRootReuseReason {
+    ExactRootReusable,
+    ProbeFailed,
+    OriginMismatch,
+    GroupMismatch,
+    NotGroupRoot,
+    DocumentNotReady,
+    BlockedPage,
+    MainUnresolved,
+    ScopeUnresolved,
+    DialogPresent,
+    FeedLoading,
+    ScrollNotAtTop,
+    ContextChanged,
+}
+
+impl FirstPostGroupRootReuseReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactRootReusable => "exact_root_reusable",
+            Self::ProbeFailed => "probe_failed",
+            Self::OriginMismatch => "origin_mismatch",
+            Self::GroupMismatch => "group_mismatch",
+            Self::NotGroupRoot => "not_group_root",
+            Self::DocumentNotReady => "document_not_ready",
+            Self::BlockedPage => "blocked_page",
+            Self::MainUnresolved => "main_unresolved",
+            Self::ScopeUnresolved => "scope_unresolved",
+            Self::DialogPresent => "dialog_present",
+            Self::FeedLoading => "feed_loading",
+            Self::ScrollNotAtTop => "scroll_not_at_top",
+            Self::ContextChanged => "context_changed",
         }
     }
 }
@@ -121,14 +159,6 @@ async fn execute_first_commentable_group_post(
         return Err(cancelled_before_dispatch());
     }
     let group_url = validated_facebook_group_url(params.container.as_deref().unwrap_or_default())?;
-    session.cdp.navigate(group_url.as_str()).await?;
-    session.facebook.active_list_url = group_url.to_string();
-    session.facebook.seen_post_ids.clear();
-    wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
-    if let Some(output) = ensure_facebook_action_gate(session, command).await? {
-        return Ok((EffectPhase::NotStarted, output));
-    }
-
     let probe_command = NativeCommand::FeedRefresh(FeedRefreshParams {
         reason: Some("first_commentable_group_post_probe".to_owned()),
         think_ms: None,
@@ -136,26 +166,73 @@ async fn execute_first_commentable_group_post(
     let scroll_command = NativeCommand::BrowseScroll(ReasonParams {
         reason: Some("first_commentable_group_post_probe".to_owned()),
     });
-    let mut latest = evaluate_facebook_router(session, &probe_command).await?;
-    let mut candidate = first_same_group_post_target(&latest.1, &group_url);
-    let mut probe_failure = first_post_probe_failure(&latest.1);
 
-    for _ in 0..FIRST_POST_SCROLL_ROUNDS {
-        if candidate.is_some()
-            || probe_failure.is_some()
-            || first_post_probe_is_exhausted(&latest.1)
-        {
-            break;
+    let (root_probe, probe_error_code) = match probe_facebook_first_post_group_root(session).await {
+        Ok(probe) => (Some(probe), None),
+        Err(error) => {
+            if let Some(diagnostic) = error.bounded_diagnostic_json() {
+                eprintln!("native_page_engine_decode_diagnostic:{diagnostic}");
+            }
+            (None, Some(format!("{:?}", error.code)))
         }
-        if facebook_command_cancelled(cancellation) {
-            return Err(cancelled_before_dispatch());
-        }
-        latest = evaluate_facebook_router(session, &scroll_command).await?;
-        candidate = first_same_group_post_target(&latest.1, &group_url);
-        probe_failure = first_post_probe_failure(&latest.1);
+    };
+    if facebook_command_cancelled(cancellation) {
+        return Err(cancelled_before_dispatch());
+    }
+    let reuse_reason = root_probe
+        .as_ref()
+        .map(|probe| first_post_group_root_reuse_reason(probe, &group_url))
+        .unwrap_or(FirstPostGroupRootReuseReason::ProbeFailed);
+    let mut root_navigated = reuse_reason != FirstPostGroupRootReuseReason::ExactRootReusable;
+    log_first_post_group_root_decision(
+        session,
+        &group_url,
+        if root_navigated { "navigate" } else { "reuse" },
+        reuse_reason,
+        root_probe.as_ref(),
+        probe_error_code.as_deref(),
+        if root_navigated { 1 } else { 0 },
+    );
+    if root_navigated {
+        navigate_first_post_group_root(session, &group_url, cancellation).await?;
     }
 
-    let Some(candidate) = candidate else {
+    let mut remaining_scroll_rounds = FIRST_POST_SCROLL_ROUNDS;
+    let candidate = loop {
+        session.facebook.active_list_url = group_url.to_string();
+        session.facebook.seen_post_ids.clear();
+        wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+        if let Some(output) = ensure_facebook_action_gate(session, command).await? {
+            return Ok((EffectPhase::NotStarted, output));
+        }
+
+        let (candidate, probe_failure) = select_first_post_candidate(
+            session,
+            &group_url,
+            &probe_command,
+            &scroll_command,
+            &mut remaining_scroll_rounds,
+            cancellation,
+        )
+        .await?;
+        if let Some(candidate) = candidate {
+            break candidate;
+        }
+
+        if probe_failure == Some("target_context_mismatch") && !root_navigated {
+            navigate_first_post_group_root(session, &group_url, cancellation).await?;
+            root_navigated = true;
+            log_first_post_group_root_decision(
+                session,
+                &group_url,
+                "navigate",
+                FirstPostGroupRootReuseReason::ContextChanged,
+                None,
+                None,
+                1,
+            );
+            continue;
+        }
         return Ok(facebook_action_result(
             EffectPhase::NotStarted,
             "open_note",
@@ -165,8 +242,12 @@ async fn execute_first_commentable_group_post(
             None,
         ));
     };
+
     let candidate_id = candidate.note_id();
     if let FirstPostTarget::Permalink(candidate_url) = &candidate {
+        if facebook_command_cancelled(cancellation) {
+            return Err(cancelled_before_dispatch());
+        }
         session.cdp.navigate(candidate_url.as_str()).await?;
         wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
     }
@@ -236,6 +317,138 @@ async fn execute_first_commentable_group_post(
         )),
         Err(error) => Err(error),
     }
+}
+
+async fn navigate_first_post_group_root(
+    session: &mut EngineSession,
+    group_url: &Url,
+    cancellation: Option<&AtomicBool>,
+) -> Result<(), EngineError> {
+    if facebook_command_cancelled(cancellation) {
+        return Err(cancelled_before_dispatch());
+    }
+    session.cdp.navigate(group_url.as_str()).await?;
+    Ok(())
+}
+
+async fn select_first_post_candidate(
+    session: &mut EngineSession,
+    group_url: &Url,
+    probe_command: &NativeCommand,
+    scroll_command: &NativeCommand,
+    remaining_scroll_rounds: &mut usize,
+    cancellation: Option<&AtomicBool>,
+) -> Result<(Option<FirstPostTarget>, Option<&'static str>), EngineError> {
+    let mut latest = evaluate_facebook_first_post_router(session, probe_command, group_url).await?;
+    loop {
+        let candidate = first_same_group_post_target(&latest.1, group_url);
+        let probe_failure = first_post_probe_failure(&latest.1);
+        if candidate.is_some()
+            || probe_failure.is_some()
+            || first_post_probe_is_exhausted(&latest.1)
+            || *remaining_scroll_rounds == 0
+        {
+            return Ok((candidate, probe_failure));
+        }
+        if facebook_command_cancelled(cancellation) {
+            return Err(cancelled_before_dispatch());
+        }
+        *remaining_scroll_rounds -= 1;
+        latest = evaluate_facebook_first_post_router(session, scroll_command, group_url).await?;
+    }
+}
+
+fn first_post_group_root_reuse_reason(
+    probe: &super::FacebookFirstPostGroupRootProbe,
+    group_url: &Url,
+) -> FirstPostGroupRootReuseReason {
+    if probe.origin != group_url.origin().ascii_serialization() {
+        return FirstPostGroupRootReuseReason::OriginMismatch;
+    }
+    let expected_path = group_url.path().trim_end_matches('/');
+    let observed_path = probe.path.trim_end_matches('/');
+    if observed_path != expected_path {
+        let expected_parts = path_parts(group_url);
+        let observed_parts: Vec<_> = observed_path
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .collect();
+        return if observed_parts.first() == Some(&"groups")
+            && observed_parts.get(1) != expected_parts.get(1)
+        {
+            FirstPostGroupRootReuseReason::GroupMismatch
+        } else {
+            FirstPostGroupRootReuseReason::NotGroupRoot
+        };
+    }
+    if !probe.search.is_empty() || !probe.hash.is_empty() || probe.surface != "group" {
+        return FirstPostGroupRootReuseReason::NotGroupRoot;
+    }
+    let expected_parts = path_parts(group_url);
+    let expected_group_id = expected_parts.get(1).copied().unwrap_or_default();
+    if !probe
+        .target_group_id
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case(expected_group_id))
+    {
+        return FirstPostGroupRootReuseReason::GroupMismatch;
+    }
+    if !matches!(probe.ready_state.as_str(), "interactive" | "complete") {
+        return FirstPostGroupRootReuseReason::DocumentNotReady;
+    }
+    if probe.blocking_kind != "none" {
+        return FirstPostGroupRootReuseReason::BlockedPage;
+    }
+    if probe.visible_main_count != 1 {
+        return FirstPostGroupRootReuseReason::MainUnresolved;
+    }
+    if !probe.scope_resolved || probe.scope_ambiguous {
+        return FirstPostGroupRootReuseReason::ScopeUnresolved;
+    }
+    if probe.visible_dialog_count != 0 {
+        return FirstPostGroupRootReuseReason::DialogPresent;
+    }
+    if probe.feed_loading {
+        return FirstPostGroupRootReuseReason::FeedLoading;
+    }
+    if !probe.scroll_y.is_finite() || !(0.0..=1.0).contains(&probe.scroll_y) {
+        return FirstPostGroupRootReuseReason::ScrollNotAtTop;
+    }
+    FirstPostGroupRootReuseReason::ExactRootReusable
+}
+
+fn log_first_post_group_root_decision(
+    session: &EngineSession,
+    group_url: &Url,
+    strategy: &'static str,
+    reason: FirstPostGroupRootReuseReason,
+    probe: Option<&super::FacebookFirstPostGroupRootProbe>,
+    probe_error_code: Option<&str>,
+    fallback_count: usize,
+) {
+    let observed_path = probe.map(|value| bounded_log_value(&value.path));
+    let surface = probe.map(|value| bounded_log_value(&value.surface));
+    let ready_state = probe.map(|value| bounded_log_value(&value.ready_state));
+    let blocking_kind = probe.map(|value| bounded_log_value(&value.blocking_kind));
+    let diagnostic = json!({
+        "strategy": strategy,
+        "reason": reason.as_str(),
+        "targetId": bounded_log_value(session.cdp.target_id()),
+        "expectedGroupPath": bounded_log_value(group_url.path()),
+        "observedPath": observed_path,
+        "surface": surface,
+        "readyState": ready_state,
+        "blockingKind": blocking_kind,
+        "feedLoading": probe.map(|value| value.feed_loading),
+        "scrollY": probe.map(|value| value.scroll_y),
+        "fallbackCount": fallback_count,
+        "probeErrorCode": probe_error_code,
+    });
+    eprintln!("native_page_engine_first_post_group_root:{diagnostic}");
+}
+
+fn bounded_log_value(value: &str) -> String {
+    value.chars().take(256).collect()
 }
 
 fn first_same_group_post_target(
@@ -413,6 +626,7 @@ async fn evaluate_facebook_router_until_bound_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::facebook::FacebookFirstPostGroupRootProbe;
     use crate::model::{PageCard, PageMovement};
 
     fn cards(note_ids: &[&str], movement: Option<PageMovement>) -> CommandOutput {
@@ -439,6 +653,113 @@ mod tests {
             list_state: None,
             selection_reason: None,
         })
+    }
+
+    fn reusable_group_root_probe() -> FacebookFirstPostGroupRootProbe {
+        FacebookFirstPostGroupRootProbe {
+            origin: "https://www.facebook.com".to_owned(),
+            path: "/groups/945390701793119".to_owned(),
+            search: String::new(),
+            hash: String::new(),
+            surface: "group".to_owned(),
+            ready_state: "complete".to_owned(),
+            blocking_kind: "none".to_owned(),
+            visible_main_count: 1,
+            visible_dialog_count: 0,
+            target_group_id: Some("945390701793119".to_owned()),
+            scope_resolved: true,
+            scope_ambiguous: false,
+            feed_loading: false,
+            scroll_y: 0.0,
+        }
+    }
+
+    #[test]
+    fn reuses_only_an_exact_ready_unblocked_group_root_at_the_feed_origin() {
+        let group = validated_facebook_group_url("https://www.facebook.com/groups/945390701793119")
+            .expect("group");
+        let exact = reusable_group_root_probe();
+        assert_eq!(
+            first_post_group_root_reuse_reason(&exact, &group),
+            FirstPostGroupRootReuseReason::ExactRootReusable
+        );
+
+        let mut probe = exact.clone();
+        probe.origin = "https://m.facebook.com".to_owned();
+        assert_eq!(
+            first_post_group_root_reuse_reason(&probe, &group),
+            FirstPostGroupRootReuseReason::OriginMismatch
+        );
+
+        let mut probe = exact.clone();
+        probe.path = "/groups/42".to_owned();
+        assert_eq!(
+            first_post_group_root_reuse_reason(&probe, &group),
+            FirstPostGroupRootReuseReason::GroupMismatch
+        );
+
+        let mut probe = exact.clone();
+        probe.path = "/groups/945390701793119/posts/7".to_owned();
+        assert_eq!(
+            first_post_group_root_reuse_reason(&probe, &group),
+            FirstPostGroupRootReuseReason::NotGroupRoot
+        );
+
+        let mut probe = exact.clone();
+        probe.search = "?multi_permalinks=7".to_owned();
+        assert_eq!(
+            first_post_group_root_reuse_reason(&probe, &group),
+            FirstPostGroupRootReuseReason::NotGroupRoot
+        );
+
+        let mut probe = exact.clone();
+        probe.ready_state = "loading".to_owned();
+        assert_eq!(
+            first_post_group_root_reuse_reason(&probe, &group),
+            FirstPostGroupRootReuseReason::DocumentNotReady
+        );
+
+        let mut probe = exact.clone();
+        probe.blocking_kind = "captcha".to_owned();
+        assert_eq!(
+            first_post_group_root_reuse_reason(&probe, &group),
+            FirstPostGroupRootReuseReason::BlockedPage
+        );
+
+        let mut probe = exact.clone();
+        probe.visible_main_count = 0;
+        assert_eq!(
+            first_post_group_root_reuse_reason(&probe, &group),
+            FirstPostGroupRootReuseReason::MainUnresolved
+        );
+
+        let mut probe = exact.clone();
+        probe.scope_ambiguous = true;
+        assert_eq!(
+            first_post_group_root_reuse_reason(&probe, &group),
+            FirstPostGroupRootReuseReason::ScopeUnresolved
+        );
+
+        let mut probe = exact.clone();
+        probe.visible_dialog_count = 1;
+        assert_eq!(
+            first_post_group_root_reuse_reason(&probe, &group),
+            FirstPostGroupRootReuseReason::DialogPresent
+        );
+
+        let mut probe = exact.clone();
+        probe.feed_loading = true;
+        assert_eq!(
+            first_post_group_root_reuse_reason(&probe, &group),
+            FirstPostGroupRootReuseReason::FeedLoading
+        );
+
+        let mut probe = exact;
+        probe.scroll_y = 1.5;
+        assert_eq!(
+            first_post_group_root_reuse_reason(&probe, &group),
+            FirstPostGroupRootReuseReason::ScrollNotAtTop
+        );
     }
 
     #[test]

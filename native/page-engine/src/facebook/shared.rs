@@ -199,6 +199,14 @@ pub(crate) async fn probe_facebook_join(
     facebook::join_probe_from_cdp(&raw)
 }
 
+pub(crate) async fn probe_facebook_first_post_group_root(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookFirstPostGroupRootProbe, EngineError> {
+    let expression = facebook::first_post_group_root_probe_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::first_post_group_root_probe_from_cdp(&raw)
+}
+
 pub(crate) async fn probe_facebook_publish_home_snapshot(
     session: &mut EngineSession,
 ) -> Result<facebook::FacebookPublishHomeProbe, EngineError> {
@@ -612,6 +620,23 @@ pub(crate) async fn evaluate_facebook_router(
         return Ok((EffectPhase::NotStarted, output));
     }
     let expression = facebook::command_expression(command)?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    let result = facebook::result_from_cdp(&raw)?;
+    let output = facebook::typed_output(command, result.output, session.cdp.target_id())?;
+    Ok((result.effect_phase, output))
+}
+
+pub(crate) async fn evaluate_facebook_first_post_router(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+    group_url: &Url,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    if facebook_command_requires_gate(command)
+        && let Some(output) = ensure_facebook_action_gate(session, command).await?
+    {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    let expression = facebook::first_post_command_expression(command, group_url)?;
     let raw = session.cdp.evaluate(&expression, true).await?;
     let result = facebook::result_from_cdp(&raw)?;
     let output = facebook::typed_output(command, result.output, session.cdp.target_id())?;

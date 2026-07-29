@@ -396,6 +396,25 @@ pub struct FacebookJoinClickResult {
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookFirstPostGroupRootProbe {
+    pub origin: String,
+    pub path: String,
+    pub search: String,
+    pub hash: String,
+    pub surface: String,
+    pub ready_state: String,
+    pub blocking_kind: String,
+    pub visible_main_count: u32,
+    pub visible_dialog_count: u32,
+    pub target_group_id: Option<String>,
+    pub scope_resolved: bool,
+    pub scope_ambiguous: bool,
+    pub feed_loading: bool,
+    pub scroll_y: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct FacebookPublishHomeProbe {
     pub href: String,
     pub ready_state: String,
@@ -430,6 +449,34 @@ pub struct FacebookPublishSubmittedProbe {
 
 pub fn command_expression(command: &NativeCommand) -> Result<String, EngineError> {
     router_expression(serde_json::to_value(command).map_err(|_| invalid_result())?)
+}
+
+pub fn first_post_command_expression(
+    command: &NativeCommand,
+    container: &Url,
+) -> Result<String, EngineError> {
+    let is_first_post_command = match command {
+        NativeCommand::FeedRefresh(params) => {
+            params.reason.as_deref() == Some("first_commentable_group_post_probe")
+        }
+        NativeCommand::BrowseScroll(params) => {
+            params.reason.as_deref() == Some("first_commentable_group_post_probe")
+        }
+        _ => false,
+    };
+    if !is_first_post_command {
+        return Err(invalid_result());
+    }
+    let mut input = serde_json::to_value(command).map_err(|_| invalid_result())?;
+    let params = input
+        .get_mut("params")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(invalid_result)?;
+    params.insert(
+        "container".to_owned(),
+        Value::String(container.as_str().to_owned()),
+    );
+    router_expression(input)
 }
 
 pub fn identity_expression(cookie_user_id: Option<&str>) -> Result<String, EngineError> {
@@ -565,6 +612,10 @@ pub fn join_probe_expression() -> Result<String, EngineError> {
 
 pub fn join_click_expression() -> Result<String, EngineError> {
     internal_expression("join_click", json!({}))
+}
+
+pub fn first_post_group_root_probe_expression() -> Result<String, EngineError> {
+    internal_expression("first_post_group_root_probe", json!({}))
 }
 
 pub fn publish_home_probe_expression() -> Result<String, EngineError> {
@@ -765,6 +816,13 @@ pub fn join_probe_from_cdp(result: &Value) -> Result<FacebookJoinProbe, EngineEr
 pub fn join_click_from_cdp(result: &Value) -> Result<FacebookJoinClickResult, EngineError> {
     let result = result_from_cdp(result)?;
     typed_internal_value(result.output, "join_click")
+}
+
+pub fn first_post_group_root_probe_from_cdp(
+    result: &Value,
+) -> Result<FacebookFirstPostGroupRootProbe, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "first_post_group_root_probe")
 }
 
 pub fn publish_home_probe_from_cdp(
@@ -1146,6 +1204,70 @@ mod tests {
         let expression = identity_expression(Some("123456789")).expect("expression");
         assert!(expression.contains("identity_read"));
         assert!(expression.contains("123456789"));
+    }
+
+    #[test]
+    fn first_post_expression_injects_container_only_for_internal_probe_commands() {
+        let command: NativeCommand = serde_json::from_str(
+            r#"{"kind":"feed_refresh","params":{"reason":"first_commentable_group_post_probe"}}"#,
+        )
+        .expect("first-post command");
+        let container =
+            Url::parse("https://www.facebook.com/groups/123").expect("canonical group URL");
+        let ordinary = command_expression(&command).expect("ordinary expression");
+        let first_post =
+            first_post_command_expression(&command, &container).expect("first-post expression");
+        let ordinary_input = ordinary.rsplit_once(")(").expect("ordinary router input").1;
+        let first_post_input = first_post
+            .rsplit_once(")(")
+            .expect("first-post router input")
+            .1;
+        assert!(!ordinary_input.contains(r#""container":"#));
+        assert!(first_post_input.contains(r#""container":"https://www.facebook.com/groups/123""#));
+
+        let unrelated: NativeCommand =
+            serde_json::from_str(r#"{"kind":"feed_refresh","params":{"reason":"manual"}}"#)
+                .expect("unrelated command");
+        assert!(first_post_command_expression(&unrelated, &container).is_err());
+    }
+
+    #[test]
+    fn first_post_group_root_probe_has_a_strict_typed_shape() {
+        let cdp_result = json!({
+            "result": {
+                "value": {
+                    "effectPhase": "confirmed",
+                    "output": {
+                        "kind": "first_post_group_root_probe",
+                        "value": {
+                            "origin": "https://www.facebook.com",
+                            "path": "/groups/123",
+                            "search": "",
+                            "hash": "",
+                            "surface": "group",
+                            "readyState": "complete",
+                            "blockingKind": "none",
+                            "visibleMainCount": 1,
+                            "visibleDialogCount": 0,
+                            "targetGroupId": "123",
+                            "scopeResolved": true,
+                            "scopeAmbiguous": false,
+                            "feedLoading": false,
+                            "scrollY": 0
+                        }
+                    }
+                }
+            }
+        });
+        let probe =
+            first_post_group_root_probe_from_cdp(&cdp_result).expect("strict group-root probe");
+        assert_eq!(probe.target_group_id.as_deref(), Some("123"));
+        assert_eq!(probe.visible_main_count, 1);
+        assert_eq!(probe.scroll_y, 0.0);
+
+        let mut unexpected = cdp_result;
+        unexpected["result"]["value"]["output"]["value"]["candidate"] = json!("must-not-leak");
+        assert!(first_post_group_root_probe_from_cdp(&unexpected).is_err());
     }
 
     #[test]
