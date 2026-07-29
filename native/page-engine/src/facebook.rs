@@ -151,6 +151,24 @@ pub struct FacebookFeedProbe {
     pub document_age_ms: u64,
 }
 
+/// 一个待采集的身份候选：某张卡内、形状像时间戳、且当前落在视口内的链接中心点。
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookIdentityCandidate {
+    pub card_index: u32,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// 身份采集回合的输入：尚无地址的卡有哪些候选，以及本屏已解析 / 总卡数（供命中率诊断）。
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookIdentityCandidates {
+    pub candidates: Vec<FacebookIdentityCandidate>,
+    pub card_count: u32,
+    pub resolved_count: u32,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct FacebookPointTarget {
@@ -431,6 +449,10 @@ pub fn feed_probe_expression() -> Result<String, EngineError> {
     router_expression(json!({ "kind": "feed_probe", "params": {} }))
 }
 
+pub fn identity_candidates_expression() -> Result<String, EngineError> {
+    router_expression(json!({ "kind": "identity_candidates", "params": {} }))
+}
+
 pub fn feed_home_target_expression() -> Result<String, EngineError> {
     router_expression(json!({ "kind": "feed_home_target", "params": {} }))
 }
@@ -659,6 +681,13 @@ pub fn reel_next_target_from_cdp(result: &Value) -> Result<FacebookReelNextTarge
 pub fn feed_probe_from_cdp(result: &Value) -> Result<FacebookFeedProbe, EngineError> {
     let result = result_from_cdp(result)?;
     typed_internal_value(result.output, "feed_probe")
+}
+
+pub fn identity_candidates_from_cdp(
+    result: &Value,
+) -> Result<FacebookIdentityCandidates, EngineError> {
+    let result = result_from_cdp(result)?;
+    typed_internal_value(result.output, "identity_candidates")
 }
 
 pub fn point_target_from_cdp(result: &Value) -> Result<FacebookPointTarget, EngineError> {

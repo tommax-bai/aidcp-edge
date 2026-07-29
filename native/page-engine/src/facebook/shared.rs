@@ -17,6 +17,19 @@ pub(crate) const FACEBOOK_DETAIL_HYDRATION_TIMEOUT: Duration = Duration::from_se
 pub(crate) const FACEBOOK_FEED_SETTLE_NAV: Duration = Duration::from_secs(6);
 pub(crate) const FACEBOOK_FEED_SETTLE_IN_PLACE: Duration = Duration::from_millis(3_500);
 pub(crate) const FACEBOOK_FEED_SCROLL_ROUNDS: usize = 8;
+
+// 身份采集（change acquire-facebook-feed-post-identity-by-hover）。Facebook 把帖子地址扣在 DOM 之外，
+// 只有可信指针落到时间戳上才换出真地址。
+//
+// **预算必须按「整条命令」算，不能按轮算**：滚动命令的原子预算上限是 engine.rs 的
+// DEFAULT_COMMAND_TIMEOUT_MS = 30s（实际取 min(会话 timeout_ms, 该上限)），超时即 CdpTimeout / Ambiguous。
+// 而零卡屏上判稳本身最坏就要 8 轮 × 3.5s ≈ 28s。采集若按轮给预算、8 轮各来一次，必然把整条命令撑爆。
+// 故给一个跨轮共享的小预算：最坏 3 卡 × 2 候选 × 1.2s ≈ 7.2s，由 8s 总预算兜住。
+// 调大前先算清楚它与判稳耗时之和是否仍显著小于 30s。
+pub(crate) const FACEBOOK_IDENTITY_SETTLE: Duration = Duration::from_millis(1_200);
+pub(crate) const FACEBOOK_IDENTITY_MAX_CANDIDATES_PER_CARD: usize = 2;
+pub(crate) const FACEBOOK_IDENTITY_MAX_CARDS_PER_ROUND: usize = 3;
+pub(crate) const FACEBOOK_IDENTITY_COMMAND_BUDGET: Duration = Duration::from_secs(8);
 pub(crate) const FACEBOOK_REFRESH_RELOAD_FLOOR_MS: u64 = 180_000;
 pub(crate) const FACEBOOK_JOIN_READY_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const FACEBOOK_JOIN_HYDRATION_SETTLE: Duration = Duration::from_secs(2);

@@ -15,6 +15,60 @@
       isVideo:Boolean(first(['video'],article)||/\/videos\/|\/reel\/|\/watch/.test(href)),
     };
   };
+  // 身份候选筛选（change acquire-facebook-feed-post-identity-by-hover）。
+  // Facebook 把帖子地址扣在 DOM 之外：一张卡里有几个指向站点根路径的链接，只有**时间戳**那个
+  // 在可信指针落上去之后才换出真地址（2026-07-29 越南语首页实测：可信指针 5/5、页面内合成事件 0/8）。
+  // 同卡的其余同形链接是「用链接实现的按钮」（如隐藏此帖，实测 36×36 含图标带无障碍标签、悬停后不变），
+  // 本就没有目的地，试它纯浪费。故按形状区分：时间戳是扁长的纯文字链接（实测 124×15、卡顶部、无标签）。
+  // 宁可漏筛（多试一次）也不误筛（永远试不到）——阈值取宽松侧。
+  //
+  // **只按高度分，不按宽高比分**（2026-07-29 两台真机标定）：时间戳高度恒 15，隐藏按钮 36，
+  // 高度是稳定判据；而宽度随时间戳文案长短变（Xu Nu 124px / Vo Tu 32px，比例 8.3 vs 2.1），
+  // 一旦按比例筛，短文案那台会把时间戳整个筛掉、采集恒零命中。
+  const IDENTITY_CANDIDATE_MAX_HEIGHT_PX=24;
+  const IDENTITY_CANDIDATE_MIN_WIDTH_PX=8;
+  const IDENTITY_CANDIDATE_VIEWPORT_MARGIN_PX=70;
+  const IDENTITY_CANDIDATE_LIMIT=24;
+  const cardHasIdentity=(article)=>Boolean(postId(permalinkOf(article)));
+  const isIdentityCandidate=(anchor)=>{
+    if(!anchor||!visible(anchor))return false;
+    if(anchor.getAttribute('aria-label'))return false;      // 带无障碍标签的是控件，不是时间戳
+    if(anchor.querySelector('svg,img'))return false;        // 含图标的是控件
+    if(!text(anchor,64))return false;                       // 时间戳有文字（虽被打散），控件没有
+    let path='';
+    try{path=new URL(anchor.href||anchor.getAttribute('href')||'',location.origin).pathname;}catch{return false;}
+    if(path!=='/')return false;                             // 已有真地址或纯锚点的都不是候选
+    const rect=anchor.getBoundingClientRect();
+    if(rect.height>IDENTITY_CANDIDATE_MAX_HEIGHT_PX)return false;
+    if(rect.width<IDENTITY_CANDIDATE_MIN_WIDTH_PX)return false;
+    const centerY=rect.top+rect.height/2;
+    const viewportHeight=Number(window.innerHeight)||0;
+    // 视口外悬停实测无效，直接不产出，避免引擎白跑一次移动
+    return centerY>=IDENTITY_CANDIDATE_VIEWPORT_MARGIN_PX&&centerY<=viewportHeight-IDENTITY_CANDIDATE_VIEWPORT_MARGIN_PX;
+  };
+  const identityCandidates=()=>{
+    const candidates=[];
+    let resolved=0;
+    const articles=reelSurface()?[]:topArticles();
+    articles.forEach((article,cardIndex)=>{
+      if(cardHasIdentity(article)){resolved+=1;return;}     // 地址一经换出即持久，已有的不再采集
+      for(const anchor of all('a[href]',article)){
+        if(candidates.length>=IDENTITY_CANDIDATE_LIMIT)return;
+        if(!isIdentityCandidate(anchor))continue;
+        const rect=anchor.getBoundingClientRect();
+        candidates.push({
+          cardIndex,
+          x:Math.round(rect.left+rect.width/2),
+          y:Math.round(rect.top+rect.height/2),
+        });
+      }
+    });
+    return {kind:'identity_candidates',value:{
+      candidates,
+      cardCount:articles.length,
+      resolvedCount:resolved,
+    }};
+  };
   const feedCards=()=>{
     const cards=[];
     const seen=new Set();

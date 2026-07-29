@@ -2010,6 +2010,7 @@ fn router_kind(request: &Value) -> Option<String> {
         "page_probe",
         "consent_probe",
         "feed_probe",
+        "identity_candidates",
         "feed_recovery_target",
         "feed_refresh",
         "browse_scroll",
@@ -4285,4 +4286,162 @@ async fn spawn_facebook_inline_context_change_cdp() -> (u16, tokio::task::JoinHa
         requests
     });
     (port, server)
+}
+
+/// 身份采集夹具：首屏「有物理卡但零地址」，一次可信指针移动之后才出现带地址的卡。
+/// 复刻 2026-07-29 越南语首页实测到的形态。
+fn facebook_identity_probe_cdp(acquired: bool) -> Value {
+    router_cdp(
+        "feed_probe",
+        json!({
+            "cards": if acquired {
+                json!([{
+                    "index": 0,
+                    "title": "Acquired",
+                    "likeCount": 0,
+                    "collectCount": 0,
+                    "noteId": "https://www.facebook.com/Alice/posts/pfbidACQUIRED"
+                }])
+            } else {
+                json!([])
+            },
+            "documentGeneration": "home-generation",
+            "listKind": "feed",
+            "listState": if acquired { "ready" } else { "present_unreportable" },
+            "loading": false,
+            "articleCount": 1,
+            "explicitEmpty": false,
+            "explicitEnd": false,
+            "url": "https://www.facebook.com/",
+            "surface": "home",
+            "scrollY": 650,
+            "innerWidth": 1440,
+            "innerHeight": 800,
+            "scrollHeight": 2400,
+            "documentAgeMs": 2000
+        }),
+    )
+}
+
+fn facebook_identity_candidates_cdp(acquired: bool) -> Value {
+    router_cdp(
+        "identity_candidates",
+        json!({
+            "candidates": if acquired {
+                json!([])
+            } else {
+                json!([{ "cardIndex": 0, "x": 512.0, "y": 240.0 }])
+            },
+            "cardCount": 1,
+            "resolvedCount": if acquired { 1 } else { 0 }
+        }),
+    )
+}
+
+async fn spawn_facebook_identity_acquisition_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        let mut hovered = false;
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            if request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseMoved"
+                && request["params"]["x"] == 512.0
+            {
+                hovered = true;
+            }
+            let result = match router_kind(&request).as_deref() {
+                Some("reel_probe") => {
+                    router_cdp("reel_probe", json!({"ok": false, "reason": "not_reel"}))
+                }
+                Some("page_probe") => facebook_feed_page_probe_cdp(),
+                Some("consent_probe") => facebook_consent_absent_cdp(),
+                Some("feed_probe") => facebook_identity_probe_cdp(hovered),
+                Some("identity_candidates") => facebook_identity_candidates_cdp(hovered),
+                Some("feed_recovery_target") => router_cdp(
+                    "point_target",
+                    json!({ "ok": false, "reason": "no_prompt" }),
+                ),
+                _ => json!({}),
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
+        requests
+    });
+    (port, server)
+}
+
+#[tokio::test]
+async fn facebook_identity_acquisition_hovers_without_ever_pressing() {
+    let (port, server) = spawn_facebook_identity_acquisition_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    // 命令原子预算 = min(会话 timeout_ms, 命令种类上限)，而 session_open 的默认 timeout_ms 只有 2s。
+    open.params.timeout_ms = 90_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "identity-acquire-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 30_000,
+            command: NativeCommand::PageScroll(PageScrollParams {
+                reason: Some("feed_scroll".to_owned()),
+                dwell_ms: None,
+            }),
+        })
+        .await
+        .expect("Feed scroll");
+
+    let CommandOutput::PageCards(cards) = outcome.output.expect("Feed cards") else {
+        panic!("expected Feed cards after identity acquisition")
+    };
+    assert_eq!(
+        cards.cards[0].note_id.as_deref(),
+        Some("https://www.facebook.com/Alice/posts/pfbidACQUIRED"),
+        "acquisition must turn an address-less card into a reportable one"
+    );
+
+    engine.shutdown().await;
+    let requests = server.await.expect("identity acquisition fake CDP");
+    assert!(
+        requests.iter().any(|request| {
+            request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseMoved"
+                && request["params"]["x"] == 512.0
+                && request["params"]["y"] == 240.0
+        }),
+        "acquisition must move the trusted pointer onto the candidate"
+    );
+    // 红线：采集只移动，绝不按下。按下会打开帖子或触发控件，那是平台可见的写操作。
+    assert!(
+        requests.iter().all(|request| {
+            request["method"] != "Input.dispatchMouseEvent"
+                || (request["params"]["type"] != "mousePressed"
+                    && request["params"]["type"] != "mouseReleased")
+        }),
+        "acquisition must never press or release the pointer"
+    );
 }

@@ -223,6 +223,8 @@ pub(crate) async fn execute_facebook_initial_feed(
         return Ok((EffectPhase::NotStarted, output));
     }
 
+    // 采集预算按整条命令算、跨轮共享：滚动命令的原子上限是 30s，判稳本身在零卡屏上就要占掉大半。
+    let acquire_deadline = tokio::time::Instant::now() + FACEBOOK_IDENTITY_COMMAND_BUDGET;
     let mut last = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_NAV).await?;
     last = match recover_facebook_feed_prompt(session, last, cancellation, deadline_unix_ms).await?
     {
@@ -241,6 +243,14 @@ pub(crate) async fn execute_facebook_initial_feed(
         }
         dispatch_facebook_feed_wheel(session, &last, cancellation, deadline_unix_ms).await?;
         last = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_IN_PLACE).await?;
+        last = acquire_facebook_feed_identities(
+            session,
+            last,
+            acquire_deadline,
+            cancellation,
+            deadline_unix_ms,
+        )
+        .await?;
     }
 
     if facebook_zero_card_terminal(session, &last).await? != FacebookZeroCardTerminal::None {
@@ -322,6 +332,9 @@ pub(crate) async fn execute_facebook_feed_scroll(
     if let Some(output) = ensure_facebook_action_gate(session, &command).await? {
         return Ok((EffectPhase::NotStarted, output));
     }
+    // 采集预算按整条命令算、跨轮共享（见 FACEBOOK_IDENTITY_COMMAND_BUDGET 的注释：
+    // 滚动命令原子上限 30s，零卡屏上判稳本身就要占掉大半，按轮给预算必然撑爆）。
+    let acquire_deadline = tokio::time::Instant::now() + FACEBOOK_IDENTITY_COMMAND_BUDGET;
     let mut current = probe_facebook_feed(session).await?;
     current = match recover_facebook_feed_prompt(session, current, cancellation, deadline_unix_ms)
         .await?
@@ -338,6 +351,15 @@ pub(crate) async fn execute_facebook_feed_scroll(
         let before = current;
         dispatch_facebook_feed_wheel(session, &before, cancellation, deadline_unix_ms).await?;
         let after = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_IN_PLACE).await?;
+        // 采集插在判稳之后、终态判定之前：命中的卡还能按普通卡批上报，来不及的留给后续轮次。
+        let after = acquire_facebook_feed_identities(
+            session,
+            after,
+            acquire_deadline,
+            cancellation,
+            deadline_unix_ms,
+        )
+        .await?;
         saw_any_card |= !after.cards.is_empty();
         let movement = PageMovement {
             before: start_y,
@@ -764,6 +786,102 @@ async fn confirm_facebook_home_empty(
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+async fn probe_facebook_identity_candidates(
+    session: &mut EngineSession,
+) -> Result<facebook::FacebookIdentityCandidates, EngineError> {
+    let expression = facebook::identity_candidates_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    facebook::identity_candidates_from_cdp(&raw)
+}
+
+/// 身份采集回合（change acquire-facebook-feed-post-identity-by-hover）。
+///
+/// Facebook 不再把帖子地址放进 DOM：一张卡里几个指向站点根路径的链接中，只有**时间戳**那个在
+/// **可信**指针落上去后才换出真地址（2026-07-29 越南语首页实测：可信指针 5/5、页面内合成事件 0/8、
+/// `focus()` 3/25、视口外无效、换出后持久、全页 `pfbid` 出现 0 次即无免交互替代路径）。
+/// 不做这一步，首页就永远读不出任何可操作目标。
+///
+/// 红线：**只移动、不按下**。任何 press/release 都会打开帖子或触发控件，那是平台可见的写操作。
+/// 坐标每次现取——懒加载在上方插内容会让上一次探测的坐标几秒内失效（调查期实测命中率因此从 5/5 掉到 0/4）。
+/// 采集失败一律无声降级：返回原探测，滚动的终态与不启用采集时逐位一致。
+async fn acquire_facebook_feed_identities(
+    session: &mut EngineSession,
+    probe: facebook::FacebookFeedProbe,
+    acquire_deadline: tokio::time::Instant,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<facebook::FacebookFeedProbe, EngineError> {
+    if probe.surface != "home" || probe.loading {
+        return Ok(probe);
+    }
+    // 本屏已经扫出带地址的卡 ⇒ 有东西可报，不必为剩下的花时间：采集是给「一张都读不出来」那种屏用的。
+    // 这条同时保证顺利路径零额外开销（不多一次探测、不多一秒停留）。
+    if !probe.cards.is_empty() {
+        return Ok(probe);
+    }
+    let mut next_ordinal: std::collections::BTreeMap<u32, usize> =
+        std::collections::BTreeMap::new();
+    let mut finished: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    let mut touched_cards: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    let mut moved = false;
+
+    loop {
+        if tokio::time::Instant::now() >= acquire_deadline {
+            break;
+        }
+        if cancellation.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
+            break;
+        }
+        if crate::input::unix_time_ms() >= deadline_unix_ms {
+            break;
+        }
+        if touched_cards.len() >= FACEBOOK_IDENTITY_MAX_CARDS_PER_ROUND {
+            break;
+        }
+        let snapshot = probe_facebook_identity_candidates(session).await?;
+        let Some(card) = snapshot
+            .candidates
+            .iter()
+            .map(|candidate| candidate.card_index)
+            .find(|index| !finished.contains(index))
+        else {
+            break;
+        };
+        let ordinal = *next_ordinal.entry(card).or_insert(0);
+        if ordinal >= FACEBOOK_IDENTITY_MAX_CANDIDATES_PER_CARD {
+            finished.insert(card);
+            continue;
+        }
+        let Some(target) = snapshot
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.card_index == card)
+            .nth(ordinal)
+        else {
+            finished.insert(card);
+            continue;
+        };
+        touched_cards.insert(card);
+        next_ordinal.insert(card, ordinal + 1);
+        // 只移动，绝不按下。
+        session
+            .cdp
+            .dispatch_mouse("mouseMoved", target.x, target.y, "none", 0)
+            .await?;
+        moved = true;
+        tokio::time::sleep(FACEBOOK_IDENTITY_SETTLE).await;
+        let after = probe_facebook_identity_candidates(session).await?;
+        if after.resolved_count > snapshot.resolved_count {
+            finished.insert(card);
+        }
+    }
+
+    if !moved {
+        return Ok(probe);
+    }
+    probe_facebook_feed(session).await
 }
 
 async fn probe_facebook_feed(
