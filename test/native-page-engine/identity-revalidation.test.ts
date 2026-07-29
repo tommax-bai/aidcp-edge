@@ -21,8 +21,11 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import {
   IdentityRevalidator,
+  applyWakeIdentityResettlement,
   createIdentityReestablishment,
+  judgeAutomationResume,
   judgeRuntimeIdentity,
+  judgeWakeIdentityResettlement,
   observedAccountIdFromDecision,
   reestablishIdentityReadOptions,
   PERIODIC_IDENTITY_READ_HYDRATE_MS,
@@ -31,6 +34,7 @@ import {
   type IdentityPageContext,
   type IdentityReestablishmentOutcome,
   type ObservationLiveness,
+  type WakeIdentityResettlementDeps,
 } from '../../src/native-page-engine/identity-guard.js';
 import type {
   IdentityDecision,
@@ -39,6 +43,7 @@ import type {
 } from '../../src/cdp/self-identity.js';
 import { facebookPlatformDriver, classifyFacebookIdentityContext } from '../../src/facebook/driver.js';
 import { xhsPlatformDriver } from '../../src/xhs/driver.js';
+import { CoreLifecycleController } from '../../src/client/core-lifecycle.js';
 
 const OBSERVATION_INTERVAL_MS = 2_000;
 
@@ -306,6 +311,7 @@ function chain(over: {
   const seq: string[] = [];
   const logs: string[] = [];
   const halts: string[] = [];
+  const restored: string[] = [];
   const readOpts: ReadSelfIdentityOptions[] = [];
   const rebaselined: string[] = [];
   const state = { accountId: 'acct-A', nickname: undefined as string | undefined };
@@ -357,8 +363,9 @@ function chain(over: {
       return current;
     },
     reportHalt: (reason) => void halts.push(reason),
+    reportIdentityRestored: (accountId) => void restored.push(accountId),
   });
-  return { run, seq, state, logs, halts, readOpts, rebaselined };
+  return { run, seq, state, logs, halts, restored, readOpts, rebaselined };
 }
 
 test('T6 重立链顺序：在途发布诚实判失败严格早于断开云端；成功路径按全序收口', async () => {
@@ -738,6 +745,7 @@ function wired(over: {
   const logs: string[] = [];
   const seq: string[] = [];
   const halts: string[] = [];
+  const restored: string[] = [];
   const outcomes: IdentityReestablishmentOutcome[] = [];
   const invalidated: IdentityInvalidReason[] = [];
   let guard!: IdentityRevalidator;
@@ -781,6 +789,7 @@ function wired(over: {
     startBrowse: () => step('startBrowse'),
     generation: () => guard.generation,
     reportHalt: (reason) => void halts.push(reason),
+    reportIdentityRestored: (accountId) => void restored.push(accountId),
   });
   /** 宿主的 `startIdentityGuard()`。回执回喂那一行正是本组用例钉的东西。 */
   const startGuard = (): void => {
@@ -792,7 +801,7 @@ function wired(over: {
       });
     });
   };
-  return { guard, startGuard, seq, logs, halts, outcomes, invalidated };
+  return { guard, startGuard, seq, logs, halts, restored, outcomes, invalidated };
 }
 
 /** 排空链条那串立即 resolve 的 await（微任务在下一个宏任务前必然全部跑完）。 */
@@ -864,6 +873,440 @@ test('T14 链条回执三态各有归宿：作废退回待判、halt 是终局�
   assert.equal(late.guard.health, 'healthy', '迟到回执 MUST 是空操作，绝不翻动不属于它的那一局');
 });
 
+// ── T15：冷待机唤醒后的身份收口（唤醒＝第二条「身份真的重新确立了」的路径）─────────────
+//
+// 唤醒会在新一代浏览器里重新读一次身份、读不出就直接判唤醒失败——所以走到收口时就意味着「刚刚实测
+// 确认过」，与重立链步 11 等价。既然等价，它就必须承担步 11 的**全部**收口：重设基线（终局唯一的
+// 解除边）、补回上一局 halt 断掉的云端连接、通告外壳解除红角标。三件事由同一个条件管。
+//
+// 曾经的形态：①③ 没有，② 只在「账号变了」时顺手做，① 还被关进 `if (resumeAutomation)` 里。而外壳
+// 传的是「automation 没暂停」——**暂停中的节点被唤醒时它必然是 false**。于是一个真 halt 过的节点走
+// 暂停 → 冷待机 → 唤醒（保持暂停）→ 恢复自动化 回来时：浏览重开、定时器重新武装、外壳显示运行中，
+// 而判定首行永久早退、云端再也没连上、角标一直红着。
+
+interface WakeHarness {
+  seq: string[];
+  logs: string[];
+  rebaselined: string[];
+  restored: string[];
+  deps: WakeIdentityResettlementDeps;
+}
+
+function wakeHarness(over: { cloudAttached?: boolean; restoreThrows?: boolean } = {}): WakeHarness {
+  const seq: string[] = [];
+  const logs: string[] = [];
+  const rebaselined: string[] = [];
+  const restored: string[] = [];
+  return {
+    seq,
+    logs,
+    rebaselined,
+    restored,
+    deps: {
+      logger: (m) => void logs.push(m),
+      rebaseline: (id) => {
+        seq.push('rebaseline');
+        rebaselined.push(id);
+      },
+      cloudLinkAttached: () => over.cloudAttached ?? false,
+      restoreCloudLink: async () => {
+        seq.push('restoreCloudLink');
+        if (over.restoreThrows) throw new Error('云端不可达');
+      },
+      reportIdentityRestored: (id) => {
+        seq.push('reportIdentityRestored');
+        restored.push(id);
+      },
+      startBrowse: () => void seq.push('startBrowse'),
+      startIdentityGuard: () => void seq.push('startIdentityGuard'),
+    },
+  };
+}
+
+const MEASURED: IdentityDecision = { kind: 'use', accountId: 'acct-B', source: 'in-place' };
+const OVERRIDE_ONLY: IdentityDecision = {
+  kind: 'use-override-after-read-fail',
+  accountId: 'override-X',
+  reason: '唤醒后就地读不出稳定 id',
+};
+
+test('T15 唤醒后的身份收口与 resumeAutomation 无关：保持暂停也必须重设基线、补回云端、解除角标', async () => {
+  // ── ① 判据层：实测到 id ⇒ 一次真重立；上一局是不是终局都一样。
+  assert.deepEqual(judgeWakeIdentityResettlement(MEASURED, 'invalid'), { kind: 'reestablished', accountId: 'acct-B' });
+  assert.deepEqual(judgeWakeIdentityResettlement(MEASURED, 'healthy'), { kind: 'reestablished', accountId: 'acct-B' });
+  // 覆盖值不是实测值：绝不拿它当基线（拿了就是把一个页面上永远读不出的值钉进校验体 → 无限重建）。
+  assert.equal(judgeWakeIdentityResettlement(OVERRIDE_ONLY, 'healthy').kind, 'unmeasured');
+  assert.equal(judgeWakeIdentityResettlement(OVERRIDE_ONLY, 'invalid').kind, 'wake_rejected');
+
+  // ── ② 核心格：实测到身份 + **保持暂停**（resumeAutomation=false）。
+  //    这一格就是复现路径里的那一步。身份三件收口 MUST 全做，自动化 MUST NOT 恢复。
+  const paused = wakeHarness();
+  await applyWakeIdentityResettlement({ kind: 'reestablished', accountId: 'acct-B' }, false, paused.deps);
+  assert.deepEqual(
+    paused.rebaselined,
+    ['acct-B'],
+    '唤醒保持暂停时 MUST 照样重设基线——它是无身份终局唯一的解除边，关进 resumeAutomation 分支＝永久失效态',
+  );
+  assert.deepEqual(paused.restored, ['acct-B'], '外壳闩住的红角标 MUST 被解除（核心健康、外壳终局＝口径分岔）');
+  assert.deepEqual(paused.seq, ['rebaseline', 'restoreCloudLink', 'reportIdentityRestored']);
+  assert.ok(!paused.seq.includes('startBrowse'), '保持暂停 MUST NOT 把浏览拉起来');
+  assert.ok(!paused.seq.includes('startIdentityGuard'), '保持暂停 MUST NOT 重新武装周期校验的定时器');
+
+  // ── ③ 恢复自动化：三件收口照做，且**基线先于**重新武装定时器（否则第一拍拿旧基线判）。
+  const resumed = wakeHarness();
+  await applyWakeIdentityResettlement({ kind: 'reestablished', accountId: 'acct-B' }, true, resumed.deps);
+  assert.deepEqual(resumed.seq, [
+    'rebaseline',
+    'restoreCloudLink',
+    'reportIdentityRestored',
+    'startBrowse',
+    'startIdentityGuard',
+  ]);
+
+  // ── ④ 云端还连着（常规唤醒：连接全程没断）⇒ MUST NOT 再连一次。
+  const attached = wakeHarness({ cloudAttached: true });
+  await applyWakeIdentityResettlement({ kind: 'reestablished', accountId: 'acct-B' }, true, attached.deps);
+  assert.ok(!attached.seq.includes('restoreCloudLink'), '连接还在时重复 connect 会白白换掉一条好连接');
+  assert.deepEqual(attached.rebaselined, ['acct-B']);
+
+  // ── ⑤ 云端补不回来：如实告警，但基线照样解除、角标照样通告（身份确实重立了，不该被牵连）。
+  const restoreFailed = wakeHarness({ restoreThrows: true });
+  await applyWakeIdentityResettlement({ kind: 'reestablished', accountId: 'acct-B' }, true, restoreFailed.deps);
+  assert.deepEqual(restoreFailed.rebaselined, ['acct-B']);
+  assert.deepEqual(restoreFailed.restored, ['acct-B']);
+  assert.ok(restoreFailed.logs.some((l) => l.includes('与云端失联')), '补不回来 MUST 响亮告警，绝不静默当成已恢复');
+
+  // ── ⑥ 没实测到 + 上一局不是终局：一件都不解除（基线仍是上一次实测值），自动化照旧恢复。
+  const unmeasured = wakeHarness();
+  await applyWakeIdentityResettlement({ kind: 'unmeasured', reason: '只有覆盖值顶着' }, true, unmeasured.deps);
+  assert.deepEqual(unmeasured.rebaselined, [], '没实测到就 MUST NOT 重设基线（那是把「不知道」说成「知道」）');
+  assert.deepEqual(unmeasured.restored, []);
+  assert.ok(!unmeasured.seq.includes('restoreCloudLink'));
+  assert.deepEqual(unmeasured.seq, ['startBrowse', 'startIdentityGuard']);
+
+  // ── ⑦ 没实测到 + 上一局正停在无身份终局：唤醒被拒，**一件副作用都不做**（尤其不恢复自动化）。
+  //    放它回来 = 浏览跑着、外壳显示运行中，而身份校验是死的、云端是断的——正是本批要根除的形态。
+  const rejected = wakeHarness();
+  await applyWakeIdentityResettlement({ kind: 'wake_rejected', reason: '只有覆盖值顶着' }, true, rejected.deps);
+  assert.deepEqual(rejected.seq, [], '唤醒被拒 MUST 是纯返回');
+  assert.ok(rejected.logs.some((l) => l.includes('重新登录')), '必须给出处理办法，不能只是静默不动');
+});
+
+test('T15bis 闭环：真 halt 过的节点走「暂停 → 冷待机 → 唤醒（保持暂停）→ 恢复自动化」之后仍能判出换号', async () => {
+  // 上一条 T15 钉的是收口函数本身；这一条把它接回校验体，钉住「终局真的被解除了」这个结果。
+  const h = wired({ pageIdentity: 'acct-B', decision: { kind: 'halt', reason: '登录态读不出稳定账号 id' } });
+  h.startGuard();
+  await h.guard.check();
+  await h.guard.check();
+  await settle();
+  assert.equal(h.guard.health, 'invalid', '前置：一次真 halt 之后校验体停在终局');
+  assert.equal(h.halts.length, 1);
+
+  // 暂停 / 冷待机：宿主叫停（递增代际、停定时器）。
+  h.guard.stop();
+  // 唤醒（保持暂停）：新一代浏览器里重新实测到身份 = acct-B。
+  const wake = wakeHarness();
+  await applyWakeIdentityResettlement(
+    judgeWakeIdentityResettlement({ kind: 'use', accountId: 'acct-B', source: 'in-place' }, h.guard.health),
+    false, // ← 保持暂停：这正是外壳对一个暂停中的节点发 wake 时传的值
+    { ...wake.deps, rebaseline: (id) => h.guard.rebaseline(id), startIdentityGuard: () => h.startGuard() },
+  );
+  assert.equal(h.guard.health, 'healthy', '唤醒实测到身份 ⇒ 终局 MUST 被解除');
+  assert.equal(h.guard.baseline, 'acct-B', '基线 MUST 跟上新一代浏览器里实测到的 id');
+
+  // 恢复自动化，页面此后又换了一次号：必须再判得出来。
+  h.startGuard();
+  const before = h.invalidated.length;
+  await h.guard.check(); // 页面读出的仍是 acct-B == 新基线 ⇒ 健康
+  assert.equal(h.guard.consecutiveFailures, 0);
+  assert.equal(h.invalidated.length, before, '基线已跟上，MUST NOT 把同一个号误判成换号');
+});
+
+test('T15ter 端到端：真 lifecycle 驱动「暂停 → 冷待机 → 唤醒 → 恢复」，四条轴 MUST 一起回到健康', async () => {
+  // T15 / T15bis 钉的是收口函数与校验体；这一条把**真的** CoreLifecycleController 接进来，按运营的
+  // 操作序走一遍。它证的是别处证不了的那一件事：`wake` 传给宿主的是「automation 没暂停」——一个
+  // 暂停中的节点被唤醒时它必然是 false，所以任何挂在「恢复自动化」上的身份收口都必然被跳过。
+  const logs: string[] = [];
+  let pageIdentity = 'acct-A';
+  let accountId = 'acct-A';
+  let browsing = false;
+  let cloudAttached = true;
+  let shellHalted: string | null = null;
+
+  const guard = new IdentityRevalidator('acct-A', {
+    threshold: 2,
+    observationIntervalMs: OBSERVATION_INTERVAL_MS,
+    logger: (m) => logs.push(m),
+    setTimer: () => ({ unref: () => undefined }) as unknown as ReturnType<typeof setInterval>,
+    clearTimer: () => undefined,
+    readPageContext: async () => 'consumer',
+    readIdentity: async () => identified(pageIdentity),
+    observationStatus: () => liveness(),
+  });
+  const reestablish = createIdentityReestablishment({
+    logger: (m) => logs.push(m),
+    suspendObservation: () => undefined,
+    stopBrowse: async () => { browsing = false; },
+    failInFlightPublishesHonestly: () => undefined,
+    hasActiveLease: () => false,
+    resetTaskCoordinator: () => undefined,
+    // halt 关云端用的是 intentionalClose：不自动重连、也不 emit 断连事件。
+    disconnectCloud: async () => { cloudAttached = false; },
+    navigateToConsumerHome: async () => undefined,
+    readIdentity: async () => ({ ok: false, reason: '归位后仍读不出稳定 id' }),
+    decideIdentity: () => ({ kind: 'halt', reason: '登录态读不出稳定账号 id' }),
+    nicknameFor: () => undefined,
+    applyIdentity: () => undefined,
+    connectCloud: async () => { cloudAttached = true; },
+    rebaseline: (id) => guard.rebaseline(id),
+    resumeObservation: () => undefined,
+    startBrowse: () => { browsing = true; },
+    generation: () => guard.generation,
+    reportHalt: (reason) => { shellHalted = reason; },
+    reportIdentityRestored: () => { shellHalted = null; },
+  });
+  const startIdentityGuard = (): void => {
+    if (!accountId) return;
+    guard.start((reason) => void reestablish(reason).then((o) => guard.noteReestablishmentOutcome(o)));
+  };
+  const lifecycle = new CoreLifecycleController({
+    pauseAutomation: async () => { guard.stop(); browsing = false; },
+    resumeAutomation: async () => { browsing = true; startIdentityGuard(); },
+    deactivate: async () => undefined,
+    closeOwnedBrowser: async () => true,
+    enterStandby: async () => { guard.stop(); browsing = false; return true; },
+    wakeFromStandby: async (resumeAutomation) => {
+      // 宿主唤醒步 4 的等价物：新一代浏览器里重新读身份并确认成功（读不出会直接判唤醒失败）。
+      const decision: IdentityDecision = { kind: 'use', accountId: pageIdentity, source: 'in-place' };
+      const resettlement = judgeWakeIdentityResettlement(decision, guard.health);
+      if (resettlement.kind === 'wake_rejected') return false;
+      accountId = pageIdentity;
+      await applyWakeIdentityResettlement(resettlement, resumeAutomation, {
+        logger: (m) => logs.push(m),
+        rebaseline: (id) => guard.rebaseline(id),
+        cloudLinkAttached: () => cloudAttached,
+        restoreCloudLink: async () => { cloudAttached = true; },
+        reportIdentityRestored: () => { shellHalted = null; },
+        startBrowse: () => { browsing = true; },
+        startIdentityGuard: () => startIdentityGuard(),
+      });
+      return true;
+    },
+    exit: () => undefined,
+    logger: (m) => logs.push(m),
+  });
+
+  startIdentityGuard();
+  browsing = true;
+
+  // 一次**真** halt：页面换了号，链条归位后读不出 ⇒ 终局。
+  pageIdentity = 'acct-B';
+  await guard.check();
+  await guard.check();
+  await settle();
+  assert.equal(guard.health, 'invalid', '前置：真 halt 之后校验体停在终局');
+  assert.equal(cloudAttached, false, '前置：halt 断掉了云端连接');
+  assert.equal(shellHalted, '登录态读不出稳定账号 id', '前置：外壳红角标已闩上');
+
+  await lifecycle.request('pause');
+  await lifecycle.request('standby');
+  await lifecycle.request('wake'); // ← 保持暂停：wake 传的是 !automationPaused = false
+  await lifecycle.request('resume');
+
+  assert.equal(browsing, true, '浏览确实重开了——所以下面三条只要有一条没回来，就是「跑着但传感层是死的」');
+  assert.equal(guard.health, 'healthy', '主项：恢复之后校验体 MUST 回到可判定态');
+  assert.equal(guard.baseline, 'acct-B', '主项：基线 MUST 跟上唤醒时实测到的 id');
+  assert.equal(cloudAttached, true, '伴随项 a：身份重新确认之后，halt 断掉的云端连接 MUST 补回来');
+  assert.equal(shellHalted, null, '伴随项 b：外壳那枚闩住的红角标 MUST 被解除');
+});
+
+// ── T15quater：同族扫描新捞出的另一条入口（不经冷待机的「暂停 → 恢复」）─────────────────
+//
+// 上面几条治的是冷待机唤醒那条路。但「让节点重新跑起来」的入口不止一条：真 halt 之后运营点一次
+// 「暂停」再点一次「恢复」，浏览循环照样重新跑起来——而这条路**不带来任何新的身份事实**，校验体
+// 仍停在终局、云端仍是断的。同一个洞换个入口再挖一遍。判据：带来实测的入口才配解除终局；不带来
+// 实测的入口在终局面前必须停手。
+
+test('T15quater 恢复自动化的身份准入：终局身份下 MUST 拒绝放行，绝不在未知身份下把浏览重新拉起来', async () => {
+  // ── 判据层。
+  assert.deepEqual(judgeAutomationResume('healthy'), { kind: 'allow' });
+  assert.deepEqual(judgeAutomationResume('reestablishing'), { kind: 'allow' },
+    '链条持球的中间态 MUST 放行——拦它等于把一次正常的重立卡死');
+  const refused = judgeAutomationResume('invalid');
+  assert.equal(refused.kind, 'refuse');
+  assert.match(refused.kind === 'refuse' ? refused.reason : '', /重新登录/,
+    '拒绝必须给出处理办法，否则运营只会反复点「恢复」');
+
+  // ── 行为层：真 lifecycle 驱动 halt → 暂停 → 恢复（**不经冷待机**）。
+  let pageIdentity = 'acct-A';
+  let browsing = false;
+  let cloudAttached = true;
+  const guard = new IdentityRevalidator('acct-A', {
+    threshold: 2,
+    observationIntervalMs: OBSERVATION_INTERVAL_MS,
+    setTimer: () => ({ unref: () => undefined }) as unknown as ReturnType<typeof setInterval>,
+    clearTimer: () => undefined,
+    readPageContext: async () => 'consumer',
+    readIdentity: async () => identified(pageIdentity),
+    observationStatus: () => liveness(),
+  });
+  const reestablish = createIdentityReestablishment({
+    logger: () => undefined,
+    suspendObservation: () => undefined,
+    stopBrowse: async () => { browsing = false; },
+    failInFlightPublishesHonestly: () => undefined,
+    hasActiveLease: () => false,
+    resetTaskCoordinator: () => undefined,
+    disconnectCloud: async () => { cloudAttached = false; },
+    navigateToConsumerHome: async () => undefined,
+    readIdentity: async () => ({ ok: false, reason: '归位后仍读不出稳定 id' }),
+    decideIdentity: () => ({ kind: 'halt', reason: '登录态读不出稳定账号 id' }),
+    nicknameFor: () => undefined,
+    applyIdentity: () => undefined,
+    connectCloud: async () => { cloudAttached = true; },
+    rebaseline: (id) => guard.rebaseline(id),
+    resumeObservation: () => undefined,
+    startBrowse: () => { browsing = true; },
+    generation: () => guard.generation,
+    reportHalt: () => undefined,
+    reportIdentityRestored: () => undefined,
+  });
+  const startIdentityGuard = (): void => {
+    guard.start((reason) => void reestablish(reason).then((o) => guard.noteReestablishmentOutcome(o)));
+  };
+  const lifecycle = new CoreLifecycleController({
+    pauseAutomation: async () => { guard.stop(); browsing = false; },
+    resumeAutomation: async () => {
+      // 宿主形状：准入不过就抛（与「浏览器缺席请走唤醒」同口径 —— 抛出 = 保持暂停态）。
+      const verdict = judgeAutomationResume(guard.health);
+      if (verdict.kind === 'refuse') throw new Error('identity_halted_relogin_required');
+      browsing = true;
+      startIdentityGuard();
+    },
+    deactivate: async () => undefined,
+    closeOwnedBrowser: async () => true,
+    exit: () => undefined,
+  });
+
+  startIdentityGuard();
+  browsing = true;
+  pageIdentity = 'acct-B';
+  await guard.check();
+  await guard.check();
+  await settle();
+  assert.equal(guard.health, 'invalid', '前置：真 halt 之后停在终局');
+  assert.equal(cloudAttached, false, '前置：halt 断掉了云端连接');
+
+  await lifecycle.request('pause');
+  await lifecycle.request('resume').catch(() => undefined);
+
+  assert.equal(browsing, false, '终局身份下 MUST NOT 把浏览重新拉起来（云端还断着，跑起来就是白烧动作 + 上报全丢）');
+  assert.equal(lifecycle.state, 'paused', '拒绝之后 MUST 如实留在暂停态，绝不投影成「已恢复」');
+
+  // 唯一的出路仍然是一次带实测的入口：冷待机唤醒（或重启节点）。
+  const wake = wakeHarness();
+  await applyWakeIdentityResettlement(
+    judgeWakeIdentityResettlement({ kind: 'use', accountId: 'acct-B', source: 'in-place' }, guard.health),
+    false,
+    { ...wake.deps, rebaseline: (id) => guard.rebaseline(id) },
+  );
+  assert.deepEqual(judgeAutomationResume(guard.health), { kind: 'allow' }, '带实测的入口解除终局之后 MUST 放行');
+});
+
+// ── T16：阈值满但**无人接管**那一格（不留一个永远等不到回执的中间态）─────────────────
+
+test('T16 判失效时没有回调接管 ⇒ 直接落终局 invalid，绝不停在等不到回执的「重立中」', async () => {
+  const logs: string[] = [];
+  const guard = new IdentityRevalidator('acct-A', {
+    threshold: 2,
+    observationIntervalMs: OBSERVATION_INTERVAL_MS,
+    logger: (m) => logs.push(m),
+    setTimer: () => ({ unref: () => undefined }) as unknown as ReturnType<typeof setInterval>,
+    clearTimer: () => undefined,
+    readPageContext: async () => 'consumer',
+    readIdentity: async () => identified('acct-B'),
+    observationStatus: () => liveness(),
+  });
+  guard.start(); // ← 不给 onInvalid：没有任何东西会来收口这一局
+
+  await guard.check();
+  await guard.check();
+  assert.equal(
+    guard.health,
+    'invalid',
+    '无人接管时 MUST 直接落终局：停在「重立中」＝一个永远等不到回执的中间态，与永久哑火同形',
+  );
+
+  // 「终局」不是措辞而是行为：再怎么 check / 收到迟到回执都不许把它翻回可判定态。
+  await guard.check();
+  assert.equal(guard.health, 'invalid');
+  guard.noteReestablishmentOutcome({ kind: 'aborted', step: 'stop_browse', observationSuspendedByChain: true });
+  assert.equal(guard.health, 'invalid', '不属于这一局的回执 MUST NOT 把无人接管的终局洗回待判');
+  guard.start(); // 恢复自动化 / CDP 重连都会反复调它
+  assert.equal(guard.health, 'invalid');
+
+  // 唯一的解除边仍然只有一次真正的身份重立。
+  guard.rebaseline('acct-B');
+  assert.equal(guard.health, 'healthy');
+});
+
+// ── T17：链条在**重设基线之后**崩掉（身份没问题，收尾没做完）────────────────────────
+
+test('T17 重立成功之后收尾步骤抛异常：MUST NOT 报成身份终局，也 MUST NOT 把校验体钉死', async () => {
+  const c = wired({ pageIdentity: 'acct-B', throwAt: 'resumeObservation' });
+  c.startGuard();
+  await c.guard.check();
+  await c.guard.check();
+  await settle();
+
+  const outcome = c.outcomes[0];
+  assert.equal(outcome?.kind, 'crashed');
+  assert.equal(
+    outcome?.kind === 'crashed' && outcome.identityReestablished,
+    true,
+    '崩在步 11 之后 MUST 如实带出「身份已经换成了」——它决定这次崩要不要被当成身份终局',
+  );
+  assert.deepEqual(
+    c.halts,
+    [],
+    '身份恰恰是唯一没出问题的东西：报 halt 会把刚解除的红角标重新闩上，文案还写着「身份确立失败」',
+  );
+  assert.deepEqual(c.restored, ['acct-B'], '身份确实重立了，通告 MUST 已经发出去');
+  assert.equal(c.guard.health, 'healthy', '基线已换、状态已回健康：一次与身份无关的故障 MUST NOT 把它钉成终局');
+  assert.equal(c.guard.baseline, 'acct-B');
+  assert.ok(
+    c.logs.some((l) => l.includes('身份本身没有问题')),
+    '真正没做完的是「恢复自动化」，日志必须把排查方向指对',
+  );
+
+  // 迟到的「重立后崩」回执 MUST NOT 翻动**不属于它的**下一局。
+  // 这一局（A）已经由 rebaseline 收口回健康；此后校验体判出新一次翻转、进「重立中」把球交给链条 B。
+  // 此时 A 的陈旧回执飘过来：它说的是「A 的收尾崩了」，与 B 正在处理的身份毫无关系。少了这道守卫，
+  // 它会把 B 持球的那一局直接钉成终局，而 B 随后的真回执又会因为「状态已不是重立中」被当作迟到丢掉
+  // ——一台身份完好的机器就此永久哑火。
+  c.guard.rebaseline('acct-C'); // 页面上又换了一次号（此刻页面读出的仍是 acct-B）
+  c.guard.start((reason) => void reason); // 重新武装回调（上一局的链条已收场，这一局交给链条 B）
+  await c.guard.check();
+  await c.guard.check();
+  assert.equal(c.guard.health, 'reestablishing', '前置：新一局已把球交给链条 B');
+  c.guard.noteReestablishmentOutcome({ kind: 'crashed', reason: 'A 的迟到回执', identityReestablished: true });
+  assert.equal(
+    c.guard.health,
+    'reestablishing',
+    '一条回执只收口它自己那一局：身份已确立的崩溃 MUST NOT 把别人持球的那一局钉成终局',
+  );
+
+  // 对照组：崩在步 11 **之前** ⇒ 原样是身份终局（这一格 T14③ 也钉，这里再钉一次边界）。
+  const early = wired({ pageIdentity: 'acct-B', throwAt: 'disconnectCloud' });
+  early.startGuard();
+  await early.guard.check();
+  await early.guard.check();
+  await settle();
+  assert.equal(early.halts.length, 1);
+  assert.deepEqual(early.restored, []);
+  assert.equal(early.guard.health, 'invalid');
+});
+
 // ── 1.9① 宿主侧接线（**弱断言**：源码文本扫描，不计入行为覆盖）──────────────────
 //
 // 下面这条只证明「宿主源码里写了这几处调用」，证不了运行时真的按顺序发生。
@@ -933,10 +1376,17 @@ test('宿主装配契约（源码扫描）：分域按平台走、两种读预�
   const resumeStart = main.indexOf('resumeAutomation: async () => {');
   const resumeEnd = main.indexOf('deactivate: async (reason)', resumeStart);
   assert.ok(resumeStart >= 0 && resumeEnd > resumeStart, '必须存在 resumeAutomation');
+  const resumeBlock = main.slice(resumeStart, resumeEnd);
   assert.match(
-    main.slice(resumeStart, resumeEnd),
+    resumeBlock,
     /nativeBrowse\?\.resumeObservation\(\)/,
     '恢复自动化 MUST 一并恢复周期观测，否则浏览重开了但阻断观测永久全盲',
+  );
+  // ⑤ter 身份准入：恢复自动化不带来任何新的身份事实，停在无身份终局时 MUST 拒绝放行（行为覆盖见 T15quater）。
+  assert.match(resumeBlock, /judgeAutomationResume\(identityGuard\?\.health/);
+  assert.ok(
+    resumeBlock.indexOf('judgeAutomationResume') < resumeBlock.indexOf('browse?.start()'),
+    '身份准入 MUST 早于把浏览拉起来——判完再放行才算闸，放行完再判只是打一行日志',
   );
 
   // ⑤bis 链条回执 MUST 回喂校验体：判失效之后校验体停在「重立中」抑制判定，回执是它唯一的出口。
@@ -955,4 +1405,28 @@ test('宿主装配契约（源码扫描）：分域按平台走、两种读预�
   assert.match(shell, /handle\.identityHalted = reason/);
   assert.match(shell, /fleet\.declaresCoreHalt\(message\) \|\| Boolean\(handle\.identityHalted\)/);
   assert.match(shell, /handle\.identityHalted = null/, '新拉起的核心 MUST 清掉上一轮的 halt 闩');
+
+  // ⑦ 唤醒后的身份收口 MUST 与 resumeAutomation 解耦：宿主只调收口函数，自己不再判「要不要重设基线」。
+  //    行为覆盖在 T15；这条只防「有人把它挪回 `if (resumeAutomation)` 里」。
+  const wakeStart = main.indexOf('wakeFromStandby: async (resumeAutomation) => {');
+  const wakeEnd = main.indexOf('exit: (code) => process.exit(code)', wakeStart);
+  assert.ok(wakeStart >= 0 && wakeEnd > wakeStart, '必须存在冷待机唤醒块');
+  const wakeBlock = main.slice(wakeStart, wakeEnd);
+  assert.match(wakeBlock, /judgeWakeIdentityResettlement\(decision, identityGuard\?\.health/,
+    '唤醒后的收口判据 MUST 由 identity-guard 给（宿主里没有可单测的缝，自己判就没人钉得住）');
+  assert.match(wakeBlock, /await applyWakeIdentityResettlement\(resettlement, resumeAutomation,/);
+  assert.doesNotMatch(wakeBlock, /if \(resumeAutomation\)/,
+    '唤醒块里 MUST NOT 再自己按 resumeAutomation 分叉——身份收口与自动化是两根独立的轴');
+  assert.doesNotMatch(wakeBlock, /identityGuard\?\.rebaseline\(wakeBaseline\)/,
+    '基线 MUST NOT 再由宿主自己拼（曾经拼成 observedAccountId ?? accountId：读不出时会把覆盖值钉进校验体）');
+
+  // ⑧ 「身份已重新确立」的通告：链条与唤醒两条路都接上，外壳照它解除闩。
+  assert.match(block, /sendLifecycleIpc\(\{ type: 'lifecycle\.identity_restored', accountId: restoredAccountId \}\)/);
+  assert.match(wakeBlock, /lifecycle\.identity_restored/);
+  assert.match(shell, /message\.type === 'lifecycle\.identity_restored'/,
+    '外壳 MUST 处理这条 IPC：halt 闩是不可撤销的，不解除就是核心说健康、外壳说终局');
+  const restoredStart = shell.indexOf("message.type === 'lifecycle.identity_restored'");
+  const restoredEnd = shell.indexOf("message.type === 'lifecycle.executor_failed'", restoredStart);
+  assert.ok(restoredStart >= 0 && restoredEnd > restoredStart);
+  assert.match(shell.slice(restoredStart, restoredEnd), /handle\.identityHalted = null/);
 });

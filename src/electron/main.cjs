@@ -4659,6 +4659,25 @@ async function spawnEdgeChild(handle, {
       });
       return;
     }
+    if (message.type === 'lifecycle.identity_restored') {
+      // 与上面那条闩成对：halt 之后核心**不退出**，所以红角标只能靠核心自己说「解除了」。
+      // 一次真正的身份重立（重立链步 11 / 冷待机唤醒里重新实测到身份）之后核心已经健康、浏览也会
+      // 跑起来，不解除这个闩，左栏就一直挂着不可撤销的红「运行期身份确立失败」——核心说健康、外壳
+      // 说终局，同一台机器同一时刻两套口径。
+      //
+      // 只在真闩着时才动状态：常态下每次唤醒都会来一条，无条件 updateStatus 会把 woken / resumed
+      // 随后要写的正确态盖掉。
+      if (!handle.identityHalted) return;
+      handle.identityHalted = null;
+      const restoredId = typeof message.accountId === 'string' && message.accountId ? message.accountId : '';
+      updateStatus(handle, {
+        edge: 'running',
+        lastMessage: `运行期身份已重新确立${restoredId ? `：${restoredId}` : ''}，自动化引擎恢复正常。`,
+        ...presencePatch('身份已重新确立'),
+        ...clearEdgeFailurePatch(handle),
+      });
+      return;
+    }
     if (message.type === 'lifecycle.executor_failed') {
       const reason = typeof message.reason === 'string' && message.reason ? message.reason : 'executor_failed';
       handle.executorFailure = reason;

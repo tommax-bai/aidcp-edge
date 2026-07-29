@@ -218,8 +218,17 @@ export class IdentityRevalidator {
 
   /**
    * 重设基线 id（身份**真正**重新确立后调用）+ 复位为健康态。缺了它，重立完仍停在「重立中」、
-   * 校验体永久哑火。这是 `invalid` 终局唯一的解除方式（另一处调用点是冷待机唤醒：新一代浏览器里
-   * 刚重新确认过身份，等价于一次真重立）。
+   * 校验体永久哑火。这是 `invalid` 终局唯一的解除方式。
+   *
+   * **它只有两个合法调用点，两个都必须是「刚刚在页面上实测到一个稳定 id」**：
+   *   ① 重立链步 11（`verdict.accountId`，归位后重读出来的）；
+   *   ② 冷待机唤醒（新一代浏览器里刚重新确认过身份，等价于一次真重立）——收口在
+   *      `applyWakeIdentityResettlement()`，**MUST NOT 被关进「顺便恢复自动化」那个分支里**。
+   *      唤醒与恢复自动化是两根独立的轴：外壳可以把一个**暂停中**的节点唤醒（`wake` 带
+   *      `resumeAutomation=false`），此时身份照样重新确认过了，基线照样必须跟上。把 ② 挂在
+   *      「恢复自动化」上，一个真 halt 过的节点走 暂停 → 冷待机 → 唤醒（保持暂停）→ 恢复自动化
+   *      这条路回来时，浏览与定时器全部重新武装，唯独判定首行永久早退——与本文件反复钉的
+   *      那个回归同形，只是换了一条入口。
    */
   rebaseline(id: string): void {
     this.baselineId = id;
@@ -239,6 +248,11 @@ export class IdentityRevalidator {
   noteReestablishmentOutcome(outcome: IdentityReestablishmentOutcome): void {
     if (outcome.kind === 'reestablished') return; // 链条内部已 rebaseline，状态早已回 healthy
     if (outcome.kind === 'skipped') return; // 另一条在跑的链条持球，由它收口
+    if (outcome.kind === 'crashed' && outcome.identityReestablished) {
+      // 身份已经在步 11 真正重立完（基线已换、状态已回 healthy），崩的是之后的收尾步骤。
+      // 那不是身份终局，把它记成 invalid 就是拿一件与身份无关的故障去钉死一台身份完好的机器。
+      return;
+    }
     if (this.state !== 'reestablishing') return; // 迟到的回执：这一局已被别的边（rebaseline / 更晚的回执）收口
     if (outcome.kind === 'aborted') {
       // 「这次没做完」≠「做完了，结论是停手」。基线仍是**旧的**，所以退回待判吞不掉任何真实翻转：
@@ -500,6 +514,16 @@ export interface IdentityReestablishmentDeps {
   connectCloud: () => Promise<void>;
   /** 步 11：重设周期校验体基线。 */
   rebaseline: (accountId: string) => void;
+  /**
+   * 步 11.5：身份**真正**重新确立的对外通告（宿主转成 lifecycle IPC 给桌面外壳）。
+   *
+   * 与 `reportHalt` 是同一枚硬币的两面：外壳收到 halt 之后会把红角标**闩住**（此后核心再打任何
+   * 一行普通日志都不许把徽标翻回运行中，否则 halt 一秒就被下一行日志洗掉）。闩住的代价是它
+   * 只能被显式解除——少了这条通告，一次**真正**的身份重立之后核心已经健康、浏览也跑起来了，
+   * 外壳却仍挂着不可撤销的红「运行期身份确立失败」。方向是假失败（看得见）不是假成功，但核心与
+   * 外壳的口径分岔本身就是缺陷：同一台机器同一时刻，一处说健康、一处说终局。
+   */
+  reportIdentityRestored: (accountId: string) => void;
   /** 步 13：重启周期观测。 */
   resumeObservation: () => void;
   /** 步 14：重启浏览。 */
@@ -528,8 +552,14 @@ export type IdentityReestablishmentOutcome =
    *
    * 做成回执而不是让异常裸抛出去，是因为异常一旦逸出，**状态机就没人收口了**：校验体停在
    * 「重立中」永久哑火，外壳还一直显示「运行中」。crashed 让两处都如实落地。
+   *
+   * `identityReestablished` 区分**崩在哪一侧**，它决定这次崩要不要报成身份终局：
+   *   - `false`（步 11 之前）：身份没换成，节点停在半拆状态 ⇒ 报 halt、校验体落终局。
+   *   - `true`（步 11 之后）：身份**已经**换成了，基线也换了、云端也按新身份连上了，崩的是
+   *     「恢复观测 / 重启浏览」这些收尾步骤。此时再报一次 halt 是**说假话**——外壳会把刚刚
+   *     解除的红角标重新闩上、文案还写着「身份确立失败」，而身份恰恰是唯一没出问题的东西。
    */
-  | { kind: 'crashed'; reason: string }
+  | { kind: 'crashed'; reason: string; identityReestablished?: boolean }
   /**
    * 宿主在链条执行中叫停：`step` 是被叫停的位置；`cloudRestored` 如实回报「本链条断掉的云端连接
    * 补回来了没有」；`observationSuspendedByChain` 如实带出「周期观测还停着、恢复责任在宿主」。
@@ -563,6 +593,8 @@ export function createIdentityReestablishment(
     const startedGeneration = deps.generation();
     let observationSuspendedByChain = false;
     let cloudDisconnectedByChain = false;
+    /** 步 11 是否已经跑过（身份真的换成了）。决定收尾步骤崩掉时要不要报成身份终局。 */
+    let identityReestablished = false;
     /** 每个 await 点复查代际；已被叫停则回滚并返回 aborted，否则返回 null 继续。 */
     const abortIfStopped = async (step: string): Promise<IdentityReestablishmentOutcome | null> => {
       if (deps.generation() === startedGeneration) return null;
@@ -674,6 +706,14 @@ export function createIdentityReestablishment(
       // 步 11：重设基线。用的是**实测**账号 id（`verdict.accountId`），与周期校验体的比较口径
       // （页面上读出来的 id）逐字一致——两者错开就会每两拍拆一次会话重建一次，无限循环。
       deps.rebaseline(accountId);
+      identityReestablished = true;
+      // 步 11.5：通告外壳「身份已重新确立」。外壳的红角标是**闩住**的，只有这条通告能解除它；
+      // 通告本身失败绝不许把一次成功的重立拖成异常（那会让下面的 catch 把它误报成终局）。
+      try {
+        deps.reportIdentityRestored(accountId);
+      } catch (reportError) {
+        deps.logger(`[identity-guard] ⚠ 通告身份已重新确立失败（${errorText(reportError)}）：外壳的终局角标可能仍挂着。`);
+      }
 
       // 步 12 —— 【5.6 待人裁定：此处是退役实现步 12「重注入连接级节奏快照」的位置】
       // 该步在 Native 形态下的归属未定（见 change tasks.md 5.6 / design.md「待裁定」§1）。
@@ -695,6 +735,18 @@ export function createIdentityReestablishment(
       // 它会永久哑火（`check()` 首行早退），而外壳还一直显示「运行中」。此刻节点是半拆状态
       // （浏览已停、观测已停、云端可能已断），如实报成终局并通告外壳。
       const reason = errorText(error);
+      if (identityReestablished) {
+        // 崩在步 11 **之后**：身份已经换成了、基线已经跟上、云端已按新身份连上，出问题的是
+        // 「恢复观测 / 重启浏览」这些收尾步骤。这里 MUST NOT 报 halt——那句话的字面意思是
+        // 「身份确立失败」，而身份恰恰是唯一没出问题的东西；报出去只会把刚解除的红角标重新闩上，
+        // 把一台身份完好的机器钉成「请重新登录后重启」。如实说清真正没做完的是什么。
+        deps.logger(
+          `[identity-guard] ⚠ 身份已重新确立，但恢复自动化的收尾步骤异常（${reason}）：` +
+            '周期观测与浏览可能仍停着，且不会有人再来重启它们。身份本身没有问题，' +
+            '请按「自动化没跑起来」排查，不要按「身份失效」处理。',
+        );
+        return { kind: 'crashed', reason, identityReestablished: true };
+      }
       deps.logger(
         `[identity-guard] ✗ 身份重立链自身异常（${reason}）：节点停在半拆状态——浏览与周期观测已停，` +
           '云端连接可能已断开。不猜、不重试、不回落默认账号，等待人工介入。',
@@ -709,4 +761,156 @@ export function createIdentityReestablishment(
       running = false;
     }
   };
+}
+
+// ===========================================================================================
+// 冷待机唤醒后的身份收口
+// ===========================================================================================
+//
+// 冷待机唤醒是**第二条**「身份真的重新确立了」的路径（第一条是上面的重立链）。唤醒流程会在新一代
+// 浏览器里重新读一次身份、读不出就直接判唤醒失败留在待机态——所以走到这里就意味着「刚刚实测确认过」，
+// 与链条步 11 等价。既然等价，它就必须承担链条步 11 承担的**全部**收口，而不是只做其中好写的那一半：
+//
+//   ① 重设校验体基线（唯一能解除 `invalid` 终局的边）
+//   ② 把上一局 halt 断掉的云端连接补回来
+//   ③ 通告外壳「身份已重新确立」（解除那枚闩住的红角标）
+//
+// 这三件事**必须由同一个条件管**。曾经的形态是：①③ 没有，② 只在「账号变了」时顺手做，而 ① 被关在
+// 「顺便恢复自动化」的分支里。于是一个真 halt 过的节点走 暂停 → 冷待机 → 唤醒（保持暂停）→ 恢复自动化
+// 回来时：浏览重开了、定时器重新武装了、外壳显示运行中，而校验体判定首行永久早退、云端再也没连上、
+// 角标一直红着。装了但永久不工作 + 三处口径各说各话。
+//
+// 反向的红线同样要守住：**没实测到就一件都不做**。唤醒时读不出身份但设了 `AIDCP_ACCOUNT_ID` 时，
+// 决策会退成覆盖值兜底（`use-override-after-read-fail`）——那是一句关于未来的声明，不是实测。拿它去
+// 解除终局、去重连云端，就是把「不知道」说成「知道」，正是 `judgeRuntimeIdentity` 拒绝的那件事。
+
+/**
+ * 恢复自动化的身份准入。
+ *
+ * 与唤醒是同一条判据的另一半：**「让节点重新跑起来」的每一条入口，都必须要么带来一次新的身份实测、
+ * 要么在无身份终局面前停手。** 唤醒带来实测（新一代浏览器里重新读过），所以它能解除终局；而
+ * 「暂停 → 恢复自动化」不带来任何新事实——它只是把定时器和浏览循环重新武装起来。
+ *
+ * 缺了这道闸的后果与冷待机那条路完全一样，只是不经过待机：一次真 halt 之后（浏览停了、观测停了、
+ * 云端连接被 intentionalClose 关掉），运营点一次「暂停」再点一次「恢复」，浏览循环就重新跑起来了，
+ * 而运行期身份校验判定首行永久早退、云端始终没连上——**一台在错误 / 未知身份下持续动作、且上报全丢
+ * 的机器**。halt 的处理办法写在它自己那行日志里（在浏览器里重新登录目标账号后重启本节点），
+ * 「点一下恢复」不构成已处理。
+ */
+export type AutomationResumeVerdict = { kind: 'allow' } | { kind: 'refuse'; reason: string };
+
+export function judgeAutomationResume(health: IdentityHealth): AutomationResumeVerdict {
+  // 只拦终局。`reestablishing` 是链条持球的中间态，它自己会收口；拦它等于把一次正常的重立卡死。
+  if (health !== 'invalid') return { kind: 'allow' };
+  return {
+    kind: 'refuse',
+    reason:
+      '运行期身份停在无身份终局：恢复自动化不会带来任何新的身份事实，放行只会让节点在未知身份下继续动作。'
+      + '请在浏览器里重新登录目标账号后重启本节点（或让外壳走一次冷待机唤醒，那条路会重新实测身份）。',
+  };
+}
+
+export type WakeIdentityResettlement =
+  /** 唤醒实测到了稳定账号 id ⇒ 等价一次真重立，三件收口全做。 */
+  | { kind: 'reestablished'; accountId: string }
+  /**
+   * 没实测到，而上一局**正停在无身份终局**上 ⇒ 这次唤醒没能把它解除，节点不该回来。
+   *
+   * 判成唤醒失败（留在待机态、可再次唤醒）而不是「回来但什么都不解除」，理由是后者会造出本批要
+   * 根除的那个形态：浏览跑着、外壳显示运行中，而运行期身份校验是死的、云端是断的。halt 的语义本
+   * 就是「停在无身份态等人处理」，处理办法写在它自己的日志里——在浏览器里重新登录目标账号。一次
+   * 读不出身份的唤醒不构成「已处理」。
+   */
+  | { kind: 'wake_rejected'; reason: string }
+  /**
+   * 没实测到，但上一局并不是终局 ⇒ 什么都不解除（基线保持上一次实测值），自动化照旧恢复。
+   * 这一格没有任何东西被打破：基线仍是最后一次实测到的值，下一拍照常判定。
+   */
+  | { kind: 'unmeasured'; reason: string };
+
+/**
+ * 纯函数：唤醒后该怎么收口。判据只有两件事——**这一代浏览器里实测到 id 了吗**，以及**上一局是不是终局**。
+ */
+export function judgeWakeIdentityResettlement(
+  decision: IdentityDecision,
+  health: IdentityHealth,
+): WakeIdentityResettlement {
+  const measured = observedAccountIdFromDecision(decision);
+  // 只认实测值。这里若退化成 `measured ?? accountId`，覆盖值就会被当成基线钉进校验体——而它在页面上
+  // 永远读不出来，于是每两拍判一次换号、把会话拆一遍重建一遍（T10 钉的那个无限重建循环）。
+  if (measured) return { kind: 'reestablished', accountId: measured };
+  const reason =
+    decision.kind === 'use-override-after-read-fail'
+      ? `唤醒后仍读不出稳定账号 id（${decision.reason}），只有 AIDCP_ACCOUNT_ID 覆盖值顶着`
+      : decision.kind === 'halt'
+        ? `唤醒后身份确认失败（${decision.reason}）`
+        : '唤醒流程没有交出实测到的账号 id';
+  return health === 'invalid' ? { kind: 'wake_rejected', reason } : { kind: 'unmeasured', reason };
+}
+
+export interface WakeIdentityResettlementDeps {
+  logger: (msg: string) => void;
+  /** 重设校验体基线（`invalid` 终局唯一的解除边）。 */
+  rebaseline: (accountId: string) => void;
+  /** 云端连接当前还在不在（在就绝不再连一次：重复 connect 会把一条好连接换掉、白丢一次握手）。 */
+  cloudLinkAttached: () => boolean;
+  /** 补回云端连接。上一局 halt 关它用的是 intentionalClose——不自动重连、也不发断连事件。 */
+  restoreCloudLink: () => Promise<void>;
+  /** 通告外壳「身份已重新确立」（解除闩住的红角标）。 */
+  reportIdentityRestored: (accountId: string) => void;
+  /** 重启浏览（仅当宿主要求恢复自动化）。 */
+  startBrowse: () => void;
+  /** 重新武装周期校验（仅当宿主要求恢复自动化：暂停中的节点不该有定时器在跑）。 */
+  startIdentityGuard: () => void;
+}
+
+/**
+ * 施加唤醒后的身份收口。
+ *
+ * **`resumeAutomation` 只管最后那两行**（重启浏览 / 重新武装定时器）。身份侧的三件收口一律与它无关：
+ * 唤醒与恢复自动化是两根独立的轴，外壳完全可以把一个暂停中的节点唤醒（`wake` 带 `false`），那时
+ * 身份照样重新确认过了。把身份收口挂到自动化那根轴上，就是给「暂停中被唤醒」这条真实路径留一个
+ * 永久失效态。
+ */
+export async function applyWakeIdentityResettlement(
+  resettlement: WakeIdentityResettlement,
+  resumeAutomation: boolean,
+  deps: WakeIdentityResettlementDeps,
+): Promise<void> {
+  if (resettlement.kind === 'wake_rejected') {
+    // 宿主据此判唤醒失败并把浏览器还回槽位；这里一件副作用都不做（尤其不恢复自动化）。
+    deps.logger(
+      `[identity-guard] 唤醒未能解除无身份终局（${resettlement.reason}）：不重设基线、不重连云端、不恢复自动化。` +
+        '请在浏览器里重新登录目标账号后重启本节点。',
+    );
+    return;
+  }
+  if (resettlement.kind === 'reestablished') {
+    // ① 基线：先做，且**无条件**做。它是终局唯一的解除边，后面两件事失败都不该拖累它。
+    deps.rebaseline(resettlement.accountId);
+    // ② 云端：只在真断了时补。上一局 halt 断它时是对的（那时身份未知，以旧身份对云端表现为在线才是
+    //    说假话）；而唤醒已经把「身份未知」这个前提消掉了，此刻还不连，节点就是一台活着、身份已确认、
+    //    浏览器已开、却对云端彻底消失的机器——自动化一恢复就会照跑照烧动作，上报全丢。
+    if (!deps.cloudLinkAttached()) {
+      try {
+        await deps.restoreCloudLink();
+        deps.logger(`[identity-guard] 云端连接已按重新确认的身份（${resettlement.accountId}）补回。`);
+      } catch (error) {
+        deps.logger(
+          `[identity-guard] ⚠ 唤醒后补回云端连接失败（${errorText(error)}）：本节点当前与云端失联，需人工介入。`,
+        );
+      }
+    }
+    // ③ 外壳：无论云端补没补上都要通告——身份确实重新确立了，红角标该解除。
+    deps.reportIdentityRestored(resettlement.accountId);
+  } else {
+    deps.logger(
+      `[identity-guard] ${resettlement.reason}：基线保持上一次实测值不变、云端连接不因此重建——` +
+        '绝不拿一个没实测过的值去解除任何状态。',
+    );
+  }
+  if (resumeAutomation) {
+    deps.startBrowse();
+    deps.startIdentityGuard();
+  }
 }

@@ -85,7 +85,10 @@ import {
   readNativeFacebookIdentity,
 } from './native-page-engine/index.js';
 import {
+  applyWakeIdentityResettlement,
   createIdentityReestablishment,
+  judgeAutomationResume,
+  judgeWakeIdentityResettlement,
   IdentityRevalidator,
   observedAccountIdFromDecision,
   DEFAULT_IDENTITY_CHECK_MS,
@@ -1186,6 +1189,12 @@ async function main(): Promise<void> {
         // 已连接云端」，运营看不到任何角标——那正是静默假成功的产品层形态。
         sendLifecycleIpc({ type: 'lifecycle.identity_halted', reason });
       },
+      reportIdentityRestored: (restoredAccountId) => {
+        // 与上面的 halt 通告成对：外壳收到 halt 之后会把红角标**闩住**（此后任何一行普通日志都不许
+        // 把徽标翻回运行中），闩住的代价是它只能被显式解除。不发这条，一次真正的身份重立之后核心
+        // 已经健康、浏览也跑起来了，左栏却仍挂着不可撤销的红「运行期身份确立失败」。
+        sendLifecycleIpc({ type: 'lifecycle.identity_restored', accountId: restoredAccountId });
+      },
       connectCloud: () => client.connect(),
       rebaseline: (nextAccountId) => identityGuard?.rebaseline(nextAccountId),
       resumeObservation: () => nativeSession.resumeObservation(),
@@ -1227,6 +1236,14 @@ async function main(): Promise<void> {
     },
     resumeAutomation: async () => {
       if (coldStandbyActive) throw new Error('browser_absent_use_wake');
+      // 身份准入：恢复自动化不带来任何新的身份事实（判据与理由在 identity-guard.ts）。停在无身份终局
+      // 时放行，就是把冷待机那条路上的同一个洞换个入口再挖一遍——浏览重新跑起来、云端始终没连上、
+      // 判定首行永久早退。如实拒绝（与上面「浏览器缺席请走唤醒」同口径：抛出 = 保持暂停态）。
+      const resumeVerdict = judgeAutomationResume(identityGuard?.health ?? 'healthy');
+      if (resumeVerdict.kind === 'refuse') {
+        console.error(`[aidcp-edge] ✗ 拒绝恢复自动化：${resumeVerdict.reason}`);
+        throw new Error('identity_halted_relogin_required');
+      }
       // 周期观测的恢复责任在这里（幂等：没停过就是空操作）。暂停期间可能有一条在途的身份重立链被
       // 叫停在「已暂停观测」的位置——链条**故意不**自己恢复（叫停的另两条路径马上就要关浏览器，
       // 那时恢复观测＝对着已 detach 的 CDP 空轮询到唤醒）。不在这里补，浏览会重开但观测永远起不来
@@ -1381,8 +1398,21 @@ async function main(): Promise<void> {
           await chrome?.killAndConfirmDead().catch(() => undefined);
           return false;
         }
-        // 新一代浏览器里刚实测到的 id（读不出实测值则不覆盖旧值）——下面重设校验体基线要用它，
-        // 用握手身份会在「覆盖值 ≠ 真实登录账号」时把基线钉在一个页面上永远读不到的值上。
+        // 唤醒后的身份收口判据（纯函数，判据与用例都在 identity-guard.ts）：这一代浏览器里实测到 id
+        // 了吗、上一局是不是正停在无身份终局上。副作用在下面统一施加，绝不在这里边判边做。
+        const resettlement = judgeWakeIdentityResettlement(decision, identityGuard?.health ?? 'healthy');
+        if (resettlement.kind === 'wake_rejected') {
+          // 上一局停在无身份终局，而这次唤醒没能实测出身份（只有 AIDCP_ACCOUNT_ID 覆盖值顶着）。
+          // 放它回来 = 浏览跑着、外壳显示运行中，而身份校验是死的、云端是断的。如实判唤醒失败，
+          // 与上面「唤醒后身份确认失败」同口径（留在待机态、可再次唤醒）。
+          console.error(`[aidcp-edge] ✗ ${resettlement.reason}：上一局停在无身份终局，本次唤醒未能解除它，如实判唤醒失败。`);
+          failInFlightPublishesHonestly('browser_wake_identity_unmeasured');
+          session.detach();
+          proxyRuntime?.suspendGeneration('wake_identity_unmeasured');
+          await chrome?.killAndConfirmDead().catch(() => undefined);
+          return false;
+        }
+        // 新一代浏览器里刚实测到的 id（读不出实测值则不覆盖旧值）。
         observedAccountId = observedAccountIdFromDecision(decision) ?? observedAccountId;
         if (decision.accountId !== accountId) {
           // 控制面引导是“上一次握手”的持久事实，允许陈旧；但绝不允许它覆盖新浏览器里的真实账号。
@@ -1405,14 +1435,22 @@ async function main(): Promise<void> {
         browse?.applyPacingSnapshot(wakePacing?.opFloorsMs, wakePacing?.tempo);
         // 与 enterStandby 的 suspendObservation('cold_standby') 对称：整批重启周期观测（幂等）。
         nativeBrowse?.resumeObservation();
-        if (resumeAutomation) {
-          browse?.start().catch((err) => console.error('[aidcp-edge] 唤醒后浏览会话异常:', err));
-          // 新一代浏览器里的身份刚刚重新确认过，基线按**实测值**重设后再开跑校验体
-          // （基线必须与校验体的比较口径一致：它比的是页面上读出来的 id）。
-          const wakeBaseline = observedAccountId ?? accountId;
-          if (wakeBaseline) identityGuard?.rebaseline(wakeBaseline);
-          startIdentityGuard?.();
-        }
+        // 身份侧的收口（重设基线 / 补回云端 / 通告外壳）与「要不要恢复自动化」**无关**：外壳完全可以
+        // 把一个暂停中的节点唤醒，那时身份照样重新确认过了。把它们关进恢复自动化那个分支，就是给
+        // 「暂停中被唤醒」这条真实路径留一个永久失效态（判据、理由与用例都在 identity-guard.ts）。
+        await applyWakeIdentityResettlement(resettlement, resumeAutomation, {
+          logger: (message) => console.log(message),
+          rebaseline: (nextBaseline) => identityGuard?.rebaseline(nextBaseline),
+          cloudLinkAttached: () => client.isConnected(),
+          restoreCloudLink: () => client.connect(),
+          reportIdentityRestored: (restoredAccountId) => {
+            sendLifecycleIpc({ type: 'lifecycle.identity_restored', accountId: restoredAccountId });
+          },
+          startBrowse: () => {
+            browse?.start().catch((err) => console.error('[aidcp-edge] 唤醒后浏览会话异常:', err));
+          },
+          startIdentityGuard: () => startIdentityGuard?.(),
+        });
         console.log(`[aidcp-edge] ✓ 唤醒完成：浏览器已重建、身份已确认、自动化${resumeAutomation ? '已恢复' : '保持暂停'}`);
         return true;
       } catch (error) {
