@@ -3384,6 +3384,8 @@ async fn spawn_facebook_initial_scan_cdp() -> (u16, tokio::task::JoinHandle<Vec<
                         "innerWidth": 1440,
                         "innerHeight": 800,
                         "scrollHeight": 1600,
+                        "scrollViewportHeight": 800,
+                        "documentTimeOriginMs": 1780000000000_u64,
                         "documentAgeMs": 1000
                     }),
                 ),
@@ -3558,6 +3560,8 @@ fn facebook_feed_recovery_probe_cdp(prompt: bool, confirmed_home: bool) -> Value
             "innerWidth": 1440,
             "innerHeight": 800,
             "scrollHeight": 800,
+            "scrollViewportHeight": 800,
+            "documentTimeOriginMs": 1780000000000_u64,
             "documentAgeMs": 2000
         }),
     )
@@ -3617,6 +3621,8 @@ fn facebook_feed_scroll_probe_cdp(after_scroll: bool) -> Value {
             "innerWidth": 1440,
             "innerHeight": 800,
             "scrollHeight": 2400,
+            "scrollViewportHeight": 800,
+            "documentTimeOriginMs": 1780000000000_u64,
             "documentAgeMs": 2000
         }),
     )
@@ -5095,6 +5101,8 @@ fn facebook_identity_probe_cdp(acquired: bool) -> Value {
             "innerWidth": 1440,
             "innerHeight": 800,
             "scrollHeight": 2400,
+            "scrollViewportHeight": 800,
+            "documentTimeOriginMs": 1780000000000_u64,
             "documentAgeMs": 2000
         }),
     )

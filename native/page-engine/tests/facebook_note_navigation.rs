@@ -186,6 +186,8 @@ fn feed_probe_value(landing: &str) -> Value {
         "innerWidth": 1440.0,
         "innerHeight": 900.0,
         "scrollHeight": 2400.0,
+        "scrollViewportHeight": 900.0,
+        "documentTimeOriginMs": 1_780_000_000_000_u64,
         "documentAgeMs": 10_000
     })
 }

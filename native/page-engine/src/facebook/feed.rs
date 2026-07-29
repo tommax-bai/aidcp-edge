@@ -236,7 +236,7 @@ pub(crate) async fn execute_facebook_initial_feed(
     let mut last = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_NAV).await?;
     last = match recover_facebook_feed_prompt(session, last, cancellation, deadline_unix_ms).await?
     {
-        FacebookFeedRecovery::Continue(probe) => probe,
+        FacebookFeedRecovery::Continue(probe) => *probe,
         FacebookFeedRecovery::Failure(phase, reason) => {
             return Ok(facebook_scroll_failure(phase, reason));
         }
@@ -332,6 +332,7 @@ pub(crate) async fn execute_facebook_feed_scroll(
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let expected_list_url = session.facebook.active_list_url.clone();
     ensure_facebook_active_list(session).await?;
     let command = NativeCommand::PageScroll(crate::command::PageScrollParams {
         reason: None,
@@ -347,13 +348,14 @@ pub(crate) async fn execute_facebook_feed_scroll(
     current = match recover_facebook_feed_prompt(session, current, cancellation, deadline_unix_ms)
         .await?
     {
-        FacebookFeedRecovery::Continue(probe) => probe,
+        FacebookFeedRecovery::Continue(probe) => *probe,
         FacebookFeedRecovery::Failure(phase, reason) => {
             return Ok(facebook_scroll_failure(phase, reason));
         }
     };
     let start_y = current.scroll_y;
     let mut saw_any_card = !current.cards.is_empty();
+    let mut canonical_card_witness = FacebookCanonicalCardWitness::from_probe(&current);
 
     for _ in 0..FACEBOOK_FEED_SCROLL_ROUNDS {
         let before = current;
@@ -369,6 +371,9 @@ pub(crate) async fn execute_facebook_feed_scroll(
         )
         .await?;
         saw_any_card |= !after.cards.is_empty();
+        if let Some(witness) = FacebookCanonicalCardWitness::from_probe(&after) {
+            canonical_card_witness = Some(witness);
+        }
         let movement = PageMovement {
             before: start_y,
             after: after.scroll_y,
@@ -388,9 +393,20 @@ pub(crate) async fn execute_facebook_feed_scroll(
             continue;
         }
 
-        let (confirmation, confirmed) =
-            confirm_facebook_feed_bottom(session, &after, cancellation, deadline_unix_ms).await?;
+        let allow_marker_free_home =
+            expected_list_url == FACEBOOK_HOME_URL && after.url == expected_list_url;
+        let (confirmation, confirmed) = confirm_facebook_feed_bottom(
+            session,
+            &after,
+            allow_marker_free_home,
+            cancellation,
+            deadline_unix_ms,
+        )
+        .await?;
         saw_any_card |= !confirmed.cards.is_empty();
+        if let Some(witness) = FacebookCanonicalCardWitness::from_probe(&confirmed) {
+            canonical_card_witness = Some(witness);
+        }
         let movement = PageMovement {
             before: start_y,
             after: confirmed.scroll_y,
@@ -401,7 +417,12 @@ pub(crate) async fn execute_facebook_feed_scroll(
         if !fresh.cards.is_empty() {
             return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(fresh)));
         }
-        if let Some(reason) = facebook_bottom_completion_reason(confirmation) {
+        let saw_card_on_confirmed_document = canonical_card_witness
+            .as_ref()
+            .is_some_and(|witness| witness.matches(&confirmed));
+        if let Some(reason) =
+            facebook_bottom_completion_reason(confirmation, saw_card_on_confirmed_document)
+        {
             return Ok(facebook_scroll_failure_on_surface(
                 EffectPhase::Confirmed,
                 reason,
@@ -620,16 +641,20 @@ async fn facebook_zero_card_terminal(
 enum FacebookBottomConfirmationState {
     Waiting,
     Invalidated,
-    ExplicitEnd,
+    ConfirmedEnd,
     WindowStable,
 }
 
 fn facebook_bottom_completion_reason(
     state: FacebookBottomConfirmationState,
+    saw_any_canonical_card: bool,
 ) -> Option<&'static str> {
     match state {
-        FacebookBottomConfirmationState::ExplicitEnd => Some("feed_exhausted"),
-        FacebookBottomConfirmationState::WindowStable => Some("feed_continuation_unconfirmed"),
+        FacebookBottomConfirmationState::ConfirmedEnd if saw_any_canonical_card => {
+            Some("feed_exhausted")
+        }
+        FacebookBottomConfirmationState::ConfirmedEnd
+        | FacebookBottomConfirmationState::WindowStable => Some("feed_continuation_unconfirmed"),
         FacebookBottomConfirmationState::Waiting | FacebookBottomConfirmationState::Invalidated => {
             None
         }
@@ -642,6 +667,32 @@ fn facebook_feed_card_identities(probe: &facebook::FacebookFeedProbe) -> Vec<Str
         .iter()
         .filter_map(|card| card.note_id.as_deref().and_then(canonical_facebook_post_id))
         .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FacebookCanonicalCardWitness {
+    surface: String,
+    url: String,
+    document_time_origin_ms: u64,
+}
+
+impl FacebookCanonicalCardWitness {
+    fn from_probe(probe: &facebook::FacebookFeedProbe) -> Option<Self> {
+        if probe.document_time_origin_ms == 0 || facebook_feed_card_identities(probe).is_empty() {
+            return None;
+        }
+        Some(Self {
+            surface: probe.surface.clone(),
+            url: probe.url.clone(),
+            document_time_origin_ms: probe.document_time_origin_ms,
+        })
+    }
+
+    fn matches(&self, probe: &facebook::FacebookFeedProbe) -> bool {
+        self.surface == probe.surface
+            && self.url == probe.url
+            && self.document_time_origin_ms == probe.document_time_origin_ms
+    }
 }
 
 fn facebook_feed_settle_key(
@@ -681,19 +732,24 @@ fn record_facebook_explicit_end_sample(samples: usize, explicit_end: bool) -> us
     if explicit_end { samples + 1 } else { 0 }
 }
 
-fn classify_facebook_bottom_confirmation(
+fn classify_facebook_bottom_confirmation_for_context(
     initial: &facebook::FacebookFeedProbe,
     current: &facebook::FacebookFeedProbe,
+    allow_marker_free_home: bool,
+    previous_document_age_ms: u64,
     samples_seen: usize,
     explicit_end_samples: usize,
 ) -> FacebookBottomConfirmationState {
-    let same_generation =
-        current.url == initial.url && current.document_generation == initial.document_generation;
+    let same_document = initial.document_time_origin_ms > 0
+        && current.url == initial.url
+        && current.document_generation == initial.document_generation
+        && current.document_time_origin_ms == initial.document_time_origin_ms
+        && current.document_age_ms >= previous_document_age_ms;
     // 每个样本都必须留在同一个已声明列表面。确认函数会在任一样本失效时立即退出，
     // 因而这里逐样本与 initial 对比即可锁住完整五样本证据链。
     let invalidated = !facebook_list_surface(&initial.surface)
         || initial.surface != current.surface
-        || !same_generation
+        || !same_document
         || initial.loading
         || !facebook_near_bottom(initial)
         || current.loading
@@ -706,27 +762,57 @@ fn classify_facebook_bottom_confirmation(
     if samples_seen < FACEBOOK_FEED_BOTTOM_SAMPLE_COUNT {
         return FacebookBottomConfirmationState::Waiting;
     }
-    if explicit_end_samples == FACEBOOK_FEED_BOTTOM_SAMPLE_COUNT {
-        return FacebookBottomConfirmationState::ExplicitEnd;
+    // 普通首页 Feed 的结束文案在不同布局/语言下不存在或会抖动。首页已经完成五次结构判稳时，
+    // 文案只作辅助观测；搜索/小组仍保留既有显式终止要求，避免 marker-free 近底把定向场景带去 Reels。
+    if (allow_marker_free_home && initial.surface == "home")
+        || explicit_end_samples == FACEBOOK_FEED_BOTTOM_SAMPLE_COUNT
+    {
+        return FacebookBottomConfirmationState::ConfirmedEnd;
     }
     FacebookBottomConfirmationState::WindowStable
+}
+
+#[cfg(test)]
+fn classify_facebook_bottom_confirmation(
+    initial: &facebook::FacebookFeedProbe,
+    current: &facebook::FacebookFeedProbe,
+    previous_document_age_ms: u64,
+    samples_seen: usize,
+    explicit_end_samples: usize,
+) -> FacebookBottomConfirmationState {
+    classify_facebook_bottom_confirmation_for_context(
+        initial,
+        current,
+        true,
+        previous_document_age_ms,
+        samples_seen,
+        explicit_end_samples,
+    )
 }
 
 async fn confirm_facebook_feed_bottom(
     session: &mut EngineSession,
     initial: &facebook::FacebookFeedProbe,
+    allow_marker_free_home: bool,
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
 ) -> Result<(FacebookBottomConfirmationState, facebook::FacebookFeedProbe), EngineError> {
     let started = tokio::time::Instant::now();
     let mut explicit_end_samples = usize::from(initial.explicit_end);
-    let initial_state =
-        classify_facebook_bottom_confirmation(initial, initial, 1, explicit_end_samples);
+    let initial_state = classify_facebook_bottom_confirmation_for_context(
+        initial,
+        initial,
+        allow_marker_free_home,
+        initial.document_age_ms,
+        1,
+        explicit_end_samples,
+    );
     if initial_state != FacebookBottomConfirmationState::Waiting {
         return Ok((initial_state, initial.clone()));
     }
 
     let mut current = initial.clone();
+    let mut previous_document_age_ms = initial.document_age_ms;
     for (sample_index, offset) in FACEBOOK_FEED_BOTTOM_SAMPLE_OFFSETS
         .iter()
         .enumerate()
@@ -737,15 +823,18 @@ async fn confirm_facebook_feed_bottom(
         let sample = probe_facebook_feed(session).await?;
         explicit_end_samples =
             record_facebook_explicit_end_sample(explicit_end_samples, sample.explicit_end);
-        let state = classify_facebook_bottom_confirmation(
+        let state = classify_facebook_bottom_confirmation_for_context(
             initial,
             &sample,
+            allow_marker_free_home,
+            previous_document_age_ms,
             sample_index + 1,
             explicit_end_samples,
         );
         if state != FacebookBottomConfirmationState::Waiting {
             return Ok((state, sample));
         }
+        previous_document_age_ms = sample.document_age_ms;
         current = sample;
     }
 
@@ -986,7 +1075,7 @@ async fn probe_facebook_home_target(
 }
 
 enum FacebookFeedRecovery {
-    Continue(facebook::FacebookFeedProbe),
+    Continue(Box<facebook::FacebookFeedProbe>),
     Failure(EffectPhase, &'static str),
 }
 
@@ -997,11 +1086,13 @@ async fn recover_facebook_feed_prompt(
     deadline_unix_ms: u64,
 ) -> Result<FacebookFeedRecovery, EngineError> {
     let Some(observed) = current.feed_recovery_target.as_ref() else {
-        return Ok(FacebookFeedRecovery::Continue(current));
+        return Ok(FacebookFeedRecovery::Continue(Box::new(current)));
     };
     if !observed.ok {
         return Ok(match observed.reason.as_deref() {
-            None | Some("no_feed_recovery_target") => FacebookFeedRecovery::Continue(current),
+            None | Some("no_feed_recovery_target") => {
+                FacebookFeedRecovery::Continue(Box::new(current))
+            }
             Some("ambiguous_feed_recovery_target") => FacebookFeedRecovery::Failure(
                 EffectPhase::NotStarted,
                 "feed_recovery_target_ambiguous",
@@ -1081,7 +1172,7 @@ async fn recover_facebook_feed_prompt(
         });
         if recovery_gone && probe.surface == "home" {
             session.facebook.active_list_url = FACEBOOK_HOME_URL.to_owned();
-            return Ok(FacebookFeedRecovery::Continue(probe));
+            return Ok(FacebookFeedRecovery::Continue(Box::new(probe)));
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
@@ -1160,8 +1251,9 @@ fn facebook_page_cards(
 
 fn facebook_near_bottom(probe: &facebook::FacebookFeedProbe) -> bool {
     probe.scroll_height > 0.0
-        && probe.inner_height > 0.0
-        && probe.scroll_height - probe.scroll_y - probe.inner_height <= probe.inner_height.max(1.0)
+        && probe.scroll_viewport_height > 0.0
+        && probe.scroll_height - probe.scroll_y - probe.scroll_viewport_height
+            <= probe.scroll_viewport_height.max(1.0)
 }
 
 #[cfg(test)]
@@ -1236,6 +1328,8 @@ mod tests {
             inner_width: 1440.0,
             inner_height: 900.0,
             scroll_height,
+            scroll_viewport_height: 900.0,
+            document_time_origin_ms: 1_780_000_000_000,
             document_age_ms: 10_000,
             feed_recovery_target: None,
         }
@@ -1340,7 +1434,7 @@ mod tests {
         let grown = feed_probe(2_900.0, 2_000.0, false, false);
 
         assert_eq!(
-            classify_facebook_bottom_confirmation(&initial, &grown, 2, 0),
+            classify_facebook_bottom_confirmation(&initial, &grown, initial.document_age_ms, 2, 0,),
             FacebookBottomConfirmationState::Invalidated
         );
     }
@@ -1355,6 +1449,12 @@ mod tests {
         left_bottom.scroll_y = 0.0;
         let mut changed_generation = initial.clone();
         changed_generation.document_generation = Some("doc-2".to_owned());
+        let mut changed_url = initial.clone();
+        changed_url.url = "https://www.facebook.com/?sk=h_chr".to_owned();
+        let mut changed_time_origin = initial.clone();
+        changed_time_origin.document_time_origin_ms += 1;
+        let mut refreshed_document = initial.clone();
+        refreshed_document.document_age_ms = 100;
         let mut new_card = initial.clone();
         new_card.cards = probe_with_one_card(false).cards;
 
@@ -1362,20 +1462,68 @@ mod tests {
             ("loading", loading),
             ("left bottom", left_bottom),
             ("document generation", changed_generation),
+            ("url", changed_url),
+            ("document time origin", changed_time_origin),
+            ("document refresh", refreshed_document),
             ("card identity set", new_card),
         ] {
             assert_eq!(
-                classify_facebook_bottom_confirmation(&initial, &sample, 2, 2),
+                classify_facebook_bottom_confirmation(
+                    &initial,
+                    &sample,
+                    initial.document_age_ms,
+                    2,
+                    2,
+                ),
                 FacebookBottomConfirmationState::Invalidated,
                 "{change} must invalidate the sequence"
             );
         }
 
+        let mut age_regressed_after_a_later_sample = initial.clone();
+        age_regressed_after_a_later_sample.document_age_ms = 15_000;
+        assert_eq!(
+            classify_facebook_bottom_confirmation(
+                &initial,
+                &age_regressed_after_a_later_sample,
+                20_000,
+                3,
+                3,
+            ),
+            FacebookBottomConfirmationState::Invalidated,
+            "document age must remain monotonic between consecutive samples"
+        );
+
         let initial_loading = feed_probe(2_400.0, 1_500.0, true, true);
         assert_eq!(
-            classify_facebook_bottom_confirmation(&initial_loading, &initial_loading, 1, 1,),
+            classify_facebook_bottom_confirmation(
+                &initial_loading,
+                &initial_loading,
+                initial_loading.document_age_ms,
+                1,
+                1,
+            ),
             FacebookBottomConfirmationState::Invalidated,
             "t=0 证据无效时不得由后续样本覆盖"
+        );
+
+        let mut ordered = probe_with_one_card(false);
+        let mut second = ordered.cards[0].clone();
+        second.index = 1;
+        second.note_id = Some("https://www.facebook.com/watch?v=2".to_owned());
+        ordered.cards.push(second);
+        let mut reordered = ordered.clone();
+        reordered.cards.reverse();
+        assert_eq!(
+            classify_facebook_bottom_confirmation(
+                &ordered,
+                &reordered,
+                ordered.document_age_ms,
+                2,
+                2,
+            ),
+            FacebookBottomConfirmationState::Invalidated,
+            "卡身份向量重排也必须使当前确认失效"
         );
     }
 
@@ -1429,58 +1577,74 @@ mod tests {
     }
 
     #[test]
-    fn stable_bottom_without_a_marker_is_non_terminal_after_the_complete_window() {
+    fn stable_home_near_bottom_without_a_marker_confirms_after_the_complete_window() {
         let initial = feed_probe(2_400.0, 1_500.0, false, false);
         let stable = initial.clone();
 
         assert_eq!(
-            classify_facebook_bottom_confirmation(&initial, &stable, 4, 0),
+            classify_facebook_bottom_confirmation(&initial, &stable, initial.document_age_ms, 4, 0,),
             FacebookBottomConfirmationState::Waiting
         );
         assert_eq!(
-            classify_facebook_bottom_confirmation(&initial, &stable, 5, 0),
-            FacebookBottomConfirmationState::WindowStable
+            classify_facebook_bottom_confirmation(&initial, &stable, initial.document_age_ms, 5, 0,),
+            FacebookBottomConfirmationState::ConfirmedEnd
         );
         assert_eq!(
-            facebook_bottom_completion_reason(FacebookBottomConfirmationState::WindowStable),
+            facebook_bottom_completion_reason(FacebookBottomConfirmationState::ConfirmedEnd, true,),
+            Some("feed_exhausted")
+        );
+        assert_eq!(
+            facebook_bottom_completion_reason(FacebookBottomConfirmationState::ConfirmedEnd, false,),
             Some("feed_continuation_unconfirmed")
         );
     }
 
     #[test]
-    fn explicit_end_cannot_finish_before_the_fifth_sample() {
-        let initial = feed_probe(2_400.0, 1_500.0, false, true);
-        let terminal = feed_probe(2_400.0, 1_500.0, false, true);
+    fn structural_home_end_cannot_finish_before_the_fifth_sample() {
+        let initial = feed_probe(2_400.0, 1_500.0, false, false);
+        let terminal = initial.clone();
 
         for samples_seen in 1..FACEBOOK_FEED_BOTTOM_SAMPLE_COUNT {
             assert_eq!(
                 classify_facebook_bottom_confirmation(
                     &initial,
                     &terminal,
+                    initial.document_age_ms,
                     samples_seen,
-                    samples_seen,
+                    0,
                 ),
                 FacebookBottomConfirmationState::Waiting,
                 "第 {samples_seen} 次样本不得提前确认耗尽"
             );
         }
         assert_eq!(
-            classify_facebook_bottom_confirmation(&initial, &terminal, 5, 5),
-            FacebookBottomConfirmationState::ExplicitEnd,
+            classify_facebook_bottom_confirmation(
+                &initial,
+                &terminal,
+                initial.document_age_ms,
+                5,
+                0,
+            ),
+            FacebookBottomConfirmationState::ConfirmedEnd,
         );
         assert_eq!(
-            facebook_bottom_completion_reason(FacebookBottomConfirmationState::ExplicitEnd),
+            facebook_bottom_completion_reason(FacebookBottomConfirmationState::ConfirmedEnd, true,),
             Some("feed_exhausted")
         );
     }
 
     #[test]
-    fn any_missing_explicit_end_sample_finishes_as_window_stable() {
+    fn any_missing_explicit_end_sample_still_confirms_a_structurally_stable_home() {
         for missing_index in 0..FACEBOOK_FEED_BOTTOM_SAMPLE_COUNT {
             let initial = feed_probe(2_400.0, 1_500.0, false, missing_index != 0);
             let mut explicit_end_samples = usize::from(initial.explicit_end);
-            let mut state =
-                classify_facebook_bottom_confirmation(&initial, &initial, 1, explicit_end_samples);
+            let mut state = classify_facebook_bottom_confirmation(
+                &initial,
+                &initial,
+                initial.document_age_ms,
+                1,
+                explicit_end_samples,
+            );
 
             for sample_index in 1..FACEBOOK_FEED_BOTTOM_SAMPLE_COUNT {
                 let sample = feed_probe(2_400.0, 1_500.0, false, sample_index != missing_index);
@@ -1489,6 +1653,7 @@ mod tests {
                 state = classify_facebook_bottom_confirmation(
                     &initial,
                     &sample,
+                    initial.document_age_ms,
                     sample_index + 1,
                     explicit_end_samples,
                 );
@@ -1496,11 +1661,99 @@ mod tests {
 
             assert_eq!(
                 state,
-                FacebookBottomConfirmationState::WindowStable,
-                "第 {} 次缺少 explicit_end 时不得确认耗尽",
+                FacebookBottomConfirmationState::ConfirmedEnd,
+                "第 {} 次缺少 explicit_end 不得阻断首页结构确认",
                 missing_index + 1
             );
         }
+    }
+
+    #[test]
+    fn a_non_home_command_redirected_to_home_does_not_gain_marker_free_exhaustion() {
+        let redirected_home = feed_probe(2_400.0, 1_500.0, false, false);
+        assert_eq!(
+            classify_facebook_bottom_confirmation_for_context(
+                &redirected_home,
+                &redirected_home,
+                false,
+                redirected_home.document_age_ms,
+                FACEBOOK_FEED_BOTTOM_SAMPLE_COUNT,
+                0,
+            ),
+            FacebookBottomConfirmationState::WindowStable
+        );
+    }
+
+    #[test]
+    fn near_bottom_means_one_viewport_not_exact_mathematical_bottom() {
+        let initial = feed_probe(2_400.0, 1_000.0, false, false);
+        assert_eq!(
+            initial.scroll_height - initial.scroll_y - initial.scroll_viewport_height,
+            500.0
+        );
+        assert!(facebook_near_bottom(&initial));
+        assert_eq!(
+            classify_facebook_bottom_confirmation(
+                &initial,
+                &initial,
+                initial.document_age_ms,
+                5,
+                0,
+            ),
+            FacebookBottomConfirmationState::ConfirmedEnd
+        );
+
+        let mut nested_scroller = feed_probe(2_400.0, 1_500.0, false, false);
+        nested_scroller.scroll_viewport_height = 400.0;
+        assert_eq!(
+            nested_scroller.scroll_height
+                - nested_scroller.scroll_y
+                - nested_scroller.scroll_viewport_height,
+            500.0
+        );
+        assert!(
+            !facebook_near_bottom(&nested_scroller),
+            "window height must not make a smaller nested scroller look near-bottom"
+        );
+        nested_scroller.scroll_y = 1_600.0;
+        assert!(facebook_near_bottom(&nested_scroller));
+    }
+
+    #[test]
+    fn canonical_card_witness_is_bound_to_the_confirmed_surface_and_document() {
+        let home = probe_with_one_card(false);
+        let witness =
+            FacebookCanonicalCardWitness::from_probe(&home).expect("canonical home card witness");
+        assert!(witness.matches(&home));
+
+        let mut later_empty_home = home.clone();
+        later_empty_home.cards.clear();
+        later_empty_home.document_generation = Some("later-stable-empty-window".to_owned());
+        assert!(
+            witness.matches(&later_empty_home),
+            "virtualization may replace the visible card vector without replacing the document"
+        );
+        assert_eq!(
+            facebook_bottom_completion_reason(
+                FacebookBottomConfirmationState::ConfirmedEnd,
+                witness.matches(&later_empty_home),
+            ),
+            Some("feed_exhausted")
+        );
+
+        let mut group = home.clone();
+        group.surface = "group".to_owned();
+        assert!(
+            !witness.matches(&group),
+            "a card observed on home must not authorize another list surface"
+        );
+
+        let mut refreshed_home = home.clone();
+        refreshed_home.document_time_origin_ms += 1;
+        assert!(
+            !witness.matches(&refreshed_home),
+            "a card observed before refresh must not authorize the replacement document"
+        );
     }
 
     #[test]
@@ -1527,16 +1780,33 @@ mod tests {
             let initial = surfaced_feed_probe(surface, 2_400.0, 1_500.0, false, true);
             let terminal = surfaced_feed_probe(surface, 2_400.0, 1_500.0, false, true);
             assert_eq!(
-                classify_facebook_bottom_confirmation(&initial, &terminal, 5, 5),
-                FacebookBottomConfirmationState::ExplicitEnd,
-                "{surface} must be able to reach an explicit end"
+                classify_facebook_bottom_confirmation(
+                    &initial,
+                    &terminal,
+                    initial.document_age_ms,
+                    5,
+                    5,
+                ),
+                FacebookBottomConfirmationState::ConfirmedEnd,
+                "{surface} must retain its existing confirmed end"
             );
 
             let stable = surfaced_feed_probe(surface, 2_400.0, 1_500.0, false, false);
+            let expected = if surface == "home" {
+                FacebookBottomConfirmationState::ConfirmedEnd
+            } else {
+                FacebookBottomConfirmationState::WindowStable
+            };
             assert_eq!(
-                classify_facebook_bottom_confirmation(&stable, &stable, 5, 0),
-                FacebookBottomConfirmationState::WindowStable,
-                "{surface} must be able to reach a stable window"
+                classify_facebook_bottom_confirmation(
+                    &stable,
+                    &stable,
+                    stable.document_age_ms,
+                    5,
+                    0,
+                ),
+                expected,
+                "{surface} must keep the intended marker-free boundary"
             );
         }
     }
@@ -1546,13 +1816,19 @@ mod tests {
         let initial = surfaced_feed_probe("group", 2_400.0, 1_500.0, false, true);
         let moved = surfaced_feed_probe("home", 2_400.0, 1_500.0, false, true);
         assert_eq!(
-            classify_facebook_bottom_confirmation(&initial, &moved, 2, 2),
+            classify_facebook_bottom_confirmation(&initial, &moved, initial.document_age_ms, 2, 2,),
             FacebookBottomConfirmationState::Invalidated
         );
 
         let detail = surfaced_feed_probe("group_post", 2_400.0, 1_500.0, false, true);
         assert_eq!(
-            classify_facebook_bottom_confirmation(&detail, &detail.clone(), 1, 1),
+            classify_facebook_bottom_confirmation(
+                &detail,
+                &detail.clone(),
+                detail.document_age_ms,
+                1,
+                1,
+            ),
             FacebookBottomConfirmationState::Invalidated,
             "非列表面上根本不该做到底确认"
         );
@@ -1573,6 +1849,16 @@ mod tests {
                 "{surface} 上一张卡都没见过才是「找不到目标」"
             );
         }
+
+        let mut noncanonical = probe_with_one_card(false);
+        noncanonical.cards[0].note_id = Some("content_ref:feed:0".to_owned());
+        assert!(facebook_feed_card_identities(&noncanonical).is_empty());
+        assert!(FacebookCanonicalCardWitness::from_probe(&noncanonical).is_none());
+        assert_eq!(
+            facebook_unconfirmed_scroll_reason(!noncanonical.cards.is_empty(), &noncanonical),
+            "feed_continuation_unconfirmed",
+            "已见物理卡仍是 continuation，但它不能成为 canonical exhaustion witness"
+        );
     }
 
     #[test]
@@ -1629,8 +1915,14 @@ mod tests {
             let initial = surfaced_feed_probe(surface, 2_400.0, 1_500.0, false, true);
             let reflowed = surfaced_feed_probe(surface, 2_460.0, 1_500.0, false, true);
             assert_eq!(
-                classify_facebook_bottom_confirmation(&initial, &reflowed, 5, 5),
-                FacebookBottomConfirmationState::ExplicitEnd,
+                classify_facebook_bottom_confirmation(
+                    &initial,
+                    &reflowed,
+                    initial.document_age_ms,
+                    5,
+                    5,
+                ),
+                FacebookBottomConfirmationState::ConfirmedEnd,
                 "{surface} 上 60px 重排不该把到底确认打掉"
             );
         }

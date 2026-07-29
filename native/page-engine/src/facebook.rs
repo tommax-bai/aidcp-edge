@@ -148,6 +148,8 @@ pub struct FacebookFeedProbe {
     pub inner_width: f64,
     pub inner_height: f64,
     pub scroll_height: f64,
+    pub scroll_viewport_height: f64,
+    pub document_time_origin_ms: u64,
     pub document_age_ms: u64,
 }
 
@@ -1389,6 +1391,8 @@ mod tests {
                             "innerWidth": 1440,
                             "innerHeight": 801,
                             "scrollHeight": 2400,
+                            "scrollViewportHeight": 801,
+                            "documentTimeOriginMs": 1780000000000_u64,
                             "documentAgeMs": 215964
                         }
                     }
@@ -1397,6 +1401,7 @@ mod tests {
         });
 
         let probe = feed_probe_from_cdp(&cdp_result).expect("bounded feed probe");
+        assert_eq!(probe.document_time_origin_ms, 1_780_000_000_000);
         assert_eq!(probe.document_age_ms, 215_964);
         assert!(probe.explicit_end);
 

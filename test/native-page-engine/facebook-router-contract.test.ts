@@ -525,6 +525,11 @@ test('Facebook Feed probe distinguishes loading and visible unreportable article
     assert.equal(result.output.value.explicitEmpty, false);
     assert.equal(result.output.value.explicitEnd, false);
     assert.deepEqual(result.output.value.cards, []);
+    assert.equal(Number.isSafeInteger(result.output.value.documentTimeOriginMs), true);
+    assert.equal(
+      result.output.value.documentTimeOriginMs,
+      Math.floor(Number(globalThis.performance.timeOrigin)),
+    );
     assert.equal(Number.isSafeInteger(result.output.value.documentAgeMs), true);
     assert.ok(Number(result.output.value.documentAgeMs) >= 10_000);
   } finally {
@@ -2470,6 +2475,11 @@ test('Facebook feed probe measures scroll from the element that actually scrolls
   const probe = await run({ kind: 'feed_probe', params: {} });
   assert.equal(probe.output.value.scrollY, 316, 'scrollY 必须来自真正在滚的容器');
   assert.equal(probe.output.value.scrollHeight, 2511, 'scrollHeight 必须来自真正在滚的容器');
+  assert.equal(
+    probe.output.value.scrollViewportHeight,
+    803,
+    '一屏高度必须来自真正在滚的容器',
+  );
 });
 
 test('Facebook first-post probe scrolls and measures the element that actually scrolls', async () => {

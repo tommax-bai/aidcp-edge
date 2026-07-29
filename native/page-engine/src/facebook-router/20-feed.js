@@ -265,9 +265,9 @@
   };
   const feedScrollMetrics=()=>{
     const node=feedScrollNode();
-    if(node)return {scrollY:Number(node.scrollTop)||0,scrollHeight:Number(node.scrollHeight)||0};
+    if(node)return {scrollY:Number(node.scrollTop)||0,scrollHeight:Number(node.scrollHeight)||0,scrollViewportHeight:Number(node.clientHeight)||0};
     const doc=document.scrollingElement||document.documentElement;
-    return {scrollY:Number(window.scrollY)||0,scrollHeight:Number(doc&&doc.scrollHeight)||0};
+    return {scrollY:Number(window.scrollY)||0,scrollHeight:Number(doc&&doc.scrollHeight)||0,scrollViewportHeight:Number(window.innerHeight)||Number(doc&&doc.clientHeight)||0};
   };
   // 实际滚动也必须落在同一个元素上：只改测量口径而仍然滚窗口，位移依旧恒 0。
   // 返回滚动前的位置，供随后的位移/到底回报使用。
@@ -330,6 +330,7 @@
     // 只数已水合的卡。虚拟化占位壳有高度、可见、但无作者也无正文——它不是「有内容读不出来」的证据。
     const articleCount=reelSurface()?0:hydratedCards().length;
     const timeOrigin=Number(performance&&performance.timeOrigin);
+    const documentTimeOriginMs=Math.min(Number.MAX_SAFE_INTEGER,Math.max(0,Math.floor(Number.isFinite(timeOrigin)?timeOrigin:0)));
     const elapsedMs=Number.isFinite(timeOrigin)?Date.now()-timeOrigin:0;
     const documentAgeMs=Math.min(Number.MAX_SAFE_INTEGER,Math.max(0,Math.floor(Number.isFinite(elapsedMs)?elapsedMs:0)));
     let explicitEmpty=false,explicitEnd=false;
@@ -360,6 +361,8 @@
       innerWidth:Number(window.innerWidth)||0,
       innerHeight:Number(window.innerHeight)||0,
       scrollHeight:scrollMetrics.scrollHeight,
+      scrollViewportHeight:scrollMetrics.scrollViewportHeight,
+      documentTimeOriginMs,
       documentAgeMs,
     }};
   };
