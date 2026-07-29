@@ -213,6 +213,51 @@ test('控制器按环境单飞并在 TTL 内复用，缓存与公开快照不保
   assert.equal(reads, 2, '过期后仅补做一次');
 });
 
+test('人工启动清除已完成失败缓存后重新探测并采用新结果', async () => {
+  let probes = 0;
+  const controller = createProxyPreflightController({
+    ttlMs: 120_000,
+    readProxy: async () => ({ ok: true, proxy: authenticatedHttpProxy }),
+    probe: async () => {
+      probes += 1;
+      return probes === 1
+        ? { state: 'unavailable', checkedAt: new Date().toISOString(), reason: 'connection_refused' }
+        : { state: 'available', checkedAt: new Date().toISOString(), reason: 'facebook_reachable' };
+    },
+  });
+
+  assert.equal((await controller.ensure({ envId: 'env-manual', profileId: 'profile-manual' })).state, 'unavailable');
+  assert.equal((await controller.ensure({ envId: 'env-manual', profileId: 'profile-manual' })).state, 'unavailable');
+  assert.equal(probes, 1, '确定失败在 TTL 内仍按默认规则复用');
+
+  controller.invalidate('env-manual');
+  assert.equal((await controller.ensure({ envId: 'env-manual', profileId: 'profile-manual' })).state, 'available');
+  assert.equal(probes, 2, '显式失效后必须真实补做检测');
+});
+
+test('人工启动遇到在途检测时保留单飞而不制造 superseded 未知结果', async () => {
+  let releaseProbe: ((value: unknown) => void) | undefined;
+  let probes = 0;
+  const controller = createProxyPreflightController({
+    readProxy: async () => ({ ok: true, proxy: authenticatedHttpProxy }),
+    probe: () => {
+      probes += 1;
+      return new Promise((resolve) => { releaseProbe = resolve; });
+    },
+  });
+
+  const first = controller.ensure({ envId: 'env-inflight', profileId: 'profile-inflight' });
+  await Promise.resolve();
+  assert.equal(controller.snapshot('env-inflight')?.state, 'checking');
+  if (controller.snapshot('env-inflight')?.state !== 'checking') controller.invalidate('env-inflight');
+  const manualStart = controller.ensure({ envId: 'env-inflight', profileId: 'profile-inflight' });
+  releaseProbe?.({ state: 'available', checkedAt: new Date().toISOString(), reason: 'facebook_reachable' });
+
+  assert.deepEqual(await manualStart, await first);
+  assert.equal((await manualStart).state, 'available');
+  assert.equal(probes, 1);
+});
+
 test('控制器不缓存 unknown，invalidate 使在途旧结果失效', async () => {
   let releaseRead: ((value: unknown) => void) | undefined;
   const updates: unknown[] = [];

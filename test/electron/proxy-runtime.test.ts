@@ -22,6 +22,50 @@ const coreSource = readFileSync(join(here, '../../src/main.ts'), 'utf8');
 const sessionSource = readFileSync(join(here, '../../src/cdp/session.ts'), 'utf8');
 const html = readFileSync(join(here, '../../src/electron/renderer/index.html'), 'utf8');
 
+function sourceBlock(startToken: string, endToken: string) {
+  const start = mainSource.indexOf(startToken);
+  const end = mainSource.indexOf(endToken, start + startToken.length);
+  assert.ok(start >= 0 && end > start, `${startToken} block must exist`);
+  return mainSource.slice(start, end);
+}
+
+test('单环境人工启动只刷新已完成预检，自动与批量路径保留 TTL 和单飞', () => {
+  const helper = sourceBlock(
+    'function invalidateCompletedProxyPreflightForManualStart(',
+    'function scheduleSelectedProxyPreflight(',
+  );
+  const checkingAt = helper.indexOf("proxyPreflight.snapshot(handle.envId)?.state === 'checking'");
+  const invalidateAt = helper.indexOf('proxyPreflight.invalidate(handle.envId)');
+  assert.match(helper, /eligibleForProxyPreflight\(handle\)/);
+  assert.match(helper, /handle\.coldStandbyWaking/);
+  assert.match(helper, /handle\.startFlowQueued/);
+  assert.ok(checkingAt >= 0 && invalidateAt > checkingAt,
+    'an in-flight real probe must remain singleflight instead of being superseded');
+
+  const startHandler = sourceBlock(
+    "ipcMain.handle('edge:start'",
+    "ipcMain.handle('edge:restart'",
+  );
+  const wakeRefreshAt = startHandler.indexOf('invalidateCompletedProxyPreflightForManualStart(handle)');
+  const wakeAt = startHandler.indexOf("wakeColdStandby(handle, 'user_start')");
+  const ordinaryRefreshAt = startHandler.indexOf(
+    'invalidateCompletedProxyPreflightForManualStart(handle)',
+    wakeRefreshAt + 1,
+  );
+  const queueAt = startHandler.indexOf('queueStartEnv(handle)');
+  assert.ok(wakeRefreshAt >= 0 && wakeAt > wakeRefreshAt,
+    'manual standby wake must refresh completed evidence before waking');
+  assert.ok(ordinaryRefreshAt > wakeAt && queueAt > ordinaryRefreshAt,
+    'manual ordinary start must refresh completed evidence before queueing');
+
+  const automaticWake = sourceBlock('function wakeColdStandby(', 'function onColdStandbyWoken(');
+  const ordinaryQueue = sourceBlock('function queueStartEnv(', 'function stopAndRestart(');
+  const batchStart = sourceBlock('function startAllEnvs(', 'function stopAllEnvs(');
+  assert.doesNotMatch(automaticWake, /invalidateCompletedProxyPreflightForManualStart/);
+  assert.doesNotMatch(ordinaryQueue, /invalidateCompletedProxyPreflightForManualStart/);
+  assert.doesNotMatch(batchStart, /invalidateCompletedProxyPreflightForManualStart/);
+});
+
 test('fleet 投影严格 allowlist，非法 IP/额外敏感字段不会进入 renderer', () => {
   const normalized = normalizeProxyRuntime({
     state: 'verified',

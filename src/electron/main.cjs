@@ -1849,6 +1849,19 @@ async function ensureNetworkPreparation(handle) {
   return ensureProxyPreflight(handle, preflightConfig);
 }
 
+function invalidateCompletedProxyPreflightForManualStart(handle) {
+  if (!eligibleForProxyPreflight(handle)
+      || handle.coldStandbyWaking
+      || handle.startFlowQueued
+      || handle.launchQueued
+      || handle.slotWaitingSince
+      || handle.transientBrowserQueued
+      || handle.transientBrowserActive) return;
+  // Keep a real in-flight probe singleflight; cancelling it would surface a non-blocking superseded result.
+  if (proxyPreflight.snapshot(handle.envId)?.state === 'checking') return;
+  proxyPreflight.invalidate(handle.envId);
+}
+
 function scheduleSelectedProxyPreflight(handle) {
   if (selectedProxyPreflightTimer) clearTimeout(selectedProxyPreflightTimer);
   selectedProxyPreflightTimer = null;
@@ -6930,8 +6943,10 @@ ipcMain.handle('edge:start', (_event, envId) => {
     handle.stopRequested = false;
   }
   if (handle && handle.child && (handle.coldStandbyActive || handle.coldStandbyPending || handle.controlPlaneOnly)) {
+    invalidateCompletedProxyPreflightForManualStart(handle);
     wakeColdStandby(handle, 'user_start');
   } else if (handle && !handle.child) {
+    invalidateCompletedProxyPreflightForManualStart(handle);
     queueStartEnv(handle);
   }
   return statusOf(handle);
