@@ -44,14 +44,26 @@
  * （只告警，绝不升级为失效）。
  *
  * ── 三、身份重立链 `createIdentityReestablishment` ──
- * 两条硬约束（验收锚，写死在顺序里）：
+ * 四条硬约束（验收锚，写死在顺序里）：
  *   **A —— 在途发布诚实判失败 MUST 早于断开云端连接。** 失败回执经边-云 WS 发出；连接断了以后
  *      `send` 只能 best-effort 失败，云端就**无限期挂起等结果**。
  *   **B —— 先导航回消费端首页、再就地重读；归位后仍读不出 ⇒ 停在无身份态。** 触发失效时页面可能
  *      停在创作发布页 / 弹层态、根本没有「我」锚点，原地读必然读不出 ⇒ 无谓停摆。归位后仍读不出，
  *      halt 分支 MUST 是**纯返回**：不换身份、不重连云端、不重启浏览、**绝不回落默认账号**（红线）。
+ *      归位是一次整页重载，**读预算必须给足**（见 `REESTABLISH_IDENTITY_READ_HYDRATE_MS`）：拿周期
+ *      校验那种小预算来读刚开始导航的页面，读到的只是「还没渲染完」，把它判成终局＝红线「慢不是失败」。
+ *   **C —— 运行期身份只认实测值，`AIDCP_ACCOUNT_ID` 覆盖在这里没有任何权威**（见 `judgeRuntimeIdentity`）。
+ *   **D —— 宿主叫停（暂停 / 冷待机 / 停用）后，在途链条 MUST 当场作废**（见「四、代际判据」）。
+ *
+ * ── 四、代际判据（宿主叫停的取消点）──
+ * `IdentityRevalidator.stop()` 只清定时器是不够的：它既拦不住**已经在途**的一次 `check()`，也拦不住
+ * 已经在跑的重立链。冷待机的契约是「保留云端连接」，而重立链第 5 步就会主动关掉云端连接（那是
+ * `intentionalClose`，**不会自动重连、也不会 emit 断连事件**）——一次没拦住的在途链条就能把待机中的
+ * 节点变成外壳再也叫不醒的砖。故：`stop()` **递增代际**；在途 `check()` 与在途链条在**每个 await 点**
+ * 复查代际，变了即当场作废。作废时链条会**回滚它自己做过的两件外部改动**（暂停观测 / 断开云端），
+ * 因为宿主并没有要求这两件事——不回滚就是把「取消」做成了另一种静默损坏。
  */
-import type { IdentityDecision, SelfIdentityResult } from '../cdp/self-identity.js';
+import type { IdentityDecision, ReadSelfIdentityOptions, SelfIdentityResult } from '../cdp/self-identity.js';
 
 export type IdentityHealth = 'healthy' | 'invalid';
 export type IdentityInvalidReason = { kind: 'lost' } | { kind: 'changed'; newId: string };
@@ -85,6 +97,30 @@ export const DEFAULT_OBSERVATION_STALENESS_FACTOR = 3;
 /** 连续多少拍判「无法确认（陈旧）」后打一条存活告警。只告警，不升级为失效。 */
 export const DEFAULT_LIVENESS_ALERT_STREAK = 3;
 
+/**
+ * 周期校验的就地读预算（ms）。**故意很小**：这一拍读不出就跳过，30s 后还有下一拍，
+ * 没有任何理由为它把 CDP 占住几秒。
+ */
+export const PERIODIC_IDENTITY_READ_HYDRATE_MS = 1_000;
+
+/**
+ * 重立链「归位后重读」的预算（ms）。**故意很大**，与上面那个是两个完全不同的需求：
+ * 归位是一次 `Page.navigate` 整页重载，而 CDP 的 `Page.navigate` 在导航**开始**时就返回、不等 load。
+ * 拿 1s 去读一个刚开始加载的首页，读到的必然是「锚点还没渲染出来」——把它当成「读不出身份」就是把
+ * 「慢」判成终局失败（红线），后果是一个只不过换了个号的健康节点被永久停在无身份态。
+ * 退役实现在同一步用的是 reader 默认的 6000ms，且注释明写靠它「等锚点渲染出来」；这里给到 10s，
+ * 覆盖冷网络下的整页重载 + 水合。这一步慢几秒毫无代价：此刻浏览已停、云端已断，没人在等它。
+ */
+export const REESTABLISH_IDENTITY_READ_HYDRATE_MS = 10_000;
+
+/**
+ * 归位后重读的读取选项。**只读、不导航**（红线：绝不把页面拽走）+ 足量水合预算。
+ * 做成函数而不是让宿主自己拼，是因为「用哪个预算」正是本文件的判据，不该散落在无法单测的宿主装配里。
+ */
+export function reestablishIdentityReadOptions(): ReadSelfIdentityOptions {
+  return { allowNavigate: false, hydrateTimeoutMs: REESTABLISH_IDENTITY_READ_HYDRATE_MS };
+}
+
 export interface IdentityRevalidatorOptions {
   /** 校验节拍（ms，默认 30 000）。宿主经 `AIDCP_IDENTITY_CHECK_MS` 配置。 */
   intervalMs?: number;
@@ -113,6 +149,8 @@ export class IdentityRevalidator {
   private stalenessStreak = 0;
   private livenessAlerted = false;
   private onInvalid?: (reason: IdentityInvalidReason) => void;
+  /** 代际：每次 `stop()` 递增。在途 `check()` 与在途重立链据此当场作废（文件头「四」）。 */
+  private currentGeneration = 0;
 
   /** 最近一次判失效的原因（重立链据此拼人话与换 id）。 */
   lastReason: IdentityInvalidReason | null = null;
@@ -168,11 +206,23 @@ export class IdentityRevalidator {
     this.timer.unref?.();
   }
 
-  /** 停止周期校验。幂等。 */
+  /**
+   * 停止周期校验。幂等。
+   *
+   * **递增代际必须无条件发生、且早于清定时器**：定时器只是「下一拍还发不发」，而此刻真正危险的是
+   * 已经在途的那一次 `check()` 和它可能已经拉起来的重立链——只清定时器，它们照样跑完，照样在
+   * 冷待机中途把云端连接关掉、把浏览重新拉起来。递增代际是它们唯一的取消点。
+   */
   stop(): void {
+    this.currentGeneration += 1;
     if (!this.timer) return;
     this.clearTimer(this.timer);
     this.timer = null;
+  }
+
+  /** 当前代际。重立链在每个 await 点比对它；变了＝宿主已叫停，链条当场作废。 */
+  get generation(): number {
+    return this.currentGeneration;
   }
 
   get running(): boolean {
@@ -205,10 +255,14 @@ export class IdentityRevalidator {
   async check(): Promise<void> {
     if (this.checking || this.state === 'invalid') return;
     this.checking = true;
+    // 代际快照：本轮 check 的每个 await 点之后都要复查。宿主一旦 `stop()`（暂停 / 冷待机 / 停用），
+    // 这一轮就地作废——既不计数、也绝不回调 onInvalid 把重立链拉起来。
+    const generation = this.currentGeneration;
     try {
       // 先按页面上下文分域，绝不不看页面就一律用消费端锚点判定
       // （否则发布把标签页带到创作子域时会误判登出）。
       const ctx = await this.opts.readPageContext().catch((): IdentityPageContext => 'unknown');
+      if (generation !== this.currentGeneration) return;
       if (ctx === 'creator-app') {
         // 创作平台真实页自带登录门禁：能停在这＝已登录 → 健康、清零。
         this.consecutive = 0;
@@ -226,6 +280,7 @@ export class IdentityRevalidator {
       } else {
         try {
           const res = await this.opts.readIdentity();
+          if (generation !== this.currentGeneration) return;
           if (res.ok) {
             if (res.identity.accountId === this.baselineId) {
               this.consecutive = 0;
@@ -247,9 +302,11 @@ export class IdentityRevalidator {
             }
           }
         } catch {
+          if (generation !== this.currentGeneration) return;
           reason = { kind: 'lost' }; // 读取异常按登出计一次（防抖阈值兜住瞬时）
         }
       }
+      if (generation !== this.currentGeneration) return;
       this.resetStalenessStreak();
       this.consecutive += 1;
       this.log(
@@ -285,6 +342,57 @@ export class IdentityRevalidator {
 }
 
 // ===========================================================================================
+// 运行期身份裁定（硬约束 C）
+// ===========================================================================================
+
+export type RuntimeIdentityVerdict =
+  | { kind: 'accept'; accountId: string; overrideIgnored?: { override: string; real: string } }
+  | { kind: 'halt'; reason: string };
+
+/**
+ * 把握手决策翻译成**运行期**裁定。这里与启动期是两套口径，差别只有一条：
+ * **`AIDCP_ACCOUNT_ID` 覆盖在运行期没有任何权威。**
+ *
+ * 启动期的覆盖是操作者的显式逃生阀：进程刚起、页面可能还没登录，操作者说「这台就是账号 X」，
+ * 那是一句关于**未来**的声明，接受它是合理的。运行期重立不是——它的触发前提就是「这台机器上
+ * 刚刚发生了身份变化」，此刻手上有的是**实测**：
+ *   - 读不出（`use-override-after-read-fail`）＝浏览器掉了登录态。这时拿覆盖值继续跑，就是把
+ *     「不知道」说成「知道」：一台没有登录态的浏览器会被当成账号 X 重新握手、重启浏览，云端看到的
+ *     是一个「健康在线」的节点。故 **MUST 判 halt**（红线：按实测回报，绝不回报请求值）。
+ *   - 读出来了但与覆盖值不一致（`use.mismatch`）＝浏览器现在真的登着另一个账号。继续用覆盖值，
+ *     就是把这个账号的全部动作记到别人头上；而且基线与比较口径会永久错开，校验体每两拍就把会话
+ *     拆一遍重建一遍（无限重建循环）。故 **以实测值为准**，并响亮告警说明覆盖值被忽略。
+ *
+ * 纯函数、可单测。
+ */
+export function judgeRuntimeIdentity(decision: IdentityDecision): RuntimeIdentityVerdict {
+  if (decision.kind === 'halt') return { kind: 'halt', reason: decision.reason };
+  if (decision.kind === 'use-override-after-read-fail') {
+    return {
+      kind: 'halt',
+      reason: `${decision.reason}（AIDCP_ACCOUNT_ID 覆盖只是启动期逃生阀，运行期重立不接受它顶替实测身份）`,
+    };
+  }
+  return decision.mismatch
+    ? { kind: 'accept', accountId: decision.mismatch.real, overrideIgnored: decision.mismatch }
+    : { kind: 'accept', accountId: decision.accountId };
+}
+
+/**
+ * 从握手决策里取出**实测**到的账号 id（没读出实测值则为 undefined）。
+ *
+ * 存在的理由是「基线必须与比较口径一致」：周期校验体比的是**页面上读出来的** id
+ * （`res.identity.accountId`），所以它的基线也只能是页面上读出来的 id。拿握手身份当基线，在
+ * 「覆盖值 ≠ 真实登录账号」这个被显式支持的组合下两者永不相等 ⇒ 每 2×节拍就把会话整个拆一遍
+ * 重建一遍，而日志里只有一句「✓ 身份已重新确立」。纯函数、可单测。
+ */
+export function observedAccountIdFromDecision(decision: IdentityDecision): string | undefined {
+  if (decision.kind !== 'use') return undefined;
+  // source==='env-override' 且无 mismatch ⇒ 覆盖值与实测值相等，accountId 就是实测值。
+  return decision.mismatch ? decision.mismatch.real : decision.accountId;
+}
+
+// ===========================================================================================
 // 身份重立链
 // ===========================================================================================
 
@@ -303,8 +411,11 @@ export interface IdentityReestablishmentDeps {
   disconnectCloud: () => Promise<void>;
   /** 步 6：先导航回消费端首页（失败只记日志、不中断链条，与退役实现同）。 */
   navigateToConsumerHome: () => Promise<void>;
-  /** 步 7：就地重读身份（allowNavigate:false）。 */
-  readIdentity: () => Promise<SelfIdentityResult>;
+  /**
+   * 步 7：就地重读身份。**读取选项由链条给**（`reestablishIdentityReadOptions()`），宿主只负责把它
+   * 原样转给平台 reader —— 「归位后要给足水合预算」是本文件的判据，不是宿主装配的自由发挥。
+   */
+  readIdentity: (options: ReadSelfIdentityOptions) => Promise<SelfIdentityResult>;
   /** 步 8：身份决策。 */
   decideIdentity: (res: SelfIdentityResult) => IdentityDecision;
   nicknameFor: (res: SelfIdentityResult, decision: IdentityDecision) => string | undefined;
@@ -318,12 +429,34 @@ export interface IdentityReestablishmentDeps {
   resumeObservation: () => void;
   /** 步 14：重启浏览。 */
   startBrowse: () => void;
+  /**
+   * 宿主代际（`IdentityRevalidator.generation`）。链条开始时取一次，之后**每个 await 点复查**；
+   * 变了＝宿主已叫停（暂停 / 冷待机 / 停用），链条当场作废并回滚自己做过的外部改动。
+   */
+  generation: () => number;
+  /**
+   * halt 终局的对外通告（宿主转成 lifecycle IPC 给桌面外壳）。
+   *
+   * halt 之后节点已彻底停摆：浏览停了、观测停了、云端连接被 `intentionalClose` 关掉（既不自动重连、
+   * 也不 emit 断连事件）。**只打一行日志是不够的**——外壳没有任何信号，左栏仍显示「运行中 / 已连接
+   * 云端」，运营看不到角标。那正是静默假成功的产品层形态。
+   */
+  reportHalt: (reason: string) => void;
 }
 
 export type IdentityReestablishmentOutcome =
   | { kind: 'reestablished'; accountId: string }
   | { kind: 'halted'; reason: string }
+  /**
+   * 宿主在链条执行中叫停：`step` 是被叫停的位置；`cloudRestored` 如实回报「本链条断掉的云端连接
+   * 补回来了没有」；`observationSuspendedByChain` 如实带出「周期观测还停着、恢复责任在宿主」。
+   */
+  | { kind: 'aborted'; step: string; cloudRestored?: boolean; observationSuspendedByChain: boolean }
   | { kind: 'skipped'; reason: 'already_running' };
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 function describeReason(reason: IdentityInvalidReason | null): string {
   if (!reason) return '未知';
@@ -342,14 +475,56 @@ export function createIdentityReestablishment(
   return async (reason) => {
     if (running) return { kind: 'skipped', reason: 'already_running' };
     running = true;
+    // 代际快照（硬约束 D）。链条自己做过的两件外部改动记在这里：作废时要回滚，因为宿主从来没要求
+    // 过它们——留着不管就是把「取消」做成另一种静默损坏（观测被永久暂停 / 云端连接永久失联）。
+    const startedGeneration = deps.generation();
+    let observationSuspendedByChain = false;
+    let cloudDisconnectedByChain = false;
+    /** 每个 await 点复查代际；已被叫停则回滚并返回 aborted，否则返回 null 继续。 */
+    const abortIfStopped = async (step: string): Promise<IdentityReestablishmentOutcome | null> => {
+      if (deps.generation() === startedGeneration) return null;
+      deps.logger(
+        `[identity-guard] 身份重立链在「${step}」处被宿主叫停（暂停 / 冷待机 / 停用）：当场作废，绝不继续往前推进。`,
+      );
+      const out: { kind: 'aborted'; step: string; cloudRestored?: boolean; observationSuspendedByChain: boolean } = {
+        kind: 'aborted',
+        step,
+        observationSuspendedByChain,
+      };
+      // 周期观测**故意不在这里恢复**。三条叫停路径里有两条（冷待机 / 停用）马上就要把浏览器关掉，
+      // 此刻恢复观测＝探针对着已 detach 的 CDP 每 2s 空轮询一路轮到唤醒（会话侧 scheduleProbe 会在
+      // `.finally` 里自我重新武装）。剩下那条（暂停）的恢复责任在宿主的 `resumeAutomation`：那里才
+      // 知道「现在要重新开工」。链条只如实把「是我暂停的」这个事实带出去。
+      if (cloudDisconnectedByChain) {
+        // 这条连接是本链条关的，而且关法是 intentionalClose（不自动重连、不发断连事件）。宿主的暂停 /
+        // 冷待机都明确要求**保留云端连接**，不补回来＝节点静默失联、外壳的唤醒指令再也送不到。
+        try {
+          await deps.connectCloud();
+          out.cloudRestored = true;
+        } catch (error) {
+          out.cloudRestored = false;
+          deps.logger(
+            `[identity-guard] ⚠ 作废回滚：重连云端失败（${errorText(error)}）——本节点当前与云端失联，需人工介入。`,
+          );
+        }
+      }
+      return out;
+    };
     try {
       const reasonText = describeReason(reason);
       const flipReason = `identity_flip:${reason?.kind ?? 'unknown'}`;
+      // 第一个取消点在**任何副作用之前**：判失效与链条启动之间隔着一次事件循环，宿主很可能正好在
+      // 这个窗口里进了冷待机。在这里让路，什么都不用回滚。
+      const abortedAtEntry = await abortIfStopped('entry');
+      if (abortedAtEntry) return abortedAtEntry;
       deps.logger(`[identity-guard] ⚠ 运行期身份失效（${reasonText}）：停自动化、退回无身份态并尝试重新确立身份`);
 
       // 步 2 / 3：先把两套周期活动停住，避免重立期间还有人对页面动手。
       deps.suspendObservation(flipReason);
+      observationSuspendedByChain = true;
       await deps.stopBrowse();
+      const abortedAfterStop = await abortIfStopped('stop_browse');
+      if (abortedAfterStop) return abortedAfterStop;
 
       // 步 4（硬约束 A）：**在断开云端之前**把在途发布诚实判失败，否则失败回执发不出去、
       // 云端无限期挂起等结果。
@@ -364,42 +539,68 @@ export function createIdentityReestablishment(
 
       // 步 5：断开云端。
       await deps.disconnectCloud();
+      cloudDisconnectedByChain = true;
+      const abortedAfterDisconnect = await abortIfStopped('disconnect_cloud');
+      if (abortedAfterDisconnect) return abortedAfterDisconnect;
 
       // 步 6（硬约束 B 前半）：先导航回消费端首页再读。触发失效时页面可能停在创作发布页 / 弹层态，
       // 原地读必然读不出 ⇒ 无谓停摆。导航失败只记日志、照样往下读（与退役实现同，不更坏）。
       try {
         await deps.navigateToConsumerHome();
       } catch (error) {
-        deps.logger(
-          `[identity-guard] 归位消费端首页失败（${error instanceof Error ? error.message : String(error)}）：退回原地重读`,
-        );
+        deps.logger(`[identity-guard] 归位消费端首页失败（${errorText(error)}）：退回原地重读`);
       }
+      const abortedAfterNavigate = await abortIfStopped('navigate_home');
+      if (abortedAfterNavigate) return abortedAfterNavigate;
 
-      // 步 7 / 8：就地重读 + 决策。
-      const idRes = await deps.readIdentity();
+      // 步 7 / 8：就地重读 + 决策。读预算由链条给足（硬约束 B 后半的前提）：归位是一次整页重载，
+      // 拿周期校验那种小预算读它，读到的只是「还没渲染完」——把它判成终局就是把「慢」当失败。
+      const idRes = await deps.readIdentity(reestablishIdentityReadOptions());
+      const abortedAfterRead = await abortIfStopped('read_identity');
+      if (abortedAfterRead) return abortedAfterRead;
       const decision = deps.decideIdentity(idRes);
-      if (decision.kind === 'halt') {
+      const verdict = judgeRuntimeIdentity(decision);
+      if (verdict.kind === 'halt') {
         // 硬约束 B 后半：halt MUST 是**纯返回**——不换身份、不重连云端、不重启浏览与观测，
-        // **绝不回落默认账号**。浏览器保住，等人重新登录后由外壳重来。
+        // **绝不回落默认账号、也绝不用 AIDCP_ACCOUNT_ID 覆盖值顶上**（硬约束 C）。
+        // 文案里的「身份确立失败」是与外壳终态白名单共用的措辞（IPC 之外的第二道保险）。
         deps.logger(
-          `[identity-guard] ✗ 归位后仍读不出稳定账号 id（${decision.reason}）：停在无身份态，不重连云端、绝不回落默认账号。` +
+          `[identity-guard] ✗ 运行期身份确立失败：归位后仍读不出稳定账号 id（${verdict.reason}）。` +
+            '已停在无身份态——不换身份、不重连云端、不重启浏览，绝不回落默认账号。' +
             '请在浏览器里重新登录目标账号后重启本节点。',
         );
-        return { kind: 'halted', reason: decision.reason };
+        deps.reportHalt(verdict.reason);
+        return { kind: 'halted', reason: verdict.reason };
+      }
+      if (verdict.overrideIgnored) {
+        // 响亮告警：这一步之后云端会话会按**实测**账号重建，与操作者设的覆盖值不同。
+        // 只打一句「✓ 身份已重新确立」就把它盖过去，等于让人永远看不到自己的配置已被实测事实推翻。
+        deps.logger(
+          `[identity-guard] ⚠ AIDCP_ACCOUNT_ID 覆盖值(${verdict.overrideIgnored.override}) ≠ 归位后实测的登录账号` +
+            `(${verdict.overrideIgnored.real})：运行期一律以**实测值**为准（启动期覆盖是逃生阀，运行期重立不是）。` +
+            '云端会话将按实测账号重建；若这不是预期，请修正 AIDCP_ACCOUNT_ID 或换回目标账号登录。',
+        );
       }
 
       // 步 9 / 10：换身份并按新 id 重连（云端据此拆旧会话）。
-      const accountId = decision.accountId;
+      const accountId = verdict.accountId;
       deps.applyIdentity(accountId, deps.nicknameFor(idRes, decision));
       await deps.connectCloud();
+      cloudDisconnectedByChain = false; // 连接已由本链条自己补回，作废时无需再重连
 
-      // 步 11：重设基线，否则校验体停在 invalid、此后永久哑火。
+      // 步 11：重设基线。用的是**实测**账号 id（`verdict.accountId`），与周期校验体的比较口径
+      // （页面上读出来的 id）逐字一致——两者错开就会每两拍拆一次会话重建一次，无限循环。
       deps.rebaseline(accountId);
 
       // 步 12 —— 【5.6 待人裁定：此处是退役实现步 12「重注入连接级节奏快照」的位置】
       // 该步在 Native 形态下的归属未定（见 change tasks.md 5.6 / design.md「待裁定」§1）。
       // 未裁定前**不实现、也不写静默兜底**：写一个「顺手 applyPacingSnapshot」在这里，等于替裁定人
       // 做了决定；写一个空 catch 则是静默假成功。故此处只留具名占位。
+
+      // 最后一个取消点：下面就要把浏览重新拉起来了。宿主若已叫停（用户点了「暂停」/ 进了冷待机），
+      // 在这里放行 = 用户点完暂停几秒后浏览自己又开始跑。作废分支会把观测还回去，但绝不 startBrowse。
+      const abortedBeforeRestart = await abortIfStopped('restart_automation');
+      if (abortedBeforeRestart) return abortedBeforeRestart;
 
       // 步 13 / 14：重启周期观测与浏览。
       deps.resumeObservation();

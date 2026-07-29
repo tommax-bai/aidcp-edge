@@ -1974,6 +1974,9 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     launchGeneration: 0,
     wakeGeneration: 0,
     lastEdgeFailureLine: '',
+    // 运行期身份重立走到 halt 的闩（reason 串 / null）。核心此时**不退出**，所以退出码那条权威判据
+    // 永远不触发；不闩住，halt 之后随便一行普通日志就把徽标重置回 running。
+    identityHalted: null,
     respawnStreak: 0,
     respawnTimer: null,
     gaveUp: false,
@@ -4426,6 +4429,9 @@ async function spawnEdgeChild(handle, {
 
   handle.browserParkingReady = false;
   handle.executorFailure = null;
+  // 身份 halt 闩只反映**本次 core run** 的终局：新拉起的核心会自己重走一遍身份确立，
+  // 不清就会把上一轮的红一直挂在新进程头上。
+  handle.identityHalted = null;
   handle.browserStateUnconfirmed = false;
   handle.browserPersonaNoticeState = null;
   resetPersonaNoticeGrace(handle);
@@ -4632,6 +4638,25 @@ async function spawnEdgeChild(handle, {
     }
     if (message.type === 'lifecycle.standby') {
       onColdStandbyAck(handle);
+      return;
+    }
+    if (message.type === 'lifecycle.identity_halted') {
+      // 运行期身份重立走到 halt：核心还活着，但已彻底停摆——浏览停了、周期观测停了、云端连接被
+      // intentionalClose 关掉（既不自动重连、也不 emit 断连事件）。**核心不会退出**，所以
+      // child.on('close') 那条权威判据永远不触发；这条 IPC 是外壳唯一能知道的途径。
+      // 不接它的后果不是「晚一点看到」，而是左栏一直显示「运行中 / 已连接云端」，运营看不到任何角标。
+      const reason = typeof message.reason === 'string' && message.reason ? message.reason : 'identity_halted';
+      // 闩住：此后核心再打任何一行普通日志都不得把徽标翻回 running（见下方 handleEdgeLog 的 halting 判据）。
+      handle.identityHalted = reason;
+      updateStatus(handle, {
+        edge: 'warning',
+        session: 'idle',
+        cloud: 'disconnected',
+        auth: 'login required',
+        lastMessage: `运行期身份确立失败：${reason}。自动化已停止、自动化引擎已断开，请在浏览器里重新登录该账号后重启本环境。`,
+        ...presencePatch('身份已失效，请重新登录后重启'),
+        ...edgeFailurePatch(`运行期身份确立失败：${reason}`),
+      });
       return;
     }
     if (message.type === 'lifecycle.executor_failed') {
@@ -5590,7 +5615,10 @@ function handleEdgeLogLine(handle, message, isError = false) {
   // 注释写着「致命启动失败立即非零退出，让桌面外壳的 edgeProcess.on('exit') 立刻看见」。日志行只做预测、
   // 退出码才是权威；把预测调准，权威一分不动。白名单里保留「CDP 输入控制不可用」是因为那条是唯一
   // **不退出**的终态（核心活着但驱不动浏览器、要求人工重启），少了它「边缘在线但浏览器驱不动」就没人报。
-  const halting = fleet.declaresCoreHalt(message);
+  // 运行期身份 halt 是**不退出**的第二类终态（第一类是「CDP 输入控制不可用」）：核心还活着、还会
+  // 继续打日志，但已经彻底停摆。它经 lifecycle.identity_halted 闩在 handle 上；不把这个闩算进来，
+  // halt 之后随便哪一行普通日志都会把徽标重置回 running，运营看到的仍是「运行中」。
+  const halting = fleet.declaresCoreHalt(message) || Boolean(handle.identityHalted);
   const next = { edge: halting ? 'warning' : 'running', lastMessage: proxyRuntimeLine ? '代理运行证据已更新' : message };
   if (!halting && handle.status.edgeFailure) next.edgeFailure = null;
   if (message.includes('[browser-parking] awaiting-login')) {

@@ -41,7 +41,7 @@ import {
   reattachSession,
   browserParkingConfigFromEnv,
   installBrowserParkingStdinControl,
-  readPageContext,
+  readCurrentHref,
   selectBrowserProvider,
   waitForLoginIdentity,
   resolveStartupIdentity,
@@ -87,9 +87,11 @@ import {
 import {
   createIdentityReestablishment,
   IdentityRevalidator,
+  observedAccountIdFromDecision,
   DEFAULT_IDENTITY_CHECK_MS,
   DEFAULT_IDENTITY_FAIL_THRESHOLD,
   DEFAULT_OBSERVATION_INTERVAL_MS,
+  PERIODIC_IDENTITY_READ_HYDRATE_MS,
   type IdentityInvalidReason,
 } from './native-page-engine/identity-guard.js';
 import {
@@ -187,6 +189,13 @@ async function main(): Promise<void> {
   }
   let accountId: string | undefined;
   let accountNickname: string | undefined;
+  /**
+   * 最近一次**从页面上实测**到的账号 id（与握手身份 `accountId` 是两回事：后者可能是
+   * `AIDCP_ACCOUNT_ID` 覆盖值）。运行期校验体的基线只能用它——校验体比的是页面读出来的 id，
+   * 基线拿覆盖值，在「覆盖值 ≠ 真实登录账号」这个被显式支持的组合下两者永不相等，
+   * 于是每 2×节拍就把会话整个拆一遍重建一遍，日志里却只有一句「✓ 身份已重新确立」。
+   */
+  let observedAccountId: string | undefined;
   const machineLabel = process.env.AIDCP_MACHINE_LABEL;
   const cdpHost = process.env.AIDCP_CDP_HOST ?? '127.0.0.1';
   const cdpPort = Number(process.env.AIDCP_CDP_PORT ?? 9222);
@@ -398,6 +407,9 @@ async function main(): Promise<void> {
         );
       }
       accountId = resolved.accountId;
+      // 实测值单独记一份：它才是运行期校验体的基线口径（覆盖值不是）。读不出实测值时留空，
+      // 绝不用覆盖值冒充「实测到的」。
+      observedAccountId = observedAccountIdFromDecision(resolved);
       // 昵称仅从本次首读且与最终数字 id 一致的已验证结果取；等待路径 idRes 仍是首读失败结果，自然不携昵称。
       accountNickname = verifiedAccountNickname(idRes, resolved);
       const display = accountNickname ? ` (${accountNickname})` : '';
@@ -1113,18 +1125,25 @@ async function main(): Promise<void> {
     // 身份读取一律 allowNavigate:false —— 只读、不导航，绝不每轮把页面拽走（红线）。
     // 平台分叉已在装配层由 `readPlatformIdentity` 做掉（Facebook 走 Native cookie 派生、其它走 TS CDP
     // 就地扫描，两条都不导航），校验体与重立链只消费它，自己不认平台。
-    const readIdentityInPlace = (): Promise<SelfIdentityResult> => readPlatformIdentity({
-      allowNavigate: false,
-      hydrateTimeoutMs: 1_000,
-      logger: () => undefined,
-    });
-    identityGuard = new IdentityRevalidator(accountId ?? '', {
+    //
+    // **水合预算由调用方给，两个调用方要的东西完全不同**：周期校验读不出就跳过（30s 后还有下一拍），
+    // 给小预算；重立链的「归位后重读」跟在一次整页重载后面，必须给足（判据与常量都在 identity-guard.ts）。
+    // 早先两处共用一个写死 1s 的闭包，于是换号场景必然在 1s 内读不出 → 判 halt → 一个只是换了个号的
+    // 健康节点被永久停在无身份态（把「页面还没渲染完」判成终局失败）。
+    const readIdentityInPlace = (options: ReadSelfIdentityOptions = {}): Promise<SelfIdentityResult> =>
+      readPlatformIdentity({ ...options, allowNavigate: false });
+    identityGuard = new IdentityRevalidator(observedAccountId ?? accountId ?? '', {
       intervalMs: identityCheckMs,
       threshold: identityFailThreshold,
       observationIntervalMs,
       logger: (message) => console.log(message),
-      readPageContext: () => readPageContext(session.cdp),
-      readIdentity: readIdentityInPlace,
+      // 分域判据按平台走（driver 上的纯函数）：小红书分消费端 / 创作子域 / 创作登录页，Facebook 域内
+      // 一律可读。写死成小红书判据会让 FB 侧每拍「跳过」、永远读不到身份——装了但永久空转。
+      readPageContext: async () => platformDriver.classifyIdentityContext(await readCurrentHref(session.cdp)),
+      readIdentity: () => readIdentityInPlace({
+        hydrateTimeoutMs: PERIODIC_IDENTITY_READ_HYDRATE_MS,
+        logger: () => undefined,
+      }),
       // 正向登出探针取周期阻断观测的读数（sticky 缓存）。陈旧 / 暂停 / 从未成功探测过一律判「无法确认」
       // 并跳过——绝不压成「真登出」（「读不到」与「没有」是两态）。判据在 identity-guard.probeLogout()。
       observationStatus: () => nativeSession.observationStatus(),
@@ -1149,13 +1168,23 @@ async function main(): Promise<void> {
         });
       },
       navigateToConsumerHome: () => session.cdp.send('Page.navigate', { url: consumerHomeUrl }).then(() => undefined),
-      readIdentity: readIdentityInPlace,
+      // 读取选项由链条给（足量水合预算），宿主原样转发、只补一条日志——绝不在这里替它决定预算。
+      readIdentity: (options) => readIdentityInPlace({ ...options, logger: (m) => console.log(m) }),
       decideIdentity: (res) => platformDriver.decideIdentity(res, overrideAccountId),
       nicknameFor: verifiedAccountNickname,
       applyIdentity: (nextAccountId, nickname) => {
         accountId = nextAccountId;
+        // 校验体的基线口径 = 页面上读出来的 id。重立链交上来的就是实测值，两处必须同步前进。
+        observedAccountId = nextAccountId;
         accountNickname = nickname;
         client.setAccountIdentity(accountId, accountNickname);
+      },
+      generation: () => identityGuard?.generation ?? 0,
+      reportHalt: (reason) => {
+        // 让外壳看得见这个终局：halt 之后浏览停了、观测停了、云端连接被 intentionalClose 关掉
+        // （既不自动重连、也不 emit 断连事件）。不发这条 IPC，桌面客户端左栏会一直显示「运行中 /
+        // 已连接云端」，运营看不到任何角标——那正是静默假成功的产品层形态。
+        sendLifecycleIpc({ type: 'lifecycle.identity_halted', reason });
       },
       connectCloud: () => client.connect(),
       rebaseline: (nextAccountId) => identityGuard?.rebaseline(nextAccountId),
@@ -1182,11 +1211,18 @@ async function main(): Promise<void> {
       failInFlightPublishesHonestly('user_pause');
       taskCoordinator.reset('user_pause');
       // 身份校验体随自动化一起停：暂停期若判失效，重立链会把浏览重新拉起来 —— 那是对「暂停」的违背。
+      // stop() 同时递增代际，把**已经在途**的一次校验与一条重立链一起作废（只清定时器拦不住它们：
+      // 一条没拦住的在途链条会在暂停期间关掉云端连接、几秒后又把浏览拉起来）。
       identityGuard?.stop();
       reportBrowseDrainTimeout((await browse?.stopAndWait(BROWSE_DRAIN_MS)) ?? true, 'user_pause');
     },
     resumeAutomation: async () => {
       if (coldStandbyActive) throw new Error('browser_absent_use_wake');
+      // 周期观测的恢复责任在这里（幂等：没停过就是空操作）。暂停期间可能有一条在途的身份重立链被
+      // 叫停在「已暂停观测」的位置——链条**故意不**自己恢复（叫停的另两条路径马上就要关浏览器，
+      // 那时恢复观测＝对着已 detach 的 CDP 空轮询到唤醒）。不在这里补，浏览会重开但观测永远起不来
+      // （会话侧 scheduleProbe 见 suspended 直接早退）：阻断观测从此全盲，且没有任何人会发现。
+      nativeBrowse?.resumeObservation();
       browse?.start().catch((error) => {
         console.error('[aidcp-edge] 恢复自动化失败:', error);
       });
@@ -1336,6 +1372,9 @@ async function main(): Promise<void> {
           await chrome?.killAndConfirmDead().catch(() => undefined);
           return false;
         }
+        // 新一代浏览器里刚实测到的 id（读不出实测值则不覆盖旧值）——下面重设校验体基线要用它，
+        // 用握手身份会在「覆盖值 ≠ 真实登录账号」时把基线钉在一个页面上永远读不到的值上。
+        observedAccountId = observedAccountIdFromDecision(decision) ?? observedAccountId;
         if (decision.accountId !== accountId) {
           // 控制面引导是“上一次握手”的持久事实，允许陈旧；但绝不允许它覆盖新浏览器里的真实账号。
           // 在任何页面动作恢复前，先以刚读出的真实身份换 Cloud 会话并拿到严格 welcome。
@@ -1359,8 +1398,10 @@ async function main(): Promise<void> {
         nativeBrowse?.resumeObservation();
         if (resumeAutomation) {
           browse?.start().catch((err) => console.error('[aidcp-edge] 唤醒后浏览会话异常:', err));
-          // 新一代浏览器里的身份刚刚重新确认过，基线按它重设后再开跑校验体。
-          if (accountId) identityGuard?.rebaseline(accountId);
+          // 新一代浏览器里的身份刚刚重新确认过，基线按**实测值**重设后再开跑校验体
+          // （基线必须与校验体的比较口径一致：它比的是页面上读出来的 id）。
+          const wakeBaseline = observedAccountId ?? accountId;
+          if (wakeBaseline) identityGuard?.rebaseline(wakeBaseline);
           startIdentityGuard?.();
         }
         console.log(`[aidcp-edge] ✓ 唤醒完成：浏览器已重建、身份已确认、自动化${resumeAutomation ? '已恢复' : '保持暂停'}`);

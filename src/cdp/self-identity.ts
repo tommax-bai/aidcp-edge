@@ -449,10 +449,19 @@ export async function readSelfIdentity(
   return { ok: true, identity: { accountId: navId, displayName: display.nickname, redId: display.redId, source: 'navigate' } };
 }
 
-/** 就地读当前页 URL 并分类为身份校验上下文（读失败按 `unknown`——本轮不判、不误杀）。 */
+/** 就地读当前页 URL（读失败返回 ''，交由调用方按 `unknown` 处置——本轮不判、不误杀）。 */
+export async function readCurrentHref(cdp: BrowseCdp): Promise<string> {
+  return evalRaw<string>(cdp, CURRENT_URL_JS).catch(() => '');
+}
+
+/**
+ * 就地读当前页 URL 并按**小红书**判据分类（读失败按 `unknown`）。
+ *
+ * ⚠ 这是小红书专用判据，MUST NOT 直接拿给别的平台用：facebook.com 在这里一律归 `unknown`，
+ * 校验体会每拍跳过、永远读不到身份。运行期校验的分域一律走 `BrowserPlatformDriver.classifyIdentityContext`。
+ */
 export async function readPageContext(cdp: BrowseCdp): Promise<PageContext> {
-  const href = await evalRaw<string>(cdp, CURRENT_URL_JS).catch(() => '');
-  return classifyPageContext(href);
+  return classifyPageContext(await readCurrentHref(cdp));
 }
 
 // ===========================================================================

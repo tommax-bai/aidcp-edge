@@ -1,6 +1,7 @@
 import type { BrowseCdp } from '../browse/cdp-util.js';
 import type {
   IdentityDecision,
+  PageContext,
   ReadSelfIdentityOptions,
   SelfIdentityResult,
 } from '../cdp/self-identity.js';
@@ -62,6 +63,19 @@ export interface BrowserPlatformDriver extends BasePlatformDriver {
   readonly runtimeKind: 'browser';
   readIdentity(cdp: BrowseCdp, opts?: ReadSelfIdentityOptions): Promise<SelfIdentityResult>;
   decideIdentity(idRes: SelfIdentityResult, override: string | undefined): IdentityDecision;
+  /**
+   * 运行期身份校验的**页面上下文分域**：当前 URL 属于「能读身份的页」「自带登录门禁的页」
+   * 「确凿登出的页」还是「判不了」。纯函数（只吃 href），实现随平台走。
+   *
+   * 为什么必须挂在 driver 上：这道闸原本写死成小红书域名判据，于是 Facebook 下的任何 URL 都归
+   * `unknown` —— 校验体每拍打一行「本轮跳过」，**永远走不到**为 FB 注入的身份读取。代码与日志都
+   * 像已经装上了，实际是一台永久空转的机器；而 FB 正是当前真正在跑的平台。
+   *
+   * 判据本身也确实是平台相关的：小红书的身份读取依赖页面上的「我」锚点，所以必须先分清停在哪个
+   * 子域；Facebook 的身份是 cookie 派生、不导航、不关心当前停在哪个页，所以「在 facebook 域内」
+   * 就足以判定「可读」。放到 driver 上，新平台**不实现就编译不过**——不会再出现「装了但永久跳过」。
+   */
+  classifyIdentityContext(href: string | null | undefined): PageContext;
 }
 
 /** API-only platforms register without inventing browse/like/publish methods. */
