@@ -274,10 +274,55 @@ async function(input){
     const current=firstPostEvidence(record.root);
     return current&&current.value===record.evidence?record.root:null;
   };
-  const topArticles=()=>{
+  // 帖子正文标记与作者链接：回落找卡的两个锚点，逐字对齐退役实现 src/facebook/post-identity.ts:22-23。
+  const storyMessageSelector='[data-ad-comet-preview="message"],[data-ad-preview="message"],[data-ad-rendering-role="story_message"]';
+  const authorLinkSelector='h2 a[href],h3 a[href],h4 a[href]';
+  // 水合证据：作者链接**或**正文标记（取或，不取与）。Facebook 的虚拟化 feed 会先渲染只占高度的空壳，
+  // 只判可见性会把空壳当成真卡——那正是「有物理卡但读不出来」被假依据触发的成因。
+  const hydratedCard=(el)=>Boolean(el&&el.querySelector&&(el.querySelector(authorLinkSelector)||el.querySelector(storyMessageSelector)));
+  const semanticArticles=()=>{
     const nodes=all('[role="article"],article').filter(visible);
     return nodes.filter((node)=>!node.parentElement||!node.parentElement.closest('[role="article"],article'));
   };
+  /**
+   * 回落找卡（退役实现 post-identity.ts:87-106 的等价物）。Facebook 有一类版式既没有
+   * `div[role="feed"]` 容器、`[role="article"]` 也只剩空壳（2026-07-29 越南语首页实测：feed 容器 0、
+   * 语义卡 2 个且都是 286px 空壳、真实条目 11 个）。此路不依赖任何语义 role：以帖子正文标记为种子，
+   * 向上走到第一个「自身之外且内部含作者链接」的祖先当卡边界。
+   * 红线：走到 body / documentElement 仍无作者证据即**不成卡**，绝不回落到整页或 main —— 那是静默假成功。
+   */
+  const fallbackArticles=()=>{
+    const found=[];
+    for(const seed of all(storyMessageSelector)){
+      if(!visible(seed))continue;
+      if(seed.closest&&seed.closest('div[role="feed"]'))continue; // 真 feed 交语义路，避免一帖两卡
+      let cur=seed;
+      while(cur&&cur!==document.body&&cur!==document.documentElement){
+        if(cur!==seed&&cur.querySelector&&cur.querySelector(authorLinkSelector))break;
+        cur=cur.parentElement;
+      }
+      if(!cur||cur===document.body||cur===document.documentElement)continue;
+      if(!visible(cur))continue;
+      if(!found.includes(cur))found.push(cur);
+    }
+    // 分享 / 引用帖会让内层也命中正文标记；只留最外层，避免一帖两卡与跨卡误归因。
+    return found.filter((node,index)=>!found.some((other,other_index)=>other_index!==index&&other.contains(node)));
+  };
+  const mergeArticles=(primary,secondary)=>{
+    const out=primary.slice();
+    for(const card of secondary){
+      if(out.some((kept)=>kept===card||kept.contains(card)||card.contains(kept)))continue;
+      out.push(card);
+    }
+    // 4 = DOCUMENT_POSITION_FOLLOWING。用字面量而非 Node.* ——注入脚本也跑在没有 Node 全局的
+    // 求值环境里（jsdom 测试夹具即是），引用全局会当场 ReferenceError 把整条找卡打断。
+    return out.sort((a,b)=>a===b?0:(a.compareDocumentPosition(b)&4)?-1:1);
+  };
+  // 发现宽、计数严：此处**不**加水合过滤——未水合的壳后续轮次可能水合，过早丢弃会让虚拟化列表少扫一批。
+  // 「有物理卡」的判定另用 hydratedCard（见 20-feed.js 的 articleCount）。
+  const topArticles=()=>mergeArticles(semanticArticles(),fallbackArticles());
+  /** 已水合的卡 = 「有物理卡」的唯一判据（present_unreportable 的准入证据、articleCount 的口径）。 */
+  const hydratedCards=()=>topArticles().filter(hydratedCard);
   const reelSurface=()=>{
     const path=location.pathname.toLowerCase();
     return classify()==='reels'||/^\/reel(?:\/|$)/.test(path);

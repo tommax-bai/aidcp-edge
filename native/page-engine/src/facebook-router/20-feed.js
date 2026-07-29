@@ -40,7 +40,9 @@
       cards,
       documentGeneration:generation,
       listKind,
-      listState:cards.length?'ready':(listKind==='reels'?Boolean(active&&active.reason!=='no_active_video'):topArticles().length)?'present_unreportable':'empty',
+      // 「有物理卡」一律以水合证据为准（hydratedCards），不数空壳——与 feedProbe 的 articleCount 同源，
+      // 否则一处严一处宽，present_unreportable 会拿假依据授权切 Reels。
+      listState:cards.length?'ready':(listKind==='reels'?Boolean(active&&active.reason!=='no_active_video'):hydratedCards().length)?'present_unreportable':'empty',
     }};
   };
   const firstPostCommentEditors=(root=document)=>all(
@@ -225,7 +227,8 @@
     const scope=first(['div[role="feed"]','[role="main"]','main'])||document.body;
     const scrollMetrics=feedScrollMetrics();
     const loading=Boolean(scope&&scope.querySelector('[role="progressbar"],[aria-busy="true"]'));
-    const articleCount=reelSurface()?0:topArticles().length;
+    // 只数已水合的卡。虚拟化占位壳有高度、可见、但无作者也无正文——它不是「有内容读不出来」的证据。
+    const articleCount=reelSurface()?0:hydratedCards().length;
     const timeOrigin=Number(performance&&performance.timeOrigin);
     const elapsedMs=Number.isFinite(timeOrigin)?Date.now()-timeOrigin:0;
     const documentAgeMs=Math.min(Number.MAX_SAFE_INTEGER,Math.max(0,Math.floor(Number.isFinite(elapsedMs)?elapsedMs:0)));
