@@ -307,9 +307,14 @@ async fn facebook_feed_recovery_uses_one_trusted_cdp_click_before_returning_card
     let mut engine = Engine::default();
     let mut open = session_open(port);
     open.params.platform = Platform::Facebook;
+    // 与「等不到后置状态」那条同源：命令原子预算 = min(会话 timeout_ms, 命令种类上限)，
+    // 而 `session_open` 默认只有 2s。恢复链是「导航 + 判稳 + 前台化 + 取点 + 点击 + 后置确认」，
+    // 机器有负载时这 2s 会在点到之前就用光，回执退化成合成 CdpTimeout（trace 里只到 feed_probe，
+    // 没有 bringToFront / dispatchMouseEvent）。取 90s，让判定与机器负载无关。
+    open.params.timeout_ms = 90_000;
     engine.open(&open).await.expect("open Facebook session");
     let mut command = browse_command(1);
-    command.deadline_unix_ms = unix_time_ms() + 4_000;
+    command.deadline_unix_ms = unix_time_ms() + 30_000;
 
     let outcome = engine
         .execute(&command)

@@ -88,6 +88,17 @@ test('permits only the capability-specific Facebook long command ceilings', asyn
       accountId: '61591824155856',
     },
   }, 90_000);
+  // 空关键词首帖开帖（change restore-facebook-post-join-comment-continuity）。
+  // 这一条**必须走真实准入校验**：桩运行时的单测只看「请求了多少毫秒」、绕过本校验，
+  // 于是 2026-07-29 真机上每一次首帖开帖都被判 invalid_request、毫秒级被拒，
+  // 云端读到的却是「群内未找到合适的可评论帖子」——比原缺陷更糟，且把人指向完全错误的方向。
+  await session.execute({
+    kind: 'note_open',
+    params: {
+      selection: 'first_commentable_group_post',
+      container: 'https://www.facebook.com/groups/42',
+    },
+  }, 90_000);
   await session.execute({
     kind: 'publish_select_mode',
     params: {
@@ -139,6 +150,32 @@ test('permits only the capability-specific Facebook long command ceilings', asyn
   );
   await assert.rejects(
     session.execute({ kind: 'page_probe', params: {} }, 90_000),
+    (error: unknown) => {
+      assert.ok(error instanceof NativePageEngineError);
+      assert.equal(error.code, 'invalid_request');
+      return true;
+    },
+  );
+  // 放宽必须**只**落在首帖那一形态：按 URL 开帖仍是 30s 上限，绝不跟着放开。
+  await assert.rejects(
+    session.execute({
+      kind: 'note_open',
+      params: { url: 'https://www.facebook.com/groups/42/posts/7' },
+    }, 90_000),
+    (error: unknown) => {
+      assert.ok(error instanceof NativePageEngineError);
+      assert.equal(error.code, 'invalid_request');
+      return true;
+    },
+  );
+  await assert.rejects(
+    session.execute({
+      kind: 'note_open',
+      params: {
+        selection: 'first_commentable_group_post',
+        container: 'https://www.facebook.com/groups/42',
+      },
+    }, 90_001),
     (error: unknown) => {
       assert.ok(error instanceof NativePageEngineError);
       assert.equal(error.code, 'invalid_request');

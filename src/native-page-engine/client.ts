@@ -12,6 +12,19 @@ const MAX_NATIVE_TIMEOUT_MS = 30_000;
 const MAX_FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS = 40_000;
 const MAX_FACEBOOK_COMMENT_TIMEOUT_MS = 90_000;
 const MAX_FACEBOOK_GROUP_JOIN_TIMEOUT_MS = 90_000;
+/**
+ * 空关键词首帖开帖的准入上限（change restore-facebook-post-join-comment-continuity）。
+ *
+ * ⚠️ 这个值是**三处同步**中的一处，改一处必炸：
+ *   ① 请求值      `browse-session.ts` 的 FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS
+ *   ② 准入校验    本文件 `validateCommandTimeout`（超上限 ⇒ invalid_request，命令**根本不下发**）
+ *   ③ 引擎天花板  native/page-engine/src/engine.rs 的 command_timeout_ceiling
+ * 只抬 ① 的后果不是"没生效"，而是**每一次首帖开帖都在毫秒级被拒**，云端看到的却是
+ * 「群内未找到合适的可评论帖子」——比原缺陷更糟。2026-07-29 已为此炸过一次真机。
+ * 桩运行时的单测抓不到这条（它绕过本校验），故另有一条走真实校验的回归。
+ */
+const MAX_FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS = 90_000;
+const FACEBOOK_FIRST_POST_SELECTION = 'first_commentable_group_post';
 const MAX_FACEBOOK_PUBLISH_FILL_TIMEOUT_MS = 400_000;
 const MAX_STDERR_CHARS = 2_048;
 const MAX_RECORD_CHARS = 64 * 1024;
@@ -1060,7 +1073,10 @@ function validateCommandTimeout(
           ? MAX_FACEBOOK_GROUP_JOIN_TIMEOUT_MS
           : command.kind === 'publish_select_mode'
             ? MAX_FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS
-            : MAX_NATIVE_TIMEOUT_MS;
+            : command.kind === 'note_open'
+              && command.params.selection === FACEBOOK_FIRST_POST_SELECTION
+              ? MAX_FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS
+              : MAX_NATIVE_TIMEOUT_MS;
   validateTimeout(timeoutMs, maxTimeoutMs);
 }
 

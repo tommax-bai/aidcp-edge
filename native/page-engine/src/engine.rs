@@ -1,4 +1,5 @@
 use crate::cdp::CdpSession;
+use crate::command::{NoteOpenParams, NoteOpenSelection};
 use crate::commit_window::CommitWindowRequester;
 use crate::endpoint;
 use crate::error::{EngineError, ErrorCode};
@@ -31,6 +32,7 @@ const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 const FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS: u64 = 40_000;
 const FACEBOOK_COMMENT_TIMEOUT_MS: u64 = 90_000;
 const FACEBOOK_GROUP_JOIN_TIMEOUT_MS: u64 = 90_000;
+const FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS: u64 = 90_000;
 const FACEBOOK_PUBLISH_FILL_TIMEOUT_MS: u64 = 400_000;
 
 #[derive(Clone, Debug, Serialize)]
@@ -1577,6 +1579,20 @@ fn command_timeout_ceiling(platform: Platform, command: &NativeCommand) -> u64 {
         && matches!(command, NativeCommand::PublishSelectMode(_))
     {
         FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS
+    } else if platform == Platform::Facebook
+        && matches!(
+            command,
+            NativeCommand::NoteOpen(NoteOpenParams {
+                selection: Some(NoteOpenSelection::FirstCommentableGroupPost),
+                ..
+            })
+        )
+    {
+        // 空关键词首帖开帖是一串串行有界窗（就绪 8s + 四轮下滚 + 可选二次导航就绪 8s +
+        // 评论框绑定 12s + 身份回读 20s ≈ 62s），沿用默认 30s 会在内层跑完前先到点。
+        // 该值是三处同步之一，另两处：边缘 src/native-page-engine/browse-session.ts（请求值）
+        // 与 src/native-page-engine/client.ts（准入校验，超上限直接 invalid_request、命令不下发）。
+        FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS
     } else {
         DEFAULT_COMMAND_TIMEOUT_MS
     }
@@ -1695,6 +1711,35 @@ mod tests {
         assert_eq!(
             command_timeout_ms_for(Platform::Facebook, 90_000, &comment),
             FACEBOOK_COMMENT_TIMEOUT_MS
+        );
+
+        // 空关键词首帖开帖有自己的天花板；按 URL 开帖不得跟着放开。
+        // 这一层是三处同步之一（另两处在边缘 browse-session.ts 的请求值与 client.ts 的准入校验），
+        // 少改任何一处，首帖开帖不是"没生效"而是**毫秒级被拒**（2026-07-29 真机实证）。
+        let first_post = NativeCommand::NoteOpen(NoteOpenParams {
+            selection: Some(NoteOpenSelection::FirstCommentableGroupPost),
+            container: Some("https://www.facebook.com/groups/42".to_owned()),
+            ..NoteOpenParams::default()
+        });
+        let open_by_url = NativeCommand::NoteOpen(NoteOpenParams {
+            url: Some("https://www.facebook.com/groups/42/posts/7".to_owned()),
+            ..NoteOpenParams::default()
+        });
+        assert_eq!(
+            command_timeout_ceiling(Platform::Facebook, &first_post),
+            FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ceiling(Platform::Facebook, &open_by_url),
+            DEFAULT_COMMAND_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ceiling(Platform::Xiaohongshu, &first_post),
+            DEFAULT_COMMAND_TIMEOUT_MS
+        );
+        assert_eq!(
+            command_timeout_ms_for(Platform::Facebook, 90_000, &first_post),
+            FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS
         );
     }
 
