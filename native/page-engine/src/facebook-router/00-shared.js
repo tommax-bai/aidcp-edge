@@ -286,19 +286,38 @@ async function(input){
     state.targets.set(targetRef,{root,evidence:evidence.value});
     return {ok:true,targetRef};
   };
-  const boundFirstPostRoot=(targetRef)=>{
-    if(!isFirstPostTarget(targetRef))return null;
-    const state=window.__aidcpNativeFirstPostTargets;
-    if(!state||state.scope!==contentRefScope()||!(state.targets instanceof Map))return null;
-    const record=state.targets.get(targetRef);
-    if(!record||!record.root||!record.root.isConnected)return null;
-    if(record.root.getAttribute('data-aidcp-native-first-post-target')!==targetRef)return null;
-    const matches=all('[data-aidcp-native-first-post-target]').filter((root)=>
+  /**
+   * 按内容派生引用重定位（change generalize-facebook-content-derived-post-identity）。
+   *
+   * 三种失败**分开具名**，绝不合并成一个笼统的「找不到」——它们对调用方的含义完全不同：
+   * - `ambiguous_target`：页面上不止一个元素挂着这个引用 ⇒ 不知道是哪张，绝不动手。
+   * - `stale_target`：元素还在、证据变了 ⇒ 虚拟化把这个 DOM 节点复用给了别的帖子，
+   *   引用要找的那条已经不在这里。此刻**必须失败**，MUST NOT 解析到「现在占着这个位置」的那条上——
+   *   那就是操作错帖子，比少读一条严重得多。
+   * - `target_not_found`：这一面 / 这一代里根本没有它（换面或换代即失效是设计，不是缺陷）。
+   *
+   * 判定顺序刻意先数标记再查登记表：登记表在换面时会被整体丢弃，先查它会把
+   * 「同一个引用挂了两处」这种真歧义误报成「没找到」。
+   */
+  const resolveContentRef=(targetRef)=>{
+    if(!isFirstPostTarget(targetRef))return {ok:false,reason:'target_not_found'};
+    const marked=all('[data-aidcp-native-first-post-target]').filter((root)=>
       root.isConnected&&root.getAttribute('data-aidcp-native-first-post-target')===targetRef
     );
-    if(matches.length!==1||matches[0]!==record.root)return null;
+    if(marked.length>1)return {ok:false,reason:'ambiguous_target'};
+    const state=window.__aidcpNativeFirstPostTargets;
+    if(!state||state.scope!==contentRefScope()||!(state.targets instanceof Map))return {ok:false,reason:'target_not_found'};
+    const record=state.targets.get(targetRef);
+    if(!record||!record.root||!record.root.isConnected)return {ok:false,reason:'target_not_found'};
+    if(marked.length!==1||marked[0]!==record.root)return {ok:false,reason:'target_not_found'};
     const current=firstPostEvidence(record.root);
-    return current&&current.value===record.evidence?record.root:null;
+    if(!current||current.value!==record.evidence)return {ok:false,reason:'stale_target'};
+    return {ok:true,root:record.root};
+  };
+  /** 既有取用口径：只关心「拿不拿得到」的调用方继续用这个（拿不到一律 null，逐位等于泛化前）。 */
+  const boundFirstPostRoot=(targetRef)=>{
+    const resolved=resolveContentRef(targetRef);
+    return resolved.ok?resolved.root:null;
   };
   // 帖子正文标记与作者链接：回落找卡的两个锚点，逐字对齐退役实现 src/facebook/post-identity.ts:22-23。
   const storyMessageSelector='[data-ad-comet-preview="message"],[data-ad-preview="message"],[data-ad-rendering-role="story_message"]';

@@ -41,16 +41,45 @@
       return href&&(href===expected||postId(href)===expectedId);
     });
   };
-  const feedLikeTarget=()=>{
-    const expected=String(p.noteId||'');
+  /**
+   * 定位待点赞的卡（change generalize-facebook-content-derived-post-identity）。
+   * - 平台链接：按归一化 postId 匹配，与泛化前逐字一致。
+   * - 会话内引用：按引用重定位——唯一命中 + 证据复校通过才算命中；多命中 / 证据漂移各自具名失败。
+   * 点赞是内容派生身份唯一能做的**动作**（不需要地址，按钮就在卡里），所以这条重定位是它的全部前提。
+   */
+  const feedLikeArticle=(expected)=>{
+    if(isFirstPostTarget(expected))return resolveContentRef(expected);
     const matches=exactArticles(expected);
     if(matches.length!==1)return {ok:false,reason:matches.length?'ambiguous_target':'target_not_found'};
-    const root=matches[0];
+    return {ok:true,root:matches[0]};
+  };
+  /**
+   * 回执里回报的身份：**问的是哪条就答哪条**。
+   * 会话内引用的卡在水合后可能冒出平台链接；此刻若把回执身份换成那个链接，
+   * 云端按 noteId 关联这次操作就对不上账了。一次操作内不许中途换身份。
+   */
+  const feedLikeNoteId=(root,expected)=>isFirstPostTarget(expected)?expected:(permalinkOf(root)||expected);
+  /**
+   * 身份是否仍对齐——**确认环节**用（点下去之后）。
+   * - 平台链接：比归一化 postId，与泛化前逐字一致。
+   * - 会话内引用：只比 DOM 上的引用标记，**刻意不重算证据**。点赞本身会改动卡内 DOM
+   *   （反应数、「你和另外 N 人」），正文为空的图片帖上那行新增文案就可能被算进正文证据；
+   *   拿「我们自己造成的变化」去否定「我们刚点成的那张卡」，等于把既成事实报成失败。
+   *   证据复校属于**定位**（下手之前，见 feedLikeArticle），不属于确认。
+   */
+  const feedLikeIdentityAligned=(root,expected)=>isFirstPostTarget(expected)
+    ?root.getAttribute('data-aidcp-native-first-post-target')===expected
+    :postId(permalinkOf(root))===postId(expected);
+  const feedLikeTarget=()=>{
+    const expected=String(p.noteId||'');
+    const located=feedLikeArticle(expected);
+    if(!located.ok)return {ok:false,reason:located.reason};
+    const root=located.root;
     const controls=feedLikeReactionControls(root);
     if(controls.length!==1)return {
       ok:false,
       reason:controls.length?'ambiguous_target':'like_button_not_found',
-      noteId:permalinkOf(root)||expected,
+      noteId:feedLikeNoteId(root,expected),
     };
     const selected=controls[0];
     const rect=selected.control.getBoundingClientRect();
@@ -62,7 +91,7 @@
       root,
       control:selected.control,
       state:selected.state,
-      noteId:permalinkOf(root)||expected,
+      noteId:feedLikeNoteId(root,expected),
       cx:rect.left+rect.width/2,
       cy:rect.top+rect.height/2,
       top:rect.top,
@@ -98,14 +127,15 @@
     const root=feedLikeOperationRoot(operationId);
     if(!root)return {state:'target_lost'};
     const expected=String(p.noteId||operation.noteId||'');
-    if(postId(permalinkOf(root))!==postId(expected))return {state:'identity_mismatch'};
+    if(!feedLikeIdentityAligned(root,expected))return {state:'identity_mismatch'};
     const controls=feedLikeReactionControls(root);
     if(controls.length!==1)return {state:'control_missing'};
     const freshPicker=Array.isArray(operation.pickerContainersBefore)
       &&feedLikePickerContainers().some((container)=>!operation.pickerContainersBefore.includes(container));
+    // 成败判据是**按钮状态**，不是 id 比对：由「赞」变「已赞」是比任何身份比对都直接的证据。
     return {
       state:controls[0].state==='reacted'?'confirmed':freshPicker?'picker_open':'pending',
-      noteId:permalinkOf(root)||expected,
+      noteId:feedLikeNoteId(root,expected),
       observation:actionEvidence(root),
     };
   };
@@ -164,7 +194,7 @@
     if(blocked)return {ok:false,reason:blocked};
     if(consentProbe().present)return {ok:false,reason:'blocked_by_consent'};
     const expected=String(p.noteId||operation.noteId||'');
-    if(postId(permalinkOf(root))!==postId(expected))return {ok:false,reason:'operation_not_found'};
+    if(!feedLikeIdentityAligned(root,expected))return {ok:false,reason:'operation_not_found'};
     const controls=feedLikeReactionControls(root);
     if(controls.length!==1)return {ok:false,reason:'like_button_not_found'};
     if(controls[0].state==='reacted')return {ok:false,reason:'already_reacted'};

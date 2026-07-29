@@ -80,6 +80,14 @@ pub(crate) async fn execute(
             let Some(note_id) = params.note_id.clone() else {
                 return Ok(latest);
             };
+            // 会话内引用没有平台地址，导航回落**结构性做不到**
+            // （change generalize-facebook-content-derived-post-identity）。
+            // 此刻必须把就地读那条具名回执（context_changed）如实交出去：拿一次必然失败的地址校验
+            // 去换一个信息量更低的合成错误，等于把「换页了、这一条没读成」抹成「命令非法」。
+            // 更不许猜地址去跳——那是把静默假成功换了个位置。
+            if is_facebook_content_ref(&note_id) {
+                return Ok(latest);
+            }
             let url = validated_facebook_content_url(note_id.as_str(), Some(note_id.as_str()))?;
             let target_post_id = canonical_facebook_post_id(url.as_str())
                 .ok_or_else(invalid_facebook_navigation_target)?;
@@ -1083,6 +1091,31 @@ fn facebook_near_bottom(probe: &facebook::FacebookFeedProbe) -> bool {
 mod tests {
     use super::*;
     use crate::model::{FacebookListKind, FacebookListState};
+
+    /// 内容派生的会话内引用**不是地址**：导航校验必须诚实拒绝它，绝不放行、也绝不猜一个地址
+    /// （change generalize-facebook-content-derived-post-identity task 2.3）。
+    /// 这条是导航兜底的最后一道保险——云端在统一出口已经不发这类命令，这里守的是「万一发了」。
+    #[test]
+    fn content_derived_references_are_never_navigable() {
+        let content_ref = format!("aidcp:facebook-group-feed-post:v1:{}", "a1".repeat(32));
+        assert!(is_facebook_content_ref(&content_ref));
+        assert!(validated_facebook_content_url(&content_ref, None).is_err());
+        assert!(validated_facebook_content_url(&content_ref, Some(&content_ref)).is_err());
+        assert!(canonical_facebook_post_id(&content_ref).is_none());
+        // 形似而不合格的值不算引用（走既有的诚实失败，不进本 change 的分档路径）。
+        assert!(!is_facebook_content_ref(
+            "aidcp:facebook-group-feed-post:v1:tooshort"
+        ));
+        assert!(!is_facebook_content_ref(&format!(
+            "aidcp:facebook-group-feed-post:v1:{}",
+            "A1".repeat(32)
+        )));
+        // 真地址照常放行，逐位等于今天。
+        assert!(
+            validated_facebook_content_url("https://www.facebook.com/Alice/posts/pfbid1", None)
+                .is_ok()
+        );
+    }
 
     fn feed_probe(
         scroll_height: f64,

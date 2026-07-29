@@ -728,6 +728,26 @@ pub(crate) async fn verify_facebook_uploaded_preview(
     }
 }
 
+/// 内容派生的会话内帖子引用前缀（change generalize-facebook-content-derived-post-identity）。
+/// 前缀是历史命名（当初只服务群组首帖），语义已是「内容派生的会话内帖子引用」；
+/// 不改名是刻意取舍——云端评论链路按它匹配，改名会失配。
+pub(crate) const FACEBOOK_CONTENT_REF_PREFIX: &str = "aidcp:facebook-group-feed-post:v1:";
+
+/// 这个 noteId 是不是内容派生的会话内引用。
+///
+/// 它**不是地址**：没有平台永久链接，导航 / 打开详情 / 定向评论结构性做不到。
+/// 判定严格到摘要长度与字符集——形似而不合格的值一律不算，走既有的诚实失败。
+pub(crate) fn is_facebook_content_ref(value: &str) -> bool {
+    value
+        .strip_prefix(FACEBOOK_CONTENT_REF_PREFIX)
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
 pub(crate) fn validated_facebook_content_url(
     raw: &str,
     expected: Option<&str>,

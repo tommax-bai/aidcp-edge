@@ -3,8 +3,9 @@ use super::shared::{
     cancelled_before_dispatch, canonical_facebook_post_id, dispatch_facebook_click,
     ensure_facebook_action_gate, evaluate_facebook_router,
     evaluate_facebook_router_until_requested_detail, facebook_action_result,
-    facebook_command_cancelled, probe_facebook_comment_action, probe_facebook_comment_editor,
-    validate_facebook_origin, validated_facebook_group_url, wait_for_facebook_ready,
+    facebook_command_cancelled, is_facebook_content_ref, probe_facebook_comment_action,
+    probe_facebook_comment_editor, validate_facebook_origin, validated_facebook_group_url,
+    wait_for_facebook_ready,
 };
 use super::{comment, feed, feed_like, group_join, publish, reels, session};
 use crate::command::{
@@ -28,7 +29,6 @@ const FIRST_POST_SCROLL_ROUNDS: usize = 4;
 // 2026-07-29 随整体 ×1.5 再放大一档（12→18 / 20→30），外层原子上限同步抬到 135s。
 const FIRST_POST_EDITOR_TIMEOUT: Duration = Duration::from_secs(18);
 const FIRST_POST_DETAIL_TIMEOUT: Duration = Duration::from_secs(30);
-const FIRST_POST_TARGET_PREFIX: &str = "aidcp:facebook-group-feed-post:v1:";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum FirstPostTarget {
@@ -257,15 +257,10 @@ fn first_same_group_post_target(
         })
 }
 
+/// 首帖引用 = 内容派生的会话内引用（同一个东西，同一份判据）。
+/// 泛化到整个信息流后判据被多处共用，故收口到 shared，这里只保留本模块的历史命名。
 fn is_first_post_target_ref(value: &str) -> bool {
-    value
-        .strip_prefix(FIRST_POST_TARGET_PREFIX)
-        .is_some_and(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
+    is_facebook_content_ref(value)
 }
 
 fn first_post_probe_failure(output: &CommandOutput) -> Option<&'static str> {
@@ -472,6 +467,8 @@ mod tests {
 
     #[test]
     fn accepts_only_strict_bound_first_post_references() {
+        // 前缀的单一事实源在 shared（泛化后由整个信息流共用）。
+        use super::super::shared::FACEBOOK_CONTENT_REF_PREFIX as FIRST_POST_TARGET_PREFIX;
         let group = validated_facebook_group_url("https://www.facebook.com/groups/945390701793119")
             .expect("group");
         let valid = format!("{FIRST_POST_TARGET_PREFIX}{}", "a1".repeat(32));
