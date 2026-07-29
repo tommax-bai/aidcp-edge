@@ -1,5 +1,4 @@
 import type { BrowseCdp } from '../browse/cdp-util.js';
-import type { OverlayMonitor } from '../browse/overlay-monitor.js';
 import type {
   IdentityDecision,
   ReadSelfIdentityOptions,
@@ -49,12 +48,20 @@ export interface BasePlatformDriver {
   isAllowedTargetUrl(url: string): boolean;
 }
 
-/** XHS/Facebook keep their existing browser-oriented contract. */
+/**
+ * XHS/Facebook keep their existing browser-oriented contract.
+ *
+ * 这里**没有**浮层监测体工厂。删除依据：阻断观测已整体迁进 Native 页面探针（周期观测在
+ * native-page-engine 的浏览会话里，动作提交前的即席复检在 Rust 动作闸内），宿主侧没有任何调用点；
+ * 而 driver 上一个「接口有、无人调」的工厂成员不产生任何信号——它既不会因为没人调用而报错，
+ * 也不会因为实现退化成抛异常的桩而被发现，正是本轮要消灭的那类无信号保留。要恢复阻断观测，
+ * 落点在 Native 探针，MUST NOT 在这里重开一个持原始 CDP 句柄、把页面判据写回明文 TypeScript
+ * 的工厂（那与页面规则必须留在编码后 Native 产物内的约束直接冲突）。
+ */
 export interface BrowserPlatformDriver extends BasePlatformDriver {
   readonly runtimeKind: 'browser';
   readIdentity(cdp: BrowseCdp, opts?: ReadSelfIdentityOptions): Promise<SelfIdentityResult>;
   decideIdentity(idRes: SelfIdentityResult, override: string | undefined): IdentityDecision;
-  createOverlayMonitor(cdp: BrowseCdp): OverlayMonitor;
 }
 
 /** API-only platforms register without inventing browse/like/publish methods. */

@@ -42,10 +42,18 @@ test('租约抑制走统一回执 helper，且回执成功位为假、原因具�
   assert.match(body, /nativeActionNameForCommand\(/, '动作名必须走既有映射，不得另起口径');
 });
 
-test('两条命令路由的抑制分支都不再静默 return', () => {
+test('页面命令路由的抑制分支都不再静默 return', () => {
   // 抑制分支的形状：判定 → 回执 → return。若某处只剩 console.warn + return，即是静默丢弃复发。
+  //
+  // 这条计数原本期望 2（Native + Facebook 两条路由）。实测那第二条**在一段静态恒假的死码里**
+  // ——迁移期遗留的 JavaScript Facebook 装配，`if (false && …)` 包着，从来不执行。也就是说当初
+  // 那半个修复落在了永不运行的代码上；死码删除后（change restore-native-xiaohongshu-session-guards
+  // 第 6 节）真实路由只剩 Native 这一条。
+  //
+  // 期望值改回 2 = 要求把死码种回来。这条断言要防的是「新增一条页面命令路由却绕开回执」，
+  // 所以判据是**每一条都必须回执**；条数随真实路由变化，不是常量契约。
   const branches = source.match(/if\s*\([^)]*canExecute\(ownedTaskId\)\)\s*\{[\s\S]*?\n\s*\}/g) ?? [];
-  assert.equal(branches.length, 2, '当前有 Native 与 Facebook 两条页面命令路由');
+  assert.ok(branches.length >= 1, '至少要有一条页面命令路由的租约抑制分支');
   for (const branch of branches) {
     assert.match(branch, /reportLeaseSuppressed\(/, `抑制分支必须回执：${branch.slice(0, 80)}`);
   }

@@ -4,7 +4,6 @@ import {
   type PlatformTargetDescriptor,
 } from '../platform/driver.js';
 import { decideHandshakeIdentity, type SelfIdentityResult } from '../cdp/self-identity.js';
-import type { OverlayMonitor } from '../browse/overlay-monitor.js';
 import { IDENTITY_READ_CURRENT_CAPABILITY } from '../comm/protocol.js';
 
 export const FACEBOOK_DEFAULT_START_URL = 'https://www.facebook.com/';
@@ -17,10 +16,6 @@ export const FACEBOOK_TARGET: PlatformTargetDescriptor = {
 
 async function nativeOnlyIdentity(): Promise<SelfIdentityResult> {
   return { ok: false, reason: 'facebook_identity_requires_native_page_engine' };
-}
-
-function nativeOnlyOverlay(): OverlayMonitor {
-  throw new Error('facebook_overlay_requires_native_page_engine');
 }
 
 export const facebookPlatformDriver: PlatformDriver = {
@@ -51,9 +46,13 @@ export const facebookPlatformDriver: PlatformDriver = {
   defaultStartUrl: FACEBOOK_TARGET.startUrl,
   attachUrlIncludes: FACEBOOK_TARGET.attachUrlIncludes,
   isAllowedTargetUrl: (url) => isUrlAllowedByTargetDescriptor(url, FACEBOOK_TARGET),
-  // Main routes Facebook identity and overlay probes through Native Page Engine. These
-  // interface sentinels prevent a future generic call from silently restoring JS CDP logic.
+  // Main routes Facebook identity through Native Page Engine. This sentinel prevents a future
+  // generic call from silently restoring JS CDP logic.
+  //
+  // 浮层监测体工厂已从 driver 契约整体移除（见 platform/driver.ts 的 BrowserPlatformDriver 注释）。
+  // 此前这里留的是一个「被调即抛」的 native-only 桩：它挡不住任何东西，因为全仓从来没有调用点——
+  // 一个永不被调用的哨兵不产生信号，正是本轮清除的那类无信号保留。Facebook 阻断观测的落点是
+  // Native 页面探针与 Rust 动作闸。
   readIdentity: nativeOnlyIdentity,
   decideIdentity: decideHandshakeIdentity,
-  createOverlayMonitor: nativeOnlyOverlay,
 };

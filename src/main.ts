@@ -74,7 +74,6 @@ import type {
   EdgeTaskReleasePayload,
   Envelope,
 } from './comm/protocol.js';
-import type { BlockingOverlaySnapshot } from './browse/overlay-monitor.js';
 import type { EdgeBrowseSession } from './browse/edge-browse-session.js';
 import type { IdentityDecision, SelfIdentityResult } from './cdp/self-identity.js';
 import {
@@ -84,25 +83,6 @@ import {
   nativeActionNameForCommand,
   readNativeFacebookIdentity,
 } from './native-page-engine/index.js';
-
-// Review-only declarations for the compile-time-unreachable legacy assembly below. `import()`
-// appears only in type positions and is erased by TypeScript, so none of these modules enters
-// the production dependency graph or provides a runtime fallback.
-type FacebookOverlayMonitor = import('./facebook/overlay.js').FacebookOverlayMonitor;
-type FacebookBrowseSession = import('./facebook/facebook-session.js').FacebookBrowseSession;
-declare const backfillOverlayEvidenceText: typeof import('./facebook/overlay.js').backfillOverlayEvidenceText;
-declare const FacebookOverlayMonitor: typeof import('./facebook/overlay.js').FacebookOverlayMonitor;
-declare const emitCompanionUiEvent: typeof import('./facebook/companion-ui.js').emitCompanionUiEvent;
-declare const FacebookBrowseSession: typeof import('./facebook/facebook-session.js').FacebookBrowseSession;
-declare const usesFacebookBrowseSession: typeof import('./facebook/facebook-session.js').usesFacebookBrowseSession;
-declare const FacebookCommentExecutor: typeof import('./facebook/comment-executor.js').FacebookCommentExecutor;
-declare const FacebookCommentHandler: typeof import('./facebook/comment-handler.js').FacebookCommentHandler;
-declare const FacebookJoinExecutor: typeof import('./facebook/join-executor.js').FacebookJoinExecutor;
-declare const WatcherSupervisor: typeof import('./browse/watcher-supervisor.js').WatcherSupervisor;
-declare const evalRaw: typeof import('./browse/cdp-util.js').evalRaw;
-declare const createOverlayReportGate: typeof import('./browse/overlay-report-gate.js').createOverlayReportGate;
-declare const captureBlockingOverlaySnapshot:
-  typeof import('./browse/overlay-monitor.js').captureBlockingOverlaySnapshot;
 
 function verifiedAccountNickname(idRes: SelfIdentityResult, decision: IdentityDecision): string | undefined {
   if (!idRes.ok || decision.kind !== 'use') return undefined;
@@ -479,7 +459,8 @@ async function main(): Promise<void> {
   //   0            = 关机（SIGINT/SIGTERM），不重起；
   //   EXIT_RECYCLE = 可恢复终态回收，请重起（sysexits EX_TEMPFAIL=75：临时失败、邀请重试）。
   const EXIT_RECYCLE = 75;
-  // 平台无关的命令会话句柄：小红书=BrowseSession，Facebook=FacebookBrowseSession（EdgeBrowseSession 契约）。
+  // 平台无关的命令会话句柄（EdgeBrowseSession 契约）。小红书与 Facebook 现在都由 Native 浏览会话承接；
+  // 迁前那条按平台分叉到 JavaScript Facebook 会话的装配已随恒假块一并删除，别按旧注释去找它。
   let browse: EdgeBrowseSession | undefined;
   // 关浏览器前等浏览循环排空的预算。有界是刚性要求：某个动作卡住时，无界等待会把冷待机 / 退出本身卡死
   // （浏览器关不掉 = 待机失效、回收挂僵尸），比原 bug 更糟。超时即诚实告警后照常关。
@@ -492,7 +473,6 @@ async function main(): Promise<void> {
         '在途动作会被中止并如实回执（不伪造成功）。',
     );
   };
-  let overlayMonitor: FacebookOverlayMonitor | undefined;
   let requestShutdown: ((reason: string) => void) | undefined;
   let coldStandbyActive = startBrowserAbsent;
   let coldStandbyWakeRequested = false;
@@ -1054,177 +1034,6 @@ async function main(): Promise<void> {
   const wantsAutoBrowse = process.env.AIDCP_AUTO_BROWSE !== 'false';
   const supportsBrowse = platformDriver.capabilities.includes('browse');
   const autoBrowse = wantsAutoBrowse && supportsBrowse;
-  // Historical JavaScript Facebook assembly is compile-time unreachable during the cutover.
-  // The dist verifier rejects its selectors/modules, so this cannot become a packaged fallback.
-  if (false && platformDriver.runtimeKind === 'browser') {
-  const useFacebookBrowse = usesFacebookBrowseSession(platformDriver);
-  if (wantsAutoBrowse && !supportsBrowse) {
-    console.warn(`[aidcp-edge] platform=${platformDriver.platform} does not support browse; BrowseSession will not start.`);
-  }
-  if (useFacebookBrowse) {
-    // —— Facebook 浏览+点赞闭环（change facebook-browse-and-like-loop）——
-    // FacebookBrowseSession 独占单槽 browseHandler，【内含】评论/加群委托（声明 browse 后旧 comment-only 注册闸
-    // `(comment||join)&&!browse` 不再触发）。浏览/点赞服从 Cloud 生命周期与风险控制，评论/加群始终服务。
-    overlayMonitor = new FacebookOverlayMonitor(session.cdp);
-    // FB 浏览高危动作会触发验证码 / FB 软限流（overlay.ts 归类 unknown）。把 captcha/unknown 翻转上报云端
-    // （risk.captcha_detected/cleared）：驱动远程验证码协助 + FB 限流退避（account-nurture-discipline-spine 云端
-    // facebook-throttle-signals 依赖此信号把账号迁至 restricted）。复用小红书同一套上报闸（unknown 延后确认 /
-    // captcha 即时 fail-closed / detected-cleared 严格配对）。执行器另有每步 fresh 复检做本地 fail-closed。
-    {
-      const overlayConfirmMs = Number(process.env.AIDCP_OVERLAY_CONFIRM_MS ?? 2000);
-      const isCloudBlockingOverlay = (kind: string): kind is 'captcha' | 'unknown' => kind === 'captcha' || kind === 'unknown';
-      let overlaySnapshotPromise: Promise<BlockingOverlaySnapshot | undefined> | undefined;
-      const resetOverlaySnapshot = (): void => {
-        overlaySnapshotPromise = undefined;
-      };
-      const primeOverlaySnapshot = (kind: 'captcha' | 'unknown'): void => {
-        if (overlaySnapshotPromise) return;
-        overlaySnapshotPromise = captureBlockingOverlaySnapshot(session.cdp, kind).catch(() => undefined);
-      };
-      // change fb-throttle-popup-zh-frequency-copy：回填同源证据用的监测体句柄。此块只在 useFacebookBrowse
-      // 下装配，driver 必返 FacebookOverlayMonitor；instanceof 只是诚实收窄——万一不是，回填静默不发生、
-      // 退化为改动前行为（不假造证据、不假成功）。
-      const fbOverlayMonitor = overlayMonitor instanceof FacebookOverlayMonitor ? overlayMonitor : undefined;
-      const sendOverlayDetected = (kind: 'captcha' | 'unknown'): void => {
-        void (async () => {
-          primeOverlaySnapshot(kind);
-          const overlay = await overlaySnapshotPromise;
-          let url = overlay?.firstDetectedUrl ?? '';
-          if (!url) {
-            try {
-              url = await evalRaw<string>(session.cdp, 'location.href');
-            } catch {
-              /* best-effort */
-            }
-          }
-          // 快照候选筛选对 FB 标准限流弹窗必然落空（无 iframe / 未达尺寸阈 / 有关闭控件）⇒ overlay.text
-          // 为空 ⇒ 云端「无文案不臆断限流」返否定 ⇒ 真限流只到 warned 降速而非 restricted 刹车。用判定
-          // 同源文本回填证据；判定本身不变。
-          const reportedOverlay = backfillOverlayEvidenceText(overlay, kind, url, fbOverlayMonitor?.lastScanText);
-          try {
-            client.send('risk.captcha_detected', {
-              edgeId,
-              kind,
-              url,
-              ...(reportedOverlay ? { overlay: reportedOverlay } : {}),
-              ...(accountId ? { accountId } : {}),
-            });
-          } catch (err) {
-            console.error('[aidcp-edge] risk.captcha_detected 上报失败:', err);
-          }
-          const what = kind === 'captcha' ? '验证码' : '未知阻断/限流';
-          console.warn(`[aidcp-edge] ⚠ Facebook 检测到${what}，已上报云端`);
-          // change facebook-write-action-visibility：结构化点亮客户端「需要处理」态。
-          // 既有 edge-fleet-console 规格要求被验证码拦住的环境必须浮到最上，但这条中文日志不含壳侧
-          // 兜底正则要的「弹窗」「暂停操作」（那张表是小红书专属的）⇒ FB 环境的阻断态**从不置真**，
-          // 卡在验证码上的机器在客户端里一直是绿的、运营不知道该救哪台。绝不靠措辞匹配，走结构化行。
-          emitCompanionUiEvent((m) => console.log(m), {
-            kind: 'activity',
-            type: 'popup',
-            sentence: `遇到${what}，先停一停等处理`,
-            presence: `遇到${what}，暂停操作中…`,
-          });
-        })();
-      };
-      const overlayReportGate = createOverlayReportGate({
-        sendDetected: sendOverlayDetected,
-        sendCleared: () => {
-          try {
-            client.send('risk.captcha_cleared', { edgeId, ...(accountId ? { accountId } : {}) });
-          } catch (err) {
-            console.error('[aidcp-edge] risk.captcha_cleared 上报失败:', err);
-          }
-          resetOverlaySnapshot();
-          // 清除侧同样必须显式：此前 FB 这条路径**什么都不打**（小红书侧会打），两侧都没有 ⇒
-          // 阻断态只能靠「任何一次成功动作顺带清掉」这种假清除退出（已在壳侧收紧为只认本事件）。
-          emitCompanionUiEvent((m) => console.log(m), {
-            kind: 'activity',
-            type: 'popup_cleared',
-            sentence: '阻断已解除，继续浏览',
-            presence: '继续浏览…',
-          });
-        },
-        isStillUnknown: () => overlayMonitor?.state === 'unknown',
-        schedule: (fn, ms) => {
-          setTimeout(fn, ms);
-        },
-        confirmMs: overlayConfirmMs,
-      });
-      // 用 WatcherSupervisor 托管 overlayMonitor 生命周期（CDP 不可恢复→停避免僵尸轮询；重连→重启），
-      // 取代裸 overlayMonitor.start()（否则会话失联后监测体空轮询到进程退出）。
-      const fbSupervisor = new WatcherSupervisor();
-      fbSupervisor.register(overlayMonitor!, (from, to) => {
-        if (isCloudBlockingOverlay(to) && !isCloudBlockingOverlay(from)) primeOverlaySnapshot(to);
-        if (!isCloudBlockingOverlay(to)) resetOverlaySnapshot();
-        overlayReportGate.onTransition(from, to);
-      });
-      session.cdp.on?.('cdp.unrecoverable', () => fbSupervisor.stopAll());
-      session.cdp.on?.('cdp.reconnected', () => fbSupervisor.startAll());
-      if (!coldStandbyActive && !startAutomationPaused) fbSupervisor.startAll();
-    }
-    const fbCommentExecutor = new FacebookCommentExecutor({
-      cdp: session.cdp,
-      getAccountId: () => accountId,
-      overlayMonitor,
-      logger: (m) => console.log(m),
-      commitWindow: browseGuard, // 5.1：FB 评论回车提交窗口
-    });
-    const fbJoinExecutor = new FacebookJoinExecutor({
-      cdp: session.cdp,
-      overlayMonitor,
-      logger: (m) => console.log(m),
-      commitWindow: browseGuard, // 5.1/5.10b：FB 加群短确认窗口
-    });
-    const fbCommentHandler = new FacebookCommentHandler({
-      executor: fbCommentExecutor,
-      joinExecutor: fbJoinExecutor,
-      client,
-      logger: (m) => console.log(m),
-    });
-    browse = new FacebookBrowseSession(
-      {
-        cdp: session.cdp,
-        client,
-        commentHandler: fbCommentHandler,
-        overlayMonitor,
-        logger: (m) => console.log(m),
-      },
-      {
-        feedUrl: process.env.AIDCP_EXPLORE_URL ?? platformDriver.defaultStartUrl,
-        startupId: browserStartupId,
-        tempo: client.getPacing()?.tempo,
-      },
-    );
-    const fbSession = browse as FacebookBrowseSession;
-    installPageCommandHandler((env) => {
-      if (handleBrowserAbsentCommand(env)) return;
-      const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
-      const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
-      if (!taskCoordinator.canExecute(ownedTaskId)) {
-        reportLeaseSuppressed(env, ownedTaskId, 'Facebook');
-        return;
-      }
-      if (ownedTaskId) taskCoordinator.touch(ownedTaskId);
-      fbSession.onCloudCommand(env).catch((err) => {
-        console.error(`[aidcp-edge] 执行 Facebook 命令 ${env.type} 失败:`, err);
-      });
-    });
-    // 交接现在有界且会诚实抛出（change lease-strict-preemption）。此处是**全新会话**（零在飞写者），
-    // 必然瞬时收敛；catch 只为不让一个诚实异常炸掉装配流程。
-    if (taskCoordinator.blocksBrowse) {
-      await browse!.quiesceForTask().catch((err) => {
-        console.warn(`[aidcp-edge] 注册 Facebook 会话时交接未收敛：${(err as Error).message}`);
-      });
-    }
-    // 不 await：会话长跑，与命令收发并行。Cloud 生命周期决定是否启动/暂停自动进 feed。
-    if (!coldStandbyActive && !startAutomationPaused) {
-      browse!.start().catch((err) => {
-        console.error('[aidcp-edge] Facebook 浏览会话异常:', err);
-      });
-    }
-    console.log('[aidcp-edge] Facebook 浏览会话已注册（由 Cloud 生命周期控制，含评论/加群委托）');
-  }
-  }
   if (wantsAutoBrowse && !supportsBrowse) {
     console.warn(`[aidcp-edge] platform=${platformDriver.platform} does not support browse; NativeBrowseSession will not start.`);
   }

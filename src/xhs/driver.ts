@@ -1,5 +1,4 @@
 import { isUrlAllowedByTargetDescriptor, type PlatformDriver } from '../platform/driver.js';
-import { CdpOverlayMonitor } from '../browse/overlay-monitor.js';
 import { decideHandshakeIdentity, readSelfIdentity } from '../cdp/self-identity.js';
 import { IDENTITY_READ_SELF_PROFILE_CAPABILITY } from '../comm/protocol.js';
 
@@ -22,5 +21,6 @@ export const xhsPlatformDriver: PlatformDriver = {
   isAllowedTargetUrl: (url) => isUrlAllowedByTargetDescriptor(url, XHS_TARGET),
   readIdentity: readSelfIdentity,
   decideIdentity: decideHandshakeIdentity,
-  createOverlayMonitor: (cdp) => new CdpOverlayMonitor(cdp),
+  // 浮层监测体工厂已从 driver 契约移除（见 platform/driver.ts 的 BrowserPlatformDriver 注释）：
+  // 小红书阻断观测的落点是 Native 页面探针，不是宿主侧的 CdpOverlayMonitor。
 };

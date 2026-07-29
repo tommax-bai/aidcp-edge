@@ -66,10 +66,13 @@ test('browser-absent page commands request a wake and return an explicit failure
   assert.match(handler, /requestColdStandbyWake\(`cloud_command:\$\{env\.type\}`\)/);
   assert.match(handler, /reportActionCompleted\(\{ action, ok: false, reason: 'browser_absent_wake_requested' \}\)/);
   assert.match(handler, /operation\.browser === 'forbidden'[\s\S]*env\.type !== 'pacing\.update'[\s\S]*applyPacingSnapshot/);
+  // 这条计数此前期望 2，而那 2 次里有 1 次就落在一段静态恒假的死码里 ——
+  // 一条本意是「被移除的页面路由不得再出现」的否定式闸，反被它要禁止的死码喂成了绿。
+  // 死码删除后真实入口只剩这一条；把期望改回 2 等于把死码再种回来。
   assert.equal(
     edgeMain.match(/if \(handleBrowserAbsentCommand\(env\)\) return;/g)?.length,
-    2,
-    'publish and browse share the two Native-only ingress paths; the removed JavaScript page route must not return',
+    1,
+    'the sole live ingress is the Native page-command route; a second occurrence means the retired route came back',
   );
 });
 

@@ -137,6 +137,9 @@ test('assertPlatformCapability: missing capability does not fall back to xhs pat
 test('xhs driver keeps shared runtime foundations outside src/xhs', async () => {
   const driverSource = await readFile(new URL('../../src/xhs/driver.ts', import.meta.url), 'utf8');
   assert.match(driverSource, /..\/cdp\/self-identity/);
-  assert.match(driverSource, /..\/browse\/overlay-monitor/);
+  // 曾断言这里必须引用退役的浮层监测体模块 —— 那是切换前的接线。阻断观测已移到执行体侧的
+  // 页面探针上，工厂成员随之从平台接口删除；那条断言编码的是旧行为，留着只会逼人把退役模块
+  // 重新挂回来（并顺带把它拖进生产产物）。
+  assert.doesNotMatch(driverSource, /..\/browse\/overlay-monitor/);
   assert.doesNotMatch(driverSource, /class\s+CdpClient|new\s+CdpClient|class\s+LocatingEngine|function\s+evalRaw/);
 });
