@@ -119,17 +119,24 @@ export function judgeCloudRebindUnderIdentity(health: IdentityHealth | undefined
  *
  * `action_completed`       —— 云端会消费 `action.completed`（浏览 / 页面动作通道）。
  * `publish_command_result` —— 云端按信封 id 关联 `publish.command.result`（发布原子通道）。
- * `none`                   —— **协议上没有负向应答形状**。此时唯一诚实的做法是不发、并把这个缺口
- *                             具名登记下来；伪造一条云端根本不认识的回执比不发更坏——它让人以为
+ * `unwired`                —— 形状**存在**，但本次拒绝的原因还没有可用的取值，因此这一条现在发不出去。
+ *                             此时唯一诚实的做法是：不发、响亮记一笔、并把缺口连同**可执行的配方**
+ *                             登记下来。伪造一条云端根本不认识的回执比不发更坏——它让人以为
  *                             「已经兑现了」，而云端照样等满自己的超时。
+ *
+ * 这一档 MUST NOT 被写成「协议上没有这条路」。上一轮它就是这么写的，而事实相反（见 EDGE_TASK_LANE）：
+ * 把「差一个枚举值」说成「没有路」，正是让下一个人以为无路可走、从而永远不去补的那种病。
  */
-export type IdentityRefusalAck = 'action_completed' | 'publish_command_result' | 'none';
+export type IdentityRefusalAck = 'action_completed' | 'publish_command_result' | 'unwired';
 
 export interface CommandLane {
   /** 日志里的通道名。 */
   readonly label: string;
   readonly ack: IdentityRefusalAck;
-  /** `ack: 'none'` 时必须写清：为什么这条通道没有负向应答，以及云端因此会看到什么。 */
+  /**
+   * `ack: 'unwired'` 时必须写清三件事：缺口到底是什么（**不是**「没有形状」就说成没有）、云端因此会
+   * 看到什么、以及补齐它的**具体落点**。写不出落点，说明还没查清楚，别急着下结论。
+   */
   readonly ackGap?: string;
 }
 
@@ -137,19 +144,40 @@ export interface CommandLane {
 export const NATIVE_COMMAND_LANE: CommandLane = { label: 'Native', ack: 'action_completed' };
 
 /**
- * 任务租约通道：**没有**负向应答形状。
+ * 任务租约通道：负向应答形状**已经存在**，缺的只是一个可用的拒绝原因。
  *
- * 协议里 `edge.task.acquire` 的对侧只有一条正向消息 `edge.task.acquired`，云端的等待方
- * （`edge-task-lease-client`）也只听这一条，等不到就按自己的 `acquire_timeout` 收口。
- * 曾经这里发的是 `action.completed{action:'edge.task.acquire'}`——那个动作名既不在边缘的动作名转发表里、
- * 也不在云端的入口别名表里，云端没有任何订阅方按它匹配。**发了等于没发**，而且比没发更坏：
- * 它让读代码的人以为「拒绝已经如实回执了」。真兑现要先在协议侧补一条负向应答（跨仓，见 tasks.md 登记）。
+ * 上一轮这里写的是「协议 v2 上任务租约没有负向应答形状，真兑现要跨仓加一条消息」。**那是错的**，
+ * 复验读云端坐实：
+ *   - 形状就是 `edge.task.released` + `reason`。云端 `comm/handler.ts` 把它路由到
+ *     `comm/edge-task-lease-client.ts` 的 `onReleased()`，其中四段针对**仍在认领中**的任务直接
+ *     `clearTimeout` + reject（`cdp_unhealthy`→`edge_unhealthy` / `browser_wake_failed` /
+ *     `window_busy` / `yield_timeout`），**不等超时**。
+ *   - 边缘自己也正是用这条形状拒绝一个接不下的认领（`execution/edge-task-coordinator.ts` 里
+ *     `onReleased({ taskId, reason: 'cdp_unhealthy' })`）。
+ *   闸反而在它上游把这条本来通的路截断了。
+ *
+ * 所以缺口只有一个：**「身份未落定」这个 reason 还不在枚举里**。补齐它的完整配方（三处，跨仓）：
+ *   ① 两份 `src/comm/protocol.ts`（edge / cloud，逐字一致）的 `EdgeTaskReleasedPayload.reason` 联合
+ *      各加一个值（如 `identity_unresolved`）+ 一段说明「身份未落定 ⇒ 不可自愈，处理办法是重新登录后重启」；
+ *   ② 云端 `comm/edge-task-lease-client.ts` 的 `onReleased()` 加一个 `if`，照 `yield_timeout` 那一段
+ *      的形状 reject 掉在认领中的任务（同属**不可自动重试**的一类）；
+ *   ③ 本文件把 `ack` 改成新增的那一档、真的发出去。
+ * **不**新增消息类型、**不**动动作映射、**不**改协议文档计数、**不**进主动命令白名单。
+ *
+ * 本轮为什么仍不做：两份 `protocol.ts` 是本仓明令的**串行热点单写区**，而此刻有并行流在跑。
+ * 这是范围裁定，不是难度问题。
+ *
+ * 不做的代价可量化：云端的 `acquire_timeout` 默认 200 秒，它要**空等满 200 秒**才拿到一个泛化的超时，
+ * 而不是即刻拿到一个有类型、且明确「别自动重试」的拒绝。
  */
 export const EDGE_TASK_LANE: CommandLane = {
   label: '任务',
-  ack: 'none',
-  ackGap: '任务租约通道在协议 v2 上没有负向应答形状（只有 edge.task.acquired 一条正向消息，'
-    + '云端等待方也只听它）；本次拒绝不会有回执，云端会等满自己的 acquire_timeout。',
+  ack: 'unwired',
+  ackGap: '任务租约的负向应答形状已经存在（edge.task.released + reason；云端 onReleased 对 cdp_unhealthy /'
+    + ' browser_wake_failed / window_busy / yield_timeout 四种原因当场 reject 掉在认领中的任务、不等超时），'
+    + '缺的只是「身份未落定」这一个 reason 枚举值：补齐＝两份 protocol.ts 的 EdgeTaskReleasedPayload.reason'
+    + ' 各加一个值 + 云端 onReleased 加一个 if，不新增消息类型、不动动作映射、不进主动命令白名单。'
+    + '补齐之前本次拒绝发不出去，云端会空等满自己的 acquire_timeout（默认 200s）才拿到一个泛化的超时。',
 };
 
 export interface IdentityCommandGateDeps {
@@ -184,7 +212,8 @@ export function guardCommandsUnderIdentity<E extends { type: MessageType }>(
       deps.reportActionCompleted({ action, ok: false, reason: verdict.reason });
       return;
     }
-    // 没有负向应答形状的通道：不伪造回执，但**必须响亮**——静默丢弃与「发一条没人收的回执」是同一种病。
+    // 负向应答尚未接线的通道：不伪造回执，但**必须响亮**——静默丢弃与「发一条没人收的回执」是同一种病。
+    // 日志里连带把补齐配方（ackGap）一起喊出来，这样看到它的人手上就有下一步，而不是只有一个坏消息。
     deps.logger(
       `[aidcp-edge] ${lane.label} 命令被身份闸拒绝 type=${env.type}：${verdict.detail}。${lane.ackGap ?? ''}`,
     );

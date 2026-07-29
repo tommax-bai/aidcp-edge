@@ -52,6 +52,7 @@ import { CoreLifecycleController } from '../../src/client/core-lifecycle.js';
 import {
   RUNTIME_POSTURE_IPC_TYPE,
   RUNTIME_POSTURE_KINDS,
+  deliverLifecycleIpc,
   publishPostureWithFallback,
   runtimePostureIpc,
   type RuntimePosture,
@@ -1474,6 +1475,14 @@ const shellPostureModule = requireCjs('../../src/electron/runtime-posture.cjs') 
     posture: unknown,
     context: { closeIntent?: boolean },
   ) => { latch: unknown; patch: ShellProjection | null };
+  posturePatchFrom: (
+    projection: ShellProjection,
+    deps: {
+      presencePatch: (text: string) => Record<string, unknown>;
+      clearFailure: () => Record<string, unknown>;
+      setFailure: (summary: string) => Record<string, unknown>;
+    },
+  ) => Record<string, unknown>;
   commitPatchUnderPosture: (
     posture: unknown,
     next: Record<string, unknown>,
@@ -1533,11 +1542,26 @@ function shellView() {
   let latchCore: unknown = null;
   let currentCore: unknown = { core: 1 };
   const live = (): unknown => shellPostureModule.postureOfLiveCore(latch, latchCore, currentCore);
+  /**
+   * 投影 → 补丁的翻译**必须**走真模块（`posturePatchFrom`），不许在这里抄一份。
+   *
+   * 上一轮这里就是一份手抄的等价逻辑，于是宿主 `posturePatch` 里那一格「失败卡片怎么写 / 怎么清」
+   * 被整格删掉，全套用例照样零红——而那一格是持久红卡的**唯一写入口**。这里的三个 deps 就是宿主
+   * `main.cjs` 里那三件私有动作的最小等价物。
+   */
   const applyProjection = (projection: ShellProjection): void => {
-    Object.assign(status, projection.axes);
-    if (projection.message) status.lastMessage = projection.message;
-    if (projection.presence) status.presence = projection.presence;
-    if (projection.failure !== undefined) status.edgeFailure = projection.failure;
+    const patch = shellPostureModule.posturePatchFrom(projection, {
+      presencePatch: (text) => ({ presence: { text, at: new Date().toISOString() } }),
+      clearFailure: () => ({ edgeFailure: null }),
+      setFailure: (summary) => ({ edgeFailure: summary }),
+    });
+    for (const [key, value] of Object.entries(patch)) {
+      if (key === 'presence') {
+        status.presence = String((value as { text?: string })?.text ?? '');
+      } else {
+        (status as unknown as Record<string, unknown>)[key] = value;
+      }
+    }
   };
   return {
     status,
@@ -2035,9 +2059,32 @@ test('T23 残局 MUST 在 IPC 之外还有一条网：核心自己的日志行�
   const quiet: string[] = [];
   publishPostureWithFallback({ kind: 'identity_halted', reason: 'r' }, { sendIpc: () => true, logger: (l) => quiet.push(l) });
   assert.deepEqual(quiet, []);
+
+  // ④ 送达判据**本身**（上面三段传的都是假的 sendIpc，驱动不到它）。
+  //    这条判据是整条第二道网的开关：判成「送到了」就永远不会有兜底行。把它改成恒 true ⇒ 本段当场红。
+  {
+    const sent: unknown[] = [];
+    assert.equal(
+      deliverLifecycleIpc({ connected: true, send: (payload) => void sent.push(payload) }, { type: 'x' }),
+      true,
+      '通道在、send 在 ⇒ 真发出去并如实报送达',
+    );
+    assert.equal(sent.length, 1);
+    assert.equal(
+      deliverLifecycleIpc({ connected: false, send: () => undefined }, { type: 'x' }),
+      false,
+      '通道已断 ⇒ process.send 是静默 no-op，MUST 判成没送到（否则第二道网永不触发）',
+    );
+    assert.equal(
+      deliverLifecycleIpc({ connected: true }, { type: 'x' }),
+      false,
+      '不是 fork 起来的进程没有 send ⇒ MUST 判成没送到，且绝不抛',
+    );
+    assert.equal(deliverLifecycleIpc({}, { type: 'x' }), false);
+  }
 });
 
-// ── T24 没有负向应答形状的通道：不伪造回执，但必须响亮 ──────────────────────────
+// ── T24 负向应答尚未接线的通道：不伪造回执，但必须响亮 + 必须留下可执行配方 ──────────
 test('T24 任务租约通道被身份闸拒绝时 MUST NOT 伪造一条云端收不到的回执', () => {
   const executed: string[] = [];
   const receipts: unknown[] = [];
@@ -2055,10 +2102,15 @@ test('T24 任务租约通道被身份闸拒绝时 MUST NOT 伪造一条云端收
   guarded({ type: 'edge.task.acquire' });
   assert.deepEqual(executed, [], '认领＝接下来会以这个账号的名义动作 + 记账，身份未落定时 MUST 拦');
   assert.deepEqual(receipts, [],
-    '协议上任务租约没有负向应答形状（只有 edge.task.acquired 一条正向消息、等待方也只听它）；'
+    '负向应答的形状（edge.task.released + reason）存在，但「身份未落定」这个 reason 还没接线；'
     + '发一条云端不认识的 action.completed 比不发更坏——它让人以为已经兑现了');
   assert.equal(logs.length, 1, '不发回执 ≠ 静默丢弃：本地必须响亮记一笔');
-  assert.match(logs[0]!, /没有负向应答形状/);
+  // 缺口的**陈述必须是真的**，且必须带落点：只说「没有路」会让下一个人以为无路可走、从而永远不去补。
+  assert.match(logs[0]!, /edge\.task\.released/, '必须点名那条本来就存在的负向应答形状');
+  assert.match(logs[0]!, /reason 枚举值/, '必须说清缺的只是一个枚举值，而不是「没有形状」');
+  assert.match(logs[0]!, /protocol\.ts/, '必须给出补齐的落点');
+  assert.match(logs[0]!, /acquire_timeout/, '必须说清不补的代价（云端空等满自己的超时）');
+  assert.doesNotMatch(logs[0]!, /没有负向应答形状/, '这句话是假的，MUST NOT 再出现');
   // 释放永远放行（拦掉只会让租约挂着不放、云端一直以为任务在跑）。
   guarded({ type: 'edge.task.release' });
   assert.deepEqual(executed, ['edge.task.release']);
@@ -2135,6 +2187,13 @@ test('宿主装配契约（源码扫描）：闸的接线还在、且没有被�
   assert.match(main, /const publishRuntimePosture = \(posture: RuntimePosture\): void =>/);
   assert.match(main, /publishPostureWithFallback\(posture, \{/,
     'posture MUST 经带日志兜底的那条出口发（IPC 在父子通道断开时是静默 no-op，行为覆盖见 T23③）');
+  // 送达判据 MUST 在可注入模块里：内联在 main() 闭包时用例只能传假的 sendIpc，真判据零覆盖
+  //（改成恒 true ⇒ 第二道网整条蒸发而全绿）。行为覆盖见 T23④。
+  assert.match(
+    main,
+    /const sendLifecycleIpc = \(payload: Record<string, unknown>\): boolean => deliverLifecycleIpc\(process, payload\);/,
+    '「送到了吗」MUST 由可注入判据回答，宿主不得内联一份自己的',
+  );
 
   // ⑤ 恢复自动化：宿主**连 async 壳都不写**，整段是可注入实现。行为覆盖 T15quater / T20⑥ / T21④。
   //    留一层壳就够被削弱：给那句 await 加 `.catch(() => undefined)`，拒绝被吞、控制器发出「已恢复」。
@@ -2167,6 +2226,18 @@ test('宿主装配契约（源码扫描）：闸的接线还在、且没有被�
   assert.match(shell, /closeIntent: Boolean\(handle\.stopRequested \|\| handle\.removed \|\| isQuitting\)/,
     '关闭意图优先：外壳别处已有同款守卫，posture 这一笔比它先到、不能例外（行为覆盖 T22③）');
   assert.match(shell, /handle\.runtimePosture = transition\.latch;/);
+  // ⑥bis 上面那行只存**闩**；把 posture 画到界面上的是紧挨着的下一行，而它此前零覆盖——
+  //      删掉它，闩照存、四轴照被覆盖层压住，但**持久失败卡片永不出现**（那一笔是红卡的唯一写入口，
+  //      终局与残局的红卡全靠它）。存了不画＝「判了但不据此动作」，本系列在追的正是这一族。
+  assert.match(
+    shell,
+    /if \(transition\.patch\) updateStatus\(handle, posturePatch\(handle, transition\.patch\)\);/,
+    'posture 转移 MUST 真的落到界面上；只存闩不画界面＝红卡永不出现',
+  );
+  // 翻译本体 MUST 在可注入模块里（行为覆盖：T20①④⑤ 的 edgeFailure 断言现在驱动的是真函数）。
+  // 宿主这一处只许是薄接线；再抄一份等价逻辑，删掉模块里那一格就又测不到了。
+  assert.match(shell, /return posturePatchFrom\(projection, \{/,
+    'posture 投影 → 补丁的翻译 MUST 走 runtime-posture.cjs 的真实现，宿主 MUST NOT 自己再写一份');
   assert.match(shell, /fleet\.declaresCoreHalt\(message\) \|\| postureLatches\(livePosture\(handle\)\)/);
   // 覆盖层与落盘是**同一个表达式**：上一轮它是末尾一整块 if，整块挪到日志推断之前，扫描照样全绿。
   assert.match(

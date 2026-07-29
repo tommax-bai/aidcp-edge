@@ -584,6 +584,8 @@ async fn facebook_reel_scroll_uses_one_active_video_wheel_after_unchanged_arrow(
     let mut engine = Engine::default();
     let mut open = session_open(port);
     open.params.platform = Platform::Facebook;
+    // 两个上限都要抬：只抬下面那条命令死线是空操作，实际预算被会话的默认 2s 卡死。见常量注释。
+    open.params.timeout_ms = HUMANIZED_GESTURE_SESSION_TIMEOUT_MS;
     engine.open(&open).await.expect("open Facebook session");
 
     let outcome = engine
@@ -2048,7 +2050,21 @@ async fn facebook_comment_deadline_clears_and_never_submits_a_partial_comment() 
             session_id: "session-1".to_owned(),
             task_id: "browse-1".to_owned(),
             command_id: 1,
-            deadline_unix_ms: unix_time_ms() + 1_000,
+            // 本例要钉的是**打字那一步的死线已过**：`comment.rs` 用
+            // `deadline - FACEBOOK_COMMENT_PRE_SUBMIT_RESERVE_MS(12s)` 当打字死线，所以只要总预算
+            // 小于 12s，打字死线在命令开始时就已经过去，一个字都不该被打出去。
+            //
+            // 而外层还有一道墙钟看门狗：`execute_platform_command` 用同一个 deadline 给整条命令
+            // 设 timeout，写命令超时 ⇒ 归成 `Ambiguous`。原值是 1_000，于是
+            // 「引擎走到打字那一步」必须在 1 秒内完成——cargo 并行跑 14 个测试二进制时，中间那几步
+            // （开帖探测 / 拟人点击 / 清空 / 聚焦，全是带停顿的真手势）轻易超过 1 秒，外层看门狗先
+            // 响，引擎于是**诚实**回 Ambiguous。实测：独立目录连跑 22 次全量红 2 次（≈9%），无人造负载。
+            //
+            // 安全断言（绝不写入 / 绝不回车）在两次红里都仍然通过 ⇒ 抖的是**用例前提**，不是引擎缺陷。
+            // 故把总预算抬到 11s：仍 < 12s（打字死线照样在开始前就过期，被测语义一字不变），但留给
+            // 「走到打字那一步」的墙钟从 1s 变成 11s。**MUST NOT 抬到 ≥ 12_000**——那会让打字死线变成
+            // 未来时刻，用例就悄悄不再测「死线已过」了。
+            deadline_unix_ms: unix_time_ms() + 11_000,
             command: NativeCommand::InteractionComment(CommentParams {
                 note_id: "https://www.facebook.com/groups/42/posts/7".to_owned(),
                 text: "deadline comment".to_owned(),
@@ -5048,13 +5064,27 @@ where
 ///
 /// 这些用例断言的是**手势形状**（帧数 / 落点坐标 / 总位移），墙钟死线在其中只是「别跑成死循环」的
 /// 兜底，不承载任何被断言的语义。而 cargo 会并行跑 14 个测试二进制，负载一上来，同一段带停顿的手势
-/// 真实耗时会被拉长数倍。把兜底值定在手势自身的量级（这条曾经是 8s），门禁就变成掷骰子——实测：
-/// 单独跑本文件连跑 6 次全绿、全量并行跑 8 次红 2 次。**「单独跑一遍全绿」因此会自证出一个假的
-/// 「无抖动」**，这正是本轮要根除的那种「看着像证明、其实什么也没证」。
+/// 真实耗时会被拉长数倍。把兜底值定在手势自身的量级，门禁就变成掷骰子。
 ///
-/// 故一律给一个与并行负载无关的大预算。它不会让任何断言变松（形状断言不看时间），只是把兜底还原成
-/// 兜底。真要覆盖「超时会怎样」的用例请显式写一个小死线，别指望这些形状用例顺手覆盖到。
+/// ── 上一轮在这里犯的错，必须写下来 ──
+/// 上一轮只把命令死线从 8s 抬到本常量，就宣布「修好了」。**那个改动完全没有生效**：真正的预算是
+/// `engine.rs::remaining_budget` 算出来的
+///     `min(deadline - now, min(session.timeout_ms, 该命令的 ceiling))`
+/// 而 `session_open()` 的 `timeout_ms` 默认是 **2_000**。也就是说无论死线写多大，实际budget 恒为 2 秒——
+/// 抬死线是一次**空操作**。之所以当时看着像修好了，只是因为验证量太小、又恰好没抽到。
+/// 本轮独立目录连跑 14 次全量，这条仍红 2 次（≈14%），失败在 `outcome.output.expect("Reel cards")`：
+/// 命令被外层看门狗掐掉、`output` 为 `None`。
+///
+/// 结论（用这条常量时必须同时做的事）：**两个上限都要抬，只抬一个等于没抬。**
+///   ① 命令死线 `deadline_unix_ms` ← 本常量；
+///   ② 会话 `open.params.timeout_ms`（默认 2s，Facebook 上限 90s、其他平台 30s，见 protocol.rs）。
+/// 断言不会因此变松——形状断言不看时间。真要覆盖「超时会怎样」，请显式写一个小死线 + 小会话预算，
+/// 别指望这些形状用例顺手覆盖到。
 const HUMANIZED_GESTURE_DEADLINE_MS: u64 = 120_000;
+
+/// 与上面配套的会话预算：Facebook 会话允许的最大值（`protocol.rs::MAX_FACEBOOK_TIMEOUT_MS`）。
+/// 单独抬 `HUMANIZED_GESTURE_DEADLINE_MS` 不生效，见那条常量的注释。
+const HUMANIZED_GESTURE_SESSION_TIMEOUT_MS: u64 = 90_000;
 
 fn unix_time_ms() -> u64 {
     SystemTime::now()

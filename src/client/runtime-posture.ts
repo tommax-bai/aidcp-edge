@@ -37,6 +37,14 @@
  *   ② 由它派生的四轴（每次 updateStatus 都被 posture 投影重新压回去）；
  *   ③ `edgeFailure` 卡片（持久，日志行只在**没有**闩时才允许清它）。
  * `lastMessage` 只承载当下这一行的叙述，随便被覆盖也不丢事实。
+ *
+ * ── 四、「恢复自动化」的准入**不在本模块** ──
+ * 这里曾有一个 `postureBlocksAutomationResume`，注释自称是「核心与外壳共用的同一条判据」。它是假的：
+ * 零调用方，且两侧真正的闸判的根本不是同一件事——**核心闸按运行期身份健康度判**
+ * （`identity-guard.ts` 的 `automationResumeCallback` → `resumeAutomationUnderIdentityGate`），
+ * **外壳闸按 posture 判**（`electron/runtime-posture.cjs` 的 `judgeResumeUnderPosture`，先判是为了不产生
+ * 那条乐观投影）。一段没人调、还声称自己是共用判据的代码比没有更坏——它会让下一个人以为改它就够了。
+ * 已删除。要改恢复准入，去改上面那两处真正在跑的。
  */
 
 /** IPC 消息类型：核心 → 外壳的**唯一**运行态通道。旧的两条（identity_halted / identity_restored）已由它取代。 */
@@ -63,18 +71,6 @@ export function runtimePostureIpc(posture: RuntimePosture): Record<string, unkno
   return { type: RUNTIME_POSTURE_IPC_TYPE, posture };
 }
 
-/**
- * 「这个 posture 允不允许恢复自动化」——核心与外壳共用的**同一条**判据（外壳侧有一份逐字镜像）。
- *
- * 只拦 `identity_halted`：
- *   - `automation_stalled` **必须放行**：点「恢复」正是它的处理办法（重新拉起浏览与观测），拦掉等于把
- *     一台身份完好、只是没跑起来的机器钉死。
- *   - `reestablishing` 放行：链条自己会收口，拦它等于把一次正常的重立卡死。
- */
-export function postureBlocksAutomationResume(posture: RuntimePosture | null | undefined): boolean {
-  return posture?.kind === 'identity_halted';
-}
-
 /** 非健康态 ⇒ 闩住：此后任何日志行推断 / 乐观投影都 MUST NOT 覆盖四轴（文件头「三」）。 */
 export function postureLatches(posture: RuntimePosture | null | undefined): boolean {
   return Boolean(posture) && posture!.kind !== 'healthy';
@@ -92,12 +88,44 @@ export const POSTURE_HALT_PHRASES: Readonly<Record<'identity_halted' | 'automati
 };
 
 /**
- * posture 的对外发布：IPC 是主路，**发不出去时必须在日志里补一句**。
+ * 「这一条真的交给外壳了吗」——IPC 送达判据的**唯一实现**。
  *
  * `process.send` 在父子通道断开时是**静默 no-op**（`process.connected` 为假就直接不发、不报错、
- * 不抛异常）。终局与残局目前各只有一条边通到外壳，这条边一丢，界面立刻退回「全绿、无角标」，
- * 而浏览与观测永久停着——正是本系列在根除的形状。终局态历史上还有第二道网（核心那行「身份确立失败」
- * 被外壳终态白名单认出来），残局态一条都没有；这里把两者都补齐，且措辞与白名单共用。
+ * 不抛异常），所以「送没送到」必须自己判，绝不能拿「调用没抛异常」当送达。
+ *
+ * 它为什么在这里而不在宿主里：上一轮这条判据写在 `src/main.ts` 那个 1400 行、无导出的单 `main()` 闭包
+ * 里，用例拿不到句柄、只能自己传一个假的送达函数进来 ⇒ **真判据零覆盖**。复验实测：把它改成恒 `true`，
+ * 整条第二道网当场蒸发（通道断了也判成送到了、兜底日志再也不打），而全套用例零红。现在用例驱动的
+ * 就是它本身。
+ */
+export interface IpcCapableProcess {
+  send?: (payload: Record<string, unknown>) => unknown;
+  connected?: boolean;
+}
+
+export function deliverLifecycleIpc(proc: IpcCapableProcess, payload: Record<string, unknown>): boolean {
+  if (typeof proc.send !== 'function' || !proc.connected) return false;
+  proc.send(payload);
+  return true;
+}
+
+/**
+ * posture 的对外发布：IPC 是主路，**发不出去时必须在日志里补一句**。
+ *
+ * 终局与残局各只有 posture IPC 一条边通到外壳。这条边一丢（`deliverLifecycleIpc` 判成没送到），
+ * 界面立刻退回「全绿、无角标」而浏览与观测永久停着——正是本系列在根除的形状。这里补的是**日志侧**
+ * 的第二道网：措辞与外壳终态白名单（`electron/fleet.cjs` 的 `declaresCoreHalt`）共用，改字面必须两边一起改。
+ *
+ * ── 这道网到底顶多久：**只顶当下这一行** ──
+ * 实测口径必须写准，否则下一个人会以为它够用而不再去补真正持久的那条边：
+ * 没有 posture IPC 就**没有闩**，没有闩 `runtimePostureOverride` 就不施加覆盖层。于是这一行被白名单
+ * 认出来 ⇒ 当下这次落盘写成 `edge:'warning'` 且不清失败卡片；但**下一行普通日志**（心跳、「已连接
+ * 云端」…）的 `declaresCoreHalt` 为假、闩又是空的，界面当场被写回「运行中」并把失败卡片清掉。
+ *
+ * 也就是说：它严格优于此前的「残局态零条边」，但按本文件头「三」的规矩衡量，它仍是把终局 / 残局的
+ * 事实放在了**会被日志行覆写**的地方。这一条是**继承**的——终局态历来如此，本次只是把残局态补到同一
+ * 水平，没有让任何东西变差，也没有把它修好。真正的修法是让外壳在识别到这句白名单措辞时也闩住
+ * （等价于「从日志行合成一个 posture 闩」），那是外壳侧的改动，已具名登记，本轮不做。
  *
  * `healthy` / `reestablishing` 不补：前者本就无事发生，后者是几秒的过渡态，丢了不会留下持久假象。
  */
@@ -113,6 +141,7 @@ export function publishPostureWithFallback(
   if (!phrase) return;
   deps.logger(
     `[aidcp-edge] ⚠ ${phrase}：${(posture as { reason: string }).reason}`
-      + '（运行态 IPC 未能送达外壳，改由日志如实声明；界面据此仍会翻红）',
+      + '（运行态 IPC 未能送达外壳，改由日志如实声明；外壳白名单只让**这一行**翻红，'
+      + '下一行普通日志就会把界面写回运行中——IPC 通道恢复前，这里给不出持久的红）',
   );
 }

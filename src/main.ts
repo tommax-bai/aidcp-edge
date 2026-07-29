@@ -99,7 +99,7 @@ import {
   PERIODIC_IDENTITY_READ_HYDRATE_MS,
   type IdentityInvalidReason,
 } from './native-page-engine/identity-guard.js';
-import { publishPostureWithFallback, type RuntimePosture } from './client/runtime-posture.js';
+import { deliverLifecycleIpc, publishPostureWithFallback, type RuntimePosture } from './client/runtime-posture.js';
 import {
   guardCommandsUnderIdentity,
   guardPublishCommandsUnderIdentity,
@@ -531,12 +531,13 @@ async function main(): Promise<void> {
     5_000,
     Number(process.env.AIDCP_STANDBY_CLOUD_RETRY_MS ?? 30_000) || 30_000,
   );
-  /** 返回「这一条真的交给外壳了吗」。父子通道断开时 `process.send` 是**静默 no-op**，调用方需要知道。 */
-  const sendLifecycleIpc = (payload: Record<string, unknown>): boolean => {
-    if (typeof process.send !== 'function' || !process.connected) return false;
-    process.send(payload);
-    return true;
-  };
+  /**
+   * 返回「这一条真的交给外壳了吗」。父子通道断开时 `process.send` 是**静默 no-op**，调用方需要知道。
+   *
+   * 判据本体在 `client/runtime-posture.ts` 的 `deliverLifecycleIpc`（可注入 ⇒ 用例驱动的是**真判据**）。
+   * 上一轮它内联在这里，用例只能传假的送达函数，把它改成恒 true 全套零红——见那个函数的注释。
+   */
+  const sendLifecycleIpc = (payload: Record<string, unknown>): boolean => deliverLifecycleIpc(process, payload);
   /**
    * 对外呈现的**唯一**出口（change §5 收口）：核心的运行态 → 外壳画什么，只经这一条边。
    *

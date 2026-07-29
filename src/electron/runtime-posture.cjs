@@ -188,6 +188,31 @@ function runtimePostureTransition(previousLatch, posture, context) {
 }
 
 /**
+ * posture 投影 → 真正落盘的状态补丁。四格语义各不相同（见 projectRuntimePosture 的注释），
+ * 这里是它们**唯一**一处被翻译成补丁字段的地方。
+ *
+ * 为什么它必须在本文件而不是留在 `main.cjs`：`failure` 那一格是**持久失败卡片的唯一写入口**——
+ * 终局与残局的红卡全靠它落盘，删掉它，闩还在、四轴还压得住，但那张说清「发生了什么、该怎么办」的
+ * 卡片永不出现。复验实测：它留在 main.cjs 里时零覆盖，整格删掉全套用例零红（用例自己抄了一份
+ * 等价逻辑，抄的那份当然照常通过）。现在用例驱动的就是它本身。
+ *
+ * 宿主只提供两类（共三个回调）它自己才知道怎么做的事：在场感补丁怎么带时间戳、失败卡片怎么写 /
+ * 怎么清（清的那一步还要顺手把宿主的「上一条失败行」记忆抹掉，那是 main.cjs 的私有状态）。
+ */
+function posturePatchFrom(projection, deps) {
+  return {
+    ...projection.axes,
+    ...(projection.message ? { lastMessage: projection.message } : {}),
+    ...(projection.presence ? deps.presencePatch(projection.presence) : {}),
+    ...(projection.failure === undefined
+      ? {}
+      : projection.failure === null
+        ? deps.clearFailure()
+        : deps.setFailure(projection.failure)),
+  };
+}
+
+/**
  * 把 posture 覆盖层施加到一份**已经算完**的状态补丁上，返回要真正落盘的那一份。
  *
  * 顺序即语义：posture 必须**赢**。上一轮这是日志行处理函数末尾的一整块 `if (postureOverride) …`，
@@ -232,6 +257,7 @@ module.exports = {
   postureLatches,
   postureOfLiveCore,
   runtimePostureTransition,
+  posturePatchFrom,
   commitPatchUnderPosture,
   runtimePostureOverride,
   judgeResumeUnderPosture,

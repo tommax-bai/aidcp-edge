@@ -61,6 +61,7 @@ const {
   postureLatches,
   postureOfLiveCore,
   runtimePostureTransition,
+  posturePatchFrom,
   commitPatchUnderPosture,
   runResumeUnderPosture,
 } = require('./runtime-posture.cjs');
@@ -2914,18 +2915,16 @@ function livePosture(handle) {
   return postureOfLiveCore(handle.runtimePosture, handle.runtimePostureCore, handle.child);
 }
 
-/** posture 投影 → updateStatus 补丁（四格语义各不相同，见 projectRuntimePosture 的注释）。 */
+/**
+ * posture 投影 → updateStatus 补丁。翻译本体在 runtime-posture.cjs 的 posturePatchFrom（可注入 ⇒ 用例
+ * 驱动的是真实现）；这里只把宿主私有的三件事接进去：在场感带时间戳、失败卡片怎么写、怎么清。
+ */
 function posturePatch(handle, projection) {
-  return {
-    ...projection.axes,
-    ...(projection.message ? { lastMessage: projection.message } : {}),
-    ...(projection.presence ? presencePatch(projection.presence) : {}),
-    ...(projection.failure === undefined
-      ? {}
-      : projection.failure === null
-        ? clearEdgeFailurePatch(handle)
-        : edgeFailurePatch(projection.failure)),
-  };
+  return posturePatchFrom(projection, {
+    presencePatch,
+    clearFailure: () => clearEdgeFailurePatch(handle),
+    setFailure: (summary) => edgeFailurePatch(summary),
+  });
 }
 
 function exitMessage(code, signal) {
