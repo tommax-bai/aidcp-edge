@@ -42,6 +42,8 @@ struct Observed {
     pending: f64,
     /// 还要读几次可滚区，`pending` 才会全部落地。
     inertia_left: usize,
+    /// 还要读几次可滚区，位移才**开始**动。平滑滚动的起步比一次探针还慢时的现场。
+    stall_left: usize,
 }
 
 impl Observed {
@@ -94,6 +96,9 @@ struct FakePage {
     /// 惯性 / 懒渲染：手势派完之后位移还要再走几拍才停。0 = 位移随手势瞬时落地。
     /// 位移没落定前，只读扫描回的仍是**滚动前那一屏**卡片。
     inertia_probes: usize,
+    /// 平滑滚动的**起步延迟**：手势派完之后还要读几次可滚区，位移才开始动。
+    /// 这几拍里位置逐字等于滚动前那一个值 —— 与「不会再动了」长得一模一样。
+    startup_probes: usize,
 }
 
 impl Default for FakePage {
@@ -105,6 +110,7 @@ impl Default for FakePage {
             cancel_at_wheel: 0,
             comment_rows: 0,
             inertia_probes: 0,
+            startup_probes: 0,
         }
     }
 }
@@ -233,6 +239,62 @@ async fn feed_paging_waits_for_the_position_to_stop_changing_before_it_rescans()
         cards.cards.first().and_then(|card| card.note_id.as_deref()),
         Some("note-fresh"),
         "重扫发生在懒渲染之前，拿到的还是滚动前那一屏",
+    );
+}
+
+/// 「还没开始动」与「不会再动了」是两态，读数却长得一模一样：位置连着几拍逐字等于滚动前那个值。
+///
+/// 平滑滚动的起步可能比一次探针还慢，所以「连读两次同一个位置」在**一次位移都没见过**时
+/// 不足以断言到底 —— 那一步之差恰好复现「只刷不点」活锁：位移回报 `moved=false`，
+/// 重扫拿到的还是滚动前那一屏卡片，云端于是反复选中已访问过的笔记或继续下发翻页。
+/// 而回执本身是诚实的（位移确实是实测的），现场没有任何错误码指向这里。
+#[tokio::test]
+async fn feed_paging_gives_a_slow_starting_scroll_the_rounds_to_prove_it_is_moving() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            // 前三次读可滚区，位置一动不动；第四次才开始走。
+            startup_probes: 3,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let result = engine
+        .execute(&scroll_command(
+            1,
+            command(r#"{"kind":"browse_scroll","params":{"reason":"feed_paging"}}"#),
+            25_000,
+        ))
+        .await
+        .expect("command result");
+
+    let CommandOutput::PageCards(cards) = result.output.expect("output") else {
+        panic!("expected page cards");
+    };
+    let movement = cards.movement.expect("翻页必须带上实测位移");
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    let total: f64 = observed.wheel_deltas.iter().sum();
+    assert!(total > 0.0, "这一场确实滚出去了");
+    assert!(
+        movement.moved,
+        "起步慢被当成了「不会再动了」：位移回报成一步没动",
+    );
+    assert_eq!(
+        movement.after, total,
+        "收工太早：读到的是起步前那个值 {} 而不是终值 {total}",
+        movement.after
+    );
+    // 后果面：断早了就在懒渲染之前重扫，拿到的还是滚动前那一屏 ——「只刷不点」活锁。
+    assert_eq!(
+        cards.cards.first().and_then(|card| card.note_id.as_deref()),
+        Some("note-fresh"),
+        "重扫发生在页面真正动起来之前",
     );
 }
 
@@ -569,6 +631,7 @@ async fn spawn_page(
             target: 0.0,
             pending: 0.0,
             inertia_left: 0,
+            stall_left: 0,
         };
         let mut wheels = 0_usize;
         while let Some(Ok(Message::Text(text))) = websocket.next().await {
@@ -599,9 +662,10 @@ async fn spawn_page(
                     observed.wheel_deltas.push(delta);
                     if page.scrolls {
                         observed.target += delta;
-                        if page.inertia_probes > 0 {
+                        if page.inertia_probes > 0 || page.startup_probes > 0 {
                             observed.pending += delta;
-                            observed.inertia_left = page.inertia_probes;
+                            observed.inertia_left = page.inertia_probes.max(1);
+                            observed.stall_left = page.startup_probes;
                         }
                         observed.position = observed.target - observed.pending;
                     }
@@ -638,7 +702,10 @@ fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value
     // 位置不再变化，才会拿到终值。
     let reads_scroll_area = expression.contains(r#""kind":"feed_scroll_area""#)
         || expression.contains(r#""kind":"comment_scroll_area""#);
-    if reads_scroll_area && observed.inertia_left > 0 {
+    // 起步延迟这几拍里位置**逐字不动**：读数与「不会再动了」完全一样，只有多等几轮才分得开。
+    if reads_scroll_area && observed.stall_left > 0 {
+        observed.stall_left -= 1;
+    } else if reads_scroll_area && observed.inertia_left > 0 {
         observed.inertia_left -= 1;
         // 最后一拍**精确**归零：位置的终值必须逐位等于目标值，否则用例分不清
         // 「引擎没等落定」与「假页面自己算出了浮点残差」。

@@ -106,6 +106,16 @@ struct FakePage {
     first_insert_stall_ms: u64,
     /// 该 `op` 的分片求值直接抛异常：返回体只有 `exceptionDetails`、没有 `/result/value`。
     throw_at_editor_op: Option<&'static str>,
+    /// 提交之后那道确认探针的读数。`Some(true)` = 评论出现了；`Some(false)` = 没出现；
+    /// `None` = 分片抛异常，**读不到** —— 与「读到了一个否」是两态。
+    ack_appeared: Option<bool>,
+    /// 回读时不给 `paragraphs` 判定：分片认不出段落结构。段落数是换行的**唯一**结构证据 ——
+    /// 两道文本比对（归一 / 汉字档）对换行完全免疫。
+    omit_paragraphs: bool,
+    /// 探针不给 `plainValue` 判定：编辑器形态**读不到**。
+    omit_plain_value: bool,
+    /// 第几次归尾探针**之后**置位接管信号（0 = 从不）。
+    cancel_at_caret_probe: usize,
 }
 
 impl Default for FakePage {
@@ -123,6 +133,10 @@ impl Default for FakePage {
             caret_never_settles: false,
             first_insert_stall_ms: 0,
             throw_at_editor_op: None,
+            ack_appeared: Some(true),
+            omit_paragraphs: false,
+            omit_plain_value: false,
+            cancel_at_caret_probe: 0,
         }
     }
 }
@@ -939,6 +953,314 @@ async fn one_slow_round_trip_pushes_the_tail_past_the_humane_chunk_bound() {
     assert_eq!(observed.editor, body, "封顶只缩往返与停顿，绝不缩内容");
 }
 
+/// 提交按钮已经按下去 ⇒ 这条评论**可能已经发出去了**。此后确认这一层只有三种读数，
+/// 只有「读到它出现了」那一种配 Confirmed。
+///
+/// 另外两种压成 Confirmed 的代价不同、但都不可接受：
+///  - 读到「没出现」压成成功 ⇒ 上游不再重投，这条评论就此丢了，没有任何一层会发现；
+///  - **读不到**压成成功 ⇒ 把「不知道」说成「确定成了」，正是红线本身。
+///
+/// 两种都回 Ambiguous，但病因必须分开记：前者指向提交多半没生效，后者指向确认层自己瞎了。
+/// 真机上这是唯一能把它们分开的证据。
+#[tokio::test]
+async fn a_comment_ack_that_is_not_a_clear_yes_stays_ambiguous_with_its_own_cause() {
+    for (ack, cause) in [
+        (Some(false), "submitted_unconfirmed"),
+        (None, "submitted_ack_unreadable"),
+    ] {
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let (port, server) = spawn_page(
+            FakePage {
+                ack_appeared: ack,
+                ..FakePage::default()
+            },
+            cancellation.clone(),
+        )
+        .await;
+        let mut engine = Engine::default();
+        engine.open(&session_open(port)).await.expect("open");
+
+        let result = engine
+            .execute_cancellable_with_commit_windows(
+                &write_command(
+                    1,
+                    command(
+                        r#"{"kind":"interaction_comment","params":{"noteId":"note-1","text":"好文，收藏了"}}"#,
+                    ),
+                    12_000,
+                ),
+                cancellation,
+                CommitWindowRequester::in_process(1),
+            )
+            .await
+            .expect("command result");
+
+        let CommandOutput::ActionReceipt(receipt) = result.output.expect("receipt") else {
+            panic!("expected an action receipt");
+        };
+        assert!(
+            !receipt.ok,
+            "确认层没读到「出现了」就报成功 = 静默假成功（ack={ack:?}）"
+        );
+        assert_eq!(
+            receipt.reason.as_deref(),
+            Some(cause),
+            "两种读数的病因被压成了一态（ack={ack:?}）"
+        );
+        assert_eq!(
+            result.effect_phase,
+            EffectPhase::Ambiguous,
+            "提交已派发，既不是 Confirmed 也不是 NotStarted（ack={ack:?}）"
+        );
+
+        drop(engine);
+        let observed = server.await.expect("fake page");
+        // 「可能已发出」不是修辞：提交那一下真的按下去了，所以绝不许回「没开始」。
+        assert_eq!(
+            observed.mouse_events("mousePressed"),
+            2,
+            "落焦 + 提交各一次（ack={ack:?}）"
+        );
+    }
+}
+
+/// 归尾确认的最后一轮**连间隔都排不下**时，那次零等待的接管 / 死线检查不是可省的礼节。
+///
+/// 省掉它直接 `break`，接管就被 `NewlineUnstable` 这条本地结局盖掉：上游收到的是一条
+/// 「换行没稳住」的普通失败回执，而不是「有人接手了」。红线是接管**原样穿出**——
+/// 让位的语义与失败的语义不是一回事，上游对两者的处置也完全不同。
+#[tokio::test]
+async fn a_takeover_at_the_last_unschedulable_settle_round_still_passes_through() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            plain_value: false,
+            // 归尾始终不收敛 ⇒ 命令停在确认循环里，且预算只够排下第一轮。
+            caret_never_settles: true,
+            caret_probe_delay_ms: 1_450,
+            cancel_at_caret_probe: 1,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let params = json!({
+        "kind": "publish_fill_field",
+        "params": {"recordId": 7, "seq": 16, "fieldType": "content", "value": "甲\n乙"},
+    });
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(1, serde_json::from_value(params).expect("command"), 8_000),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let error = result
+        .error
+        .expect("接管必须原样穿出，不许被「没稳住」盖成一条普通回执");
+    assert_eq!(error.code, ErrorCode::Cancelled);
+    assert!(result.output.is_none());
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    assert_eq!(
+        observed.evaluated(r#""kind":"content_caret_state""#),
+        1,
+        "第二轮连间隔都排不下 —— 正是那次零等待检查该开口的一刻",
+    );
+    assert_eq!(observed.editor, "", "让位之前必须先清场");
+}
+
+/// 段落数**读不到**时放行，就是把「读不到」当成「没有问题」。
+///
+/// 这一条尤其阴：下面两道文本比对（归一 / 汉字档）对换行完全免疫，段落数是换行仅有的
+/// 结构证据。放行的后果不是报错，而是一份段落被吞光的正文以 Confirmed 回报，
+/// 发布链继续往下走 —— 没有任何一层会发现。
+#[tokio::test]
+async fn a_body_whose_paragraph_count_cannot_be_read_is_never_confirmed() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            omit_paragraphs: true,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let body = "第一段内容\n第二段内容";
+    let params = json!({
+        "kind": "publish_fill_field",
+        "params": {"recordId": 7, "seq": 17, "fieldType": "content", "value": body},
+    });
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(1, serde_json::from_value(params).expect("command"), 20_000),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::PublishReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected a publish receipt");
+    };
+    assert!(!receipt.ok, "段落证据读不到就放行 = 静默假成功");
+    assert_eq!(
+        receipt.error.as_deref(),
+        Some("publish_content_paragraphs_unreadable"),
+        "「读不到」被记成了「段落数不够」或者干脆被放行"
+    );
+    assert_eq!(result.effect_phase, EffectPhase::Ambiguous);
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    // 文本本身一个字都不差：两道文本比对本来会照常放行，拦住它的只有段落这一条。
+    assert_eq!(observed.inserted_chunks().concat(), body);
+    assert_eq!(observed.editor, "", "失败出口必须先清场");
+}
+
+/// 评论路径上的同一道闸，后果更重一级：放行之后紧接着就是**点提交**。
+/// 串码在场时终稿必须是「正文 + 换行 + 串码」（审=发），而两道文本比对看不见那条换行——
+/// 段落数读不到还照样确认，等于把一条与人审看到的不是同一份的评论发出去。
+#[tokio::test]
+async fn a_comment_whose_paragraph_count_cannot_be_read_never_reaches_the_submit() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            omit_paragraphs: true,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(
+                1,
+                command(
+                    r#"{"kind":"interaction_comment","params":{"noteId":"note-1","text":"好文，收藏了","groupChatCode":"vx-1234"}}"#,
+                ),
+                12_000,
+            ),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::ActionReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected an action receipt");
+    };
+    assert!(!receipt.ok);
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("comment_paragraphs_unreadable")
+    );
+    assert_eq!(result.effect_phase, EffectPhase::NotStarted);
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    assert_eq!(
+        observed.mouse_events("mousePressed"),
+        1,
+        "只该有落焦那一次点击：提交一次都没被按下去"
+    );
+    assert_eq!(observed.editor, "", "拒绝出口必须先清场");
+}
+
+/// 编辑器形态**读不到**时不猜：猜错的两个方向都通向不可逆的错误提交。
+///
+/// 猜成受控框 ⇒ 往富文本里写字面 `\n`，那条分隔换行常常什么都不产生，终稿与人审看到的
+/// 不是同一份；猜成富文本 ⇒ 改走裸回车，而评论框上的回车**就是提交**，会把只写了一半的
+/// 评论原样发出去。所以这里在零派发处结构性拒绝，一个字符不写、一次点击不派。
+///
+/// 发布正文那一处是同一道闸的另一半：猜错只会写出一份「不是那份内容」的正文，
+/// 同样必须在开工前拒绝。
+#[tokio::test]
+async fn an_editor_whose_form_cannot_be_read_refuses_before_a_single_keystroke() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            omit_plain_value: true,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let comment = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(
+                1,
+                command(
+                    r#"{"kind":"interaction_comment","params":{"noteId":"note-1","text":"好文，收藏了","groupChatCode":"vx-1234"}}"#,
+                ),
+                12_000,
+            ),
+            cancellation.clone(),
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+    let CommandOutput::ActionReceipt(receipt) = comment.output.expect("receipt") else {
+        panic!("expected an action receipt");
+    };
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("comment_editor_form_unreadable"),
+        "形态读不到被当成了读到了"
+    );
+    assert_eq!(comment.effect_phase, EffectPhase::NotStarted);
+
+    let params = json!({
+        "kind": "publish_fill_field",
+        "params": {"recordId": 7, "seq": 18, "fieldType": "content", "value": "第一段内容\n第二段内容"},
+    });
+    let publish = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(2, serde_json::from_value(params).expect("command"), 20_000),
+            cancellation,
+            CommitWindowRequester::in_process(2),
+        )
+        .await
+        .expect("command result");
+    let CommandOutput::PublishReceipt(receipt) = publish.output.expect("receipt") else {
+        panic!("expected a publish receipt");
+    };
+    assert_eq!(
+        receipt.error.as_deref(),
+        Some("publish_field_form_unreadable"),
+        "形态读不到被当成了读到了"
+    );
+    assert_eq!(publish.effect_phase, EffectPhase::NotStarted);
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    assert!(
+        observed.inserted_chunks().is_empty(),
+        "零派发：一个字符都不许写"
+    );
+    assert_eq!(
+        observed.mouse_events("mousePressed"),
+        0,
+        "零派发：一次点击都不许有"
+    );
+    assert_eq!(observed.enter_presses, 0, "零派发：一次回车都不许按");
+}
+
 fn command(raw: &str) -> NativeCommand {
     serde_json::from_str(raw).expect("native command fixture")
 }
@@ -1014,6 +1336,7 @@ async fn spawn_page(
             editor_probes: 0,
         };
         let mut inserts = 0_usize;
+        let mut caret_probes = 0_usize;
         while let Some(Ok(Message::Text(text))) = websocket.next().await {
             let request: Value = serde_json::from_str(&text).expect("request JSON");
             let id = request["id"].as_u64().expect("request id");
@@ -1057,9 +1380,14 @@ async fn spawn_page(
 
             if method == "Runtime.evaluate"
                 && expression.contains(r#""kind":"content_caret_state""#)
-                && page.caret_probe_delay_ms > 0
             {
-                tokio::time::sleep(Duration::from_millis(page.caret_probe_delay_ms)).await;
+                if page.caret_probe_delay_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(page.caret_probe_delay_ms)).await;
+                }
+                caret_probes += 1;
+                if page.cancel_at_caret_probe > 0 && caret_probes == page.cancel_at_caret_probe {
+                    cancellation.store(true, Ordering::Release);
+                }
             }
 
             let mut rejected = false;
@@ -1128,7 +1456,14 @@ fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value
         return value(json!({"found": true, "x": 320.0, "y": 460.0}));
     }
     if expression.contains(r#""kind":"comment_ack""#) {
-        return value(json!({"found": true, "appeared": true}));
+        // `None` = 分片抛异常：连 `/result/value` 都没有，`appeared` 因此**读不到**。
+        return match page.ack_appeared {
+            Some(appeared) => value(json!({"found": true, "appeared": appeared})),
+            None => json!({"exceptionDetails": {
+                "text": "Uncaught",
+                "exception": {"className": "TypeError", "description": "boom"},
+            }}),
+        };
     }
     if expression.contains(r#""kind":"content_caret_state""#) {
         return value(json!({
@@ -1168,11 +1503,21 @@ fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value
             .split('\n')
             .filter(|line| !line.trim().is_empty())
             .count();
-        return value(json!({
+        let mut reading = json!({
             "found": true, "cleared": reported.is_empty(), "focused": true,
             "value": reported, "plainValue": page.plain_value,
             "x": 240.0, "y": 300.0, "paragraphs": paragraphs,
-        }));
+        });
+        // 「判定缺席」的现场：分片没抛异常，只是这一项它给不出来。所有别的判定照常可读 ——
+        // 折成 false / 0 的话，缺席会伪装成一个确定的坏消息（或者更糟：一个确定的好消息）。
+        let absent = reading.as_object_mut().expect("reading object");
+        if page.omit_paragraphs {
+            absent.remove("paragraphs");
+        }
+        if page.omit_plain_value {
+            absent.remove("plainValue");
+        }
+        return value(reading);
     }
     value(json!({"found": false}))
 }
