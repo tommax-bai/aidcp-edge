@@ -312,6 +312,38 @@ pub struct ActionEvidence {
     pub article_index: Option<u32>,
 }
 
+/// 验证码协助**键入取证**（change restore-native-xiaohongshu-session-guards §3）。
+///
+/// 六格逐字对齐云端契约 `CaptchaAssistTypeReportPayload`（两仓 `src/comm/protocol.ts`）。
+/// 它回答的是操作员唯一想知道的那件事：**答案到底有没有打进去**——「答案错了」与「一个字都没打」
+/// 在此之前是同一个 `failed`。
+///
+/// 两条红线：
+///  ① **绝不携带答案本身**：只放「谁 / 多少个 / 有没有提交」这种形状的事实，绝不放文本内容。
+///  ② **「读不到」与「没有」是两态**：焦点档还没探到（或探测本身失败）时整份取证**缺席**，
+///     回读通道失败时 `verified` **缺席**——MUST NOT 用一个看着确定的值（`none` / `mismatch`）
+///     去冒充一个其实不知道的结论。
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CaptchaTypeReport {
+    /// 字符**即将派发那一刻**的焦点档：`editable` / `opaque` / `none`。
+    pub focus: String,
+    /// 焦点元素标签（`INPUT` / `IFRAME` / `CANVAS` …）。仅供取证，MUST NOT 据此分支。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_tag: Option<String>,
+    /// `verified` = 回读确认为空；`attempted` = 尽力清了但读不回。清空**失败**时缺席。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleared: Option<String>,
+    /// **实际派发**成功的字符数。MUST NOT 回退成请求文本长度。
+    pub typed: usize,
+    /// 回读结论：`match` / `mismatch`；焦点不可回读（opaque）时为 `unverifiable`；
+    /// 回读**通道本身**失败时缺席。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<String>,
+    /// 是否真的派发过提交按键。
+    pub submitted: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ActionReceipt {
@@ -333,6 +365,13 @@ pub struct ActionReceipt {
     pub clicked: Option<bool>,
     #[serde(default)]
     pub candidates: Vec<CommentCandidate>,
+    /// 只有验证码协助的键入回执携带这一格。
+    ///
+    /// `skip_serializing_if` 不是洁癖而是必需：宿主浏览会话对回执做**盲展开**后转发云端，
+    /// 不跳过就会让每一条动作完成都多带一个 `typeReport: null`，被读成「有一段空取证」，
+    /// 而 TS 那处是 `as` 断言、类型检查抓不到。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_report: Option<CaptchaTypeReport>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -409,6 +448,10 @@ impl ActionReceipt {
         }
         if let Some(observation) = &mut self.post_observation {
             observation.bound();
+        }
+        if let Some(report) = &mut self.type_report {
+            // 焦点标签来自页面、长度不可控；其余五格是本进程产出的封闭域，不需要截断。
+            truncate_optional(&mut report.focus_tag, 64);
         }
         self.candidates.truncate(MAX_COMMENT_CANDIDATES);
         for candidate in &mut self.candidates {

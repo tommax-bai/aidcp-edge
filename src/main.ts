@@ -83,6 +83,10 @@ import {
   nativeActionNameForCommand,
   readNativeFacebookIdentity,
 } from './native-page-engine/index.js';
+import {
+  buildCaptchaClickResultFacts,
+  type NativeCaptchaClickReceipt,
+} from './captcha/click-result.js';
 
 function verifiedAccountNickname(idRes: SelfIdentityResult, decision: IdentityDecision): string | undefined {
   if (!idRes.ok || decision.kind !== 'use') return undefined;
@@ -997,18 +1001,15 @@ async function main(): Promise<void> {
         },
       });
       const receipt = execution.output?.kind === 'action_receipt'
-        ? execution.output.value as { ok: boolean; reason?: string }
+        ? execution.output.value as NativeCaptchaClickReceipt
         : undefined;
       client.send('captcha.assist.click_result', {
         incidentId,
         snapshotId: String(payload.snapshotId ?? ''),
         edgeId,
         ...(accountId ? { accountId } : {}),
-        status: receipt?.reason === 'cleared' ? 'cleared' : receipt?.reason === 'still_blocked' ? 'still_blocked' : 'failed',
-        ...(receipt?.reason ? { reason: receipt.reason } : {}),
+        ...buildCaptchaClickResultFacts(payload, receipt),
         checkedAt: Date.now(),
-        replayMode: 'synthetic',
-        inputMode: typeof payload.text === 'string' ? 'click_type' : 'click',
       });
     })().catch((err) => {
       console.error(`[aidcp-edge] Native 验证码协助 ${env.type} 失败:`, err);

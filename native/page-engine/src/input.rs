@@ -60,6 +60,21 @@ pub(crate) enum TextInputFailure {
     TargetLost,
 }
 
+/// 验证码键入的失败**带上已派发字符数**（change restore-native-xiaohongshu-session-guards 任务 3.5）。
+///
+/// 为什么把计数放进错误值而不是做成出参：出参形态下调用方可以完全无视它、照样编译通过，
+/// 而「写了结构没接线」正是本 change 要消灭的形态。做成错误值的字段后，调用方要拿到 `failure`
+/// 就必须解构这个结构体，`typed` 始终在视野里，漏用是显性的。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CaptchaTypeError {
+    pub(crate) failure: TextInputFailure,
+    /// 一次完整「按下 + 抬起」返回成功之后才计入的字符数。
+    ///
+    /// 按下成功而抬起失败的那个字符会被**少算一个**——方向是少报、不是多报，且调用方随后清场，
+    /// 符合「按实测回报」。MUST NOT 为了「好看」改成先加后提交。
+    pub(crate) typed: usize,
+}
+
 #[derive(Debug)]
 pub(crate) enum WheelInputFailure {
     Cancelled,
@@ -207,12 +222,17 @@ async fn type_text_humanized_inner(
     Ok(typed)
 }
 
+/// 逐字符派发验证码答案，**成功与失败都回带真实的已派发字符数**。
+///
+/// 中途被抢占 / 超预算 / 通道失败时，调用方要如实回报「打进去几个」——而这个数只有在这里才知道：
+/// 一旦以裸 `TextInputFailure` 抛出，内部计数就丢了，调用方唯一还拿得到的只有**请求文本长度**，
+/// 于是必然回退成「请求了几个就说打了几个」。那正是本 change 要消灭的静默假成功。
 pub(crate) async fn type_captcha_with_key_events(
     cdp: &mut CdpSession,
     value: &str,
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
-) -> Result<usize, TextInputFailure> {
+) -> Result<usize, CaptchaTypeError> {
     let mut rhythm = KeyboardRhythm::new();
     let mut typed = 0;
     let mut last_rtt_ms = 0_u64;
@@ -220,11 +240,19 @@ pub(crate) async fn type_captcha_with_key_events(
         let wait_ms = rhythm
             .flight_delay_ms(character)
             .saturating_sub(last_rtt_ms);
-        wait_before_character(wait_ms, cancellation, deadline_unix_ms).await?;
-        let spec = captcha_key_spec(character).ok_or(TextInputFailure::Engine)?;
+        wait_before_character(wait_ms, cancellation, deadline_unix_ms)
+            .await
+            .map_err(|failure| CaptchaTypeError { failure, typed })?;
+        let spec = captcha_key_spec(character).ok_or(CaptchaTypeError {
+            failure: TextInputFailure::Engine,
+            typed,
+        })?;
         let dwell_ms = rhythm.dwell_delay_ms();
         let started = Instant::now();
-        commit_captcha_key_stroke(cdp, &spec, dwell_ms).await?;
+        commit_captcha_key_stroke(cdp, &spec, dwell_ms)
+            .await
+            .map_err(|failure| CaptchaTypeError { failure, typed })?;
+        // 计数只在**整对按键提交成功之后**自增（与退役实现的逐字进度回调同一时机）。
         typed += 1;
         let elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         last_rtt_ms = elapsed_ms.saturating_sub(dwell_ms);

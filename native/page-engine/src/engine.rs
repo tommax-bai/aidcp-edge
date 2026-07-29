@@ -6,9 +6,10 @@ use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
 use crate::input::{TextInputFailure, type_captcha_with_key_events, type_text_humanized};
 use crate::model::{
-    ActionReceipt, CaptchaSnapshot, FacebookIdentityReceipt, IdentityObservation,
-    IdentityObservationSource, IdentityPageEffect, NoteDetail, NotificationHome, NotificationItems,
-    ObservedActionReceipt, PageCards, PlanResults, ProfileDetail, PublishReceipt,
+    ActionReceipt, CaptchaSnapshot, CaptchaTypeReport, FacebookIdentityReceipt,
+    IdentityObservation, IdentityObservationSource, IdentityPageEffect, NoteDetail,
+    NotificationHome, NotificationItems, ObservedActionReceipt, PageCards, PlanResults,
+    ProfileDetail, PublishReceipt,
 };
 use crate::probe::PageKind;
 use crate::probe::ProbeResult;
@@ -798,6 +799,7 @@ fn xhs_gate_refusal(action: &'static str, reason: &'static str) -> (EffectPhase,
             group_url: None,
             clicked: None,
             candidates: Vec::new(),
+            type_report: None,
         })),
     )
 }
@@ -1003,10 +1005,13 @@ async fn clear_xhs_search_input_best_effort(session: &mut EngineSession) {
     let _ = probe_xhs_search_input(session, "focus-clear").await;
 }
 
-async fn focused_text_matches(
-    session: &mut EngineSession,
-    expected: &str,
-) -> Result<bool, EngineError> {
+/// 回读焦点元素的文本，**把「读不到」与「读到了」分成两态**。
+///
+/// `Err` = 回读通道本身失败（求值发不出去）；`Ok(None)` = 通道通了但页面回了 null
+/// （此刻没有可读的焦点元素）；`Ok(Some(v))` = 真读到了 `v`。
+/// 三者压成一个布尔会让「没读到」和「读到了不一样的东西」变成同一个结论——
+/// 那正是退役实现把 null 记成「不匹配」的那处失真，MUST NOT 照抄。
+async fn focused_text_readback(session: &mut EngineSession) -> Result<Option<String>, EngineError> {
     let readback = session
         .cdp
         .evaluate(
@@ -1017,7 +1022,14 @@ async fn focused_text_matches(
     Ok(readback
         .pointer("/result/value")
         .and_then(serde_json::Value::as_str)
-        == Some(expected))
+        .map(str::to_owned))
+}
+
+async fn focused_text_matches(
+    session: &mut EngineSession,
+    expected: &str,
+) -> Result<bool, EngineError> {
+    Ok(focused_text_readback(session).await?.as_deref() == Some(expected))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1027,24 +1039,36 @@ enum FocusTier {
     None,
 }
 
-async fn probe_active_focus_tier(session: &mut EngineSession) -> Result<FocusTier, EngineError> {
+/// 探焦点档，并**顺带把焦点元素标签带回来**（取证用，MUST NOT 据它分支）。
+///
+/// 结果编码成 `"<档>"` 或 `"<档>:<标签>"` 一个字符串而不是一个对象：档位是判据、标签只是取证，
+/// 放同一格能让「只认档位」的既有读法原样成立，也让页面侧表达式保持单值返回。
+async fn probe_active_focus_tier(
+    session: &mut EngineSession,
+) -> Result<(FocusTier, Option<String>), EngineError> {
     let result = session
         .cdp
         .evaluate(
-            "(()=>{const e=document.activeElement;if(!e||e===document.body||e===document.documentElement)return 'none';const tag=String(e.tagName||'');const editable=(tag==='INPUT'&&!e.disabled&&!e.readOnly)||(tag==='TEXTAREA'&&!e.disabled&&!e.readOnly)||e.isContentEditable===true;return editable?'editable':'opaque'})()",
+            "(()=>{const e=document.activeElement;if(!e)return 'none';const tag=String(e.tagName||'');if(e===document.body||e===document.documentElement)return 'none:'+tag;const editable=(tag==='INPUT'&&!e.disabled&&!e.readOnly)||(tag==='TEXTAREA'&&!e.disabled&&!e.readOnly)||e.isContentEditable===true;return (editable?'editable':'opaque')+':'+tag})()",
             false,
         )
         .await?;
-    Ok(
-        match result
-            .pointer("/result/value")
-            .and_then(serde_json::Value::as_str)
-        {
-            Some("editable") => FocusTier::Editable,
-            Some("opaque") => FocusTier::Opaque,
+    let raw = result
+        .pointer("/result/value")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let (tier, tag) = match raw.split_once(':') {
+        Some((tier, tag)) => (tier, (!tag.is_empty()).then(|| tag.to_owned())),
+        None => (raw, None),
+    };
+    Ok((
+        match tier {
+            "editable" => FocusTier::Editable,
+            "opaque" => FocusTier::Opaque,
             _ => FocusTier::None,
         },
-    )
+        tag,
+    ))
 }
 
 async fn clear_focused_target(
@@ -1121,6 +1145,7 @@ fn search_receipt(phase: EffectPhase, reason: &str) -> (EffectPhase, CommandOutp
             group_url: None,
             clicked: None,
             candidates: Vec::new(),
+            type_report: None,
         })),
     )
 }
@@ -1349,6 +1374,10 @@ pub(crate) async fn click_captcha(
                 "captcha snapshot identity is stale",
             )
         })?;
+    // 全程只有这一份取证累加器：每个返回点都从它取**那一刻真实**的快照。
+    // 点击段尚未探过焦点，所以此处两个返回点的快照必然整份缺席（见 `CaptchaTypeForensics::snapshot`）——
+    // 而它们恰恰是「下发了文本、一个字符都没打」的典型形态，缺席正是要让云端探测器响的那一声。
+    let mut forensics = CaptchaTypeForensics::default();
     for (clicked, point) in params.points.iter().enumerate() {
         if cancellation.is_some_and(|value| value.load(Ordering::Acquire)) {
             if clicked == 0 {
@@ -1358,6 +1387,7 @@ pub(crate) async fn click_captcha(
                 EffectPhase::Dispatched,
                 false,
                 "preempted_by_task",
+                &forensics,
             ));
         }
         if unix_time_ms() >= deadline_unix_ms {
@@ -1371,6 +1401,7 @@ pub(crate) async fn click_captcha(
                 EffectPhase::Dispatched,
                 false,
                 "captcha_deadline_exceeded",
+                &forensics,
             ));
         }
         let x = point.x * snapshot.width as f64;
@@ -1392,24 +1423,33 @@ pub(crate) async fn click_captcha(
     let mut text_focus_tier = None;
     if let Some(text) = &params.text {
         let focus_tier = match probe_active_focus_tier(session).await {
-            Ok(FocusTier::None) => {
+            Ok((FocusTier::None, tag)) => {
+                // 焦点没落定是**结构确定**的失败：知道档位、知道零派发、知道没提交，取证齐备。
+                forensics.observe_focus(FocusTier::None, tag);
                 return Ok(captcha_click_result(
                     EffectPhase::Dispatched,
                     false,
                     "captcha_input_not_focused",
+                    &forensics,
                 ));
             }
-            Ok(tier) => tier,
+            Ok((tier, tag)) => {
+                forensics.observe_focus(tier, tag);
+                tier
+            }
             Err(_) => {
+                // 探测**本身**失败：焦点档读不到。取证整份缺席——「读不到」不得冒充 `none`。
                 return Ok(captcha_click_result(
                     EffectPhase::Dispatched,
                     false,
                     "captcha_input_focus_probe_failed",
+                    &forensics,
                 ));
             }
         };
         text_focus_tier = Some(focus_tier);
         if clear_focused_target(session, focus_tier).await.is_err() {
+            // 清空失败 ⇒ `cleared` 留空（既不是 verified 也不是 attempted），零派发、未提交。
             return Ok(captcha_click_result(
                 EffectPhase::Dispatched,
                 false,
@@ -1418,8 +1458,15 @@ pub(crate) async fn click_captcha(
                 } else {
                     "captcha_input_clear_failed"
                 },
+                &forensics,
             ));
         }
+        // 可编辑档的清空自带「回读确认为空」那一步，故为 verified；不可回读档只能算尽力清过。
+        forensics.cleared = Some(if focus_tier == FocusTier::Editable {
+            "verified"
+        } else {
+            "attempted"
+        });
         let typing_deadline = deadline_unix_ms.saturating_sub(
             params
                 .settle_ms
@@ -1427,42 +1474,69 @@ pub(crate) async fn click_captcha(
                 .min(3_000)
                 .saturating_add(2_000),
         );
-        if let Err(failure) =
-            type_captcha_with_key_events(&mut session.cdp, text, cancellation, typing_deadline)
-                .await
+        match type_captcha_with_key_events(&mut session.cdp, text, cancellation, typing_deadline)
+            .await
         {
-            clear_focused_target_best_effort(session, focus_tier).await;
-            return Ok(captcha_click_result(
-                EffectPhase::Dispatched,
-                false,
-                match failure {
-                    TextInputFailure::Cancelled => "preempted_by_task",
-                    TextInputFailure::Deadline => "captcha_type_deadline_exceeded",
-                    TextInputFailure::Engine => "captcha_type_failed",
-                    TextInputFailure::TargetLost => "captcha_input_focus_lost",
-                },
-            ));
+            // 成功路径的字符数同样要接住：丢掉它就只剩「请求了几个」可回报。
+            Ok(typed) => forensics.typed = typed,
+            Err(error) => {
+                // 被抢占 / 超预算 / 通道失败：已派发的部分留在页面上 ⇒ 清场 + **如实回报实际派发数**，
+                // MUST NOT 回退成 `text.chars().count()`，且绝不继续提交。
+                forensics.typed = error.typed;
+                clear_focused_target_best_effort(session, focus_tier).await;
+                return Ok(captcha_click_result(
+                    EffectPhase::Dispatched,
+                    false,
+                    match error.failure {
+                        TextInputFailure::Cancelled => "preempted_by_task",
+                        TextInputFailure::Deadline => "captcha_type_deadline_exceeded",
+                        TextInputFailure::Engine => "captcha_type_failed",
+                        TextInputFailure::TargetLost => "captcha_input_focus_lost",
+                    },
+                    &forensics,
+                ));
+            }
         }
         if focus_tier == FocusTier::Editable {
-            match focused_text_matches(session, text).await {
-                Ok(true) => {}
-                Ok(false) => {
+            // 回读是三态，不是布尔：读到且一致 / 读到但不一致 / 根本没读到。
+            // 退役实现把「没读到」压成「不一致」，那是把不知道说成知道，此处**有意不照抄**。
+            match focused_text_readback(session).await {
+                Ok(Some(actual)) if actual == *text => forensics.verified = Some("match"),
+                Ok(Some(_)) => {
+                    forensics.verified = Some("mismatch");
                     clear_focused_target_best_effort(session, focus_tier).await;
                     return Ok(captcha_click_result(
                         EffectPhase::Dispatched,
                         false,
                         "text_readback_mismatch",
+                        &forensics,
+                    ));
+                }
+                Ok(None) => {
+                    // 通道通了、页面说「此刻没有可读的焦点元素」⇒ 结构上验不了，如实标 unverifiable。
+                    forensics.verified = Some("unverifiable");
+                    clear_focused_target_best_effort(session, focus_tier).await;
+                    return Ok(captcha_click_result(
+                        EffectPhase::Dispatched,
+                        false,
+                        "text_readback_unreadable",
+                        &forensics,
                     ));
                 }
                 Err(_) => {
+                    // 回读**通道**失败 ⇒ 连「验不了」都说不出口，`verified` 整格留空。
                     clear_focused_target_best_effort(session, focus_tier).await;
                     return Ok(captcha_click_result(
                         EffectPhase::Dispatched,
                         false,
                         "text_readback_failed",
+                        &forensics,
                     ));
                 }
             }
+        } else {
+            // 不可回读的焦点档：结构上就验不了，如实标记，绝不当成 match。
+            forensics.verified = Some("unverifiable");
         }
     }
     if params.submit.as_deref() == Some("enter") {
@@ -1474,6 +1548,7 @@ pub(crate) async fn click_captcha(
                 EffectPhase::Dispatched,
                 false,
                 "preempted_by_task",
+                &forensics,
             ));
         }
         if unix_time_ms() >= deadline_unix_ms {
@@ -1484,35 +1559,75 @@ pub(crate) async fn click_captcha(
                 EffectPhase::Dispatched,
                 false,
                 "captcha_deadline_exceeded",
+                &forensics,
             ));
         }
         if let Some(expected_tier) = text_focus_tier {
-            let current_tier = probe_active_focus_tier(session)
-                .await
-                .unwrap_or(FocusTier::None);
+            // 提交前重探一次：Enter 跟随焦点，焦点转移就会从错的上下文提交。
+            // 探测**本身**失败与「焦点确实变了」是两态，原因码不合并。
+            let Ok((current_tier, _)) = probe_active_focus_tier(session).await else {
+                clear_focused_target_best_effort(session, expected_tier).await;
+                return Ok(captcha_click_result(
+                    EffectPhase::Dispatched,
+                    false,
+                    "captcha_input_focus_probe_failed",
+                    &forensics,
+                ));
+            };
             if current_tier != expected_tier {
                 clear_focused_target_best_effort(session, current_tier).await;
                 return Ok(captcha_click_result(
                     EffectPhase::Dispatched,
                     false,
                     "captcha_input_focus_lost",
+                    &forensics,
                 ));
             }
         }
-        session
+        // 提交按键的两次派发**分开判**：按下失败 ⇒ 提交按键从未到过页面（submitted=false）；
+        // 按下成功而抬起失败 ⇒ 提交**真的发生过**，此时回报 submitted=false 就是把既成事实说没有。
+        if session
             .cdp
             .dispatch_key_with_text("keyDown", "Enter", "Enter", 13, "\r")
-            .await?;
-        session
+            .await
+            .is_err()
+        {
+            return Ok(captcha_click_result(
+                EffectPhase::Dispatched,
+                false,
+                "captcha_submit_failed",
+                &forensics,
+            ));
+        }
+        forensics.submitted = true;
+        if session
             .cdp
             .dispatch_key("keyUp", "Enter", "Enter", 13)
-            .await?;
+            .await
+            .is_err()
+        {
+            return Ok(captcha_click_result(
+                EffectPhase::Dispatched,
+                false,
+                "captcha_submit_key_release_failed",
+                &forensics,
+            ));
+        }
     }
     tokio::time::sleep(Duration::from_millis(
         params.settle_ms.unwrap_or(350).min(3_000),
     ))
     .await;
-    let page = session.cdp.probe_page().await?;
+    // 复检读不到 ⇒ 判定不可得，**不是**「没清掉」。回车常触发导航，此处失败是常态而非事故；
+    // 关键是取证（打进去几个 / 有没有提交）不能跟着这次读不到一起蒸发。
+    let Ok(page) = session.cdp.probe_page().await else {
+        return Ok(captcha_click_result(
+            EffectPhase::Dispatched,
+            false,
+            "captcha_verdict_unavailable",
+            &forensics,
+        ));
+    };
     let blocked = matches!(
         page.page_kind,
         PageKind::Captcha | PageKind::Unknown | PageKind::Login
@@ -1521,28 +1636,76 @@ pub(crate) async fn click_captcha(
         EffectPhase::Confirmed,
         !blocked,
         if blocked { "still_blocked" } else { "cleared" },
+        &forensics,
     ))
+}
+
+/// 验证码协助键入的取证累加器：每个回执返回点都从它取一份**那一刻真实**的快照。
+///
+/// 之所以是累加器而不是逐点手搓：`click_captcha` 有十几个返回点，手搓必然漏，
+/// 而漏掉的那一份不会报错，只会变成一条「看着完整、其实空着」的回执。
+#[derive(Clone, Debug, Default)]
+struct CaptchaTypeForensics {
+    focus: Option<FocusTier>,
+    focus_tag: Option<String>,
+    cleared: Option<&'static str>,
+    typed: usize,
+    verified: Option<&'static str>,
+    submitted: bool,
+}
+
+impl CaptchaTypeForensics {
+    fn observe_focus(&mut self, tier: FocusTier, tag: Option<String>) {
+        self.focus = Some(tier);
+        self.focus_tag = tag;
+    }
+
+    /// 焦点档还没探到（或探测本身失败）时**整份缺席**。
+    ///
+    /// 云端契约里 `focus` 是必填且只有三个确定值，硬填一个等于把「不知道」说成「知道」；
+    /// 缺席则让云端的「下发了文本却未键入」探测器如实响。
+    fn snapshot(&self) -> Option<CaptchaTypeReport> {
+        let focus = self.focus?;
+        Some(CaptchaTypeReport {
+            focus: match focus {
+                FocusTier::Editable => "editable",
+                FocusTier::Opaque => "opaque",
+                FocusTier::None => "none",
+            }
+            .to_owned(),
+            focus_tag: self.focus_tag.clone(),
+            cleared: self.cleared.map(str::to_owned),
+            typed: self.typed,
+            verified: self.verified.map(str::to_owned),
+            submitted: self.submitted,
+        })
+    }
 }
 
 fn captcha_click_result(
     phase: EffectPhase,
     ok: bool,
     reason: &str,
+    forensics: &CaptchaTypeForensics,
 ) -> (EffectPhase, CommandOutput) {
     (
         phase,
-        CommandOutput::ActionReceipt(Box::new(ActionReceipt {
-            action: "captcha_click".to_owned(),
-            ok,
-            reason: Some(reason.to_owned()),
-            note_id: None,
-            observation: None,
-            post_observation: None,
-            group_observation: None,
-            group_url: None,
-            clicked: None,
-            candidates: Vec::new(),
-        })),
+        CommandOutput::ActionReceipt(Box::new(
+            ActionReceipt {
+                action: "captcha_click".to_owned(),
+                ok,
+                reason: Some(reason.to_owned()),
+                note_id: None,
+                observation: None,
+                post_observation: None,
+                group_observation: None,
+                group_url: None,
+                clicked: None,
+                candidates: Vec::new(),
+                type_report: forensics.snapshot(),
+            }
+            .bounded(),
+        )),
     )
 }
 

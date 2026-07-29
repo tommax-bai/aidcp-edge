@@ -329,6 +329,7 @@ pub(crate) fn facebook_action_result(
             group_url: None,
             clicked: None,
             candidates: Vec::new(),
+            type_report: None,
         })),
     )
 }
@@ -355,6 +356,7 @@ pub(crate) fn facebook_join_result(
             group_url,
             clicked: Some(clicked),
             candidates: Vec::new(),
+            type_report: None,
         })),
     )
 }
@@ -973,6 +975,7 @@ pub(crate) fn facebook_scroll_failure_on_surface(
             group_url: None,
             clicked: None,
             candidates: Vec::new(),
+            type_report: None,
         })),
     )
 }
