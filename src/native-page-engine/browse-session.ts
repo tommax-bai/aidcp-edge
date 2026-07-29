@@ -120,6 +120,17 @@ const XIAOHONGSHU_BLOCKING_POLICY: BlockingPolicy = {
   emitsCompanionUi: false,
 };
 
+/**
+ * 「这条命令有没有真的交给执行器」的**事实**记录，由执行体在越过派发那一行时置位。
+ *
+ * 存在的理由：宿主侧在派发之前还有一段节奏等待（动作前犹豫 / 离页停留），那一段被接管时
+ * 抛出的异常不带 `effectPhase`。从错误对象反推得不到答案，兜底成 ambiguous 就等于把
+ * 「一个字节都没发出去」报成「已提交、结果未知」。
+ */
+interface DispatchTrace {
+  started: boolean;
+}
+
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
   if (signal?.aborted) return Promise.reject(Object.assign(new Error('Native pacing wait aborted'), { code: 'aborted' }));
@@ -346,27 +357,36 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     }
     const controller = new AbortController();
     this.activeAbort = controller;
-    const active = this.executeAndReport(command, ownedTaskId ?? this.ownerId, controller.signal, env);
+    // 「这条命令有没有真的发给引擎」是**执行体自己**知道的事实，不是从错误对象反推出来的。
+    // 节奏等待（犹豫 / 停留）发生在派发之前，那一段被接管时抛出的异常不带 effectPhase——
+    // 兜底成 ambiguous 就是把一条**一个字节都没发出去**的命令报成「已提交、结果未知」，
+    // 上游据此写去重、不重投，与诚实红线的方向正相反。
+    const dispatch: DispatchTrace = { started: false };
+    const active = this.executeAndReport(command, ownedTaskId ?? this.ownerId, controller.signal, env, dispatch);
     this.active = active;
     try {
       await active;
       if (env.type === 'session.end') this.stop('cloud_session_end');
     } catch (error) {
       const detail = error as { code?: string; detail?: { effectPhase?: string; reasonCode?: string } };
-      const phase = detail.detail?.effectPhase;
+      const reported = detail.detail?.effectPhase;
+      // 引擎报了什么就是什么；引擎没报（异常来自派发之前 / 之外）时按**有没有派发**定：
+      // 零派发 = 未开始，已派发但读不到结局 = ambiguous（保守方向）。
+      const phase = reported === 'not_started' || reported === 'dispatched'
+        || reported === 'confirmed' || reported === 'ambiguous'
+        ? reported
+        : dispatch.started ? 'ambiguous' : 'not_started';
       this.reportFailure(
         env,
         phase === 'ambiguous' ? 'native_effect_ambiguous' : detail.code ?? 'native_command_failed',
-        phase === 'not_started' || phase === 'dispatched' || phase === 'confirmed' || phase === 'ambiguous'
-          ? phase
-          : 'ambiguous',
+        phase,
       );
       // 结构化那一行只带 token（可被机械消费、不含现场文本）；下面那条人读的行保留原样，
       // 它带的是引擎错误消息，只供人排障，不是被解析的证据面。
       this.diagnostic('command_failed', {
         command: nativeActionNameForCommand(env.type),
         code: detail.code ?? 'native_command_failed',
-        effectPhase: phase ?? 'ambiguous',
+        effectPhase: phase,
       });
       this.logger(`[native-page] ${env.type} failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -486,6 +506,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     ownerId = this.ownerId,
     signal?: AbortSignal,
     env?: Envelope,
+    dispatch?: DispatchTrace,
   ): Promise<void> {
     await this.applyCommandPacing(command, signal);
     // 就地读锚点在犹豫之后、执行之前记：犹豫属于「决定要看」，不属于「正在看这条」。
@@ -496,6 +517,9 @@ export class NativeBrowseSession implements EdgeBrowseSession {
         ? (this.options.clock ?? monotonicNow)()
         : 0;
     const timeoutMs = this.facebookCommandTimeoutMs(command);
+    // 越过这一行即「已经交给执行器」。取消缝仍在这之前：`runtime.execute` 自己的失败会带
+    // 具名的 effectPhase，用不到这个标记。
+    if (dispatch) dispatch.started = true;
     const result = await this.options.runtime.execute(
       ownerId,
       command,

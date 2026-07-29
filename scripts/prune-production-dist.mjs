@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const {
-  FRAGMENT_DIRECTORY,
+  CLEARTEXT_SOURCE_ROOT,
   PRODUCTION_FORBIDDEN_MARKERS,
   RETIRED_DIST_MODULES,
   assertFragmentInventoryReconciled,
@@ -70,7 +70,7 @@ export function assertNoRetiredDistModules(distRoot) {
  *
  * 因此这道闸重新锚定到「该脚本真正能检查到的语料」：整棵 dist 树，按**文件名**判。
  * 分片一旦被以任何方式（拷贝、打包脚本、生成器）落进 dist 的任意子目录，当场失败。
- * 枚举从清单派生，新增分片自动进闸。
+ * 枚举从**目录结构**派生（不只是 Facebook 有序清单），新增任何一份明文分片自动进闸。
  */
 export function assertNoFragmentLeak(distRoot, files, fragmentNames) {
   const forbidden = new Set(fragmentNames);
@@ -78,7 +78,7 @@ export function assertNoFragmentLeak(distRoot, files, fragmentNames) {
     if (forbidden.has(basename(file))) {
       throw new Error(
         `embedded page-rule fragment leaked into production dist: ${relative(distRoot, file)} `
-        + `(registered in ${FRAGMENT_DIRECTORY}/manifest.txt)`,
+        + `(cleartext page-rule source under ${CLEARTEXT_SOURCE_ROOT}/)`,
       );
     }
   }
@@ -119,8 +119,11 @@ export function pruneProductionDist(root = repoRoot) {
   const entry = join(distRoot, 'main.js');
   if (!existsSync(entry)) throw new Error('production dist entry is missing');
 
-  // 分片清单与目录先对账：闸门的枚举来自清单，清单本身失真则整条闸失效。
-  const fragmentNames = assertFragmentInventoryReconciled(root);
+  // Facebook 有序清单先与目录双向对账：它失真时 build.rs 与闸门会给出不同判定。
+  assertFragmentInventoryReconciled(root);
+  // 闸门的枚举取**全部**明文页面规则语料（含平铺在 src/ 下的小红书分片与明文选择器），
+  // 不是只取 Facebook 那一摞有序分片。
+  const fragmentNames = forbiddenFragmentBasenames(root);
 
   const allFiles = collectFiles(distRoot);
 

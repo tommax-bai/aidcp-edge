@@ -91,6 +91,7 @@ function harness(options: {
 } & { execute?: (command: NativePageCommand) => Promise<NativePageCommandExecution> }) {
   const executions: NativePageCommand[] = [];
   const actions: ActionCompletedPayload[] = [];
+  const logs: string[] = [];
   const runtime = {
     async execute(_ownerId: string, command: NativePageCommand) {
       executions.push(command);
@@ -148,9 +149,9 @@ function harness(options: {
     clock: options.clock ?? (() => 1_000),
     random: () => 0.25, // gaussian(0.25,0.25) ≈ 0 ⇒ jitterAround 恒等，断言可读
     sleep: options.sleep,
-    logger: () => undefined,
+    logger: (line: string) => { logs.push(line); },
   });
-  return { session, executions, actions };
+  return { session, executions, actions, logs };
 }
 
 /** 有界等待：缺了它，一条「本该等却没等」的回归会把用例挂死，而不是给出一行红。 */
@@ -406,4 +407,66 @@ test('被接管掐断的停留不消费锚点：重下的返回命令仍然补�
   // 而真正等完的那一次确实消费掉了锚点：再下一条不再重复补一段停留。
   await h.session.onCloudCommand(envelope('navigation.back', { reason: 'r', dwellMs: 6_000 }));
   assert.deepEqual(waits, [6_000, 6_000], '锚点已消费，不得再补一段');
+});
+
+// ─────────────────── 零派发 ≠ 结果未知：节奏等待期间被接管的那一段 ───────────────────
+
+/**
+ * 节奏等待（动作前犹豫 / 离页停留）发生在把命令交给执行器**之前**。那一段被接管时抛出的异常
+ * 不带 `effectPhase`，从错误对象反推不出结局 —— 兜底成 `ambiguous` 就是把一条**一个字节都没
+ * 发出去**的命令报成「已提交、结果未知」，上游据此写去重、不重投，与诚实红线方向正相反。
+ *
+ * 本 change 把这个窗口从「仅 Facebook 的翻页」扩到两个平台的关帖 / 返回 / 翻页，又新增了
+ * 云端不下发时也会触发的本地兜底停留 —— 窗口显著变宽，所以这道判定必须钉死。
+ */
+test('节奏等待期间被接管：零派发的命令报「未开始」，绝不报「已提交、结果未知」', async () => {
+  const abort = async (): Promise<never> => {
+    throw Object.assign(new Error('Native pacing wait aborted'), { code: 'aborted' });
+  };
+  // 犹豫面与停留面各取一条：两条腿都在派发之前等，两条都必须收窄。
+  const cases: Array<{ type: MessageType; payload: Record<string, unknown>; anchor?: MessageType }> = [
+    { type: 'interaction.like', payload: { noteId: 'note-1', thinkMs: 2_400 } },
+    { type: 'note.close', payload: { reason: 'r', dwellMs: 6_000 }, anchor: 'note.open' },
+    { type: 'navigation.back', payload: { reason: 'r', dwellMs: 6_000 }, anchor: 'note.open' },
+  ];
+
+  for (const item of cases) {
+    const h = harness({ platform: 'xiaohongshu', sleep: abort });
+    if (item.anchor) await h.session.onCloudCommand(envelope(item.anchor, { noteId: 'note-1' }));
+    const before = h.executions.length;
+    h.actions.length = 0;
+    h.logs.length = 0;
+
+    await h.session.onCloudCommand(envelope(item.type, item.payload));
+
+    assert.equal(h.executions.length, before, `${item.type} 根本没派发过，却到达了执行器`);
+    assert.equal(h.actions.length, 1, `${item.type} 必须回一条失败`);
+    assert.equal(
+      h.actions[0]?.reason,
+      'aborted',
+      `${item.type} 零派发被报成了 native_effect_ambiguous`,
+    );
+    const failure = h.logs.find((line) => line.includes('event=command_failed'));
+    assert.ok(failure, `${item.type} 缺少结构化失败诊断`);
+    assert.match(
+      failure,
+      /effectPhase=not_started/,
+      `${item.type} 零派发被上报成「已提交、结果未知」：${failure}`,
+    );
+  }
+});
+
+/** 对照：派发之后失败仍然是 ambiguous —— 否则上面那条会被一句「一律 not_started」喂绿。 */
+test('已经交给执行器之后再失败，仍然是「已提交、结果未知」', async () => {
+  const h = harness({
+    platform: 'xiaohongshu',
+    execute: async () => { throw new Error('engine died mid-command'); },
+  });
+  await h.session.onCloudCommand(envelope('interaction.like', { noteId: 'note-1' }));
+
+  assert.equal(h.executions.length, 1, '这一条确实到达了执行器');
+  assert.equal(h.actions[0]?.reason, 'native_effect_ambiguous');
+  const failure = h.logs.find((line) => line.includes('event=command_failed'));
+  assert.ok(failure);
+  assert.match(failure, /effectPhase=ambiguous/, `派发之后的失败被收窄成了未开始：${failure}`);
 });

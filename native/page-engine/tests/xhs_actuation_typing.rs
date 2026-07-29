@@ -96,6 +96,16 @@ struct FakePage {
     cancel_at_editor_probe: usize,
     /// 第几次编辑器 `op:"probe"` 直接回 CDP 错误（0 = 从不）。
     reject_editor_probe_at: usize,
+    /// 编辑器把**字面换行**吞掉：`Input.insertText("\n")` 照收，编辑器里不多出一段。
+    swallow_literal_newline: bool,
+    /// 归尾探针的假往返耗时。真机 RTT 几十毫秒 —— 正是「预算 ÷ 间隔」推算轮数时漏算的那一项。
+    caret_probe_delay_ms: u64,
+    /// 归尾探针永远报「光标不在末端」：确认这一层始终不收敛。
+    caret_never_settles: bool,
+    /// 第一次文本写入的一次性长停顿：模拟单次慢往返把实测成本永久抬高（单调 `max` 放大器）。
+    first_insert_stall_ms: u64,
+    /// 该 `op` 的分片求值直接抛异常：返回体只有 `exceptionDetails`、没有 `/result/value`。
+    throw_at_editor_op: Option<&'static str>,
 }
 
 impl Default for FakePage {
@@ -108,6 +118,11 @@ impl Default for FakePage {
             readback_override: None,
             cancel_at_editor_probe: 0,
             reject_editor_probe_at: 0,
+            swallow_literal_newline: false,
+            caret_probe_delay_ms: 0,
+            caret_never_settles: false,
+            first_insert_stall_ms: 0,
+            throw_at_editor_op: None,
         }
     }
 }
@@ -652,6 +667,278 @@ async fn a_full_width_punctuation_rewrite_still_confirms_through_the_hanzi_lane(
     let _ = server.await.expect("fake page");
 }
 
+/// 归尾确认的预算按**实际流逝**限界，不按「预算 ÷ 间隔」推算轮数。
+///
+/// 推算法漏掉了每轮的一次 `Runtime.evaluate` 往返（真机几十毫秒），实际墙钟能到分配值的两倍以上；
+/// 而 `xhs_fill_budget` 正是按这个分配值把可用窗口的**一半**划给归尾确认的 —— 前提不成立时，
+/// 12 段正文会把窗口吃干，正文那一半反而撞死线。
+///
+/// 判据取**探针次数**而非墙钟：往返由假页面强制成 200ms，推算法必然跑满 18 轮（1500ms ÷ 80ms），
+/// 按实际流逝限界只跑得下 6 轮左右。
+#[tokio::test]
+async fn the_settle_confirmation_spends_the_budget_it_was_given_not_twice_that() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            plain_value: false,
+            caret_probe_delay_ms: 200,
+            caret_never_settles: true,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let params = json!({
+        "kind": "publish_fill_field",
+        "params": {"recordId": 7, "seq": 14, "fieldType": "content", "value": "第一段内容\n第二段内容"},
+    });
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(1, serde_json::from_value(params).expect("command"), 20_000),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::PublishReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected a publish receipt");
+    };
+    // 始终没稳住 ⇒ 诚实失败（而不是「读不到」那一态）。
+    assert_eq!(
+        receipt.error.as_deref(),
+        Some("publish_content_newline_unstable")
+    );
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    let probes = observed.evaluated(r#""kind":"content_caret_state""#);
+    assert!(
+        probes >= 2,
+        "至少要真的探两轮，否则这条断言是空跑：{probes}"
+    );
+    assert!(
+        probes <= 10,
+        "归尾确认按名义间隔推算轮数（1500ms÷80ms=18 轮），把分配给它的预算花掉了两倍以上：实测 {probes} 轮",
+    );
+}
+
+/// 富文本评论框 + 联系方式串码：结构上带不了那条分隔换行 ⇒ **零派发**拒绝。
+///
+/// 字面 `\n` 在富文本里常常什么都不产生，而改走裸回车会把只写了一半的评论提交出去 ——
+/// 比丢一条换行严重得多的不可逆后果。所以这里一个字符都不写、一次点击都不派发。
+#[tokio::test]
+async fn a_rich_text_comment_box_refuses_the_contact_separator_before_anything_is_dispatched() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            plain_value: false,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(
+                1,
+                command(
+                    r#"{"kind":"interaction_comment","params":{"noteId":"note-1","text":"好文，收藏了","groupChatCode":"vx-1234"}}"#,
+                ),
+                12_000,
+            ),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::ActionReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected an action receipt");
+    };
+    assert!(!receipt.ok);
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("comment_editor_cannot_carry_separator")
+    );
+    assert_eq!(result.effect_phase, EffectPhase::NotStarted);
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    assert!(
+        observed.inserted_chunks().is_empty(),
+        "零派发：一个字符都不许写"
+    );
+    assert_eq!(
+        observed.mouse_events("mousePressed"),
+        0,
+        "零派发：一次点击都不许有"
+    );
+    assert_eq!(observed.enter_presses, 0, "评论框上的回车是提交，绝不许按");
+}
+
+/// 受控框里那条分隔换行被吞掉：两道文本比对都看不见（归一把换行折成空格），
+/// 只剩段落数这一条结构证据拦得住 —— 拦不住的后果是「审=发」被破坏而没有任何一层发现。
+#[tokio::test]
+async fn a_swallowed_contact_separator_is_refused_before_the_submit_is_ever_clicked() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            swallow_literal_newline: true,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(
+                1,
+                command(
+                    r#"{"kind":"interaction_comment","params":{"noteId":"note-1","text":"好文，收藏了","groupChatCode":"vx-1234"}}"#,
+                ),
+                12_000,
+            ),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::ActionReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected an action receipt");
+    };
+    assert!(!receipt.ok, "终稿与人审看到的不是同一份，绝不许报成功");
+    assert_eq!(receipt.reason.as_deref(), Some("comment_separator_lost"));
+    assert_eq!(result.effect_phase, EffectPhase::NotStarted);
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    // 正文与串码都在、顺序也对 —— 两道文本比对确实放行了，是段落数这一条拦住的。
+    assert!(
+        observed.inserted_chunks().concat().contains('\n'),
+        "换行确实写出去了 —— 是编辑器吞的"
+    );
+    assert_eq!(
+        observed.mouse_events("mousePressed"),
+        1,
+        "只该有落焦那一次点击：提交一次都没被按下去"
+    );
+    assert_eq!(observed.editor, "", "拒绝出口必须先清场");
+}
+
+/// 分片脚本抛异常时，**所有**布尔判定都读不到。折成 false 会把病因记成一个不存在的现场：
+/// 真机上照着 `editor_not_clean` 去查「上一条评论的残文」，而编辑器其实是空的。
+#[tokio::test]
+async fn a_probe_that_threw_is_reported_as_unreadable_and_never_as_a_dirty_editor() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            throw_at_editor_op: Some("clear"),
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(
+                1,
+                command(
+                    r#"{"kind":"interaction_comment","params":{"noteId":"note-1","text":"好文，收藏了"}}"#,
+                ),
+                12_000,
+            ),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::ActionReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected an action receipt");
+    };
+    assert!(!receipt.ok);
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("comment_editor_clear_unreadable"),
+        "「读不到」被折成了「读到了一个坏消息」"
+    );
+    assert_eq!(result.effect_phase, EffectPhase::NotStarted);
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    assert!(
+        observed.inserted_chunks().is_empty(),
+        "判据读不到时一个字符都不许写"
+    );
+}
+
+/// 降级判据不是死码：一次慢往返（单调 `max` 放大器）足以把剩余尾巴推进「买不起拟人粒度」的区间，
+/// 真的产生一次远超人感上限的整块写入。内容仍然一个字符都不许少。
+///
+/// 这一条钉的是**可达性**——降级标记会在真实流量里点亮；「标记 ⇒ 记账行」那半边由
+/// `input.rs` 的单元用例钉死（记账行本身走 stderr，libtest 没有稳定接口读回自己的输出）。
+#[tokio::test]
+async fn one_slow_round_trip_pushes_the_tail_past_the_humane_chunk_bound() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            first_insert_stall_ms: 4_000,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let body: String = std::iter::repeat_n('字', 2_000).collect();
+    let params = json!({
+        "kind": "publish_fill_field",
+        "params": {"recordId": 7, "seq": 15, "fieldType": "content", "value": body},
+    });
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(1, serde_json::from_value(params).expect("command"), 14_000),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::PublishReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected a publish receipt");
+    };
+    assert!(receipt.ok, "降级不许把内容写丢：{:?}", receipt.error);
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    let widest = observed
+        .inserted_chunks()
+        .iter()
+        .map(|chunk| chunk.chars().count())
+        .max()
+        .unwrap_or_default();
+    assert!(
+        widest > 120,
+        "这一场本该落进降级区间（最大单次写入 {widest} 字），否则上面那条断言什么也没证明",
+    );
+    assert_eq!(observed.editor, body, "封顶只缩往返与停顿，绝不缩内容");
+}
+
 fn command(raw: &str) -> NativeCommand {
     serde_json::from_str(raw).expect("native command fixture")
 }
@@ -742,8 +1029,13 @@ async fn spawn_page(
                     .pointer("/params/text")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                observed.editor.push_str(chunk);
+                if !(page.swallow_literal_newline && chunk == "\n") {
+                    observed.editor.push_str(chunk);
+                }
                 inserts += 1;
+                if inserts == 1 && page.first_insert_stall_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(page.first_insert_stall_ms)).await;
+                }
                 if page.insert_delay_ms > 0 {
                     tokio::time::sleep(Duration::from_millis(page.insert_delay_ms)).await;
                 }
@@ -761,6 +1053,13 @@ async fn spawn_page(
                 if !page.swallow_enter {
                     observed.editor.push('\n');
                 }
+            }
+
+            if method == "Runtime.evaluate"
+                && expression.contains(r#""kind":"content_caret_state""#)
+                && page.caret_probe_delay_ms > 0
+            {
+                tokio::time::sleep(Duration::from_millis(page.caret_probe_delay_ms)).await;
             }
 
             let mut rejected = false;
@@ -836,12 +1135,22 @@ fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value
             "found": true,
             "text": normalized(&observed.editor),
             "newlines": observed.enter_presses,
-            "atEnd": true,
+            "atEnd": !page.caret_never_settles,
         }));
     }
     if expression.contains(r#""kind":"comment_editor""#)
         || expression.contains(r#""kind":"publish_field""#)
     {
+        // 分片脚本抛异常：`silent:true` 下 CDP 不报错，返回体里只有 `exceptionDetails`。
+        // 所有布尔判定因此都读不到 —— 折成 false 的话，病因会被记成一个不存在的现场。
+        if let Some(op) = page.throw_at_editor_op
+            && expression.contains(&format!(r#""op":"{op}""#))
+        {
+            return json!({"exceptionDetails": {
+                "text": "Uncaught",
+                "exception": {"className": "TypeError", "description": "boom"},
+            }});
+        }
         if expression.contains(r#""op":"clear""#) {
             observed.editor.clear();
             return value(json!({

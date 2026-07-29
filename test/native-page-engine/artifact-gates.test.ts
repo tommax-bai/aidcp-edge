@@ -17,6 +17,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const require = createRequire(import.meta.url);
 
 const inventory = require(resolve(repoRoot, 'scripts/native-engine-inventory.cjs')) as {
+  CLEARTEXT_SOURCE_ROOT: string;
   FRAGMENT_DIRECTORY: string;
   PACKAGED_FRAGMENT_PREFIX: string;
   PRODUCTION_FORBIDDEN_MARKERS: readonly string[];
@@ -24,6 +25,8 @@ const inventory = require(resolve(repoRoot, 'scripts/native-engine-inventory.cjs
   assertFragmentInventoryReconciled: (root: string) => string[];
   assertFragmentsEndWithNewline: (root: string) => void;
   assertPackagingAllowListExcludesFragments: (patterns: unknown[]) => void;
+  forbiddenFragmentBasenames: (root: string) => string[];
+  listCleartextPageRuleSources: (root: string) => string[];
   packagedFragmentEntries: (root: string) => string[];
   readFragmentManifest: (root: string) => string[];
 };
@@ -93,6 +96,65 @@ test('every registered fragment is covered by both leakage gates', () => {
       `production pruner does not cover fragment ${entry}`,
     );
   }
+});
+
+/**
+ * 泄漏闸的覆盖面由**目录结构**派生，不由 Facebook 有序清单派生。
+ *
+ * 反例就在本仓：`FRAGMENT_DIRECTORY` 只指向 facebook-router/，而小红书的四份分片与
+ * 两份明文选择器平铺在上一级 `native/page-engine/src/` 下。以清单派生时，
+ * 新增 xhs-input-targets.js（含全部选择器与 DOM 语义）之后「已守护分片数」纹丝不动 ——
+ * 那不是「已覆盖」的证据，恰恰是「未覆盖」的证据：任一构建路径把它明文带进产物，
+ * 两道闸都不会命中，计数照报。
+ */
+test('every cleartext page-rule source is covered, Xiaohongshu fragments included', () => {
+  const sources = inventory.listCleartextPageRuleSources(repoRoot);
+  const manifest = inventory.readFragmentManifest(repoRoot);
+  const basenames = inventory.forbiddenFragmentBasenames(repoRoot);
+  const packaged = afterPack.packagedForbiddenEntries(repoRoot);
+
+  assert.ok(
+    sources.length > manifest.length,
+    `泄漏闸覆盖面（${sources.length}）没有宽于 Facebook 有序清单（${manifest.length}）：小红书分片逃出闸门了`,
+  );
+  const xiaohongshu = sources.filter((path) => /\/xhs-[^/]+$/.test(path));
+  assert.ok(xiaohongshu.length >= 4, `小红书明文语料只认出 ${xiaohongshu.length} 份`);
+  assert.ok(
+    xiaohongshu.includes(`${inventory.CLEARTEXT_SOURCE_ROOT}/xhs-input-targets.js`),
+    '写动作判据分片必须在闸门枚举里',
+  );
+
+  for (const path of xiaohongshu) {
+    assert.ok(packaged.includes(`/${path}`), `packaging scanner does not cover ${path}`);
+    const name = path.slice(path.lastIndexOf('/') + 1);
+    assert.throws(
+      () => pruner.assertNoFragmentLeak('/dist', [`/dist/nested/${name}`], basenames),
+      /embedded page-rule fragment leaked into production dist/,
+      `production pruner does not cover ${path}`,
+    );
+  }
+});
+
+test('the pruning pipeline rejects a planted Xiaohongshu fragment as well', () => {
+  withTempDir((dir) => {
+    mkdirSync(join(dir, 'dist', 'nested'), { recursive: true });
+    writeFileSync(join(dir, 'dist', 'main.js'), 'export const main = 1;\n');
+    symlinkSync(resolve(repoRoot, 'native'), join(dir, 'native'));
+    const plantedPath = join(dir, 'dist', 'nested', 'xhs-input-targets.js');
+    writeFileSync(plantedPath, '// planted Xiaohongshu page rule\n');
+    assert.throws(
+      () => pruner.pruneProductionDist(dir),
+      /embedded page-rule fragment leaked into production dist/,
+    );
+    assert.ok(existsSync(plantedPath), 'the leaked fragment must still be there when the gate fires');
+
+    rmSync(plantedPath);
+    const summary = pruner.pruneProductionDist(dir);
+    // 对账数：闸门报出来的「已守护分片数」必须等于目录派生的全部明文语料，
+    // 不是 Facebook 有序清单那 11 条。
+    assert.equal(summary.fragments, inventory.listCleartextPageRuleSources(repoRoot).length);
+    assert.ok(summary.fragments > inventory.readFragmentManifest(repoRoot).length);
+  });
 });
 
 test('neither leakage gate carries a hand-copied fragment list', () => {

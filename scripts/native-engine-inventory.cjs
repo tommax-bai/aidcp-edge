@@ -1,12 +1,18 @@
 'use strict';
 
-// 页面规则分片的唯一事实源是 native/page-engine/src/facebook-router/manifest.txt
+// Facebook 路由分片的顺序事实源是 native/page-engine/src/facebook-router/manifest.txt
 // —— build.rs 只读这一份来决定哪些分片被拼接、异或后编进二进制。
 //
-// 因此所有「枚举分片」的闸门（生产剪枝、打包后置扫描、构建期对账、测试）
-// MUST 在运行时从这里派生，MUST NOT 各自手抄一份字面量清单：
-// 手抄清单与事实源之间没有任何机械对账，新增分片会自动逃出全部闸门
-// （08-reaction-semantics.js 就是这么漏掉的）。
+// 但**泄漏闸的覆盖面比它大**：明文页面规则不止 Facebook 那一摞有序分片，
+// native/page-engine/src/ 下还平铺着小红书的四份分片与两份明文选择器
+// （build.rs 逐个 fs::read 后异或编进二进制）。曾经整条闸只由 FB 清单派生，
+// 于是新增 xhs-input-targets.js（236 行，含全部选择器与 DOM 语义）之后
+// 「已守护分片数」纹丝不动 —— 那不是「已覆盖」的证据，恰恰是「未覆盖」的证据。
+//
+// 因此泄漏闸的枚举一律从**目录结构**派生：src/ 下所有非 Rust 文件都是明文页面规则语料。
+// 新增任何一份分片都自动进闸，无需登记，也无处手抄。
+// MUST NOT 各自手抄一份字面量清单：手抄清单与事实源之间没有任何机械对账，
+// 新增分片会自动逃出全部闸门（08-reaction-semantics.js 就是这么漏掉的）。
 //
 // 本模块写成 CommonJS，因为消费方同时有 ESM 脚本（prune-production-dist.mjs、
 // build-native-page-engine.mjs）与 CommonJS 的 electron-builder 钩子（after-pack.cjs），
@@ -15,14 +21,18 @@
 const { readdirSync, readFileSync, statSync } = require('node:fs');
 const { join, resolve } = require('node:path');
 
-/** 分片目录（相对仓库根）。 */
+/** Facebook 有序分片目录（相对仓库根）。 */
 const FRAGMENT_DIRECTORY = 'native/page-engine/src/facebook-router';
 /** 有序清单文件名（build.rs 唯一读取并断言的那一份）。 */
 const FRAGMENT_MANIFEST_NAME = 'manifest.txt';
-/** 分片在 asar 归档里的条目前缀（asar.listPackage 给的是以 / 开头的绝对条目名）。 */
+/** Facebook 分片在 asar 归档里的条目前缀（asar.listPackage 给的是以 / 开头的绝对条目名）。 */
 const PACKAGED_FRAGMENT_PREFIX = '/native/page-engine/src/facebook-router/';
 /** electron-builder 的 files 允许清单一旦能覆盖到这个根，明文分片就可能进归档。 */
 const PACKAGED_FRAGMENT_ROOT = 'native/page-engine/src/';
+/** 明文页面规则语料的根：这棵树下的非 Rust 文件全部是被禁出现在产物里的明文规则。 */
+const CLEARTEXT_SOURCE_ROOT = 'native/page-engine/src';
+/** 引擎自身的实现语言 —— 它不是明文页面规则，扫描时排除。 */
+const ENGINE_SOURCE_EXTENSION = '.rs';
 
 /**
  * 已迁移到 Native 引擎、MUST NOT 再出现在生产 dist / 安装包里的 TypeScript 模块产物。
@@ -171,14 +181,52 @@ function assertFragmentsEndWithNewline(repoRoot) {
   }
 }
 
+/**
+ * 全部明文页面规则语料（仓库根相对路径，POSIX 分隔符，字典序）。
+ *
+ * 由**目录结构**派生而非任何清单：清单只管「哪些分片按什么顺序拼进 Facebook 路由」，
+ * 管不到平铺在 src/ 下的小红书分片与明文选择器。以清单派生泄漏闸，等于让每一份
+ * 非 Facebook 的明文规则结构上逃出全部闸门 —— 而计数不变会让人误以为「已覆盖」。
+ */
+function listCleartextPageRuleSources(repoRoot) {
+  const root = resolve(repoRoot, CLEARTEXT_SOURCE_ROOT);
+  const collected = [];
+  const walk = (directory, prefix) => {
+    for (const name of readdirSync(directory).sort()) {
+      const path = join(directory, name);
+      const relative = prefix ? `${prefix}/${name}` : name;
+      if (statSync(path).isDirectory()) {
+        walk(path, relative);
+        continue;
+      }
+      if (name.endsWith(ENGINE_SOURCE_EXTENSION)) continue;
+      if (name === FRAGMENT_MANIFEST_NAME) continue;
+      collected.push(`${CLEARTEXT_SOURCE_ROOT}/${relative}`);
+    }
+  };
+  walk(root, '');
+  if (collected.length === 0) {
+    throw new Error(`no cleartext page-rule sources found under ${CLEARTEXT_SOURCE_ROOT}`);
+  }
+  // 两套派生对不上就响亮失败：有序清单登记的每一片都必须出现在目录派生的语料里。
+  // 对不上说明其中一套已经失真，而两套都在给闸门供枚举。
+  const missing = readFragmentManifest(repoRoot)
+    .map((entry) => `${FRAGMENT_DIRECTORY}/${entry}`)
+    .filter((path) => !collected.includes(path));
+  if (missing.length > 0) {
+    throw new Error(`ordered source manifest names a file the cleartext scan cannot see: ${missing.join(', ')}`);
+  }
+  return collected;
+}
+
 /** 生产 dist 里被禁的分片文件名（按 basename 判，见 prune-production-dist.mjs 的锚定说明）。 */
 function forbiddenFragmentBasenames(repoRoot) {
-  return readFragmentManifest(repoRoot);
+  return listCleartextPageRuleSources(repoRoot).map((path) => path.slice(path.lastIndexOf('/') + 1));
 }
 
 /** 安装包 asar 里被禁的分片条目名。 */
 function packagedFragmentEntries(repoRoot) {
-  return readFragmentManifest(repoRoot).map((entry) => `${PACKAGED_FRAGMENT_PREFIX}${entry}`);
+  return listCleartextPageRuleSources(repoRoot).map((path) => `/${path}`);
 }
 
 /**
@@ -211,6 +259,7 @@ function sampleFragmentName(repoRoot) {
 }
 
 module.exports = {
+  CLEARTEXT_SOURCE_ROOT,
   FRAGMENT_DIRECTORY,
   FRAGMENT_MANIFEST_NAME,
   PACKAGED_FRAGMENT_PREFIX,
@@ -223,6 +272,7 @@ module.exports = {
   forbiddenFragmentBasenames,
   fragmentDirectory,
   fragmentManifestPath,
+  listCleartextPageRuleSources,
   listFragmentFiles,
   packagedFragmentEntries,
   readFragmentManifest,

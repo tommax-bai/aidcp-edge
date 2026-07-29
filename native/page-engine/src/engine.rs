@@ -8,7 +8,7 @@ use crate::input::{
     ContentNewline, ContentUnit, PointerClickOptions, PointerInputFailure, TextInputFailure,
     WheelInputFailure, bigram_similarity, build_content_units, dispatch_pointer_click,
     dispatch_wheel_humanized, hanzi_only, normalize_field_text, type_captcha_with_key_events,
-    type_content_burst_humanized, type_text_humanized,
+    type_content_burst_humanized, type_text_humanized, typing_degradation_note,
 };
 use crate::model::{
     ActionEvidence, ActionReceipt, CaptchaSnapshot, CaptchaTypeReport, FacebookIdentityReceipt,
@@ -1123,13 +1123,6 @@ async fn probe_xhs_input_target(
     session.cdp.evaluate(&expression, false).await
 }
 
-fn xhs_target_flag(value: &serde_json::Value, name: &str) -> bool {
-    value
-        .pointer(&format!("/result/value/{name}"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-}
-
 fn xhs_target_text(value: &serde_json::Value, name: &str) -> Option<String> {
     value
         .pointer(&format!("/result/value/{name}"))
@@ -1137,12 +1130,48 @@ fn xhs_target_text(value: &serde_json::Value, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// 三态读法：`Some(true)` / `Some(false)` / `None`（分片没给出这一判定）。
-/// 与 `xhs_target_flag` 的区别就是不把「读不到」折成 `false`。
+/// 分片判定的**三态**读法：`Some(true)` / `Some(false)` = 分片给出了确定判定；
+/// `None` = 这一轮**读不到**。
+///
+/// 写动作的每一道判据都必须走这一条，MUST NOT 折成 `unwrap_or(false)`：`evaluate` 带
+/// `silent:true`，页内一抛异常返回体里就只有 `exceptionDetails`、没有 `/result/value`，
+/// 于是**所有**布尔判定一律读成 false。失败方向确实是保守的（不会假成功），但**归因是错的** ——
+/// 真机上会照着 `editor_not_clean` 去查「上一条评论的残文没清干净」，而编辑器其实是空的、
+/// 真因是分片脚本报错。「读不到」与「读到了一个坏消息」压成一态，就是把不知道说成知道。
 fn xhs_target_optional_bool(value: &serde_json::Value, name: &str) -> Option<bool> {
     value
         .pointer(&format!("/result/value/{name}"))
         .and_then(serde_json::Value::as_bool)
+}
+
+/// 「读不到」的两种成因，进诊断行（不进回执词表，回执只分「确定的坏消息 / 读不到」两态）。
+fn xhs_unreadable_cause(value: &serde_json::Value) -> &'static str {
+    if value.get("exceptionDetails").is_some() {
+        "probe_threw"
+    } else {
+        "verdict_absent"
+    }
+}
+
+/// 三态判据的统一处置：`Some(true)` 放行；`Some(false)` 回 `false_reason`；
+/// `None` 回 `unreadable_reason` 并把成因写进诊断行。
+fn xhs_target_gate(
+    value: &serde_json::Value,
+    name: &str,
+    false_reason: &'static str,
+    unreadable_reason: &'static str,
+) -> Result<(), &'static str> {
+    match xhs_target_optional_bool(value, name) {
+        Some(true) => Ok(()),
+        Some(false) => Err(false_reason),
+        None => {
+            eprintln!(
+                "native_page_engine_xhs_target_unreadable:{name}:{}",
+                xhs_unreadable_cause(value)
+            );
+            Err(unreadable_reason)
+        }
+    }
 }
 
 fn xhs_target_number(value: &serde_json::Value, name: &str) -> Option<f64> {
@@ -1298,8 +1327,13 @@ async fn execute_xhs_comment(
         serde_json::json!({"kind":"note_guard","noteId":note_id}),
     )
     .await?;
-    if !xhs_target_flag(&guard, "match") {
-        return Ok(refusal("note_page_mismatch"));
+    if let Err(reason) = xhs_target_gate(
+        &guard,
+        "match",
+        "note_page_mismatch",
+        "note_guard_unreadable",
+    ) {
+        return Ok(refusal(reason));
     }
     let body = xhs_normalized_field(&params.text);
     if body.is_empty() {
@@ -1325,12 +1359,32 @@ async fn execute_xhs_comment(
         serde_json::json!({"kind":"comment_editor","op":"probe"}),
     )
     .await?;
-    if !xhs_target_flag(&editor, "found") {
-        return Ok(refusal("comment_editor_not_found"));
+    if let Err(reason) = xhs_target_gate(
+        &editor,
+        "found",
+        "comment_editor_not_found",
+        "comment_editor_probe_unreadable",
+    ) {
+        return Ok(refusal(reason));
     }
     let Some((x, y)) = xhs_target_point(&editor) else {
         return Ok(refusal("comment_editor_not_found"));
     };
+    // 编辑器形态（受控框 / 富文本）决定这条评论**结构上能不能带一条分隔换行**。
+    // 三态：读不到时不猜 —— 猜错的两个方向都通向不可逆的错误提交。
+    let editor_is_plain = xhs_target_optional_bool(&editor, "plainValue");
+    // 联系方式串码要求终稿是「正文 + 换行 + 串码」（审=发）。换行在这里只有一条安全通道：
+    // 受控框里的字面 `\n`。富文本框既走不通字面换行（`Input.insertText("\n")` 常常
+    // 什么都不产生），也**不能**改走裸回车 —— 评论框上的回车是提交，会把只写了一半的评论
+    // 原样发出去，那是比丢一条换行严重得多的不可逆后果。所以这里在**零派发**处结构性拒绝，
+    // 而不是写下去再赌。没有串码时不需要分隔，富文本框照常可用。
+    if contact_code.is_some() {
+        match editor_is_plain {
+            Some(true) => {}
+            Some(false) => return Ok(refusal("comment_editor_cannot_carry_separator")),
+            None => return Ok(refusal("comment_editor_form_unreadable")),
+        }
+    }
     if let Err(failure) = dispatch_pointer_click(
         &mut session.cdp,
         x,
@@ -1357,16 +1411,26 @@ async fn execute_xhs_comment(
         serde_json::json!({"kind":"comment_editor","op":"clear"}),
     )
     .await?;
-    if !xhs_target_flag(&cleared, "cleared") {
-        return Ok(refusal("editor_not_clean"));
+    if let Err(reason) = xhs_target_gate(
+        &cleared,
+        "cleared",
+        "editor_not_clean",
+        "comment_editor_clear_unreadable",
+    ) {
+        return Ok(refusal(reason));
     }
     let focused = probe_xhs_input_target(
         session,
         serde_json::json!({"kind":"comment_editor","op":"focus"}),
     )
     .await?;
-    if !xhs_target_flag(&focused, "focused") {
-        return Ok(refusal("comment_editor_focus_failed"));
+    if let Err(reason) = xhs_target_gate(
+        &focused,
+        "focused",
+        "comment_editor_focus_failed",
+        "comment_editor_focus_unreadable",
+    ) {
+        return Ok(refusal(reason));
     }
     if !xhs_target_text(&focused, "value")
         .unwrap_or_default()
@@ -1376,8 +1440,9 @@ async fn execute_xhs_comment(
     }
 
     let units = build_content_units(&full_text).ok_or_else(xhs_units_internal_error)?;
-    // 评论框多为受控 textarea，那里的 `\n` 是普通字符；走裸回车会把评论提交出去。
-    if let Err(failure) = type_content_burst_humanized(
+    // 评论框是受控 textarea（上面那道形态闸已经把富文本 + 串码的组合零派发挡掉了），
+    // 那里的 `\n` 是普通字符；走裸回车会把评论提交出去。
+    match type_content_burst_humanized(
         &mut session.cdp,
         &units,
         &ContentNewline::LiteralCharacter,
@@ -1386,20 +1451,27 @@ async fn execute_xhs_comment(
     )
     .await
     {
-        clear_xhs_editor_best_effort(
-            session,
-            serde_json::json!({"kind":"comment_editor","op":"clear"}),
-        )
-        .await;
-        if matches!(failure, TextInputFailure::Cancelled) {
-            return Err(cancelled_before_dispatch());
+        Ok(outcome) => {
+            if let Some(note) = typing_degradation_note(&outcome) {
+                eprintln!("native_page_engine_xhs_typing_degraded:comment:{note}");
+            }
         }
-        return Ok(refusal(match failure {
-            TextInputFailure::Deadline => "comment_input_deadline_exceeded",
-            TextInputFailure::TargetLost => "comment_editor_focus_lost",
-            TextInputFailure::NewlineUnstable => "comment_newline_unstable",
-            TextInputFailure::Engine | TextInputFailure::Cancelled => "comment_input_failed",
-        }));
+        Err(failure) => {
+            clear_xhs_editor_best_effort(
+                session,
+                serde_json::json!({"kind":"comment_editor","op":"clear"}),
+            )
+            .await;
+            if matches!(failure, TextInputFailure::Cancelled) {
+                return Err(cancelled_before_dispatch());
+            }
+            return Ok(refusal(match failure {
+                TextInputFailure::Deadline => "comment_input_deadline_exceeded",
+                TextInputFailure::TargetLost => "comment_editor_focus_lost",
+                TextInputFailure::NewlineUnstable => "comment_newline_unstable",
+                TextInputFailure::Engine | TextInputFailure::Cancelled => "comment_input_failed",
+            }));
+        }
     }
 
     // 打字已经完成 ⇒ 编辑器里躺着一条填好的评论。此后到「按下提交」之前的**每一个**出口
@@ -1480,23 +1552,33 @@ async fn execute_xhs_comment(
 
     // 提交点已跨过：此后**不再**把取消当成「没提交」——那正是提交窗口存在的理由。
     tokio::time::sleep(Duration::from_millis(XHS_COMMENT_SETTLE_MS)).await;
-    let appeared = probe_xhs_input_target(
+    // 三态：读到「出现了」才 Confirmed；读到「没出现」与「压根读不到」都是 Ambiguous，
+    // 但**病因分开记** —— 前者说明提交很可能没生效，后者说明确认这一层本身瞎了。
+    let ack = probe_xhs_input_target(
         session,
         serde_json::json!({"kind":"comment_ack","text":body}),
     )
-    .await
-    .map(|value| xhs_target_flag(&value, "appeared"))
-    .unwrap_or(false);
-    Ok(if appeared {
-        xhs_action_outcome(EffectPhase::Confirmed, "comment", true, None, &note_id)
-    } else {
-        xhs_action_outcome(
+    .await;
+    let ack_verdict = match &ack {
+        Ok(value) => xhs_target_optional_bool(value, "appeared"),
+        Err(_) => None,
+    };
+    Ok(match ack_verdict {
+        Some(true) => xhs_action_outcome(EffectPhase::Confirmed, "comment", true, None, &note_id),
+        Some(false) => xhs_action_outcome(
             EffectPhase::Ambiguous,
             "comment",
             false,
             Some("submitted_unconfirmed"),
             &note_id,
-        )
+        ),
+        None => xhs_action_outcome(
+            EffectPhase::Ambiguous,
+            "comment",
+            false,
+            Some("submitted_ack_unreadable"),
+            &note_id,
+        ),
     })
 }
 
@@ -1513,6 +1595,11 @@ async fn xhs_comment_readback_and_submit_target(
     contact_code: Option<&str>,
     cancellation: Option<&AtomicBool>,
 ) -> Result<Result<(f64, f64), &'static str>, EngineError> {
+    // 串码在场 ⇒ 终稿恰好两段（正文归一后不含换行、串码同理）。这是「审=发」里那条分隔换行的
+    // **结构证据**，也是下面两道文本比对**看不见**的东西：`xhs_normalized_field` 把换行折成空格，
+    // 于是「正文 串码」连成一行时 `find(body)` 与 `find(code)` 照样命中、顺序照样正确 ⇒ 确认 ⇒
+    // 提交 ⇒ ok=true，而人审看到的终稿与真正发出去的不是同一份，任何一层都不会发现。
+    let expected_paragraphs = if contact_code.is_some() { 2 } else { 1 };
     let mut readback_reason = "comment_readback_mismatch";
     let mut confirmed = false;
     for round in 0..XHS_READBACK_BUDGET_MS.div_ceil(XHS_READBACK_INTERVAL_MS) {
@@ -1543,6 +1630,21 @@ async fn xhs_comment_readback_and_submit_target(
             readback_reason = "comment_readback_mismatch";
             continue;
         }
+        if expected_paragraphs > 1 {
+            match xhs_target_number(&read, "paragraphs") {
+                Some(paragraphs) if (paragraphs as usize) < expected_paragraphs => {
+                    readback_reason = "comment_separator_lost";
+                    continue;
+                }
+                // 「读不到段落数」与「段落数不够」是两态；读不到时**也不放行** ——
+                // 上面两道比对对换行免疫，此刻认定收敛就是静默假成功。
+                None => {
+                    readback_reason = "comment_paragraphs_unreadable";
+                    continue;
+                }
+                Some(_) => {}
+            }
+        }
         confirmed = true;
         break;
     }
@@ -1552,8 +1654,13 @@ async fn xhs_comment_readback_and_submit_target(
 
     let submit =
         probe_xhs_input_target(session, serde_json::json!({"kind":"comment_submit"})).await?;
-    if !xhs_target_flag(&submit, "found") {
-        return Ok(Err("comment_submit_not_found"));
+    if let Err(reason) = xhs_target_gate(
+        &submit,
+        "found",
+        "comment_submit_not_found",
+        "comment_submit_probe_unreadable",
+    ) {
+        return Ok(Err(reason));
     }
     let Some(point) = xhs_target_point(&submit) else {
         return Ok(Err("comment_submit_not_found"));
@@ -1581,13 +1688,26 @@ async fn execute_xhs_publish_fill_field(
     });
 
     let field = probe_xhs_input_target(session, field_request.clone()).await?;
-    if !xhs_target_flag(&field, "found") {
-        return Ok(not_started("publish_field_not_found"));
+    if let Err(reason) = xhs_target_gate(
+        &field,
+        "found",
+        "publish_field_not_found",
+        "publish_field_probe_unreadable",
+    ) {
+        return Ok(not_started(reason));
     }
     let Some((x, y)) = xhs_target_point(&field) else {
         return Ok(not_started("publish_field_not_found"));
     };
-    let plain_value = xhs_target_flag(&field, "plainValue");
+    // 编辑器形态决定换行走字面字符还是裸回车。读不到时**不猜**：猜成富文本会往受控框里打回车，
+    // 猜成受控框会把段落写丢；两个方向都通向「写了但不是那份内容」。零派发拒绝才是诚实的。
+    let Some(plain_value) = xhs_target_optional_bool(&field, "plainValue") else {
+        eprintln!(
+            "native_page_engine_xhs_target_unreadable:plainValue:{}",
+            xhs_unreadable_cause(&field)
+        );
+        return Ok(not_started("publish_field_form_unreadable"));
+    };
 
     let units = build_content_units(&params.value).ok_or_else(xhs_units_internal_error)?;
     let newline_count = units
@@ -1623,16 +1743,26 @@ async fn execute_xhs_publish_fill_field(
         };
     }
     let cleared = probe_xhs_input_target(session, clear_request.clone()).await?;
-    if !xhs_target_flag(&cleared, "cleared") {
-        return Ok(not_started("publish_field_not_clean"));
+    if let Err(reason) = xhs_target_gate(
+        &cleared,
+        "cleared",
+        "publish_field_not_clean",
+        "publish_field_clear_unreadable",
+    ) {
+        return Ok(not_started(reason));
     }
     let focused = probe_xhs_input_target(
         session,
         serde_json::json!({"kind":"publish_field","op":"focus","fieldType":params.field_type}),
     )
     .await?;
-    if !xhs_target_flag(&focused, "focused") {
-        return Ok(not_started("publish_field_focus_failed"));
+    if let Err(reason) = xhs_target_gate(
+        &focused,
+        "focused",
+        "publish_field_focus_failed",
+        "publish_field_focus_unreadable",
+    ) {
+        return Ok(not_started(reason));
     }
 
     let caret_state_expression = xhs::input_targets_expression(&serde_json::json!({
@@ -1647,7 +1777,7 @@ async fn execute_xhs_publish_fill_field(
             stabilize_budget_ms: per_newline_ms,
         }
     };
-    if let Err(failure) = type_content_burst_humanized(
+    match type_content_burst_humanized(
         &mut session.cdp,
         &units,
         &newline,
@@ -1656,23 +1786,32 @@ async fn execute_xhs_publish_fill_field(
     )
     .await
     {
-        clear_xhs_editor_best_effort(session, clear_request.clone()).await;
-        if matches!(failure, TextInputFailure::Cancelled) {
-            return Err(cancelled_before_dispatch());
+        Ok(outcome) => {
+            if let Some(note) = typing_degradation_note(&outcome) {
+                eprintln!("native_page_engine_xhs_typing_degraded:publish_field:{note}");
+            }
         }
-        return Ok(xhs_publish_outcome(
-            EffectPhase::Ambiguous,
-            record_id,
-            seq,
-            false,
-            Some(match failure {
-                TextInputFailure::Deadline => "publish_field_deadline_exceeded",
-                TextInputFailure::TargetLost => "publish_field_focus_lost",
-                // 「没稳住」与「探针读不到」分开上报，真机上才分得清病因。
-                TextInputFailure::NewlineUnstable => "publish_content_newline_unstable",
-                TextInputFailure::Engine | TextInputFailure::Cancelled => "publish_field_failed",
-            }),
-        ));
+        Err(failure) => {
+            clear_xhs_editor_best_effort(session, clear_request.clone()).await;
+            if matches!(failure, TextInputFailure::Cancelled) {
+                return Err(cancelled_before_dispatch());
+            }
+            return Ok(xhs_publish_outcome(
+                EffectPhase::Ambiguous,
+                record_id,
+                seq,
+                false,
+                Some(match failure {
+                    TextInputFailure::Deadline => "publish_field_deadline_exceeded",
+                    TextInputFailure::TargetLost => "publish_field_focus_lost",
+                    // 「没稳住」与「探针读不到」分开上报，真机上才分得清病因。
+                    TextInputFailure::NewlineUnstable => "publish_content_newline_unstable",
+                    TextInputFailure::Engine | TextInputFailure::Cancelled => {
+                        "publish_field_failed"
+                    }
+                }),
+            ));
+        }
     }
 
     let wanted = xhs_normalized_field(&params.value);
@@ -1806,12 +1945,16 @@ struct XhsScrollArea {
 
 /// 读一处可滚区。返回 `None` 的含义是**读不到**（解析不出可滚区，或数值字段缺失），
 /// 与「读到了、但页面没动」是两态——调用方 MUST NOT 把前者当后者。
+///
+/// 这里 `found == Some(false)`（分片解析不出可滚区）与 `None`（读不到判定）确实同属
+/// 「读不到一处可滚区」这一态，不是折叠：分片的 `found:false` 本来就是「我没解析出来」，
+/// 与「这里确实没有可滚区」不是一回事，两者对调用方的处置也完全相同。
 async fn probe_xhs_scroll_area(
     session: &mut EngineSession,
     request: serde_json::Value,
 ) -> Result<Option<XhsScrollArea>, EngineError> {
     let value = probe_xhs_input_target(session, request).await?;
-    if !xhs_target_flag(&value, "found") {
+    if xhs_target_optional_bool(&value, "found") != Some(true) {
         return Ok(None);
     }
     let (Some((x, y)), Some(position), Some(viewport_height)) = (
@@ -1945,10 +2088,20 @@ async fn close_xhs_detail_overlay(
 ) -> Result<(), EngineError> {
     let probe =
         probe_xhs_input_target(session, serde_json::json!({ "kind": "detail_close" })).await?;
-    if !xhs_target_flag(&probe, "overlay") {
-        return Ok(());
+    // 三态：读到「没有浮层」才跳过。读不到时**不当作没有浮层** —— 那会让手势落在浮层上、
+    // feed 一步不动却读到位移。读不到就照「浮层可能在、关闭控件没认出来」那条走（照常去滚，
+    // 位移按实测回报），并留一行成因。
+    match xhs_target_optional_bool(&probe, "overlay") {
+        Some(false) => return Ok(()),
+        Some(true) => {}
+        None => eprintln!(
+            "native_page_engine_xhs_target_unreadable:overlay:{}",
+            xhs_unreadable_cause(&probe)
+        ),
     }
-    let Some((x, y)) = xhs_target_point(&probe).filter(|_| xhs_target_flag(&probe, "found")) else {
+    let Some((x, y)) = xhs_target_point(&probe)
+        .filter(|_| xhs_target_optional_bool(&probe, "found") == Some(true))
+    else {
         eprintln!("native_page_engine_xhs_detail_close_control_missing");
         return Ok(());
     };
@@ -2063,12 +2216,17 @@ async fn execute_xhs_comment_scroll(
         serde_json::json!({"kind":"note_guard","noteId":note_id}),
     )
     .await?;
-    if !xhs_target_flag(&guard, "match") {
+    if let Err(reason) = xhs_target_gate(
+        &guard,
+        "match",
+        "note_page_mismatch",
+        "note_guard_unreadable",
+    ) {
         return Ok(xhs_action_outcome(
             EffectPhase::NotStarted,
             "scroll_comments",
             false,
-            Some("note_page_mismatch"),
+            Some(reason),
             &note_id,
         ));
     }

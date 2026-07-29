@@ -57,6 +57,12 @@ const TYPING_PAUSE_BUDGET_SHARE: u64 = 2;
 /// 逐字档里单次停顿的封顶倍数：预算宽裕时不裁（保留 8% 概率的长停顿这一人感特征），
 /// 预算收紧时才由中心值的这个倍数封住尾部。
 const TYPING_PER_CHAR_PAUSE_CAP_FACTOR: u64 = 4;
+/// 一次写入还称得上「像人打的」的字符上限。**它不是封顶动作，是判据**：
+/// 规划出的块超过它，说明剩余预算已经买不起拟人粒度，这一步是**降级**的。
+/// 降级本身不被禁止（禁止它会把内容写不完，违反零丢失红线），但**绝不许无声发生** ——
+/// 一次 1000 字的 `Input.insertText` 在时序特征上等价于退役实现的「原型 value setter 整段赋值」，
+/// 正是本 change 要根除的机器特征；回执照报成功、日志里一行痕迹都没有，就是这条红线的输入侧形态。
+const TYPING_HUMANE_CHUNK_CHARS: usize = 120;
 /// 换行后的归尾确认：轮询间隔与**迭代次数**上限（按次数限界，不按墙钟死循环）。
 const NEWLINE_STABILIZE_INTERVAL_MS: u64 = 80;
 const NEWLINE_STABILIZE_MAX_ROUNDS: usize = 19;
@@ -320,6 +326,9 @@ pub(crate) fn content_text_char_count(units: &[ContentUnit]) -> usize {
 pub(crate) struct TypingStep {
     pub(crate) chunk_size: usize,
     pub(crate) pause_center_ms: u64,
+    /// 这一步的粒度已经买不起拟人形态（块大于 `TYPING_HUMANE_CHUNK_CHARS`）。
+    /// 由调用方累计并响亮记一笔，绝不无声吞掉。
+    pub(crate) degraded: bool,
 }
 
 impl TypingStep {
@@ -343,6 +352,16 @@ impl TypingStep {
 ///
 /// 推导：预算一半给停顿、一半给往返；往返那一半除以**实测**的单次往返成本得到还买得起
 /// 几次写入，再与剩余字符数、往返上限取小；块大小由「剩余字符数 ÷ 买得起的次数」向上取整。
+///
+/// 这里的 `.max(1)` 是**终止性**保证，不是拟人下限：预算收紧时 `affordable_sends` 一路降到 0，
+/// 只有兜住 1 才能让剩余尾巴在一次写入里落地、循环收敛。给它抬一个「至少分 N 块」的下限
+/// 会破坏这条收敛性 —— 每一步重算都只吃掉剩余的 1/N，字符按几何级数递减而预算按线性递减，
+/// 结果是写到 90% 撞死线、清场、诚实失败；把一次「像机器但内容完整」的成功换成一次失败，
+/// 方向反了。所以这里不加下限，改为**把降级如实标出来**（`degraded`），由调用方响亮记账。
+///
+/// 另注：初始估值 60ms ⇒ 第一步只有在剩余预算不足 120ms 时才会降级，而那之前
+/// `xhs_typing_deadline` 已经零派发拒绝了。故降级只可能发生在**尾巴**上，整篇正文
+/// 一次性灌进去这一形态结构上到不了。
 pub(crate) fn plan_typing_step(
     remaining_chars: usize,
     remaining_budget_ms: u64,
@@ -352,6 +371,7 @@ pub(crate) fn plan_typing_step(
         return TypingStep {
             chunk_size: 1,
             pause_center_ms: 0,
+            degraded: false,
         };
     }
     let send_cost = observed_send_cost_ms.max(1);
@@ -368,7 +388,35 @@ pub(crate) fn plan_typing_step(
     TypingStep {
         chunk_size,
         pause_center_ms,
+        degraded: chunk_size > TYPING_HUMANE_CHUNK_CHARS,
     }
+}
+
+/// 一次分块输入跑完之后的**实测**账：写进去多少字符、有几步是降级的、最大的一次写入多少字符、
+/// 实测单次往返成本收敛到多少。后三项只在降级发生时才有意义，专供响亮记账。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct TypingOutcome {
+    /// **实际写进页面**的字符数（换行按 1 计）。绝不回报请求值。
+    pub(crate) written: usize,
+    pub(crate) degraded_sends: usize,
+    pub(crate) max_chunk_chars: usize,
+    pub(crate) observed_send_cost_ms: u64,
+}
+
+/// 降级记账行。没降级就是 `None` —— 让「一切正常」与「降级了但没人看见」在类型上就分得开。
+///
+/// 这一行是真机上唯一能看出「拟人写入退化成整段赋值」的证据：`send_cost_ms` 指向放大器
+/// （单次慢往返被单调 `max` 永久抬高），`max_chunk` 指向这次退化到了多机器。
+pub(crate) fn typing_degradation_note(outcome: &TypingOutcome) -> Option<String> {
+    (outcome.degraded_sends > 0).then(|| {
+        format!(
+            "degraded_sends={}:max_chunk={}:humane_chunk={}:send_cost_ms={}",
+            outcome.degraded_sends,
+            outcome.max_chunk_chars,
+            TYPING_HUMANE_CHUNK_CHARS,
+            outcome.observed_send_cost_ms,
+        )
+    })
 }
 
 /// 分块突发式输入（8.2 的新原语）。
@@ -377,18 +425,20 @@ pub(crate) fn plan_typing_step(
 /// 长正文才把块撑大。**取消缝仍在「这一块的停顿已结束、它的写入尚未发出」那一瞬**，
 /// 已写入的部分留在编辑器里，由调用方负责清场。
 ///
-/// 返回**实际写进页面的字符数**（换行按 1 计）。绝不回报请求值。
+/// 返回**实测**的写入账（写进去多少字符、降级了几步）。绝不回报请求值。
 pub(crate) async fn type_content_burst_humanized(
     cdp: &mut CdpSession,
     units: &[ContentUnit],
     newline: &ContentNewline<'_>,
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
-) -> Result<usize, TextInputFailure> {
+) -> Result<TypingOutcome, TextInputFailure> {
     let mut rhythm = KeyboardRhythm::new();
     let mut remaining_chars = content_text_char_count(units);
     let mut observed_send_cost_ms = TYPING_INITIAL_SEND_COST_MS;
     let mut written = 0_usize;
+    let mut degraded_sends = 0_usize;
+    let mut max_chunk_chars = 0_usize;
     let mut expected_prefix = String::new();
     let mut expected_newlines = 0_usize;
     for unit in units {
@@ -452,6 +502,12 @@ pub(crate) async fn type_content_burst_humanized(
                     let delay_ms = step.delay_ms(&mut rhythm, chars[index]);
                     // 取消缝：这一块的停顿已结束、它的写入尚未发出。
                     wait_before_character(delay_ms, cancellation, deadline_unix_ms).await?;
+                    // 记账在**派发之前**：这一步的粒度已经定了，之后不论成功、超时还是被接管，
+                    // 「这一次写入有多机器」都已经是既成事实，不该被后续的失败路径抹掉。
+                    if step.degraded {
+                        degraded_sends += 1;
+                    }
+                    max_chunk_chars = max_chunk_chars.max(take);
                     let started = Instant::now();
                     cdp.insert_text(&chunk)
                         .await
@@ -469,7 +525,12 @@ pub(crate) async fn type_content_burst_humanized(
             }
         }
     }
-    Ok(written)
+    Ok(TypingOutcome {
+        written,
+        degraded_sends,
+        max_chunk_chars,
+        observed_send_cost_ms,
+    })
 }
 
 fn remaining_budget_ms(deadline_unix_ms: u64) -> u64 {
@@ -484,6 +545,13 @@ fn remaining_budget_ms(deadline_unix_ms: u64) -> u64 {
 ///
 /// 「读不到」与「没稳住」是两态：全程一次都没读到判定 ⇒ `Engine`（探针问题），
 /// 读到过但始终不满足 ⇒ `NewlineUnstable`。压成一态就会在真机上按图索骥找一个不存在的病因。
+///
+/// 预算按**实际流逝**限界，不按「预算 ÷ 间隔」推算轮数：每一轮的真实开销是
+/// 「一次 `Runtime.evaluate` 往返 + 一个间隔」，真机 RTT 几十毫秒 ⇒ 推算出来的轮数
+/// 跑起来能吃掉分配值的两倍以上。而 `xhs_fill_budget` 正是按这个分配值把可用窗口的
+/// **一半**划给归尾确认的 —— 推算法让那个「一半」的前提不成立，12 段正文能把 26.5s 里的
+/// 21.5s 吃掉、只剩 5s 给 5000 字正文，然后撞死线、清场、诚实失败。
+/// 迭代次数上限仍在（`NEWLINE_STABILIZE_MAX_ROUNDS`），所以不是拿墙钟裸跑死循环。
 async fn stabilize_after_newline(
     cdp: &mut CdpSession,
     expression: &str,
@@ -493,17 +561,32 @@ async fn stabilize_after_newline(
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
 ) -> Result<(), TextInputFailure> {
-    let rounds = (budget_ms / NEWLINE_STABILIZE_INTERVAL_MS)
-        .min(NEWLINE_STABILIZE_MAX_ROUNDS as u64) as usize;
-    if rounds < NEWLINE_STABILIZE_REQUIRED_HITS as usize {
+    if budget_ms < NEWLINE_STABILIZE_INTERVAL_MS * u64::from(NEWLINE_STABILIZE_REQUIRED_HITS) {
         // 预算连两轮都排不下：这一段结构上不可能确认，不开写才是诚实的。
         return Err(TextInputFailure::NewlineUnstable);
     }
+    let started = Instant::now();
     let expected = normalize_field_text(expected_prefix);
     let expected_hanzi = hanzi_only(&expected);
     let mut hits = 0_u32;
     let mut readable_once = false;
-    for _ in 0..rounds {
+    for round in 0..NEWLINE_STABILIZE_MAX_ROUNDS {
+        if round > 0 {
+            // 下一轮（间隔 + 一次往返）排不进剩余预算就收工。判据是**已经花掉多少**，
+            // 不是「按名义间隔应该还剩几轮」。
+            let elapsed_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+            let interval_ms = if elapsed_ms + NEWLINE_STABILIZE_INTERVAL_MS >= budget_ms {
+                0
+            } else {
+                NEWLINE_STABILIZE_INTERVAL_MS
+            };
+            // 即使这一轮已经排不下，也先走一次（零等待的）接管 / 死线检查：
+            // 接管必须**原样穿出**，不许被「没稳住」这条本地结局盖掉。
+            wait_before_character(interval_ms, cancellation, deadline_unix_ms).await?;
+            if interval_ms == 0 {
+                break;
+            }
+        }
         let raw = cdp
             .evaluate(expression, true)
             .await
@@ -534,12 +617,6 @@ async fn stabilize_after_newline(
             }
             None => hits = 0,
         }
-        wait_before_character(
-            NEWLINE_STABILIZE_INTERVAL_MS,
-            cancellation,
-            deadline_unix_ms,
-        )
-        .await?;
     }
     Err(if readable_once {
         TextInputFailure::NewlineUnstable
@@ -1819,6 +1896,53 @@ mod tests {
             );
             assert!(step.pause_center_ms <= TYPING_PAUSE_CENTER_CEILING_MS);
         }
+    }
+
+    /// 预算买不起拟人粒度时的降级**必须被标出来**。
+    ///
+    /// 降级本身不被禁止：这里的 `.max(1)` 是终止性保证，抬成「至少分 N 块」会让每一步只吃掉
+    /// 剩余的 1/N，字符按几何级数递减而预算按线性递减，结果是写到九成撞死线 —— 把一次
+    /// 「像机器但内容完整」的成功换成一次失败。所以这一条钉的是：降级**不许无声发生**。
+    #[test]
+    fn a_tail_that_can_no_longer_afford_humane_granularity_is_marked_and_accounted_for() {
+        // 一次慢往返把实测成本抬到 3s，剩余预算只有 1s ⇒ 往返那一半连一次都买不起。
+        let degraded = plan_typing_step(5_000, 1_000, 3_000);
+        assert_eq!(
+            degraded.chunk_size, 5_000,
+            "终止性：买不起时尾巴必须能在一次写入里落地"
+        );
+        assert!(
+            degraded.degraded,
+            "5000 字一次性灌进去是机器特征（等价于退役实现的整段赋值），必须被标成降级"
+        );
+
+        let note = typing_degradation_note(&TypingOutcome {
+            written: 5_000,
+            degraded_sends: 1,
+            max_chunk_chars: 5_000,
+            observed_send_cost_ms: 3_000,
+        })
+        .expect("降级必须留下记账行，否则拟人保证是悄悄消失的");
+        assert!(
+            note.contains("max_chunk=5000"),
+            "记账行要指出退化到了多机器：{note}"
+        );
+        assert!(
+            note.contains("send_cost_ms=3000"),
+            "记账行要指向放大器（单调 max 的实测往返成本）：{note}"
+        );
+
+        // 对照：预算宽裕时既不降级，也不留噪声行 —— 否则这条断言什么也没证明。
+        let healthy = plan_typing_step(5_000, 30_000, 60);
+        assert!(healthy.chunk_size <= TYPING_HUMANE_CHUNK_CHARS);
+        assert!(!healthy.degraded);
+        assert_eq!(
+            typing_degradation_note(&TypingOutcome {
+                written: 5_000,
+                ..TypingOutcome::default()
+            }),
+            None
+        );
     }
 
     /// 预算收紧只会让块变大、停顿变短 —— 方向必须是这一个，反了就是用拟人化制造超时。
