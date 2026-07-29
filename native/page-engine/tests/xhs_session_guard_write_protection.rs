@@ -19,7 +19,7 @@ use aidcp_page_engine::protocol::{
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -39,7 +39,9 @@ fn xiaohongshu_commit_window_contracts_keep_the_pre_migration_labels_and_budgets
     // 评论回车：点下即进入「已提交、结果未知」区，取消 = 把一条可能已发出的评论当成没发生。
     let comment = xiaohongshu_commit_window(&comment_command()).expect("comment window");
     assert_eq!(comment.label, "xhs_comment_submit");
-    assert_eq!(comment.budget_ms, 4_000);
+    // 硬件级逐字输入整段落在窗口内之后，4s 必被打穿；预算抬到命令墙钟上限。
+    // 打穿的后果实测是「窗口静默过期 ⇒ 抢占可以落在提交那一刻」，不是「写入被拒发」。
+    assert_eq!(comment.budget_ms, 30_000);
 
     // 三条通知分类栏：点击**消费未读、无回滚**，窗口 MUST 覆盖点击那一刻。
     let comments = xiaohongshu_commit_window(&command(
@@ -85,18 +87,30 @@ fn xiaohongshu_commit_window_contracts_keep_the_pre_migration_labels_and_budgets
 }
 
 #[tokio::test]
-async fn comment_submit_requests_its_commit_window_before_touching_the_page() {
-    let (port, server) = spawn_xhs_cdp("note_detail", None).await;
+async fn comment_submit_requests_its_commit_window_before_any_write_dispatch() {
+    // 真正的不变量是**顺序**：提交窗口先于任何触碰页面的写动作，而不是「必须调用注入路由」。
+    // 后者是迁移期的实现细节 —— 写动作一旦被引擎特化截走，那条断言会连同缺陷一起变绿。
+    let observed_requests = Arc::new(AtomicUsize::new(0));
+    let (port, server) =
+        spawn_counted_xhs_cdp("note_detail", None, observed_requests.clone()).await;
     let mut engine = Engine::default();
     engine
         .open(&session_open(port))
         .await
         .expect("open session");
+    // 会话打开本身不该触碰页面：后面的「窗口之前只发生过阻断闸那一次探针」以此为基线。
+    let baseline = observed_requests.load(Ordering::Acquire);
 
     let (sender, mut receiver) = mpsc::unbounded_channel::<CommitWindowRequest>();
+    let seen_at_window = observed_requests.clone();
     let arbiter = tokio::spawn(async move {
         let request = receiver.recv().await.expect("commit window request");
-        let observed = (request.label, request.budget_ms);
+        // 引擎此刻正阻塞等确认，计数在这一瞬是稳定的。
+        let observed = (
+            request.label,
+            request.budget_ms,
+            seen_at_window.load(Ordering::Acquire),
+        );
         request.acknowledgement.send(true).expect("ack");
         observed
     });
@@ -110,24 +124,24 @@ async fn comment_submit_requests_its_commit_window_before_touching_the_page() {
         .await
         .expect("command result");
 
+    let (label, budget_ms, requests_before_window) = arbiter.await.expect("arbiter");
+    assert_eq!(label, "xhs_comment_submit");
+    // 逐字输入整段落在窗口内，预算随之抬到命令墙钟上限（推导见 commit_window.rs）。
+    assert_eq!(budget_ms, 30_000);
     assert_eq!(
-        arbiter.await.expect("arbiter"),
-        ("xhs_comment_submit", 4_000)
+        requests_before_window - baseline,
+        1,
+        "开窗之前只允许发生提交前阻断闸那一次页面探针"
     );
-    // 窗口拿到了就照常执行（这里页面规则回一个诚实的失败终局，本用例不关心它的内容）。
-    assert!(result.output.is_some() || result.error.is_some());
 
     drop(engine);
     let requests = server.await.expect("fake CDP");
+    // 窗口拿到之后引擎才继续往下走：请求总数必须真的增长过（否则上面那条计数断言恒真）。
     assert!(
-        requests.iter().any(|entry| {
-            entry
-                .pointer("/params/expression")
-                .and_then(Value::as_str)
-                .is_some_and(|expression| expression.contains(r#""kind":"interaction_comment""#))
-        }),
-        "窗口拿到之后才允许调用页面规则"
+        requests.len() > requests_before_window,
+        "窗口拿到之后才允许继续触碰页面"
     );
+    assert!(result.output.is_some() || result.error.is_some());
 }
 
 #[tokio::test]
@@ -168,22 +182,36 @@ async fn a_refused_commit_window_dispatches_nothing_and_terminates_as_not_starte
 
     drop(engine);
     let requests = server.await.expect("fake CDP");
-    assert!(
-        !requests.iter().any(|entry| {
-            entry["method"]
-                .as_str()
-                .is_some_and(|method| method.starts_with("Input."))
-        }),
-        "窗口被拒时 MUST NOT 派发任何输入"
-    );
-    assert!(
-        !requests.iter().any(|entry| {
+    // 「某某不得出现」这种否定式检查会被特化悄悄喂成恒真（被禁的东西本来就不再产生了）。
+    // 改成**穷举**：窗口被拒之后页面上只应留下阻断闸那一次探针，输入事件一个都没有。
+    let evaluated: Vec<&str> = requests
+        .iter()
+        .filter(|entry| entry["method"] == "Runtime.evaluate")
+        .map(|entry| {
             entry
                 .pointer("/params/expression")
                 .and_then(Value::as_str)
-                .is_some_and(|expression| expression.contains(r#""kind":"interaction_comment""#))
-        }),
-        "窗口被拒时 MUST NOT 调用页面规则"
+                .unwrap_or_default()
+        })
+        .collect();
+    assert_eq!(
+        evaluated.len(),
+        1,
+        "窗口被拒后除阻断闸那一次探针外不许再有任何求值：{evaluated:?}"
+    );
+    assert!(
+        evaluated[0].contains("feedCardCount"),
+        "那唯一一次求值就是提交前的阻断闸页面探针"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|entry| entry["method"]
+                .as_str()
+                .is_some_and(|method| method.starts_with("Input.")))
+            .count(),
+        0,
+        "窗口被拒时一个输入事件都不许派发"
     );
 }
 
@@ -331,7 +359,7 @@ fn session_open(port: u16) -> SessionOpenRecord {
             host: "127.0.0.1".to_owned(),
             port,
             platform: Platform::Xiaohongshu,
-            timeout_ms: 2_000,
+            timeout_ms: 30_000,
         },
     }
 }
@@ -343,7 +371,7 @@ fn write_command(command_id: u64, command: NativeCommand) -> CommandRecord {
         session_id: "session-guard".to_owned(),
         task_id: "browse-guard".to_owned(),
         command_id,
-        deadline_unix_ms: unix_time_ms() + 4_000,
+        deadline_unix_ms: unix_time_ms() + 30_000,
         command,
     }
 }
@@ -353,6 +381,14 @@ fn write_command(command_id: u64, command: NativeCommand) -> CommandRecord {
 async fn spawn_xhs_cdp(
     page_kind: &'static str,
     probe_override: Option<Value>,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    spawn_counted_xhs_cdp(page_kind, probe_override, Arc::new(AtomicUsize::new(0))).await
+}
+
+async fn spawn_counted_xhs_cdp(
+    page_kind: &'static str,
+    probe_override: Option<Value>,
+    observed: Arc<AtomicUsize>,
 ) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let port = listener.local_addr().expect("address").port();
@@ -400,6 +436,7 @@ async fn spawn_xhs_cdp(
             } else {
                 json!({})
             };
+            observed.fetch_add(1, Ordering::Release);
             requests.push(request);
             websocket
                 .send(Message::Text(

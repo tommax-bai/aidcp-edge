@@ -4,7 +4,12 @@ use crate::commit_window::{CommitWindowRequester, xiaohongshu_commit_window};
 use crate::endpoint;
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
-use crate::input::{TextInputFailure, type_captcha_with_key_events, type_text_humanized};
+use crate::input::{
+    ContentNewline, ContentUnit, PointerClickOptions, PointerInputFailure, TextInputFailure,
+    bigram_similarity, build_content_units, dispatch_pointer_click, hanzi_only,
+    normalize_field_text, type_captcha_with_key_events, type_content_burst_humanized,
+    type_text_humanized,
+};
 use crate::model::{
     ActionReceipt, CaptchaSnapshot, CaptchaTypeReport, FacebookIdentityReceipt,
     IdentityObservation, IdentityObservationSource, IdentityPageEffect, NoteDetail,
@@ -42,6 +47,27 @@ const FACEBOOK_COMMENT_TIMEOUT_MS: u64 = 180_000;
 const FACEBOOK_GROUP_JOIN_TIMEOUT_MS: u64 = 135_000;
 const FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS: u64 = 135_000;
 const FACEBOOK_PUBLISH_FILL_TIMEOUT_MS: u64 = 600_000;
+/// 小红书评论：写完之后还要花掉的墙钟 —— 提交目标 probe + 拟人点击 + 800ms 落定 +
+/// 结果扫描 + 失败清场 + CDP 抖动余量。**不照抄退役的 12s 停顿预算**：那是按
+/// 「宿主一次性 insertText」的旧支出账定的。
+const XHS_COMMENT_TAIL_RESERVE_MS: u64 = 6_000;
+/// 小红书发布字段：写完之后还要花掉的墙钟 —— 有界回读 2s + 光标归尾 + 失败清场 + 余量。
+const XHS_FILL_TAIL_RESERVE_MS: u64 = 3_500;
+/// 单个换行的归尾确认上限（退役实测值）与下限。低于下限时「连续两轮 80ms 命中」
+/// 结构上排不下，与其开写到一半超时，不如**开工前零派发**地诚实拒绝。
+const XHS_NEWLINE_STABILIZE_CEILING_MS: u64 = 1_500;
+const XHS_NEWLINE_STABILIZE_FLOOR_MS: u64 = 400;
+/// 归尾确认总量最多吃掉「扣掉收尾余量后」的这一份额，剩下的留给正文本身。
+const XHS_NEWLINE_STABILIZE_BUDGET_SHARE: u64 = 2;
+/// 写后有界回读窗口与轮询间隔（编辑器常在下一帧才把内容规整完，写完立刻单次读会误判）。
+const XHS_READBACK_BUDGET_MS: u64 = 2_000;
+const XHS_READBACK_INTERVAL_MS: u64 = 80;
+/// 评论提交之后的落定等待，与注入路由同口径。
+const XHS_COMMENT_SETTLE_MS: u64 = 800;
+/// 正文回读的语义相似度阈值：编辑器的空白规整 / 全半角替换是无害改写，严格等值会误杀。
+const XHS_CONTENT_SIMILARITY_THRESHOLD: f64 = 0.9;
+/// 与注入路由一致的字段级上限（按码点）。
+const XHS_TEXT_CLIP_CHARS: usize = 32_000;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -691,6 +717,15 @@ async fn execute_xhs_command_once(
         SearchExecute(params) => {
             execute_search(session, params, command, cancellation, deadline_unix_ms).await
         }
+        // 写动作特化：文本一律走硬件级逐字 / 分块输入原语，页面判据经混淆分片，
+        // 指针落焦与提交走拟人轨迹。截走之后注入路由里的同名分支不可达，
+        // 其删除归单写区属主 `restore-native-xiaohongshu-action-honesty`。
+        InteractionComment(params) => {
+            execute_xhs_comment(session, params, cancellation, deadline_unix_ms).await
+        }
+        PublishFillField(params) => {
+            execute_xhs_publish_fill_field(session, params, cancellation, deadline_unix_ms).await
+        }
         PublishUploadImage(params) => {
             validate_publish_file(&params.path)?;
             let selector = xhs::file_input_selector()?;
@@ -885,6 +920,8 @@ async fn execute_search(
                 TextInputFailure::Deadline => "search_input_deadline_exceeded",
                 TextInputFailure::Engine => "search_input_failed",
                 TextInputFailure::TargetLost => "search_input_focus_lost",
+                // 搜索框走的是逐字原语、不含换行单元，这一态在这条路径上结构上不可达。
+                TextInputFailure::NewlineUnstable => "search_input_failed",
                 TextInputFailure::Cancelled => unreachable!(),
             },
         ));
@@ -1004,6 +1041,592 @@ fn evaluated_value(result: &serde_json::Value) -> Result<Option<&serde_json::Val
         .with_decode_diagnostic(exception_diagnostic(exception)));
     }
     Ok(result.pointer("/result/value"))
+}
+
+// ───────────────────────────── 小红书写动作特化（§8 输入半边）─────────────────────────────
+
+/// 页面判据入口：选择器与 DOM 语义只活在混淆分片里，Rust 侧不写选择器。
+async fn probe_xhs_input_target(
+    session: &mut EngineSession,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, EngineError> {
+    let expression = xhs::input_targets_expression(&request)?;
+    session.cdp.evaluate(&expression, false).await
+}
+
+fn xhs_target_flag(value: &serde_json::Value, name: &str) -> bool {
+    value
+        .pointer(&format!("/result/value/{name}"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn xhs_target_text(value: &serde_json::Value, name: &str) -> Option<String> {
+    value
+        .pointer(&format!("/result/value/{name}"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn xhs_target_number(value: &serde_json::Value, name: &str) -> Option<f64> {
+    value
+        .pointer(&format!("/result/value/{name}"))
+        .and_then(serde_json::Value::as_f64)
+}
+
+fn xhs_target_point(value: &serde_json::Value) -> Option<(f64, f64)> {
+    Some((
+        xhs_target_number(value, "x")?,
+        xhs_target_number(value, "y")?,
+    ))
+}
+
+/// 与注入路由同口径的字段归一：折叠空白 + 去首尾 + 按码点截断。
+fn xhs_normalized_field(value: &str) -> String {
+    let normalized = normalize_field_text(value);
+    if normalized.chars().count() <= XHS_TEXT_CLIP_CHARS {
+        return normalized;
+    }
+    normalized.chars().take(XHS_TEXT_CLIP_CHARS).collect()
+}
+
+/// 有界等待，取消即原样穿出（接管优先于死线）。
+async fn xhs_wait_checked(
+    delay_ms: u64,
+    cancellation: Option<&AtomicBool>,
+) -> Result<(), EngineError> {
+    let delay = Duration::from_millis(delay_ms);
+    if let Some(cancellation) = cancellation {
+        tokio::select! {
+            _ = wait_for_cancellation(cancellation) => return Err(cancelled_before_dispatch()),
+            _ = tokio::time::sleep(delay) => {}
+        }
+    } else {
+        tokio::time::sleep(delay).await;
+    }
+    if cancellation.is_some_and(|value| value.load(Ordering::Acquire)) {
+        return Err(cancelled_before_dispatch());
+    }
+    Ok(())
+}
+
+fn xhs_action_outcome(
+    phase: EffectPhase,
+    action: &str,
+    ok: bool,
+    reason: Option<&str>,
+    note_id: &str,
+) -> (EffectPhase, CommandOutput) {
+    (
+        phase,
+        CommandOutput::ActionReceipt(Box::new(ActionReceipt {
+            action: action.to_owned(),
+            ok,
+            reason: reason.map(str::to_owned),
+            note_id: Some(note_id.to_owned()),
+            observation: None,
+            post_observation: None,
+            group_observation: None,
+            group_url: None,
+            clicked: None,
+            candidates: Vec::new(),
+            // 验证码键入取证只由验证码回执产出；这里显式写 None，**不用 `..Default::default()` 绕过**
+            // ——那一格带 `skip_serializing_if`，正是为了让普通动作完成回执里不要多出一个空字段。
+            type_report: None,
+        })),
+    )
+}
+
+fn xhs_publish_outcome(
+    phase: EffectPhase,
+    record_id: u64,
+    seq: u32,
+    ok: bool,
+    error: Option<&str>,
+) -> (EffectPhase, CommandOutput) {
+    (
+        phase,
+        CommandOutput::PublishReceipt(PublishReceipt {
+            record_id,
+            seq,
+            kind: "fill_field".to_owned(),
+            ok,
+            submit_dispatched: None,
+            value: None,
+            post_url: None,
+            error: error.map(str::to_owned),
+        }),
+    )
+}
+
+fn xhs_units_internal_error() -> EngineError {
+    EngineError::new(
+        ErrorCode::EngineInternal,
+        "native Xiaohongshu content units carried a newline after normalisation",
+    )
+}
+
+/// 逐字 / 分块输入的截止时刻：命令死线减去收尾必须留出的那一段。
+/// 留不出来就是**结构上做不到**，此时零派发地诚实拒绝，而不是开写到一半超时。
+fn xhs_typing_deadline(deadline_unix_ms: u64, tail_reserve_ms: u64) -> Option<u64> {
+    let now = unix_time_ms();
+    let available = deadline_unix_ms.saturating_sub(now);
+    let usable = available.checked_sub(tail_reserve_ms)?;
+    (usable > 0).then_some(now + usable)
+}
+
+/// 发布正文的预算推导：先扣收尾余量，再把归尾确认的总量限死在剩余的一半以内，
+/// 均摊到每个换行；摊到低于下限即开工前诚实拒绝。
+fn xhs_fill_budget(deadline_unix_ms: u64, newline_count: usize) -> Option<(u64, u64)> {
+    let typing_deadline = xhs_typing_deadline(deadline_unix_ms, XHS_FILL_TAIL_RESERVE_MS)?;
+    if newline_count == 0 {
+        return Some((typing_deadline, XHS_NEWLINE_STABILIZE_CEILING_MS));
+    }
+    let usable = typing_deadline.saturating_sub(unix_time_ms());
+    let allowance = (newline_count as u64 * XHS_NEWLINE_STABILIZE_CEILING_MS)
+        .min(usable / XHS_NEWLINE_STABILIZE_BUDGET_SHARE);
+    let per_newline_ms = allowance / newline_count as u64;
+    (per_newline_ms >= XHS_NEWLINE_STABILIZE_FLOOR_MS).then_some((typing_deadline, per_newline_ms))
+}
+
+/// 失败清场：留着半截草稿会被下一次写入拼上，或被提交原样发出去。
+async fn clear_xhs_editor_best_effort(session: &mut EngineSession, request: serde_json::Value) {
+    let _ = probe_xhs_input_target(session, request).await;
+}
+
+/// 小红书评论：目标闸 → 定位 → 拟人点击落焦 → 清场 → focus → 逐字输入 → 回读 → 提交 → 有界确认。
+///
+/// 提交窗口在命令开头已开（见 `execute_xhs_command_once` ②），逐字输入整段落在窗口内 ——
+/// 这正是把 `xhs_comment_submit` 预算从 4s 抬到命令上限的原因：窗口过期不会拒发写入，
+/// 但会让抢占落在**提交那一刻**，把一条可能已发出去的评论当成没发生。
+async fn execute_xhs_comment(
+    session: &mut EngineSession,
+    params: &crate::command::CommentParams,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let note_id = params.note_id.clone();
+    let refusal = |reason: &str| {
+        xhs_action_outcome(
+            EffectPhase::NotStarted,
+            "comment",
+            false,
+            Some(reason),
+            &note_id,
+        )
+    };
+
+    let guard = probe_xhs_input_target(
+        session,
+        serde_json::json!({"kind":"note_guard","noteId":note_id}),
+    )
+    .await?;
+    if !xhs_target_flag(&guard, "match") {
+        return Ok(refusal("note_page_mismatch"));
+    }
+    let body = xhs_normalized_field(&params.text);
+    if body.is_empty() {
+        return Ok(refusal("comment_text_empty"));
+    }
+    let contact_code = params
+        .group_chat_code
+        .as_deref()
+        .map(xhs_normalized_field)
+        .filter(|value| !value.is_empty());
+    // 审=发：人审看到的终稿是「正文 + 换行 + 联系方式串码」。
+    let full_text = match &contact_code {
+        Some(code) => format!("{body}\n{code}"),
+        None => body.clone(),
+    };
+    let Some(typing_deadline) = xhs_typing_deadline(deadline_unix_ms, XHS_COMMENT_TAIL_RESERVE_MS)
+    else {
+        return Ok(refusal("comment_budget_exhausted"));
+    };
+
+    let editor = probe_xhs_input_target(
+        session,
+        serde_json::json!({"kind":"comment_editor","op":"probe"}),
+    )
+    .await?;
+    if !xhs_target_flag(&editor, "found") {
+        return Ok(refusal("comment_editor_not_found"));
+    }
+    let Some((x, y)) = xhs_target_point(&editor) else {
+        return Ok(refusal("comment_editor_not_found"));
+    };
+    if let Err(failure) = dispatch_pointer_click(
+        &mut session.cdp,
+        x,
+        y,
+        PointerClickOptions::default(),
+        cancellation,
+        deadline_unix_ms,
+    )
+    .await
+    {
+        return match failure {
+            PointerInputFailure::CancelledBeforePress => Err(cancelled_before_dispatch()),
+            PointerInputFailure::DeadlineBeforePress => {
+                Ok(refusal("comment_editor_deadline_exceeded"))
+            }
+            // 落焦点击不是不可逆动作：这里报「未开始」说的是**这条评论**没开始，属实。
+            PointerInputFailure::MoveFailed(_) | PointerInputFailure::SubmitDispatched(_) => {
+                Ok(refusal("comment_editor_not_actuated"))
+            }
+        };
+    }
+    let cleared = probe_xhs_input_target(
+        session,
+        serde_json::json!({"kind":"comment_editor","op":"clear"}),
+    )
+    .await?;
+    if !xhs_target_flag(&cleared, "cleared") {
+        return Ok(refusal("editor_not_clean"));
+    }
+    let focused = probe_xhs_input_target(
+        session,
+        serde_json::json!({"kind":"comment_editor","op":"focus"}),
+    )
+    .await?;
+    if !xhs_target_flag(&focused, "focused") {
+        return Ok(refusal("comment_editor_focus_failed"));
+    }
+    if !xhs_target_text(&focused, "value")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Ok(refusal("editor_not_clean"));
+    }
+
+    let units = build_content_units(&full_text).ok_or_else(xhs_units_internal_error)?;
+    // 评论框多为受控 textarea，那里的 `\n` 是普通字符；走裸回车会把评论提交出去。
+    if let Err(failure) = type_content_burst_humanized(
+        &mut session.cdp,
+        &units,
+        &ContentNewline::LiteralCharacter,
+        cancellation,
+        typing_deadline,
+    )
+    .await
+    {
+        clear_xhs_editor_best_effort(
+            session,
+            serde_json::json!({"kind":"comment_editor","op":"clear"}),
+        )
+        .await;
+        if matches!(failure, TextInputFailure::Cancelled) {
+            return Err(cancelled_before_dispatch());
+        }
+        return Ok(refusal(match failure {
+            TextInputFailure::Deadline => "comment_input_deadline_exceeded",
+            TextInputFailure::TargetLost => "comment_editor_focus_lost",
+            TextInputFailure::NewlineUnstable => "comment_newline_unstable",
+            TextInputFailure::Engine | TextInputFailure::Cancelled => "comment_input_failed",
+        }));
+    }
+
+    // 回读：正文与串码都必须在，且串码在正文之后（不许丢、不许换序）。
+    let mut readback_reason = "comment_readback_mismatch";
+    let mut confirmed = false;
+    for round in 0..XHS_READBACK_BUDGET_MS.div_ceil(XHS_READBACK_INTERVAL_MS) {
+        if round > 0 {
+            xhs_wait_checked(XHS_READBACK_INTERVAL_MS, cancellation).await?;
+        }
+        let read = probe_xhs_input_target(
+            session,
+            serde_json::json!({"kind":"comment_editor","op":"probe"}),
+        )
+        .await?;
+        let value = xhs_normalized_field(&xhs_target_text(&read, "value").unwrap_or_default());
+        let Some(body_at) = value.find(body.as_str()) else {
+            readback_reason = "comment_readback_mismatch";
+            continue;
+        };
+        let code_at = match &contact_code {
+            Some(code) => match value.find(code.as_str()) {
+                Some(at) => at,
+                None => {
+                    readback_reason = "comment_contact_code_missing";
+                    continue;
+                }
+            },
+            None => body_at,
+        };
+        if code_at < body_at {
+            readback_reason = "comment_readback_mismatch";
+            continue;
+        }
+        confirmed = true;
+        break;
+    }
+    if !confirmed {
+        clear_xhs_editor_best_effort(
+            session,
+            serde_json::json!({"kind":"comment_editor","op":"clear"}),
+        )
+        .await;
+        return Ok(refusal(readback_reason));
+    }
+
+    let submit =
+        probe_xhs_input_target(session, serde_json::json!({"kind":"comment_submit"})).await?;
+    if !xhs_target_flag(&submit, "found") {
+        clear_xhs_editor_best_effort(
+            session,
+            serde_json::json!({"kind":"comment_editor","op":"clear"}),
+        )
+        .await;
+        return Ok(refusal("comment_submit_not_found"));
+    }
+    let Some((submit_x, submit_y)) = xhs_target_point(&submit) else {
+        clear_xhs_editor_best_effort(
+            session,
+            serde_json::json!({"kind":"comment_editor","op":"clear"}),
+        )
+        .await;
+        return Ok(refusal("comment_submit_not_found"));
+    };
+    if let Err(failure) = dispatch_pointer_click(
+        &mut session.cdp,
+        submit_x,
+        submit_y,
+        PointerClickOptions::default(),
+        cancellation,
+        deadline_unix_ms,
+    )
+    .await
+    {
+        return match failure {
+            PointerInputFailure::CancelledBeforePress => {
+                clear_xhs_editor_best_effort(
+                    session,
+                    serde_json::json!({"kind":"comment_editor","op":"clear"}),
+                )
+                .await;
+                Err(cancelled_before_dispatch())
+            }
+            PointerInputFailure::DeadlineBeforePress => {
+                clear_xhs_editor_best_effort(
+                    session,
+                    serde_json::json!({"kind":"comment_editor","op":"clear"}),
+                )
+                .await;
+                Ok(refusal("comment_submit_deadline_exceeded"))
+            }
+            PointerInputFailure::MoveFailed(_) => {
+                clear_xhs_editor_best_effort(
+                    session,
+                    serde_json::json!({"kind":"comment_editor","op":"clear"}),
+                )
+                .await;
+                Ok(refusal("comment_submit_not_actuated"))
+            }
+            // **按下已经派发**：这条评论可能已经发出去了。诚实红线 —— MUST NOT 回「未开始」，
+            // 否则上游会当成压根没点而重投，结果是重复评论。
+            PointerInputFailure::SubmitDispatched(_) => Ok(xhs_action_outcome(
+                EffectPhase::Ambiguous,
+                "comment",
+                false,
+                Some("submitted_unconfirmed"),
+                &note_id,
+            )),
+        };
+    }
+
+    // 提交点已跨过：此后**不再**把取消当成「没提交」——那正是提交窗口存在的理由。
+    tokio::time::sleep(Duration::from_millis(XHS_COMMENT_SETTLE_MS)).await;
+    let appeared = probe_xhs_input_target(
+        session,
+        serde_json::json!({"kind":"comment_ack","text":body}),
+    )
+    .await
+    .map(|value| xhs_target_flag(&value, "appeared"))
+    .unwrap_or(false);
+    Ok(if appeared {
+        xhs_action_outcome(EffectPhase::Confirmed, "comment", true, None, &note_id)
+    } else {
+        xhs_action_outcome(
+            EffectPhase::Ambiguous,
+            "comment",
+            false,
+            Some("submitted_unconfirmed"),
+            &note_id,
+        )
+    })
+}
+
+/// 小红书发布字段填写：正文换行走**裸回车 + 有界归尾确认**，文本写入结构上不携带回车符。
+async fn execute_xhs_publish_fill_field(
+    session: &mut EngineSession,
+    params: &crate::command::PublishFieldParams,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let record_id = params.record_id;
+    let seq = params.seq;
+    let not_started = |error: &str| {
+        xhs_publish_outcome(EffectPhase::NotStarted, record_id, seq, false, Some(error))
+    };
+    let field_request = serde_json::json!({
+        "kind":"publish_field","op":"probe","fieldType":params.field_type,
+    });
+    let clear_request = serde_json::json!({
+        "kind":"publish_field","op":"clear","fieldType":params.field_type,
+    });
+
+    let field = probe_xhs_input_target(session, field_request.clone()).await?;
+    if !xhs_target_flag(&field, "found") {
+        return Ok(not_started("publish_field_not_found"));
+    }
+    let Some((x, y)) = xhs_target_point(&field) else {
+        return Ok(not_started("publish_field_not_found"));
+    };
+    let plain_value = xhs_target_flag(&field, "plainValue");
+
+    let units = build_content_units(&params.value).ok_or_else(xhs_units_internal_error)?;
+    let newline_count = units
+        .iter()
+        .filter(|unit| matches!(unit, ContentUnit::Newline))
+        .count();
+    // 结构性前置判据：换行多到归尾确认排不下时，**开工前**零派发地诚实拒绝。
+    let Some((typing_deadline, per_newline_ms)) = xhs_fill_budget(
+        deadline_unix_ms,
+        if plain_value { 0 } else { newline_count },
+    ) else {
+        return Ok(not_started("publish_field_budget_exhausted"));
+    };
+
+    if let Err(failure) = dispatch_pointer_click(
+        &mut session.cdp,
+        x,
+        y,
+        PointerClickOptions::default(),
+        cancellation,
+        deadline_unix_ms,
+    )
+    .await
+    {
+        return match failure {
+            PointerInputFailure::CancelledBeforePress => Err(cancelled_before_dispatch()),
+            PointerInputFailure::DeadlineBeforePress => {
+                Ok(not_started("publish_field_deadline_exceeded"))
+            }
+            PointerInputFailure::MoveFailed(_) | PointerInputFailure::SubmitDispatched(_) => {
+                Ok(not_started("publish_field_not_actuated"))
+            }
+        };
+    }
+    let cleared = probe_xhs_input_target(session, clear_request.clone()).await?;
+    if !xhs_target_flag(&cleared, "cleared") {
+        return Ok(not_started("publish_field_not_clean"));
+    }
+    let focused = probe_xhs_input_target(
+        session,
+        serde_json::json!({"kind":"publish_field","op":"focus","fieldType":params.field_type}),
+    )
+    .await?;
+    if !xhs_target_flag(&focused, "focused") {
+        return Ok(not_started("publish_field_focus_failed"));
+    }
+
+    let caret_state_expression = xhs::input_targets_expression(&serde_json::json!({
+        "kind":"content_caret_state","fieldType":params.field_type,
+    }))?;
+    // 受控框（`value` 语义）里 `\n` 是普通字符；富文本正文才需要裸回车让编辑器自己拆段。
+    let newline = if plain_value {
+        ContentNewline::LiteralCharacter
+    } else {
+        ContentNewline::BareEnterKey {
+            caret_state_expression: caret_state_expression.as_str(),
+            stabilize_budget_ms: per_newline_ms,
+        }
+    };
+    if let Err(failure) = type_content_burst_humanized(
+        &mut session.cdp,
+        &units,
+        &newline,
+        cancellation,
+        typing_deadline,
+    )
+    .await
+    {
+        clear_xhs_editor_best_effort(session, clear_request.clone()).await;
+        if matches!(failure, TextInputFailure::Cancelled) {
+            return Err(cancelled_before_dispatch());
+        }
+        return Ok(xhs_publish_outcome(
+            EffectPhase::Ambiguous,
+            record_id,
+            seq,
+            false,
+            Some(match failure {
+                TextInputFailure::Deadline => "publish_field_deadline_exceeded",
+                TextInputFailure::TargetLost => "publish_field_focus_lost",
+                // 「没稳住」与「探针读不到」分开上报，真机上才分得清病因。
+                TextInputFailure::NewlineUnstable => "publish_content_newline_unstable",
+                TextInputFailure::Engine | TextInputFailure::Cancelled => "publish_field_failed",
+            }),
+        ));
+    }
+
+    let wanted = xhs_normalized_field(&params.value);
+    let head: String = wanted.chars().take(20).collect();
+    let expected_paragraphs = params
+        .value
+        .split('\n')
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    let mut settled = false;
+    for round in 0..XHS_READBACK_BUDGET_MS.div_ceil(XHS_READBACK_INTERVAL_MS) {
+        if round > 0 {
+            xhs_wait_checked(XHS_READBACK_INTERVAL_MS, cancellation).await?;
+        }
+        let read = probe_xhs_input_target(session, field_request.clone()).await?;
+        let value = xhs_normalized_field(&xhs_target_text(&read, "value").unwrap_or_default());
+        if value.is_empty() || (!head.is_empty() && !value.starts_with(head.as_str())) {
+            continue;
+        }
+        if plain_value && expected_paragraphs > 1 {
+            let paragraphs = xhs_target_number(&read, "paragraphs").unwrap_or_default() as usize;
+            if paragraphs < expected_paragraphs {
+                continue;
+            }
+        }
+        if value == wanted || bigram_similarity(&value, &wanted) >= XHS_CONTENT_SIMILARITY_THRESHOLD
+        {
+            settled = true;
+            break;
+        }
+        // 汉字档退化比较：编辑器对标点 / 全半角的无害改写不该判成内容丢失。
+        let wanted_hanzi = hanzi_only(&wanted);
+        if !wanted_hanzi.is_empty() && hanzi_only(&value).contains(wanted_hanzi.as_str()) {
+            settled = true;
+            break;
+        }
+    }
+    if !settled {
+        clear_xhs_editor_best_effort(session, clear_request).await;
+        return Ok(xhs_publish_outcome(
+            EffectPhase::Ambiguous,
+            record_id,
+            seq,
+            false,
+            Some("publish_field_readback_mismatch"),
+        ));
+    }
+    // 光标归尾：后续的话题 / @ 候选都在光标处继续写，光标不在尾部会插到正文中间。
+    let _ = probe_xhs_input_target(
+        session,
+        serde_json::json!({"kind":"publish_field","op":"cursor_to_end","fieldType":params.field_type}),
+    )
+    .await;
+    Ok(xhs_publish_outcome(
+        EffectPhase::Confirmed,
+        record_id,
+        seq,
+        true,
+        None,
+    ))
 }
 
 async fn probe_xhs_search_input(
@@ -1554,6 +2177,8 @@ pub(crate) async fn click_captcha(
                         TextInputFailure::Deadline => "captcha_type_deadline_exceeded",
                         TextInputFailure::Engine => "captcha_type_failed",
                         TextInputFailure::TargetLost => "captcha_input_focus_lost",
+                        // 验证码走逐字原语、不含换行单元，这一态结构上不可达。
+                        TextInputFailure::NewlineUnstable => "captcha_type_failed",
                     },
                     &forensics,
                 ));

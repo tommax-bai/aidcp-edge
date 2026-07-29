@@ -13,6 +13,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/xhs-command-router.js");
     println!("cargo:rerun-if-changed=src/xhs-file-input-selector.txt");
     println!("cargo:rerun-if-changed=src/xhs-search-input-geometry.js");
+    println!("cargo:rerun-if-changed=src/xhs-input-targets.js");
     println!("cargo:rerun-if-changed=src/facebook-router/manifest.txt");
     println!("cargo:rerun-if-changed=src/facebook-file-input-selector.txt");
     println!("cargo:rerun-if-changed=command-manifest.json");
@@ -88,6 +89,25 @@ fn main() {
         .join("xhs_search_input_geometry_bytes.rs");
     fs::write(search_geometry_output_path, search_geometry_output)
         .expect("write encoded native search input geometry");
+
+    let input_targets_source =
+        fs::read("src/xhs-input-targets.js").expect("read native input targets source");
+    let input_targets_encoded: Vec<u8> = input_targets_source
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| byte ^ KEY[index % KEY.len()])
+        .collect();
+    let input_targets_bytes = input_targets_encoded
+        .iter()
+        .map(|byte| format!("0x{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let input_targets_output =
+        format!("pub const XHS_INPUT_TARGETS_BYTES: &[u8] = &[{input_targets_bytes}];\n");
+    let input_targets_output_path =
+        PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("xhs_input_targets_bytes.rs");
+    fs::write(input_targets_output_path, input_targets_output)
+        .expect("write encoded native input targets");
 
     let facebook_router_source = read_ordered_sources("src/facebook-router/manifest.txt");
     let facebook_router_encoded: Vec<u8> = facebook_router_source

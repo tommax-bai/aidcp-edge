@@ -616,6 +616,8 @@ pub(crate) async fn execute_facebook_publish_fill(
             TextInputFailure::Deadline => "fill_deadline_exceeded",
             TextInputFailure::Engine => "engine_error",
             TextInputFailure::TargetLost => "composer_focus_lost",
+            // 逐字原语不含换行单元，这一态在本路径上结构上不可达。
+            TextInputFailure::NewlineUnstable => "engine_error",
             TextInputFailure::Cancelled => unreachable!(),
         };
         let error = facebook_publish_fill_cleanup_error(reason, cleanup);

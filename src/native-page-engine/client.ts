@@ -972,7 +972,10 @@ export const NATIVE_COMMIT_WINDOW_BUDGETS: Readonly<Record<NativeCommitWindowLab
   fb_join_click: 27_750,
   fb_comment_enter: 30_000,
   fb_publish_submit: 30_000,
-  xhs_comment_submit: 4_000,
+  // 评论提交现在把硬件级逐字输入整段包在窗口里（引擎侧 `commit_window.rs` 写了推导），
+  // 故预算 = 命令墙钟上限 `MAX_NATIVE_TIMEOUT_MS`。窗口的真实关闭点仍是命令结束时的 dispose，
+  // 这个数字只是兜底上限。**两侧必须同批改**：这里漏改会让评论写入全部拒发。
+  xhs_comment_submit: 30_000,
   xhs_notification_comments: 20_000,
   xhs_notification_likes: 20_000,
   xhs_notification_follows: 20_000,

@@ -19,6 +19,7 @@ include!(concat!(
     env!("OUT_DIR"),
     "/xhs_search_input_geometry_bytes.rs"
 ));
+include!(concat!(env!("OUT_DIR"), "/xhs_input_targets_bytes.rs"));
 
 const ROUTER_KEY: &[u8] = &[
     0x91, 0x2f, 0xc4, 0x6a, 0x5d, 0xe3, 0x18, 0xb7, 0x42, 0x0d, 0xfa,
@@ -62,6 +63,22 @@ pub fn search_input_expression(mode: &str) -> Result<String, EngineError> {
     let source = String::from_utf8(decoded).map_err(|_| invalid_result())?;
     let mode = serde_json::to_string(mode).map_err(|_| invalid_result())?;
     Ok(format!("({})({mode})", source.trim()))
+}
+
+/// 写动作特化分支的页面判据入口。选择器与 DOM 语义**只活在分片里**，Rust 侧不写选择器
+/// ——与 `search_input_expression` 同构（那条已跑通），也与 Facebook 的 `*_expression()` 同一形。
+///
+/// 请求形状：`{ kind, op?, noteId?, fieldType?, text? }`；返回一律是有界的判定结构，
+/// 不带页面正文全文与凭据。
+pub fn input_targets_expression(request: &Value) -> Result<String, EngineError> {
+    let decoded: Vec<u8> = XHS_INPUT_TARGETS_BYTES
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| byte ^ ROUTER_KEY[index % ROUTER_KEY.len()])
+        .collect();
+    let source = String::from_utf8(decoded).map_err(|_| invalid_result())?;
+    let request = serde_json::to_string(request).map_err(|_| invalid_result())?;
+    Ok(format!("({})({request})", source.trim()))
 }
 
 /// 结果解码入口。诊断与 Facebook 侧同级（阶段 / 字段路径 / 异常位置），构造函数在

@@ -12,9 +12,21 @@ pub struct XiaohongshuCommitWindow {
     pub budget_ms: u64,
 }
 
+/// 评论提交窗口的预算 = 命令墙钟上限。
+///
+/// 迁移后这里是 4s，那是「写入瞬时、窗口只覆盖点提交 + 校验」时代的值。接上硬件级逐字输入后，
+/// 打字整段落在窗口内，4s 必被打穿。**实测确认过打穿的后果**：窗口只是静默过期
+/// （`src/execution/commit-window.ts` 的 `isOpen()` 按 `now < openUntil` 判定，过期即 false），
+/// 引擎侧 `enter` 之后**再无任何复检**，宿主也只在命令结束时 dispose ——
+/// 所以打穿**不会**让写入被拒发（拒发只发生在「标签不在宿主白名单里」那一种），
+/// 它的真实后果是**抢占会落在提交那一刻**：一条可能已经发出去的评论被当成没发生 ⇒ 上游重投 ⇒ 重复评论。
+///
+/// 因此预算抬到命令上限（`engine.rs` 的 `DEFAULT_COMMAND_TIMEOUT_MS`，也是宿主
+/// `MAX_NATIVE_TIMEOUT_MS`）。这不等于「整条命令禁抢占 30s」：宿主在命令结束时就 dispose，
+/// 预算只是**兜底上限**，防一个卡死的窗口永久挡住抢占。
 const XHS_COMMENT_SUBMIT: XiaohongshuCommitWindow = XiaohongshuCommitWindow {
     label: "xhs_comment_submit",
-    budget_ms: 4_000,
+    budget_ms: 30_000,
 };
 const XHS_NOTIFICATION_COMMENTS: XiaohongshuCommitWindow = XiaohongshuCommitWindow {
     label: "xhs_notification_comments",

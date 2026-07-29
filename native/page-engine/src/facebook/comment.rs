@@ -235,6 +235,8 @@ pub(crate) async fn execute_facebook_comment(
                 TextInputFailure::Deadline => "comment_deadline_exceeded",
                 TextInputFailure::Engine => "comment_input_failed",
                 TextInputFailure::TargetLost => "comment_input_focus_lost",
+                // 逐字原语不含换行单元，这一态在本路径上结构上不可达。
+                TextInputFailure::NewlineUnstable => "comment_input_failed",
                 TextInputFailure::Cancelled => unreachable!(),
             },
             Some(params.note_id.clone()),

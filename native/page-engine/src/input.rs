@@ -40,6 +40,28 @@ const POINTER_ORIGIN_OFFSET_MAX_PX: f64 = 160.0;
 const POINTER_AIM_DWELL_CENTER_MS: f64 = 70.0;
 const POINTER_AIM_DWELL_MIN_MS: f64 = 35.0;
 const POINTER_AIM_DWELL_MAX_MS: f64 = 180.0;
+/// 分块突发式输入的封顶常量。**封顶只作用于「一次写多少字」与「块间停多久」，
+/// 绝不作用于内容** —— 所有字符都必须写入，预算耗尽只允许诚实失败，不允许写一半报成功。
+///
+/// 上限 240 次往返 = 「再长的正文也不会把往返数拖成失控」；退役实现写死 50，那是按
+/// 「云端 30s 单步 + 宿主一次性 insertText」的旧支出账定的，Native 形态下这 30s 还要
+/// 多养活 IPC / 闸探页 / 开窗 / 目标 probe / 拟人点击 / 清空 / focus / 回读 / 提交确认 / 清场，
+/// 所以数值不照抄，改由每次写入前按**剩余预算**现算（见 `plan_typing_step`）。
+const TYPING_MAX_SENDS_CEILING: usize = 240;
+/// 块间停顿的中心值上限。再长的停顿对「像人」没有增益，只是把预算烧掉。
+const TYPING_PAUSE_CENTER_CEILING_MS: u64 = 220;
+/// 一次 CDP 写入往返的初始保守估值；真实值由每次写入实测后单调抬升（见 `type_content_burst_humanized`）。
+const TYPING_INITIAL_SEND_COST_MS: u64 = 60;
+/// 剩余预算里给停顿的份额（1/2），另一半留给 CDP 往返本身。
+const TYPING_PAUSE_BUDGET_SHARE: u64 = 2;
+/// 逐字档里单次停顿的封顶倍数：预算宽裕时不裁（保留 8% 概率的长停顿这一人感特征），
+/// 预算收紧时才由中心值的这个倍数封住尾部。
+const TYPING_PER_CHAR_PAUSE_CAP_FACTOR: u64 = 4;
+/// 换行后的归尾确认：轮询间隔与**迭代次数**上限（按次数限界，不按墙钟死循环）。
+const NEWLINE_STABILIZE_INTERVAL_MS: u64 = 80;
+const NEWLINE_STABILIZE_MAX_ROUNDS: usize = 19;
+/// 连续命中多少轮才算稳定。一次命中可能正落在编辑器的延迟选区事务之前。
+const NEWLINE_STABILIZE_REQUIRED_HITS: u32 = 2;
 /// 极近距离不生成无意义曲线，直接一帧到位。
 const POINTER_DEGENERATE_DISTANCE_PX: f64 = 2.0;
 /// 轨迹最多吃掉剩余预算的这一份额；超预算时缩帧，**绝不**因此跳过按下 / 抬起配平。
@@ -58,6 +80,9 @@ pub(crate) enum TextInputFailure {
     Deadline,
     Engine,
     TargetLost,
+    /// 换行后的归尾确认在预算内始终没稳住（**读到了、但没稳**）。
+    /// 与 `Engine`（探针根本读不到）分开：把「读不到」压成「没稳住」等于把不知道说成知道。
+    NewlineUnstable,
 }
 
 /// 验证码键入的失败**带上已派发字符数**（change restore-native-xiaohongshu-session-guards 任务 3.5）。
@@ -220,6 +245,411 @@ async fn type_text_humanized_inner(
         typed += 1;
     }
     Ok(typed)
+}
+
+/// 文本写入的结构性不变量：**一次写入永远不携带回车符**。
+///
+/// 这不是注释级约定，而是类型级约定 —— 唯一的构造器带否定检查，构造失败即响亮失败。
+/// **绝不**提供「发现带回车就过滤掉」的兜底：那会把「内容被悄悄改写」说成成功，
+/// 正是本轮要根除的静默假成功。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NewlineFreeText(String);
+
+impl NewlineFreeText {
+    pub(crate) fn new(value: &str) -> Option<Self> {
+        (!value.contains('\n') && !value.contains('\r')).then(|| Self(value.to_owned()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// 正文的两类输入单元。文本单元结构上不可能携带回车符；换行是独立单元，
+/// 由调用方按编辑器形态选择它的写法（见 `ContentNewline`）。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ContentUnit {
+    Text(NewlineFreeText),
+    Newline,
+}
+
+/// 换行怎么写。
+pub(crate) enum ContentNewline<'a> {
+    /// 当成普通字符写（受控 `textarea` / `input` 形态，例如评论框）：
+    /// 那里的 `\n` 就是一个字符，不是段落事务，走裸回车反而会把评论提交出去。
+    LiteralCharacter,
+    /// 裸回车按键 + 有界归尾确认（富文本正文）：让编辑器自己执行段落拆分，
+    /// 并在每次回车后确认「已写前缀仍在 + 换行数达标 + 光标在末端」连续两轮命中。
+    BareEnterKey {
+        caret_state_expression: &'a str,
+        stabilize_budget_ms: u64,
+    },
+}
+
+/// 把一段文本拆成输入单元。`\r\n` / 裸 `\r` 先归一成 `\n`，文本片段一律来自
+/// `split('\n')` —— 其产物结构上不可能含 `\n`，故 `NewlineFreeText::new` 恒成功；
+/// 返回 `None` 只可能是编程错误，调用方 MUST 响亮失败，不得静默降级。
+pub(crate) fn build_content_units(text: &str) -> Option<Vec<ContentUnit>> {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut units = Vec::new();
+    for (index, line) in normalized.split('\n').enumerate() {
+        if index > 0 {
+            units.push(ContentUnit::Newline);
+        }
+        if line.is_empty() {
+            continue;
+        }
+        units.push(ContentUnit::Text(NewlineFreeText::new(line)?));
+    }
+    Some(units)
+}
+
+/// 单元里的文本字符总数（换行不计 —— 它走的是另一条通道）。
+pub(crate) fn content_text_char_count(units: &[ContentUnit]) -> usize {
+    units
+        .iter()
+        .map(|unit| match unit {
+            ContentUnit::Text(value) => value.as_str().chars().count(),
+            ContentUnit::Newline => 0,
+        })
+        .sum()
+}
+
+/// 一次写入的形状：这次写几个字符、写之前停多久。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TypingStep {
+    pub(crate) chunk_size: usize,
+    pub(crate) pause_center_ms: u64,
+}
+
+impl TypingStep {
+    fn delay_ms(&self, rhythm: &mut KeyboardRhythm, first: char) -> u64 {
+        if self.pause_center_ms == 0 {
+            return 0;
+        }
+        if self.chunk_size == 1 {
+            // 逐字档走键盘节奏（与退役实现逐项一致）；只有预算收紧时封顶才真的咬住。
+            rhythm
+                .flight_delay_ms(first)
+                .min(self.pause_center_ms * TYPING_PER_CHAR_PAUSE_CAP_FACTOR)
+        } else {
+            sample_pause_ms(self.pause_center_ms as f64)
+        }
+    }
+}
+
+/// 按**剩余字符数**与**剩余预算**现算下一次写入的形状。每次写入前都重算一次，
+/// 所以一次 CDP 抖动只会让后续的块变大 / 停顿变短，绝不会变成「少写几个字」。
+///
+/// 推导：预算一半给停顿、一半给往返；往返那一半除以**实测**的单次往返成本得到还买得起
+/// 几次写入，再与剩余字符数、往返上限取小；块大小由「剩余字符数 ÷ 买得起的次数」向上取整。
+pub(crate) fn plan_typing_step(
+    remaining_chars: usize,
+    remaining_budget_ms: u64,
+    observed_send_cost_ms: u64,
+) -> TypingStep {
+    if remaining_chars == 0 {
+        return TypingStep {
+            chunk_size: 1,
+            pause_center_ms: 0,
+        };
+    }
+    let send_cost = observed_send_cost_ms.max(1);
+    let pause_budget_ms = remaining_budget_ms / TYPING_PAUSE_BUDGET_SHARE;
+    let roundtrip_budget_ms = remaining_budget_ms - pause_budget_ms;
+    let affordable_sends = (roundtrip_budget_ms / send_cost).max(1);
+    let max_sends = affordable_sends
+        .min(remaining_chars as u64)
+        .min(TYPING_MAX_SENDS_CEILING as u64) as usize;
+    let chunk_size = remaining_chars.div_ceil(max_sends);
+    let chunk_count = remaining_chars.div_ceil(chunk_size);
+    let pause_center_ms =
+        (pause_budget_ms / chunk_count as u64).min(TYPING_PAUSE_CENTER_CEILING_MS);
+    TypingStep {
+        chunk_size,
+        pause_center_ms,
+    }
+}
+
+/// 分块突发式输入（8.2 的新原语）。
+///
+/// 与逐字原语的关系：短文本自然落到 `chunk_size == 1`，逐字派发、走同一条键盘节奏；
+/// 长正文才把块撑大。**取消缝仍在「这一块的停顿已结束、它的写入尚未发出」那一瞬**，
+/// 已写入的部分留在编辑器里，由调用方负责清场。
+///
+/// 返回**实际写进页面的字符数**（换行按 1 计）。绝不回报请求值。
+pub(crate) async fn type_content_burst_humanized(
+    cdp: &mut CdpSession,
+    units: &[ContentUnit],
+    newline: &ContentNewline<'_>,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<usize, TextInputFailure> {
+    let mut rhythm = KeyboardRhythm::new();
+    let mut remaining_chars = content_text_char_count(units);
+    let mut observed_send_cost_ms = TYPING_INITIAL_SEND_COST_MS;
+    let mut written = 0_usize;
+    let mut expected_prefix = String::new();
+    let mut expected_newlines = 0_usize;
+    for unit in units {
+        match unit {
+            ContentUnit::Newline => {
+                let step = plan_typing_step(
+                    remaining_chars.max(1),
+                    remaining_budget_ms(deadline_unix_ms),
+                    observed_send_cost_ms,
+                );
+                // 取消缝：停顿已结束、这一次换行尚未发出。
+                wait_before_character(step.pause_center_ms, cancellation, deadline_unix_ms).await?;
+                match newline {
+                    ContentNewline::LiteralCharacter => {
+                        cdp.insert_text("\n")
+                            .await
+                            .map_err(|_| TextInputFailure::Engine)?;
+                    }
+                    ContentNewline::BareEnterKey {
+                        caret_state_expression,
+                        stabilize_budget_ms,
+                    } => {
+                        // 裸回车：不带 text —— 让编辑器自己执行段落拆分。
+                        // 带 '\r' 的 keypress 形态是搜索框专用，用在正文上会触发提交。
+                        cdp.dispatch_key("rawKeyDown", "Enter", "Enter", 13)
+                            .await
+                            .map_err(|_| TextInputFailure::Engine)?;
+                        cdp.dispatch_key("keyUp", "Enter", "Enter", 13)
+                            .await
+                            .map_err(|_| TextInputFailure::Engine)?;
+                        expected_prefix.push('\n');
+                        expected_newlines += 1;
+                        written += 1;
+                        stabilize_after_newline(
+                            cdp,
+                            caret_state_expression,
+                            &expected_prefix,
+                            expected_newlines,
+                            *stabilize_budget_ms,
+                            cancellation,
+                            deadline_unix_ms,
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
+                expected_prefix.push('\n');
+                written += 1;
+            }
+            ContentUnit::Text(value) => {
+                let chars: Vec<char> = value.as_str().chars().collect();
+                let mut index = 0;
+                while index < chars.len() {
+                    let step = plan_typing_step(
+                        remaining_chars,
+                        remaining_budget_ms(deadline_unix_ms),
+                        observed_send_cost_ms,
+                    );
+                    let take = step.chunk_size.min(chars.len() - index);
+                    let chunk: String = chars[index..index + take].iter().collect();
+                    let delay_ms = step.delay_ms(&mut rhythm, chars[index]);
+                    // 取消缝：这一块的停顿已结束、它的写入尚未发出。
+                    wait_before_character(delay_ms, cancellation, deadline_unix_ms).await?;
+                    let started = Instant::now();
+                    cdp.insert_text(&chunk)
+                        .await
+                        .map_err(|_| TextInputFailure::Engine)?;
+                    // 实测单次往返成本，单调抬升（保守方向：只会让后续块更大、往返更少，
+                    // 绝不会因为低估而把内容写不完）。
+                    let elapsed_ms: u64 =
+                        started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+                    observed_send_cost_ms = observed_send_cost_ms.max(elapsed_ms);
+                    expected_prefix.push_str(&chunk);
+                    written += take;
+                    remaining_chars = remaining_chars.saturating_sub(take);
+                    index += take;
+                }
+            }
+        }
+    }
+    Ok(written)
+}
+
+fn remaining_budget_ms(deadline_unix_ms: u64) -> u64 {
+    deadline_unix_ms.saturating_sub(unix_time_ms())
+}
+
+/// 换行之后的有界归尾确认。
+///
+/// 判据四条同时成立才算一次命中：探针读到了目标 && 已写前缀仍在 && 换行数达标 && 光标在末端；
+/// 任一条不满足即把连续命中计数**清零**。连续两轮命中才收敛 —— 富文本编辑器的选区事务
+/// 可能比一次读慢一拍，单轮命中会把「还没落定」当成落定。
+///
+/// 「读不到」与「没稳住」是两态：全程一次都没读到判定 ⇒ `Engine`（探针问题），
+/// 读到过但始终不满足 ⇒ `NewlineUnstable`。压成一态就会在真机上按图索骥找一个不存在的病因。
+async fn stabilize_after_newline(
+    cdp: &mut CdpSession,
+    expression: &str,
+    expected_prefix: &str,
+    expected_newlines: usize,
+    budget_ms: u64,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<(), TextInputFailure> {
+    let rounds = (budget_ms / NEWLINE_STABILIZE_INTERVAL_MS)
+        .min(NEWLINE_STABILIZE_MAX_ROUNDS as u64) as usize;
+    if rounds < NEWLINE_STABILIZE_REQUIRED_HITS as usize {
+        // 预算连两轮都排不下：这一段结构上不可能确认，不开写才是诚实的。
+        return Err(TextInputFailure::NewlineUnstable);
+    }
+    let expected = normalize_field_text(expected_prefix);
+    let expected_hanzi = hanzi_only(&expected);
+    let mut hits = 0_u32;
+    let mut readable_once = false;
+    for _ in 0..rounds {
+        let raw = cdp
+            .evaluate(expression, true)
+            .await
+            .map_err(|_| TextInputFailure::Engine)?;
+        match caret_state_from_cdp(&raw) {
+            Some(state) => {
+                readable_once = true;
+                // 前缀两级比较：编辑器会做无害的空白规整 / 全半角改写，严格等值会误杀；
+                // 含汉字时只比汉字（退役实测口径），不含汉字才比规整后的全文。
+                let prefix_matches = expected.is_empty()
+                    || if expected_hanzi.is_empty() {
+                        state.text.contains(&expected)
+                    } else {
+                        hanzi_only(&state.text).contains(&expected_hanzi)
+                    };
+                if state.found
+                    && prefix_matches
+                    && state.newlines >= expected_newlines
+                    && state.at_end
+                {
+                    hits += 1;
+                    if hits >= NEWLINE_STABILIZE_REQUIRED_HITS {
+                        return Ok(());
+                    }
+                } else {
+                    hits = 0;
+                }
+            }
+            None => hits = 0,
+        }
+        wait_before_character(
+            NEWLINE_STABILIZE_INTERVAL_MS,
+            cancellation,
+            deadline_unix_ms,
+        )
+        .await?;
+    }
+    Err(if readable_once {
+        TextInputFailure::NewlineUnstable
+    } else {
+        TextInputFailure::Engine
+    })
+}
+
+pub(crate) struct CaretState {
+    pub(crate) found: bool,
+    pub(crate) text: String,
+    pub(crate) newlines: usize,
+    pub(crate) at_end: bool,
+}
+
+/// 解析归尾探针的读数。异常 / 结构缺失一律回 `None`＝**这一轮没读到**，
+/// 绝不冒充「读到了一个坏消息」。
+pub(crate) fn caret_state_from_cdp(raw: &serde_json::Value) -> Option<CaretState> {
+    if raw.get("exceptionDetails").is_some() {
+        return None;
+    }
+    let value = raw.pointer("/result/value")?;
+    Some(CaretState {
+        found: value.get("found").and_then(serde_json::Value::as_bool)?,
+        text: value
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        newlines: value
+            .get("newlines")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default() as usize,
+        at_end: value
+            .get("atEnd")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+/// 与页面侧读回同口径的归一：折叠空白、去首尾。
+pub(crate) fn normalize_field_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut pending_space = false;
+    for character in value.chars() {
+        if character.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space && !out.is_empty() {
+            out.push(' ');
+        }
+        pending_space = false;
+        out.push(character);
+    }
+    out
+}
+
+/// 只保留汉字。用于前缀比较的退化档：编辑器对标点 / 全半角的无害改写不该判成内容丢失。
+pub(crate) fn hanzi_only(value: &str) -> String {
+    value.chars().filter(|value| is_han(*value)).collect()
+}
+
+fn is_han(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x2_0000..=0x2_A6DF
+            | 0x2_A700..=0x2_EBEF
+            | 0x2_F800..=0x2_FA1F
+            | 0x3_0000..=0x3_134F
+    )
+}
+
+/// 字符二元组 Dice 系数。编辑器的空白规整 / 全半角替换是无害改写，严格等值会误杀；
+/// 但「只写进去一半」会显著拉低系数，阈值仍拦得住。
+pub(crate) fn bigram_similarity(left: &str, right: &str) -> f64 {
+    if left == right {
+        return 1.0;
+    }
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    let bigrams = |value: &str| {
+        let characters: Vec<char> = value.chars().collect();
+        let mut map: std::collections::HashMap<(char, char), usize> =
+            std::collections::HashMap::new();
+        for window in characters.windows(2) {
+            *map.entry((window[0], window[1])).or_default() += 1;
+        }
+        map
+    };
+    let first = bigrams(left);
+    let second = bigrams(right);
+    let mut shared = 0_usize;
+    let mut total = 0_usize;
+    for (gram, count) in &first {
+        total += count;
+        shared += (*count).min(second.get(gram).copied().unwrap_or_default());
+    }
+    for count in second.values() {
+        total += count;
+    }
+    if total == 0 {
+        0.0
+    } else {
+        2.0 * shared as f64 / total as f64
+    }
 }
 
 /// 逐字符派发验证码答案，**成功与失败都回带真实的已派发字符数**。
@@ -1282,6 +1712,157 @@ mod tests {
         let tight = pointer_frame_budget(pointer_time_allowance_ms(unix_time_ms() + 240));
         assert!((1..POINTER_FRAME_COUNT_MAX).contains(&tight));
     }
+
+    /// 「文本写入一律不带回车符」由**类型系统**承载：构造器带否定检查，且没有
+    /// 「发现带回车就过滤掉」的兜底 —— 那种兜底会把内容被改写说成成功。
+    #[test]
+    fn newline_free_text_rejects_carriage_and_line_feed() {
+        assert!(NewlineFreeText::new("a\nb").is_none());
+        assert!(NewlineFreeText::new("a\rb").is_none());
+        assert!(NewlineFreeText::new("a\r\nb").is_none());
+        let clean = NewlineFreeText::new("正文 abc 😀").expect("clean text");
+        assert_eq!(clean.as_str(), "正文 abc 😀");
+    }
+
+    /// 拆单元既不许把回车带进文本单元，也不许丢掉任何一个字符：
+    /// 用 `'\n'` 把单元重新接起来必须逐字符等于归一化后的原文。
+    #[test]
+    fn content_units_never_carry_a_newline_and_lose_no_character() {
+        for sample in [
+            "第一段\r\n第二段",
+            "单个回车\r第二段",
+            "连续空行\n\n\n收尾",
+            "emoji 😀\n第二段 🎉",
+            "\n开头就是换行",
+            "结尾是换行\n",
+            "没有换行",
+            "",
+        ] {
+            let units = build_content_units(sample).expect("units");
+            for unit in &units {
+                if let ContentUnit::Text(value) = unit {
+                    assert!(
+                        !value.as_str().contains('\n') && !value.as_str().contains('\r'),
+                        "text unit carried a newline for {sample:?}"
+                    );
+                }
+            }
+            let rejoined: String = units
+                .iter()
+                .map(|unit| match unit {
+                    ContentUnit::Text(value) => value.as_str().to_owned(),
+                    ContentUnit::Newline => "\n".to_owned(),
+                })
+                .collect();
+            let normalized = sample.replace("\r\n", "\n").replace('\r', "\n");
+            assert_eq!(rejoined, normalized, "content lost for {sample:?}");
+            assert_eq!(
+                content_text_char_count(&units),
+                normalized.chars().filter(|value| *value != '\n').count()
+            );
+        }
+    }
+
+    /// 封顶只缩**往返与停顿**，绝不缩内容：任意（字数, 预算）组合下，模拟整条写入循环，
+    /// 写入次数受上限约束、且写进去的字符数恒等于原字数。
+    #[test]
+    fn the_send_cap_shrinks_round_trips_never_content() {
+        for (chars, budget_ms, send_cost_ms) in [
+            (5_usize, 20_000_u64, 60_u64),
+            (200, 20_000, 60),
+            (1_000, 12_000, 60),
+            (5_000, 12_000, 60),
+            (5_000, 3_000, 200),
+            (32_000, 1_000, 400),
+        ] {
+            let mut remaining = chars;
+            let mut spent_ms = 0_u64;
+            let mut sends = 0_usize;
+            let mut written = 0_usize;
+            while remaining > 0 {
+                let step =
+                    plan_typing_step(remaining, budget_ms.saturating_sub(spent_ms), send_cost_ms);
+                assert!(step.chunk_size >= 1, "块大小恒 ≥ 1，否则循环不前进");
+                let take = step.chunk_size.min(remaining);
+                spent_ms += step.pause_center_ms + send_cost_ms;
+                sends += 1;
+                written += take;
+                remaining -= take;
+            }
+            assert_eq!(
+                written, chars,
+                "封顶绝不许丢字符（{chars} 字 / {budget_ms}ms）"
+            );
+            assert!(
+                sends <= TYPING_MAX_SENDS_CEILING,
+                "写入次数 {sends} 越过上限（{chars} 字 / {budget_ms}ms）"
+            );
+        }
+    }
+
+    /// 每一步的停顿计划都只敢要走「剩下的一半」：块数 × 中心值 ≤ 剩余预算的一半，
+    /// 且中心值不越过人感上限。
+    #[test]
+    fn the_pause_plan_never_asks_for_more_than_half_of_what_is_left() {
+        for (chars, budget_ms) in [
+            (1_usize, 30_000_u64),
+            (24, 20_000),
+            (1_000, 12_000),
+            (5_000, 6_000),
+            (5_000, 100),
+        ] {
+            let step = plan_typing_step(chars, budget_ms, 60);
+            let chunk_count = chars.div_ceil(step.chunk_size) as u64;
+            assert!(
+                step.pause_center_ms * chunk_count <= budget_ms / 2,
+                "停顿计划越过了剩余预算的一半（{chars} 字 / {budget_ms}ms）"
+            );
+            assert!(step.pause_center_ms <= TYPING_PAUSE_CENTER_CEILING_MS);
+        }
+    }
+
+    /// 预算收紧只会让块变大、停顿变短 —— 方向必须是这一个，反了就是用拟人化制造超时。
+    #[test]
+    fn a_tighter_budget_only_grows_the_chunk_and_shortens_the_pause() {
+        let roomy = plan_typing_step(2_000, 20_000, 60);
+        let tight = plan_typing_step(2_000, 2_000, 60);
+        assert!(tight.chunk_size >= roomy.chunk_size);
+        assert!(tight.pause_center_ms <= roomy.pause_center_ms);
+    }
+
+    /// 归尾探针的读数：异常 / 结构缺失 = **这一轮没读到**，绝不冒充「读到了坏消息」。
+    #[test]
+    fn caret_state_separates_unreadable_from_a_real_reading() {
+        assert!(
+            caret_state_from_cdp(&serde_json::json!({"exceptionDetails": {"lineNumber": 1}}))
+                .is_none()
+        );
+        assert!(caret_state_from_cdp(&serde_json::json!({"result": {}})).is_none());
+        assert!(
+            caret_state_from_cdp(&serde_json::json!({"result": {"value": {"text": "x"}}}))
+                .is_none()
+        );
+        let state = caret_state_from_cdp(&serde_json::json!({
+            "result": {"value": {"found": true, "text": "第一段 第二段", "newlines": 1, "atEnd": true}}
+        }))
+        .expect("readable");
+        assert!(state.found && state.at_end);
+        assert_eq!(state.newlines, 1);
+    }
+
+    /// 前缀比较的两级口径：编辑器的空白规整 / 全半角改写是无害的，严格等值会误杀。
+    #[test]
+    fn prefix_comparison_survives_harmless_editor_rewrites() {
+        assert_eq!(
+            normalize_field_text("  第一段\n\n第二段  "),
+            "第一段 第二段"
+        );
+        assert_eq!(hanzi_only("第一段，abc123 第二段！"), "第一段第二段");
+        assert!(bigram_similarity("第一段第二段", "第一段第二段") > 0.99);
+        assert!(bigram_similarity("第一段第二段", "第一段") < XHS_TEST_SIMILARITY_FLOOR);
+    }
+
+    const XHS_TEST_SIMILARITY_FLOOR: f64 = 0.9;
 
     #[test]
     fn wheel_gesture_preserves_upward_direction() {

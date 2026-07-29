@@ -354,7 +354,7 @@ const BROWSE_SUCCESS_OUTPUTS: Readonly<Record<string, readonly SuccessOutput[]>>
     { output: 'action_receipt', platform: 'facebook', source: 'facebook/shared.rs facebook_action_result' },
   ],
   interaction_comment: [
-    { output: 'action_receipt', platform: 'xiaohongshu', source: 'xhs-command-router.js kind===interaction_comment' },
+    { output: 'action_receipt', platform: 'xiaohongshu', source: 'engine.rs execute_xhs_comment（引擎特化后不再走注入路由）' },
     { output: 'action_receipt', platform: 'facebook', source: 'facebook/comment.rs facebook_action_result' },
   ],
   interaction_like_comment: [
