@@ -1,10 +1,11 @@
 use crate::command::NativeCommand;
 use crate::engine::CommandOutput;
-use crate::error::{EngineError, ErrorCode};
+use crate::error::{DecodeStage, EngineError, ErrorCode, JsonValueType};
 use crate::model::{
     ActionReceipt, NoteDetail, NotificationHome, NotificationItems, ObservedActionReceipt,
     PageCards, PlanResults, ProfileDetail, PublishReceipt,
 };
+use crate::probe::{decode_diagnostic, deserialize_with_diagnostic, exception_diagnostic};
 use crate::protocol::EffectPhase;
 use serde::Deserialize;
 use serde_json::Value;
@@ -63,20 +64,42 @@ pub fn search_input_expression(mode: &str) -> Result<String, EngineError> {
     Ok(format!("({})({mode})", source.trim()))
 }
 
+/// 结果解码入口。诊断与 Facebook 侧同级（阶段 / 字段路径 / 异常位置），构造函数在
+/// `crate::probe`、由各平台共用；诊断保持有界，不含页面正文与凭据。
+/// 裸错误只留下一句「结果无效」，真机上无从分辨是规则改版、字段漂移，还是页面根本没跑起来。
 pub fn result_from_cdp(result: &Value) -> Result<BrowserCommandResult, EngineError> {
-    if result.get("exceptionDetails").is_some() {
-        return Err(invalid_result());
+    if let Some(exception) = result.get("exceptionDetails") {
+        return Err(invalid_result().with_decode_diagnostic(exception_diagnostic(exception)));
     }
-    let value = result.pointer("/result/value").ok_or_else(invalid_result)?;
-    serde_json::from_value(value.clone()).map_err(|_| invalid_result())
+    let value = result.pointer("/result/value").ok_or_else(|| {
+        invalid_result().with_decode_diagnostic(decode_diagnostic(
+            DecodeStage::CdpWrapper,
+            None,
+            Some("result.value".to_owned()),
+            JsonValueType::Missing,
+        ))
+    })?;
+    deserialize_with_diagnostic(value, None, DecodeStage::CdpWrapper)
+        .map_err(|diagnostic| invalid_result().with_decode_diagnostic(diagnostic))
 }
 
 pub fn typed_output(command: &NativeCommand, output: Value) -> Result<CommandOutput, EngineError> {
-    let kind = output
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or_else(invalid_result)?;
-    let value = output.get("value").cloned().ok_or_else(invalid_result)?;
+    let kind = output.get("kind").and_then(Value::as_str).ok_or_else(|| {
+        invalid_result().with_decode_diagnostic(decode_diagnostic(
+            DecodeStage::OutputKind,
+            None,
+            Some("output.kind".to_owned()),
+            crate::probe::json_value_type(output.get("kind")),
+        ))
+    })?;
+    let value = output.get("value").cloned().ok_or_else(|| {
+        invalid_result().with_decode_diagnostic(decode_diagnostic(
+            DecodeStage::OutputValue,
+            None,
+            Some("output.value".to_owned()),
+            JsonValueType::Missing,
+        ))
+    })?;
     match kind {
         "page_cards" => Ok(CommandOutput::PageCards(
             serde_json::from_value::<PageCards>(value)

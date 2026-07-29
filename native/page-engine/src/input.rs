@@ -129,6 +129,46 @@ pub(crate) async fn type_text_humanized_guarded(
     .await
 }
 
+/// 逐字输入前的焦点守卫读数，三态。
+///
+/// `Unreadable` 与 `Lost` 必须分开：守卫在页面里抛了异常、或回来的结构对不上（`/result/value/output`
+/// 缺失、kind 不是文本目标、布尔字段不是布尔），说明**这一次没读到**焦点状态；
+/// 只有守卫确实回了「目标不在 / 没聚焦」才是焦点真丢了。塌成一态就会把「不知道」上报成
+/// 「知道是坏的」，真机上按图索骥找一个根本没发生的失焦。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FocusGuardVerdict {
+    Focused,
+    Lost,
+    Unreadable,
+}
+
+pub(crate) fn focus_guard_verdict(result: &serde_json::Value) -> FocusGuardVerdict {
+    if result.get("exceptionDetails").is_some() {
+        return FocusGuardVerdict::Unreadable;
+    }
+    let Some(output) = result.pointer("/result/value/output") else {
+        return FocusGuardVerdict::Unreadable;
+    };
+    if output.get("kind").and_then(serde_json::Value::as_str) != Some("text_target") {
+        return FocusGuardVerdict::Unreadable;
+    }
+    let (Some(ok), Some(focused)) = (
+        output
+            .pointer("/value/ok")
+            .and_then(serde_json::Value::as_bool),
+        output
+            .pointer("/value/focused")
+            .and_then(serde_json::Value::as_bool),
+    ) else {
+        return FocusGuardVerdict::Unreadable;
+    };
+    if ok && focused {
+        FocusGuardVerdict::Focused
+    } else {
+        FocusGuardVerdict::Lost
+    }
+}
+
 async fn type_text_humanized_inner(
     cdp: &mut CdpSession,
     value: &str,
@@ -146,25 +186,17 @@ async fn type_text_humanized_inner(
         )
         .await?;
         if let Some(expression) = target_guard_expression {
+            // 通道失败（求值发不出去 / 连接断了）单列为 Engine，保持不变。
             let result = cdp
                 .evaluate(expression, true)
                 .await
                 .map_err(|_| TextInputFailure::Engine)?;
-            let target_current = result
-                .pointer("/result/value/output")
-                .is_some_and(|output| {
-                    output.get("kind").and_then(serde_json::Value::as_str) == Some("text_target")
-                        && output
-                            .pointer("/value/ok")
-                            .and_then(serde_json::Value::as_bool)
-                            == Some(true)
-                        && output
-                            .pointer("/value/focused")
-                            .and_then(serde_json::Value::as_bool)
-                            == Some(true)
-                });
-            if !target_current {
-                return Err(TextInputFailure::TargetLost);
+            match focus_guard_verdict(&result) {
+                FocusGuardVerdict::Focused => {}
+                FocusGuardVerdict::Lost => return Err(TextInputFailure::TargetLost),
+                // 「守卫求值本身失败 / 输出缺失」不是「焦点确实丢了」：前者是读不到，后者是读到了坏消息。
+                // 把读不到当成读到，就是把不知道说成知道。这里按引擎侧失败归因，绝不冒充目标丢失。
+                FocusGuardVerdict::Unreadable => return Err(TextInputFailure::Engine),
             }
         }
         cdp.insert_text(&character.to_string())
@@ -948,6 +980,47 @@ fn unix_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 焦点守卫的三态：读到「在且聚焦」/ 读到「不在或没聚焦」/ **根本没读到**。
+    /// 第三态过去被塌进「目标丢了」，等于把不知道说成知道是坏的。
+    #[test]
+    fn focus_guard_separates_unreadable_from_a_real_focus_loss() {
+        let focused = serde_json::json!({
+            "result": {"value": {"output": {"kind": "text_target", "value": {"ok": true, "focused": true}}}}
+        });
+        assert_eq!(focus_guard_verdict(&focused), FocusGuardVerdict::Focused);
+
+        // 读到了坏消息：目标不在 / 没聚焦，都是真的焦点丢了。
+        for value in [
+            serde_json::json!({"ok": false, "focused": true}),
+            serde_json::json!({"ok": true, "focused": false}),
+            serde_json::json!({"ok": false, "focused": false}),
+        ] {
+            let lost = serde_json::json!({
+                "result": {"value": {"output": {"kind": "text_target", "value": value}}}
+            });
+            assert_eq!(focus_guard_verdict(&lost), FocusGuardVerdict::Lost);
+        }
+
+        // 没读到：守卫在页面里抛了、输出缺失、kind 不对、字段不是布尔——四种都是「不知道」。
+        for unreadable in [
+            serde_json::json!({"exceptionDetails": {"lineNumber": 3}, "result": {"value": {}}}),
+            serde_json::json!({"result": {"value": {}}}),
+            serde_json::json!({"result": {"value": {"output": {"kind": "point_target"}}}}),
+            serde_json::json!({
+                "result": {"value": {"output": {"kind": "text_target", "value": {"ok": "yes", "focused": true}}}}
+            }),
+            serde_json::json!({
+                "result": {"value": {"output": {"kind": "text_target", "value": {"focused": true}}}}
+            }),
+        ] {
+            assert_eq!(
+                focus_guard_verdict(&unreadable),
+                FocusGuardVerdict::Unreadable,
+                "{unreadable}"
+            );
+        }
+    }
 
     #[test]
     fn captcha_key_map_covers_visible_ascii_and_rejects_everything_else() {

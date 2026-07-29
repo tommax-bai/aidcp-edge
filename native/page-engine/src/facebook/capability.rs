@@ -51,6 +51,12 @@ pub struct FacebookParityEntry {
 const TEXT_CONTAINS_WITH_TOLERANCE: &str =
     "normalized containment within the shared extra-character tolerance";
 
+/// 三条提交窗口。**标签在引擎侧定义，预算的事实源在宿主**
+/// （`src/native-page-engine/client.ts` 的 `NATIVE_COMMIT_WINDOW_BUDGETS`）：
+/// 宿主按标签发放预算；这里的数字只是那张表的镜像，运行期不再作数——报大了只授宿主上限，
+/// 标签不认识则拒发这一次窗口并把结论绑到当前命令上（不再终止引擎进程）。
+/// 两侧由 `test/native-page-engine/runtime-contracts-commit-window.test.ts` 机械对账：
+/// 单边改一个数字，仓库检查当场失败。改预算请改宿主那张表，再让对账把这里带上。
 const JOIN_WINDOW: Option<CommitWindowContract> = Some(CommitWindowContract {
     label: "fb_join_click",
     budget_ms: 18_500,

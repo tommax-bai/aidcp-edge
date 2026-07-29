@@ -151,7 +151,12 @@ export type NativeEffectPhase = 'not_started' | 'dispatched' | 'confirmed' | 'am
 export type NativeCommitWindowLabel =
   | 'fb_join_click'
   | 'fb_comment_enter'
-  | 'fb_publish_submit';
+  | 'fb_publish_submit'
+  | 'xhs_comment_submit'
+  | 'xhs_notification_comments'
+  | 'xhs_notification_likes'
+  | 'xhs_notification_follows'
+  | 'xhs_publish_submit';
 
 export interface NativeCommitWindowRequest {
   sessionId: string;
@@ -417,6 +422,20 @@ class NativeProcessTransport {
     });
   }
 
+  /**
+   * 存活的**肯定证据**：握手已完成、Node 明说进程还没退出（`exitCode`/`signalCode` 均为 null）、
+   * 没被我们杀过、且标准输入这条通道现在可写。
+   * MUST NOT 退化成「没记到死讯就算活着」——退出事件可能还没派发，缓存句柄就是这么被复用成僵尸的。
+   */
+  isLive(): boolean {
+    return this.ready
+      && !this.exited
+      && !this.child.killed
+      && this.child.exitCode === null
+      && this.child.signalCode === null
+      && this.child.stdin.writable === true;
+  }
+
   engineManifest(): NativePageEngineManifest {
     if (!this.manifest) {
       throw new NativePageEngineError('invalid_protocol', 'Native Page Engine manifest is unavailable');
@@ -522,14 +541,20 @@ class NativeProcessTransport {
       this.failProtocol('Native Page Engine emitted an invalid response record');
       return;
     }
-    const commitWindow = parseCommitWindowRequest(record);
     if (record.type === 'commit_window_request') {
+      const commitWindow = parseCommitWindowRequest(record);
       if (!commitWindow) {
+        // 结构坏了才是传输契约破了：连是哪条命令都读不出来，没有可归因的对象。
         this.failProtocol('Native Page Engine emitted an invalid commit window request');
         this.terminate();
         return;
       }
-      this.handleCommitWindowRequest(record.id, commitWindow);
+      const budgetMs = grantCommitWindowBudget(commitWindow.label, commitWindow.budgetMs);
+      if (budgetMs === undefined) {
+        this.rejectCommitWindowContract(commitWindow, 'commit_window_label_unknown');
+        return;
+      }
+      this.handleCommitWindowRequest(record.id, { ...commitWindow, budgetMs });
       return;
     }
     const pending = this.pending.get(record.id);
@@ -577,6 +602,39 @@ class NativeProcessTransport {
     });
   }
 
+  /**
+   * 提交窗口的契约违规：拒绝这一次窗口（不可逆动作因此不会被按下），并把结论绑到**当前这条命令**上。
+   * 引擎进程不终止——一条命令的契约不符，代价必须停在这条命令，而不是把整个环境打成砖。
+   */
+  private rejectCommitWindowContract(
+    request: CommitWindowRequestRecord,
+    reason: CommitWindowContractViolation,
+  ): void {
+    const pending = this.pending.get(request.id);
+    // 先发否决回执：引擎收到 accepted=false 会在按下之前放弃，不必干等到命令截止。
+    const ackId = requestId('commit_window_ack');
+    void this.request(ackId, {
+      type: 'commit_window_ack',
+      protocolVersion: NATIVE_PAGE_ENGINE_PROTOCOL_VERSION,
+      id: ackId,
+      sessionId: request.sessionId,
+      taskId: request.taskId,
+      commandId: request.commandId,
+      token: request.token,
+      label: request.label,
+      accepted: false,
+    }, Math.min(this.processTimeoutMs, 2_000)).catch(() => undefined);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pending.disposeCommitWindow?.();
+    this.pending.delete(request.id);
+    pending.reject(new NativePageEngineError(
+      'commit_window_unavailable',
+      `Native commit window contract violation: ${reason}`,
+      { effectPhase: 'not_started', reasonCode: reason, stderr: this.stderr || undefined },
+    ));
+  }
+
   private failProtocol(message: string): void {
     this.failProcess(new NativePageEngineError('invalid_protocol', message, {
       stderr: this.stderr || undefined,
@@ -615,6 +673,11 @@ export class NativePageEngineSession {
     private readonly processTimeoutMs: number,
     readonly platform: NativePagePlatform,
   ) {}
+
+  /** 会话句柄是否还能承载命令：本会话未关闭 **且** 底层传输给出存活的肯定证据。 */
+  isLive(): boolean {
+    return !this.closed && this.transport.isLive();
+  }
 
   async probePage(
     timeoutMs = DEFAULT_NATIVE_TIMEOUT_MS,
@@ -876,11 +939,34 @@ function parseCommandResponse(
   return value as unknown as CommandResponse;
 }
 
-const NATIVE_COMMIT_WINDOW_BUDGETS: Readonly<Record<NativeCommitWindowLabel, number>> = {
+/**
+ * 提交窗口预算的**单一事实源**（宿主权威）。引擎侧 `native/page-engine/src/facebook/capability.rs`
+ * 与 `native/page-engine/src/commit_window.rs` 的窗口只保留标签、其数字是这张表的镜像，由
+ * `test/native-page-engine/runtime-contracts-commit-window.test.ts` 机械对账；
+ * 单边改一个数字，仓库检查当场失败。
+ *
+ * 运行期口径：宿主按**标签**发放预算，引擎自报的数字只作为「不超过事实源上限」的请求值。
+ * MUST NOT 回到「两边各写一份 + 相等断言 + 不等就终止引擎」——一次纯节奏调优会在按下按钮前
+ * 把整个引擎杀掉，然后被上报成一条普通失败。
+ *
+ * ⚠️ **这张表是准入白名单，不只是数字表**：不在表里的标签会被判成契约违规并否决窗口，
+ * 而窗口拿不到时写入 MUST NOT 派发。所以引擎新增一处提交窗口却漏改这里，后果不是
+ * 「少了一层保护」，而是那处写入**全部拒发**（回执诚实，但功能停摆）。
+ * 两平台的预算各按各自真实提交时长定：小红书发布提交是 15s，Facebook 是 20s，混用即拉长或截短。
+ */
+export const NATIVE_COMMIT_WINDOW_BUDGETS: Readonly<Record<NativeCommitWindowLabel, number>> = {
   fb_join_click: 18_500,
   fb_comment_enter: 20_000,
   fb_publish_submit: 20_000,
+  xhs_comment_submit: 4_000,
+  xhs_notification_comments: 20_000,
+  xhs_notification_likes: 20_000,
+  xhs_notification_follows: 20_000,
+  xhs_publish_submit: 15_000,
 };
+
+/** 结构合法但契约不符的提交窗口请求：绑定到当前命令，不牵连引擎进程。 */
+type CommitWindowContractViolation = 'commit_window_label_unknown';
 
 function parseCommitWindowRequest(value: unknown): CommitWindowRequestRecord | undefined {
   if (
@@ -893,12 +979,23 @@ function parseCommitWindowRequest(value: unknown): CommitWindowRequestRecord | u
     || !Number.isSafeInteger(value.commandId)
     || typeof value.token !== 'string'
     || typeof value.label !== 'string'
-    || !Object.hasOwn(NATIVE_COMMIT_WINDOW_BUDGETS, value.label)
-    || value.budgetMs !== NATIVE_COMMIT_WINDOW_BUDGETS[value.label as NativeCommitWindowLabel]
   ) {
     return undefined;
   }
   return value as unknown as CommitWindowRequestRecord;
+}
+
+/**
+ * 按标签发放预算。上限恒为事实源的数字：引擎报大了只授上限（引擎侧一个笔误不得放大成
+ * 不受控的写保护窗口），报小了按它报的授（引擎可以要更短，不能要更长），没报 / 报了非法值
+ * 按事实源发放。标签不认识时返回 undefined —— 那是契约违规，不是「按默认放行」。
+ */
+function grantCommitWindowBudget(label: string, requestedMs: unknown): number | undefined {
+  if (!Object.hasOwn(NATIVE_COMMIT_WINDOW_BUDGETS, label)) return undefined;
+  const authoritative = NATIVE_COMMIT_WINDOW_BUDGETS[label as NativeCommitWindowLabel];
+  return Number.isSafeInteger(requestedMs) && Number(requestedMs) > 0
+    ? Math.min(Number(requestedMs), authoritative)
+    : authoritative;
 }
 
 function parseSessionInfo(value: unknown): NativePageSessionInfo {

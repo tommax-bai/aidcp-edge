@@ -18,6 +18,10 @@ export interface NativePageRuntimeOptions {
   expectedManifest: NativePageEngineManifest;
   platform?: NativePagePlatform;
   processTimeoutMs?: number;
+  /** 测试 / 开发夹具专用，与客户端同名选项一致。生产的 Rust 二进制不接受参数。 */
+  binaryArgs?: string[];
+  /** 测试 / 开发夹具专用：注入给引擎子进程的环境变量。 */
+  env?: NodeJS.ProcessEnv;
 }
 
 interface OpenOwner {
@@ -27,6 +31,20 @@ interface OpenOwner {
 
 const DEFAULT_NATIVE_SESSION_TIMEOUT_MS = 30_000;
 const FACEBOOK_NATIVE_SESSION_TIMEOUT_MS = 90_000;
+
+/**
+ * 丢弃一个**已经决定不再使用**的会话句柄。关闭失败（引擎已死时必然失败）不再往外抛：
+ * 这个会话此刻已从 owner 位上摘掉，关不掉不能反过来堵死重建入口——
+ * 「结束会话失败 → owner 没释放 → 下一次开始还是同一个死会话」这条链就是这么形成的。
+ * 命令层的成败仍按各自的执行结果如实回报，这里吞掉的只是收尾动作的异常。
+ */
+async function discardSession(session: NativePageEngineSession): Promise<void> {
+  try {
+    await session.close();
+  } catch {
+    // 关不掉的句柄已经不在 owner 位上，进程退出兜底由传输层负责。
+  }
+}
 
 export class NativePageRuntime {
   private readonly client: NativePageEngineClient;
@@ -39,6 +57,8 @@ export class NativePageRuntime {
       binaryPath: options.binaryPath,
       processTimeoutMs: options.processTimeoutMs ?? 31_000,
       expectedManifest: options.expectedManifest,
+      ...(options.binaryArgs ? { binaryArgs: options.binaryArgs } : {}),
+      ...(options.env ? { env: options.env } : {}),
     });
   }
 
@@ -113,7 +133,7 @@ export class NativePageRuntime {
       if (this.owner?.ownerId !== ownerId) return;
       const current = this.owner;
       this.owner = undefined;
-      await current.session.close();
+      await discardSession(current.session);
     });
   }
 
@@ -122,16 +142,22 @@ export class NativePageRuntime {
     await this.serial(async () => {
       const current = this.owner;
       this.owner = undefined;
-      await current?.session.close();
+      if (current) await discardSession(current.session);
     });
   }
 
   private async sessionFor(ownerId: string): Promise<NativePageEngineSession> {
-    if (this.owner?.ownerId === ownerId) return this.owner.session;
-    if (this.owner) {
-      const old = this.owner;
+    const cached = this.owner;
+    if (cached?.ownerId === ownerId) {
+      // 命中缓存不等于句柄还活着。返回前必须取到存活的肯定证据，取不到就按已死处理、
+      // 丢弃并重开——否则引擎进程死掉之后，这里会一直把僵尸句柄发下去，
+      // 每一条命令都撞「引擎已退出」，而重建入口永远轮不到。
+      if (cached.session.isLive()) return cached.session;
       this.owner = undefined;
-      await old.session.close();
+      await discardSession(cached.session);
+    } else if (cached) {
+      this.owner = undefined;
+      await discardSession(cached.session);
     }
     const endpoint = this.options.getEndpoint();
     const suffix = ownerId.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 80) || 'page';

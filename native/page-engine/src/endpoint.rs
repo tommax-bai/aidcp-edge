@@ -35,6 +35,11 @@ pub fn validate_loopback_host(host: &str) -> Result<(), EngineError> {
 }
 
 pub async fn list_targets(host: &str, port: u16) -> Result<Vec<CdpTarget>, EngineError> {
+    let body = http_get(host, port, "/json").await?;
+    serde_json::from_slice(&body).map_err(|_| invalid_endpoint_response())
+}
+
+async fn http_get(host: &str, port: u16, path: &str) -> Result<Vec<u8>, EngineError> {
     validate_loopback_host(host)?;
     let mut stream = TcpStream::connect((host, port)).await.map_err(|_| {
         EngineError::new(
@@ -48,7 +53,7 @@ pub async fn list_targets(host: &str, port: u16) -> Result<Vec<CdpTarget>, Engin
         format!("{host}:{port}")
     };
     let request = format!(
-        "GET /json HTTP/1.1\r\nHost: {host_header}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {host_header}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(request.as_bytes()).await.map_err(|_| {
         EngineError::new(
@@ -80,7 +85,7 @@ pub async fn list_targets(host: &str, port: u16) -> Result<Vec<CdpTarget>, Engin
             break;
         }
     }
-    parse_target_response(&response)
+    http_response_body(&response)
 }
 
 fn response_is_complete(response: &[u8]) -> bool {
@@ -141,7 +146,7 @@ fn chunked_body_complete(body: &[u8]) -> bool {
     }
 }
 
-fn parse_target_response(response: &[u8]) -> Result<Vec<CdpTarget>, EngineError> {
+fn http_response_body(response: &[u8]) -> Result<Vec<u8>, EngineError> {
     let separator = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -156,17 +161,20 @@ fn parse_target_response(response: &[u8]) -> Result<Vec<CdpTarget>, EngineError>
         return Err(invalid_endpoint_response());
     }
     let body = &response[separator + 4..];
-    let decoded;
-    let body = if headers.lines().any(|line| {
+    if headers.lines().any(|line| {
         line.to_ascii_lowercase()
             .starts_with("transfer-encoding: chunked")
     }) {
-        decoded = decode_chunked(body)?;
-        decoded.as_slice()
+        decode_chunked(body)
     } else {
-        body
-    };
-    serde_json::from_slice(body).map_err(|_| invalid_endpoint_response())
+        Ok(body.to_vec())
+    }
+}
+
+#[cfg(test)]
+fn parse_target_response(response: &[u8]) -> Result<Vec<CdpTarget>, EngineError> {
+    let body = http_response_body(response)?;
+    serde_json::from_slice(&body).map_err(|_| invalid_endpoint_response())
 }
 
 fn decode_chunked(body: &[u8]) -> Result<Vec<u8>, EngineError> {
@@ -208,6 +216,91 @@ fn invalid_endpoint_response() -> EngineError {
     EngineError::new(
         ErrorCode::EndpointUnreachable,
         "DevTools endpoint returned an invalid response",
+    )
+}
+
+/// 被准入的那一个浏览器实例的**身份证据**。
+///
+/// 端口不是身份：同机多环境并行时，指纹浏览器释放的调试端口会被另一环境复用，
+/// 只按「目标类型 + 平台域名 + 端口」挑目标，重连就可能附着到**别的分身的浏览器**上，
+/// 随后的一切动作都落在别人的账号里。判据必须能把「这一次连上的浏览器」和
+/// 「当初被准入的那一个」对上。
+///
+/// 载体取自浏览器自报的实例标识：CDP `/json/version` 的 `webSocketDebuggerUrl`
+/// 形如 `ws://127.0.0.1:<port>/devtools/browser/<uuid>`，其中 `<uuid>` 由浏览器进程在启动时生成，
+/// 换一个浏览器进程必换一个值——端口回收复用不会把它带过去。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserInstanceIdentity {
+    pub browser_id: String,
+}
+
+impl BrowserInstanceIdentity {
+    /// 从浏览器级调试地址里取实例标识。取不到就是取不到，MUST NOT 用端口或空串顶上。
+    pub fn from_browser_debugger_url(raw_url: &str) -> Option<Self> {
+        let url = Url::parse(raw_url).ok()?;
+        if url.scheme() != "ws" && url.scheme() != "wss" {
+            return None;
+        }
+        let browser_id = url
+            .path()
+            .strip_prefix("/devtools/browser/")?
+            .trim_matches('/')
+            .to_owned();
+        (!browser_id.is_empty()
+            && browser_id.len() <= 128
+            && browser_id
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-'))
+        .then_some(Self { browser_id })
+    }
+}
+
+/// 读取当前端点上浏览器进程的实例标识（CDP `/json/version`）。
+pub async fn read_browser_identity(
+    host: &str,
+    port: u16,
+) -> Result<BrowserInstanceIdentity, EngineError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BrowserVersion {
+        #[serde(default)]
+        web_socket_debugger_url: String,
+    }
+    let body = http_get(host, port, "/json/version").await?;
+    let version: BrowserVersion =
+        serde_json::from_slice(&body).map_err(|_| invalid_endpoint_response())?;
+    BrowserInstanceIdentity::from_browser_debugger_url(&version.web_socket_debugger_url)
+        .ok_or_else(unproven_instance_identity)
+}
+
+/// 带身份证据的目标选择。
+///
+/// - 拿不到当初准入时记下的身份（`admitted` 为 `None`）→ 诚实报执行器不健康，**不附着任何目标**。
+/// - 这一次读到的实例身份与准入时的不一致 → 同样拒绝，绝不退化成「端口对上就接管」。
+/// - 两者一致后，才按平台与端口挑目标（与 `select_target` 同一套判据）。
+pub fn select_target_for_instance(
+    targets: &[CdpTarget],
+    platform: Platform,
+    endpoint_port: u16,
+    admitted: Option<&BrowserInstanceIdentity>,
+    observed: Option<&BrowserInstanceIdentity>,
+) -> Result<CdpTarget, EngineError> {
+    let (Some(admitted), Some(observed)) = (admitted, observed) else {
+        return Err(unproven_instance_identity());
+    };
+    if admitted != observed {
+        return Err(EngineError::new(
+            ErrorCode::EndpointUnreachable,
+            "DevTools endpoint belongs to another browser instance than the admitted one",
+        ));
+    }
+    select_target(targets, platform, endpoint_port)
+}
+
+fn unproven_instance_identity() -> EngineError {
+    EngineError::new(
+        ErrorCode::EndpointUnreachable,
+        "DevTools endpoint could not prove it is the admitted browser instance",
     )
 }
 
@@ -442,6 +535,98 @@ mod tests {
                     .expect_err("unsafe debugger URL")
                     .code,
                 ErrorCode::NoMatchingTarget
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_to_attach_without_proven_instance_identity() {
+        let targets = vec![target(
+            "xhs",
+            "page",
+            "https://www.xiaohongshu.com/explore",
+            "ws://127.0.0.1:9222/devtools/page/xhs",
+        )];
+        let admitted = BrowserInstanceIdentity::from_browser_debugger_url(
+            "ws://127.0.0.1:9222/devtools/browser/1111-2222",
+        )
+        .expect("admitted identity");
+        let another = BrowserInstanceIdentity::from_browser_debugger_url(
+            "ws://127.0.0.1:9222/devtools/browser/3333-4444",
+        )
+        .expect("observed identity");
+
+        // 端口对上、平台域名也对上，但身份证据对不上 —— 拒绝附着，不返回任何目标。
+        assert_eq!(
+            select_target_for_instance(
+                &targets,
+                Platform::Xiaohongshu,
+                9222,
+                Some(&admitted),
+                Some(&another),
+            )
+            .expect_err("cross-instance port reuse")
+            .code,
+            ErrorCode::EndpointUnreachable
+        );
+
+        // 取不到证据（任一侧缺失）同样拒绝，MUST NOT 退化成「端口对上就接管」。
+        for (admitted_side, observed_side) in [
+            (None, Some(&admitted)),
+            (Some(&admitted), None),
+            (None, None),
+        ] {
+            assert_eq!(
+                select_target_for_instance(
+                    &targets,
+                    Platform::Xiaohongshu,
+                    9222,
+                    admitted_side,
+                    observed_side,
+                )
+                .expect_err("missing identity evidence")
+                .code,
+                ErrorCode::EndpointUnreachable
+            );
+        }
+
+        // 证据一致才走既有的平台 / 端口判据。
+        assert_eq!(
+            select_target_for_instance(
+                &targets,
+                Platform::Xiaohongshu,
+                9222,
+                Some(&admitted),
+                Some(&admitted.clone()),
+            )
+            .expect("same instance")
+            .id,
+            "xhs"
+        );
+    }
+
+    #[test]
+    fn browser_instance_identity_comes_only_from_a_browser_debugger_url() {
+        assert_eq!(
+            BrowserInstanceIdentity::from_browser_debugger_url(
+                "ws://127.0.0.1:9222/devtools/browser/abc-123"
+            )
+            .expect("identity")
+            .browser_id,
+            "abc-123"
+        );
+        for raw in [
+            // 页面级地址不是实例身份。
+            "ws://127.0.0.1:9222/devtools/page/abc",
+            // 端口不是身份：没有 browser 段就取不到。
+            "ws://127.0.0.1:9222/json/version",
+            "http://127.0.0.1:9222/devtools/browser/abc",
+            "ws://127.0.0.1:9222/devtools/browser/",
+            "not a url",
+        ] {
+            assert!(
+                BrowserInstanceIdentity::from_browser_debugger_url(raw).is_none(),
+                "{raw}"
             );
         }
     }

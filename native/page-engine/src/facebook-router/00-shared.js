@@ -10,8 +10,17 @@ async function(input){
     const style=window.getComputedStyle?getComputedStyle(el):null;
     return rect.width>1&&rect.height>1&&(!style||(style.display!=='none'&&style.visibility!=='hidden'&&Number(style.opacity||1)>0.05));
   };
-  const all=(selector,root=document)=>Array.from(root.querySelectorAll(selector));
+  // 取用层的空 root 防护。导航瞬间 document.body 可能为 null，各处「|| document.body」兜底
+  // 会把 null 当成根传进来；零防护时这里当场抛 TypeError，而写命令遇到任何规则错误都会被判
+  // 「可能已做」——一次没有有效根的遍历，绝不能变成一次「说不定点过了」。
+  // 无有效根一律回空结果，由调用方按各自的动作名报诚实的找不到目标。
+  const rooted=(root)=>(root&&typeof root.querySelectorAll==='function')?root:null;
+  const all=(selector,root=document)=>{
+    const scope=rooted(root);
+    return scope?Array.from(scope.querySelectorAll(selector)):[];
+  };
   const first=(selectors,root=document)=>{
+    if(!rooted(root))return null;
     for(const selector of selectors){
       const hit=all(selector,root).find(visible);
       if(hit)return hit;

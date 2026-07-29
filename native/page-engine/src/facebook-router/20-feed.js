@@ -385,5 +385,8 @@
     const expected=String(p.noteId||p.url||'');
     const exact=expected?exactArticle(expected):null;
     const root=exact||first(['[role="dialog"] [role="article"]','[role="dialog"]','main [role="article"]','main article'])||document.querySelector('main')||document.body;
+    // 兜底链一路到 document.body 仍可能落空（导航瞬间 body 尚未挂上）。
+    // 把空根交给详情遍历，过去是当场抛异常；现在诚实报找不到目标，绝不把「读不到」说成一次已完成的开帖。
+    if(!root||typeof root.querySelectorAll!=='function')return action('open',false,'target_not_found');
     return noteDetail(root,permalinkOf(root)||cleanPermalink(location.href)||expected);
   };

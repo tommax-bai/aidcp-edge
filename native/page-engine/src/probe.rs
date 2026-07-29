@@ -1,4 +1,7 @@
-use crate::error::{EngineError, ErrorCode};
+use crate::error::{
+    CdpExceptionClass, CdpExceptionReason, DecodeStage, EngineError, ErrorCode, ErrorDiagnostic,
+    JsonValueType,
+};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -137,17 +140,29 @@ pub fn result_from_cdp(
     target_id: String,
     cdp_result: &serde_json::Value,
 ) -> Result<ProbeResult, EngineError> {
-    if cdp_result.get("exceptionDetails").is_some() {
+    // 解码失败必须说得出「在哪一步、哪个字段、页面抛的是什么」。裸错误只留下一句
+    // 「结果无效」，真机上无从判断是规则改版、字段漂移，还是页面根本没跑起来。
+    if let Some(exception) = cdp_result.get("exceptionDetails") {
         return Err(EngineError::new(
             ErrorCode::ProbeFailed,
             "native page probe raised an exception",
-        ));
+        )
+        .with_decode_diagnostic(exception_diagnostic(exception)));
     }
-    let value = cdp_result
-        .pointer("/result/value")
-        .ok_or_else(invalid_probe_result)?;
-    let raw = serde_json::from_value::<RawPageSignals>(value.clone())
-        .map_err(|_| invalid_probe_result())?;
+    let value = cdp_result.pointer("/result/value").ok_or_else(|| {
+        invalid_probe_result().with_decode_diagnostic(decode_diagnostic(
+            DecodeStage::CdpWrapper,
+            None,
+            Some("result.value".to_owned()),
+            JsonValueType::Missing,
+        ))
+    })?;
+    let raw = deserialize_with_diagnostic::<RawPageSignals>(
+        value,
+        Some("page_probe"),
+        DecodeStage::TypedValue,
+    )
+    .map_err(|diagnostic| invalid_probe_result().with_decode_diagnostic(diagnostic))?;
     build_result(target_id, raw)
 }
 
@@ -268,6 +283,150 @@ fn invalid_probe_result() -> EngineError {
         ErrorCode::ProbeFailed,
         "native page probe returned an invalid result",
     )
+}
+
+// ---------------------------------------------------------------------------
+// 跨平台共用的**有界**解码诊断
+//
+// 这一段是平台中立的：解码在哪一阶段失败、哪个字段路径、页面抛的是哪一类异常、在第几行，
+// 与是小红书还是页面探测无关。放在这里是因为它必须被小红书结果解码与页面探测解码共用。
+// Facebook 侧另有一份等价实现（`facebook.rs` 的私有函数，本 change 不可编辑该文件），
+// 三处应在能同时编辑时收口到 `error.rs`。
+//
+// 边界纪律：诊断只带**结构**信息与受限标识符，MUST NOT 带页面正文、地址或任何凭据——
+// 异常描述只用于分类，落进诊断的仅是被 `EngineError::with_decode_diagnostic` 收窄过的标识符。
+// ---------------------------------------------------------------------------
+
+pub(crate) fn json_value_type(value: Option<&serde_json::Value>) -> JsonValueType {
+    match value {
+        None => JsonValueType::Missing,
+        Some(serde_json::Value::Null) => JsonValueType::Null,
+        Some(serde_json::Value::Bool(_)) => JsonValueType::Boolean,
+        Some(serde_json::Value::Number(_)) => JsonValueType::Number,
+        Some(serde_json::Value::String(_)) => JsonValueType::String,
+        Some(serde_json::Value::Array(_)) => JsonValueType::Array,
+        Some(serde_json::Value::Object(_)) => JsonValueType::Object,
+    }
+}
+
+pub(crate) fn decode_diagnostic(
+    decode_stage: DecodeStage,
+    expected_kind: Option<&'static str>,
+    field_path: Option<String>,
+    actual_type: JsonValueType,
+) -> ErrorDiagnostic {
+    ErrorDiagnostic {
+        operation_stage: None,
+        decode_stage: Some(decode_stage),
+        expected_kind,
+        field_path,
+        actual_type: Some(actual_type),
+        exception_class: None,
+        exception_reason: None,
+        exception_token: None,
+        line_number: None,
+        column_number: None,
+    }
+}
+
+/// 页面里抛出的异常：记类别 / 原因 / 触发标识符 / 行列，不记描述原文。
+pub(crate) fn exception_diagnostic(exception: &serde_json::Value) -> ErrorDiagnostic {
+    let exception_class = match exception
+        .pointer("/exception/className")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("Error") => Some(CdpExceptionClass::Error),
+        Some("TypeError") => Some(CdpExceptionClass::TypeError),
+        Some("ReferenceError") => Some(CdpExceptionClass::ReferenceError),
+        Some("RangeError") => Some(CdpExceptionClass::RangeError),
+        Some("SyntaxError") => Some(CdpExceptionClass::SyntaxError),
+        Some("EvalError") => Some(CdpExceptionClass::EvalError),
+        Some("URIError") => Some(CdpExceptionClass::UriError),
+        _ => None,
+    };
+    let description = exception
+        .pointer("/exception/description")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .lines()
+        .next()
+        .unwrap_or_default();
+    let (exception_reason, exception_token) = classify_exception_description(description);
+    ErrorDiagnostic {
+        operation_stage: None,
+        decode_stage: Some(DecodeStage::CdpException),
+        expected_kind: None,
+        field_path: None,
+        actual_type: Some(json_value_type(Some(exception))),
+        exception_class,
+        exception_reason: Some(exception_reason),
+        exception_token,
+        line_number: exception
+            .get("lineNumber")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+        column_number: exception
+            .get("columnNumber")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+    }
+}
+
+fn classify_exception_description(description: &str) -> (CdpExceptionReason, Option<String>) {
+    for quote in ['\'', '"', '`'] {
+        let marker = format!("(reading {quote}");
+        if let Some(rest) = description.split_once(&marker).map(|(_, rest)| rest)
+            && let Some(identifier) = rest.split(quote).next()
+        {
+            return (
+                CdpExceptionReason::CannotReadProperty,
+                Some(identifier.to_owned()),
+            );
+        }
+    }
+    if let Some(identifier) = description
+        .strip_prefix("ReferenceError: ")
+        .and_then(|value| value.strip_suffix(" is not defined"))
+    {
+        return (
+            CdpExceptionReason::ReferenceNotDefined,
+            Some(identifier.to_owned()),
+        );
+    }
+    if description.ends_with(" is not a function") {
+        return (CdpExceptionReason::NotAFunction, None);
+    }
+    (CdpExceptionReason::Other, None)
+}
+
+/// 带字段路径的反序列化。失败时给出诊断，错误码由调用方按自己的域决定。
+pub(crate) fn deserialize_with_diagnostic<T: serde::de::DeserializeOwned>(
+    value: &serde_json::Value,
+    expected_kind: Option<&'static str>,
+    decode_stage: DecodeStage,
+) -> Result<T, ErrorDiagnostic> {
+    serde_path_to_error::deserialize(value.clone()).map_err(|error| {
+        let path = error.path().to_string();
+        let missing_field = missing_field_name(&error.inner().to_string());
+        let field_path = match ((path != ".").then_some(path), missing_field.as_deref()) {
+            (Some(base), Some(field)) => Some(format!("{base}.{field}")),
+            (Some(base), None) => Some(base),
+            (None, Some(field)) => Some(field.to_owned()),
+            (None, None) => None,
+        };
+        let actual_type = if missing_field.is_some() {
+            JsonValueType::Missing
+        } else {
+            json_value_type(Some(value))
+        };
+        decode_diagnostic(decode_stage, expected_kind, field_path, actual_type)
+    })
+}
+
+fn missing_field_name(message: &str) -> Option<String> {
+    let rest = message.strip_prefix("missing field `")?;
+    let field = rest.split('`').next()?;
+    (!field.is_empty() && field.len() <= 64).then(|| field.to_owned())
 }
 
 #[cfg(test)]
