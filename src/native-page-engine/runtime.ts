@@ -29,8 +29,17 @@ interface OpenOwner {
   session: NativePageEngineSession;
 }
 
-const DEFAULT_NATIVE_SESSION_TIMEOUT_MS = 30_000;
-const FACEBOOK_NATIVE_SESSION_TIMEOUT_MS = 90_000;
+/**
+ * ⚠️ 本组是**四处同步**的第 ③ 层（会话超时），也是最容易漏、漏了最难发现的一层。
+ *
+ * 引擎侧算命令预算时取 `session_timeout_ms.min(命令种类天花板)`：会话超时若小于天花板，
+ * 就会把天花板**静默夹回**小值——不报错、不打日志、看着改了其实没生效。
+ * 因此本值必须 ≥ 所有 Facebook 命令天花板里的最大者（当前 = 评论 180s）。
+ * 另外三层：① `browse-session.ts` 请求值、② `client.ts` 准入校验、
+ * ④ `native/page-engine/src/engine.rs` 的 command_timeout_ceiling。
+ */
+const DEFAULT_NATIVE_SESSION_TIMEOUT_MS = 45_000;
+const FACEBOOK_NATIVE_SESSION_TIMEOUT_MS = 180_000;
 
 /**
  * 丢弃一个**已经决定不再使用**的会话句柄。关闭失败（引擎已死时必然失败）不再往外抛：

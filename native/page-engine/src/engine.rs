@@ -28,12 +28,17 @@ use url::Url;
 
 const MAX_RECORDED_COMMANDS: usize = 128;
 const MAX_CAPTCHA_SNAPSHOTS: usize = 8;
-const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
-const FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS: u64 = 40_000;
-const FACEBOOK_COMMENT_TIMEOUT_MS: u64 = 90_000;
-const FACEBOOK_GROUP_JOIN_TIMEOUT_MS: u64 = 90_000;
-const FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS: u64 = 90_000;
-const FACEBOOK_PUBLISH_FILL_TIMEOUT_MS: u64 = 400_000;
+// ⚠️ 本组是**四处同步**的第 ④ 层（引擎天花板）。另外三层都在边缘 TS：
+//   ① 请求值   src/native-page-engine/browse-session.ts
+//   ② 准入校验 src/native-page-engine/client.ts（超上限 ⇒ invalid_request，命令根本不下发）
+//   ③ 会话超时 src/native-page-engine/runtime.ts（此处取 session.min(ceiling)，会话值小就静默夹回）
+// 四层任缺其一都不会有编译错误，失败形态却各不相同（被拒 / 静默失效）。
+const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 45_000;
+const FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS: u64 = 60_000;
+const FACEBOOK_COMMENT_TIMEOUT_MS: u64 = 180_000;
+const FACEBOOK_GROUP_JOIN_TIMEOUT_MS: u64 = 135_000;
+const FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS: u64 = 135_000;
+const FACEBOOK_PUBLISH_FILL_TIMEOUT_MS: u64 = 600_000;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1785,17 +1790,29 @@ mod tests {
             command_timeout_ceiling(Platform::Xiaohongshu, &fill),
             DEFAULT_COMMAND_TIMEOUT_MS
         );
+        // 边缘 `src/native-page-engine/runtime.ts` 对 Facebook 会话下发的 timeout_ms。
+        // 它必须 ≥ 所有天花板，否则下面的 min() 会把天花板**静默夹回**（不报错、不打日志）。
+        // 跨语言那半由边缘 `test/native-page-engine/timeout-chain-contract.test.ts` 守。
+        const FACEBOOK_SESSION_TIMEOUT_MS: u64 = 180_000;
         assert_eq!(
-            command_timeout_ms_for(Platform::Facebook, 90_000, &fill),
-            FACEBOOK_PUBLISH_FILL_TIMEOUT_MS
+            command_timeout_ms_for(Platform::Facebook, FACEBOOK_SESSION_TIMEOUT_MS, &fill),
+            FACEBOOK_PUBLISH_FILL_TIMEOUT_MS,
+            "发布填正文显式绕过 min()，不受会话超时约束"
         );
         assert_eq!(
-            command_timeout_ms_for(Platform::Facebook, 90_000, &join),
+            command_timeout_ms_for(Platform::Facebook, FACEBOOK_SESSION_TIMEOUT_MS, &join),
             FACEBOOK_GROUP_JOIN_TIMEOUT_MS
         );
         assert_eq!(
-            command_timeout_ms_for(Platform::Facebook, 90_000, &comment),
+            command_timeout_ms_for(Platform::Facebook, FACEBOOK_SESSION_TIMEOUT_MS, &comment),
             FACEBOOK_COMMENT_TIMEOUT_MS
+        );
+        // 会话超时偏小时天花板**被静默夹回**——这正是 2026-07-29 那类漏改的失败形态：
+        // 看着改了天花板，实际跑的还是旧值，且没有任何错误可看。
+        assert_eq!(
+            command_timeout_ms_for(Platform::Facebook, 60_000, &comment),
+            60_000,
+            "会话超时小于天花板时必须夹回会话值——本断言存在的意义是把这个陷阱写死在案"
         );
 
         // 空关键词首帖开帖有自己的天花板；按 URL 开帖不得跟着放开。
@@ -1823,7 +1840,7 @@ mod tests {
             DEFAULT_COMMAND_TIMEOUT_MS
         );
         assert_eq!(
-            command_timeout_ms_for(Platform::Facebook, 90_000, &first_post),
+            command_timeout_ms_for(Platform::Facebook, FACEBOOK_SESSION_TIMEOUT_MS, &first_post),
             FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS
         );
     }

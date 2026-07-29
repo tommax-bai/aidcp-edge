@@ -13,7 +13,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
 pub(crate) const FACEBOOK_HOME_URL: &str = "https://www.facebook.com/";
-pub(crate) const FACEBOOK_DETAIL_HYDRATION_TIMEOUT: Duration = Duration::from_secs(15);
+// 时间预算整体 ×1.5（用户口径，2026-07-29）。只放大**等页面的容错窗**；
+// 拟人停顿、限流地板、判稳预算不动——它们不是容错：判稳是「页面渲染完要多久」的经验值，
+// 且身份采集（下方常量）明确依赖「8 轮判稳要装进命令预算」，放大它会直接撑爆那条算式。
+pub(crate) const FACEBOOK_DETAIL_HYDRATION_TIMEOUT: Duration = Duration::from_secs(23);
 pub(crate) const FACEBOOK_FEED_SETTLE_NAV: Duration = Duration::from_secs(6);
 pub(crate) const FACEBOOK_FEED_SETTLE_IN_PLACE: Duration = Duration::from_millis(3_500);
 pub(crate) const FACEBOOK_FEED_SCROLL_ROUNDS: usize = 8;
@@ -30,12 +33,14 @@ pub(crate) const FACEBOOK_IDENTITY_SETTLE: Duration = Duration::from_millis(1_20
 pub(crate) const FACEBOOK_IDENTITY_MAX_CANDIDATES_PER_CARD: usize = 2;
 pub(crate) const FACEBOOK_IDENTITY_MAX_CARDS_PER_ROUND: usize = 3;
 pub(crate) const FACEBOOK_IDENTITY_COMMAND_BUDGET: Duration = Duration::from_secs(8);
+/// 两次「刷新导致整页重载」之间的最小间隔：**限流地板**，不是超时，不随预算放大。
 pub(crate) const FACEBOOK_REFRESH_RELOAD_FLOOR_MS: u64 = 180_000;
-pub(crate) const FACEBOOK_JOIN_READY_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const FACEBOOK_JOIN_READY_TIMEOUT: Duration = Duration::from_secs(45);
+/// 点击前后的拟人停顿：**节奏**不是容错，不随预算放大。
 pub(crate) const FACEBOOK_JOIN_HYDRATION_SETTLE: Duration = Duration::from_secs(2);
 pub(crate) const FACEBOOK_JOIN_POST_CLICK_SETTLE: Duration = Duration::from_millis(1_500);
-pub(crate) const FACEBOOK_JOIN_VERIFY_TIMEOUT: Duration = Duration::from_secs(45);
-pub(crate) const FACEBOOK_PUBLISH_UPLOAD_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
+pub(crate) const FACEBOOK_JOIN_VERIFY_TIMEOUT: Duration = Duration::from_secs(68);
+pub(crate) const FACEBOOK_PUBLISH_UPLOAD_VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) static FACEBOOK_FEED_LIKE_OPERATION: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn unix_time_ms() -> u64 {

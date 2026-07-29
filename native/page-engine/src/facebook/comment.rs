@@ -9,8 +9,14 @@ use crate::protocol::{EffectPhase, NativeCommand};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-const FACEBOOK_COMMENT_PRE_SUBMIT_RESERVE_MS: u64 = 12_000;
-const FACEBOOK_COMMENT_READBACK_BUDGET: Duration = Duration::from_secs(3);
+/// 逐字输入之后**留给提交那一段**的预算（回读校验 + 动作闸 + 提交窗 + 聚焦 + Enter + 就地确认 + 交回执）。
+/// 输入死线 = 命令死线 − 本值。留少了的失败形态正是用户报的「输入完还是失败」：字打完了却没时间提交。
+///
+/// 取值不能机械 ×1.5：这一段的内容是 回读 5s + 就地确认 13.5s = 18.5s，
+/// 机械算出的 18s **本身就是负余量**（原值 12s 对 3s+9s=12s 同样是零余量，那条不变式一直是破的）。
+/// 取 21s，给「把诚实回执交出去」留约 2.5s——判据同 `feed.rs` 的恢复回执余量。
+const FACEBOOK_COMMENT_PRE_SUBMIT_RESERVE_MS: u64 = 21_000;
+const FACEBOOK_COMMENT_READBACK_BUDGET: Duration = Duration::from_secs(5);
 
 pub(crate) async fn execute(
     session: &mut EngineSession,
@@ -354,7 +360,8 @@ pub(crate) async fn execute_facebook_comment(
         ));
     }
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(9);
+    // 就地确认轮询窗：随整体 ×1.5（9s → 13.5s）。它整段落在提交前预留之内，改这里必须复核预留够不够。
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(13_500);
     loop {
         if facebook_command_cancelled(cancellation) {
             return Ok(facebook_action_result(

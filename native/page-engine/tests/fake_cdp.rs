@@ -958,14 +958,18 @@ async fn facebook_note_open_never_returns_mismatched_detail_as_success() {
     let mut engine = Engine::default();
     let mut open = session_open(port);
     open.params.platform = Platform::Facebook;
-    open.params.timeout_ms = 20_000;
+    // 本例测的是**详情水合窗到点后如实报失败**，那个窗必须是唯一的约束项。
+    // 2026-07-29 水合窗随整体 ×1.5 抬到 23s 后，原来的 20s 命令预算反而比内层窗还小：
+    // 外层先到点，把诚实的 ProbeFailed 盖成合成的 CdpTimeout —— 正是本轮在治的那类倒挂。
+    // 取默认命令天花板 45s，让内层窗继续当约束项。
+    open.params.timeout_ms = 45_000;
     engine.open(&open).await.expect("open Facebook session");
 
     let outcome = engine
         .execute(&facebook_note_open_command(
             1,
             "https://www.facebook.com/groups/100/posts/2579243155868042",
-            20_000,
+            45_000,
         ))
         .await
         .expect("stored bounded target failure");
@@ -1529,7 +1533,10 @@ async fn facebook_comment_types_approved_text_one_unicode_scalar_at_a_time() {
             session_id: "session-1".to_owned(),
             task_id: "browse-1".to_owned(),
             command_id: 1,
-            deadline_unix_ms: unix_time_ms() + 20_000,
+            // 提交前预留（FACEBOOK_COMMENT_PRE_SUBMIT_RESERVE_MS，2026-07-29 随整体 ×1.5 抬到 18s）
+            // 会从命令死线里扣掉，剩下的才是逐字输入窗。20s 死线只剩 2s 打字，本例测的是
+            // 「逐字输入」和「提交窗被拒」，不是死线，故给足 60s 让预留不再是约束项。
+            deadline_unix_ms: unix_time_ms() + 60_000,
             command: NativeCommand::InteractionComment(CommentParams {
                 note_id: "https://www.facebook.com/groups/42/posts/7".to_owned(),
                 text: body.to_owned(),
@@ -1620,7 +1627,8 @@ async fn facebook_comment_commit_window_rejection_clears_and_never_submits() {
         session_id: "session-1".to_owned(),
         task_id: "browse-1".to_owned(),
         command_id: 1,
-        deadline_unix_ms: unix_time_ms() + 20_000,
+        // 同上：提交前预留 18s 会从死线里扣掉，20s 只剩 2s 打字，测不到提交窗那一步。
+        deadline_unix_ms: unix_time_ms() + 60_000,
         command: NativeCommand::InteractionComment(CommentParams {
             note_id: "https://www.facebook.com/groups/42/posts/7".to_owned(),
             text: "approved comment".to_owned(),

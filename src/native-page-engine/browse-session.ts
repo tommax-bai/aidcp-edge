@@ -139,27 +139,49 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 const monotonicNow = (): number => performance.now();
-const DEFAULT_NATIVE_COMMAND_TIMEOUT_MS = 30_000;
 const DEFAULT_OBSERVATION_INTERVAL_MS = 2_000;
 const DEFAULT_BLOCKING_WAIT_MS = 15_000;
 const DEFAULT_BLOCKING_POLL_MS = 250;
-const FACEBOOK_GROUP_JOIN_TIMEOUT_MS = 90_000;
+// ⚠️ 本组是**四处同步**的第 ① 层（请求值）。另外三层：
+//   ② 准入校验 `client.ts` 的 validateCommandTimeout（超上限 ⇒ invalid_request，命令**根本不下发**）
+//   ③ 会话超时 `runtime.ts` 的 FACEBOOK_NATIVE_SESSION_TIMEOUT_MS
+//      （引擎取 `session_timeout_ms.min(ceiling)`，会话值小就**静默夹回旧值**、没有任何报错）
+//   ④ 引擎天花板 `native/page-engine/src/engine.rs` 的 command_timeout_ceiling
+// 漏 ② ⇒ 命令毫秒级被拒；漏 ③ ⇒ 看着改了其实没生效。typecheck 对这三种漂移全部无感。
+//
+// 默认档是**跨平台共享**的（小红书 / 视频号也读它）。本次仍随 Facebook 一起 30s → 45s，
+// 理由是：Facebook 按 URL 开帖这条走的就是默认档，而它的内层详情水合窗已抬到 23s——
+// 留在 30s 会让内层几乎顶满外层（已被 fake-CDP 用例当场抓到倒挂）。
+// 抬默认档只放大**容错**，不改变任何成功路径的行为；对另两个平台的唯一影响是诚实失败晚 15s 暴露。
+const DEFAULT_NATIVE_COMMAND_TIMEOUT_MS = 45_000;
+const FACEBOOK_GROUP_JOIN_TIMEOUT_MS = 135_000;
 /**
  * 空关键词首帖开帖的原子上限（change restore-facebook-post-join-comment-continuity）。
  *
- * 该命令内部是一串**串行**有界窗口，最坏路径：群页导航后就绪 8s + 首次探测约 2s +
- * 四轮下滚约 12s + 可选固链导航后就绪 8s + 评论框绑定 12s + 身份回读 20s ≈ 62s。
- * 默认 30s 会在内层窗口跑完之前先到点，把边端一个具名失败改判成外层合成失败——
- * 只放宽内层而不抬这一层等于没改。取值与加群命令同为 90s，避免上限种类膨胀。
- * 普通开帖（带 url / noteId）不受影响，仍取默认值。
+ * 该命令内部是一串**串行**有界窗口，最坏路径：群页导航后就绪 12s + 首次探测约 2s +
+ * 四轮下滚约 12s + 可选固链导航后就绪 12s + 评论框绑定 18s + 身份回读 30s ≈ 86s。
+ * 只放宽内层而不抬这一层等于没改：外层先到点，把边端一个具名失败改判成外层合成失败。
+ * 取值与加群命令同为 135s，避免上限种类膨胀。普通开帖（带 url / noteId）仍取默认值。
  */
-const FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS = 90_000;
+const FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS = 135_000;
 const FACEBOOK_FIRST_POST_SELECTION = 'first_commentable_group_post';
-const FACEBOOK_COMMENT_TIMEOUT_FLOOR_MS = 28_000;
-const FACEBOOK_COMMENT_TIMEOUT_BASE_MS = 18_000;
-const FACEBOOK_COMMENT_TIMEOUT_PER_CHAR_MS = 220;
-const FACEBOOK_COMMENT_TIMEOUT_MAX_MS = 90_000;
-const FACEBOOK_COMMENT_RESPONSE_SLACK_MS = 1_000;
+/**
+ * 评论提交是**长度感知**预算：逐字拟人输入的实测均速约 165ms/字符
+ * （`input.rs` 的对数正态中位 110ms + 标点 ×1.4 + 8% 概率插入 300–600ms 停顿），
+ * 再加上找编辑框 / 滚动 / 聚焦 / 提交后等待 / reload / 校验的固定开销约 30s。
+ *
+ * 2026-07-29 真机：一条约 277 字符的越南语招聘长文，预算 78s（= 18s + 220ms×277 − 1s），
+ * 逐字输入没输完就撞 deadline，如实回 `comment_deadline_exceeded` 并清空编辑框。
+ * 现按用户口径整体 ×1.5，**上限单独抬到 180s**——上限才是长评论的真正约束：
+ * 公式再大也会被它夹回去。180s 覆盖约 880 字符，且仍在会话空转看门狗之内。
+ */
+const FACEBOOK_COMMENT_TIMEOUT_FLOOR_MS = 42_000;
+const FACEBOOK_COMMENT_TIMEOUT_BASE_MS = 27_000;
+const FACEBOOK_COMMENT_TIMEOUT_PER_CHAR_MS = 330;
+const FACEBOOK_COMMENT_TIMEOUT_MAX_MS = 180_000;
+// 传输余量：边端自掐表要比云端步超时早一点收口，好让诚实回执赶在云端判 timeout 之前到。
+// 它是「余量」不是「超时」，不随 ×1.5 放大；但预算变长后单跳抖动也变大，给到 2s。
+const FACEBOOK_COMMENT_RESPONSE_SLACK_MS = 2_000;
 
 /**
  * 就地读停留地板（edge-local 兜底，纯函数便于单测）：按正文字数线性、封顶，再乘 tempo。

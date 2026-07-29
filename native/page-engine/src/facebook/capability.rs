@@ -57,17 +57,19 @@ const TEXT_CONTAINS_WITH_TOLERANCE: &str =
 /// 标签不认识则拒发这一次窗口并把结论绑到当前命令上（不再终止引擎进程）。
 /// 两侧由 `test/native-page-engine/runtime-contracts-commit-window.test.ts` 机械对账：
 /// 单边改一个数字，仓库检查当场失败。改预算请改宿主那张表，再让对账把这里带上。
+// 提交窗预算随整体 ×1.5（2026-07-29）：它喂给宿主守卫，划定「这段不可被抢占」的时长。
+// 命令预算变长后这段也要相应变长，否则抢占闸会在提交段中途放行别的任务。
 const JOIN_WINDOW: Option<CommitWindowContract> = Some(CommitWindowContract {
     label: "fb_join_click",
-    budget_ms: 18_500,
+    budget_ms: 27_750,
 });
 const COMMENT_WINDOW: Option<CommitWindowContract> = Some(CommitWindowContract {
     label: "fb_comment_enter",
-    budget_ms: 20_000,
+    budget_ms: 30_000,
 });
 const PUBLISH_WINDOW: Option<CommitWindowContract> = Some(CommitWindowContract {
     label: "fb_publish_submit",
-    budget_ms: 20_000,
+    budget_ms: 30_000,
 });
 
 macro_rules! entry {

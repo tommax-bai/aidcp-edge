@@ -9,7 +9,12 @@ pub const CAPABILITY_DIGEST: &str = env!("AIDCP_PAGE_ENGINE_CAPABILITY_DIGEST");
 pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 const MIN_TIMEOUT_MS: u64 = 50;
 const MAX_TIMEOUT_MS: u64 = 30_000;
-const MAX_FACEBOOK_TIMEOUT_MS: u64 = 90_000;
+/// 引擎侧对 Facebook `session.open` / 命令 timeout 的准入上限。
+///
+/// ⚠️ 这是「四处同步」之外**第五处**、也是最容易被整组遗忘的一处：它在引擎入口就把超参拒掉。
+/// 漏改的后果不是某条命令变慢，而是 `session.open` 直接被拒、**整个 Facebook 平台一条命令都发不出**。
+/// 必须 ≥ 边缘 `src/native-page-engine/runtime.ts` 下发的 FACEBOOK_NATIVE_SESSION_TIMEOUT_MS。
+const MAX_FACEBOOK_TIMEOUT_MS: u64 = 180_000;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

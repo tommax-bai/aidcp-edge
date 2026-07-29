@@ -8,24 +8,31 @@ import { isAbsolute } from 'node:path';
 
 export const NATIVE_PAGE_ENGINE_PROTOCOL_VERSION = 2;
 const DEFAULT_NATIVE_TIMEOUT_MS = 5_000;
-const MAX_NATIVE_TIMEOUT_MS = 30_000;
-const MAX_FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS = 40_000;
-const MAX_FACEBOOK_COMMENT_TIMEOUT_MS = 90_000;
-const MAX_FACEBOOK_GROUP_JOIN_TIMEOUT_MS = 90_000;
 /**
- * 空关键词首帖开帖的准入上限（change restore-facebook-post-join-comment-continuity）。
+ * ⚠️ 本组是**四处同步**的第 ② 层（准入校验）。另外三层：
+ *   ① 请求值      `browse-session.ts`
+ *   ③ 会话超时    `runtime.ts` 的 FACEBOOK_NATIVE_SESSION_TIMEOUT_MS
+ *                （引擎取 `session_timeout_ms.min(ceiling)`，会话值小就**静默夹回旧值**、不报错）
+ *   ④ 引擎天花板  native/page-engine/src/engine.rs 的 command_timeout_ceiling
  *
- * ⚠️ 这个值是**三处同步**中的一处，改一处必炸：
- *   ① 请求值      `browse-session.ts` 的 FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS
- *   ② 准入校验    本文件 `validateCommandTimeout`（超上限 ⇒ invalid_request，命令**根本不下发**）
- *   ③ 引擎天花板  native/page-engine/src/engine.rs 的 command_timeout_ceiling
- * 只抬 ① 的后果不是"没生效"，而是**每一次首帖开帖都在毫秒级被拒**，云端看到的却是
- * 「群内未找到合适的可评论帖子」——比原缺陷更糟。2026-07-29 已为此炸过一次真机。
- * 桩运行时的单测抓不到这条（它绕过本校验），故另有一条走真实校验的回归。
+ * 本层的失败形态最刺眼：超上限 ⇒ `invalid_request`，命令**根本不下发**。
+ * 2026-07-29 只抬了 ① 而漏了本层，结果每一次首帖开帖都在毫秒级被拒，云端读到的却是
+ * 「群内未找到合适的可评论帖子」——比原缺陷更糟，且把诊断指向完全错误的方向。
+ * 桩运行时的单测**绕过本校验**，故 `client.test.ts` 里另有走真实校验的回归。
  */
-const MAX_FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS = 90_000;
+const MAX_NATIVE_TIMEOUT_MS = 45_000;
+const MAX_FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS = 60_000;
+const MAX_FACEBOOK_COMMENT_TIMEOUT_MS = 180_000;
+const MAX_FACEBOOK_GROUP_JOIN_TIMEOUT_MS = 135_000;
+const MAX_FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS = 135_000;
+/**
+ * Facebook **会话**超时的准入上限，必须 ≥ 上面所有命令上限里的最大者（当前 = 评论 180s）。
+ * 会话超时偏小会让引擎把命令天花板静默夹回；而这里校验得太严则更糟——
+ * `openSession` 直接 invalid_request，**整个 Facebook 会话开不起来**，不是某条命令失败。
+ */
+const MAX_FACEBOOK_SESSION_TIMEOUT_MS = 180_000;
 const FACEBOOK_FIRST_POST_SELECTION = 'first_commentable_group_post';
-const MAX_FACEBOOK_PUBLISH_FILL_TIMEOUT_MS = 400_000;
+const MAX_FACEBOOK_PUBLISH_FILL_TIMEOUT_MS = 600_000;
 const MAX_STDERR_CHARS = 2_048;
 const MAX_RECORD_CHARS = 64 * 1024;
 
@@ -811,9 +818,13 @@ export class NativePageEngineClient {
   }
 
   async openSession(input: NativePageSessionInput): Promise<NativePageEngineSession> {
+    // 会话超时自身也要过准入校验，且它必须**容得下最长的那条命令**——引擎按
+    // `session_timeout_ms.min(命令天花板)` 算预算，会话值偏小会把天花板静默夹回。
+    // 这里曾复用加群上限，于是「会话超时 > 加群上限」时 openSession 直接 invalid_request、
+    // **整个 Facebook 会话开不起来**（不是某条命令失败，是全线不可用）。改为按最长命令上限校验。
     validateProbeInput(
       input,
-      input.platform === 'facebook' ? MAX_FACEBOOK_GROUP_JOIN_TIMEOUT_MS : MAX_NATIVE_TIMEOUT_MS,
+      input.platform === 'facebook' ? MAX_FACEBOOK_SESSION_TIMEOUT_MS : MAX_NATIVE_TIMEOUT_MS,
     );
     validateIdentifier(input.sessionId, 'sessionId');
     validateIdentifier(input.taskId, 'taskId');
@@ -955,9 +966,11 @@ function parseCommandResponse(
  * 两平台的预算各按各自真实提交时长定：小红书发布提交是 15s，Facebook 是 20s，混用即拉长或截短。
  */
 export const NATIVE_COMMIT_WINDOW_BUDGETS: Readonly<Record<NativeCommitWindowLabel, number>> = {
-  fb_join_click: 18_500,
-  fb_comment_enter: 20_000,
-  fb_publish_submit: 20_000,
+  // 提交窗预算随 Facebook 时间预算整体 ×1.5（2026-07-29）。这里是**事实源**，
+  // native/page-engine/src/facebook/capability.rs 里的同名数字只是镜像，运行期以本表为准。
+  fb_join_click: 27_750,
+  fb_comment_enter: 30_000,
+  fb_publish_submit: 30_000,
   xhs_comment_submit: 4_000,
   xhs_notification_comments: 20_000,
   xhs_notification_likes: 20_000,

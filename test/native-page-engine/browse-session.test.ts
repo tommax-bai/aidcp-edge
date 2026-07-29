@@ -288,13 +288,16 @@ test('Native Facebook assigns only Join and length-aware comments a long command
   }));
   await h.session.onCloudCommand(envelope('feed.refresh', { reason: 'ordinary' }));
 
+  // 2026-07-29 Facebook 时间预算整体 ×1.5、评论上限单独取 180s。
+  // 评论按 code point 算「正文 + 换行 + 联系方式」：100+1+8=109 → 27_000 + 330×109 = 62_970，减回执余量 2_000。
+  // 第二条 400 字符无联系方式 → 27_000 + 330×400 = 159_000，减 2_000。
   assert.equal(h.executions[0]?.command.kind, 'group_join');
-  assert.equal(h.executions[0]?.timeoutMs, 90_000);
+  assert.equal(h.executions[0]?.timeoutMs, 135_000);
   assert.equal(h.executions[1]?.command.kind, 'interaction_comment');
-  assert.equal(h.executions[1]?.timeoutMs, 40_980);
+  assert.equal(h.executions[1]?.timeoutMs, 60_970);
   assert.equal(h.executions[2]?.command.kind, 'interaction_comment');
-  assert.equal(h.executions[2]?.timeoutMs, 89_000);
-  assert.equal(h.executions[3]?.timeoutMs, 30_000);
+  assert.equal(h.executions[2]?.timeoutMs, 157_000);
+  assert.equal(h.executions[3]?.timeoutMs, 45_000);
 });
 
 test('Native Facebook gives the first-post open its own long budget; 普通开帖仍取默认', async () => {
@@ -319,9 +322,12 @@ test('Native Facebook gives the first-post open its own long budget; 普通开�
   }));
 
   assert.equal(h.executions[0]?.command.kind, 'note_open');
-  assert.equal(h.executions[0]?.timeoutMs, 90_000, '首帖开帖必须拿到长预算');
+  assert.equal(h.executions[0]?.timeoutMs, 135_000, '首帖开帖必须拿到长预算');
   assert.equal(h.executions[1]?.command.kind, 'note_open');
-  assert.equal(h.executions[1]?.timeoutMs, 30_000, '按 URL 开帖预算未变，不得跟着放宽');
+  assert.ok(
+    (h.executions[1]?.timeoutMs ?? 0) < (h.executions[0]?.timeoutMs ?? 0),
+    '按 URL 开帖走默认档，必须明显短于首帖那条专属预算',
+  );
 });
 
 test('Native Facebook forwards the exact Join commit window to the shared coordinator guard', async () => {

@@ -10,7 +10,10 @@ const fixture = fileURLToPath(
   new URL('../fixtures/native-page-engine/fake-engine.mjs', import.meta.url),
 );
 
-function client(mode: string, processTimeoutMs = 3_000): NativePageEngineClient {
+// 假引擎是真起一个 node 子进程（tsx + fixture）。3s 只够空载时启动：满负载并行跑全量时会被吃掉，
+// 于是协议校验类用例拿到的是 engine_timeout 而不是它要测的 invalid_protocol —— 单跑必过、全量偶发。
+// 这些用例测的是协议与错误语义，不是启动速度，故给足 10s；真要测进程死线的那条自己传更小的值。
+function client(mode: string, processTimeoutMs = 10_000): NativePageEngineClient {
   return new NativePageEngineClient({
     binaryPath: process.execPath,
     binaryArgs: [fixture],
@@ -107,7 +110,7 @@ test('permits only the capability-specific Facebook long command ceilings', asyn
       optionKind: 'target',
       optionValue: 'facebook_personal_timeline',
     },
-  }, 40_000);
+  }, 60_000);
   await session.execute({
     kind: 'publish_fill_field',
     params: {
@@ -125,7 +128,7 @@ test('permits only the capability-specific Facebook long command ceilings', asyn
         text: 'Vietnamese comment',
         accountId: '61591824155856',
       },
-    }, 90_001),
+    }, 180_001),
     (error: unknown) => {
       assert.ok(error instanceof NativePageEngineError);
       assert.equal(error.code, 'invalid_request');
@@ -141,7 +144,7 @@ test('permits only the capability-specific Facebook long command ceilings', asyn
         optionKind: 'target',
         optionValue: 'facebook_personal_timeline',
       },
-    }, 40_001),
+    }, 60_001),
     (error: unknown) => {
       assert.ok(error instanceof NativePageEngineError);
       assert.equal(error.code, 'invalid_request');
@@ -156,7 +159,7 @@ test('permits only the capability-specific Facebook long command ceilings', asyn
       return true;
     },
   );
-  // 放宽必须**只**落在首帖那一形态：按 URL 开帖仍是 30s 上限，绝不跟着放开。
+  // 放宽必须**只**落在首帖那一形态：按 URL 开帖仍走默认档上限，绝不跟着放开。
   await assert.rejects(
     session.execute({
       kind: 'note_open',
@@ -175,7 +178,7 @@ test('permits only the capability-specific Facebook long command ceilings', asyn
         selection: 'first_commentable_group_post',
         container: 'https://www.facebook.com/groups/42',
       },
-    }, 90_001),
+    }, 135_001),
     (error: unknown) => {
       assert.ok(error instanceof NativePageEngineError);
       assert.equal(error.code, 'invalid_request');

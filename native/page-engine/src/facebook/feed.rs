@@ -23,7 +23,7 @@ fn facebook_inline_read_context_changed(output: &CommandOutput) -> bool {
     )
 }
 
-const FACEBOOK_FEED_RECOVERY_TIMEOUT: Duration = Duration::from_secs(8);
+const FACEBOOK_FEED_RECOVERY_TIMEOUT: Duration = Duration::from_secs(12);
 /// 恢复等待必须给「把诚实回执交出去」留出的余量。
 ///
 /// 这一层是本 change 的核心命题在小尺度上的复现：**外层原子上限先到点，会把一个具名回执
