@@ -53,6 +53,9 @@ export class NativePublishExecutor {
         nativePublishCommand(payload, { localImagePath, imageIndex }),
         timeoutMs,
         signal,
+        // 提交窗口处理器与平台无关：开窗由执行体在不可逆写入的正前方发起请求，
+        // 宿主只做仲裁与转发。这里**不得**加平台条件——加了就等于把某个平台的
+        // 发布提交重新暴露成「无声照写」（协调器可在提交进行中接管）。
         this.commitWindow
           ? (request) => this.commitWindow!.enter(request.budgetMs, request.label)
           : undefined,

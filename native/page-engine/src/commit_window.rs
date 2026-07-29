@@ -1,8 +1,66 @@
+use crate::command::NativeCommand;
 use crate::error::{EngineError, ErrorCode};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot};
+
+/// 一条不可逆写入的提交窗口契约：开多久、在协调器那边叫什么名字。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct XiaohongshuCommitWindow {
+    pub label: &'static str,
+    pub budget_ms: u64,
+}
+
+const XHS_COMMENT_SUBMIT: XiaohongshuCommitWindow = XiaohongshuCommitWindow {
+    label: "xhs_comment_submit",
+    budget_ms: 4_000,
+};
+const XHS_NOTIFICATION_COMMENTS: XiaohongshuCommitWindow = XiaohongshuCommitWindow {
+    label: "xhs_notification_comments",
+    budget_ms: 20_000,
+};
+const XHS_NOTIFICATION_LIKES: XiaohongshuCommitWindow = XiaohongshuCommitWindow {
+    label: "xhs_notification_likes",
+    budget_ms: 20_000,
+};
+const XHS_NOTIFICATION_FOLLOWS: XiaohongshuCommitWindow = XiaohongshuCommitWindow {
+    label: "xhs_notification_follows",
+    budget_ms: 20_000,
+};
+/// 发布提交是 **15s**，不是 20s —— 20s 是 Facebook 的 `fb_publish_submit`。
+/// 两个平台的预算各自按各自的真实提交时长定，混用一个值等于把另一个平台的窗口拉长或截短。
+const XHS_PUBLISH_SUBMIT: XiaohongshuCommitWindow = XiaohongshuCommitWindow {
+    label: "xhs_publish_submit",
+    budget_ms: 15_000,
+};
+
+/// 小红书四处不可逆写入的提交窗口契约。
+///
+/// 判据是「这一步一旦点下去就没有回滚」：
+///  - 评论提交：点下即进入「已提交、结果未知」区，此后取消 = 把一条**可能已经发出去**的评论
+///    当成没发生 ⇒ 上游重试 ⇒ 重复评论；
+///  - 三条通知分类栏：点击**消费未读、无回滚**，窗口 MUST 覆盖点击那一刻；
+///  - 发布提交：同评论，且代价更大。
+///
+/// 其余命令回 `None`（读命令与可重放的导航不占窗口）——把整条命令包进窗口等于
+/// 把「不可逆写入保护」偷换成「命令期间禁抢占」，抢占能力会事实上失效。
+///
+/// ⚠️ **宿主侧必须同批认识这五条标签**：预算的单一事实源在宿主
+/// （`src/native-page-engine/client.ts` 的 `NativeCommitWindowLabel` 与
+/// `NATIVE_COMMIT_WINDOW_BUDGETS`），引擎自报的数字只作为「不超过事实源上限」的请求值。
+/// 宿主那张表里没有的标签会被判成契约违规并否决窗口 —— 后果不是「没有保护」，
+/// 而是这五处写入**全部拒发**。改这里就必须同时改那里。
+pub fn xiaohongshu_commit_window(command: &NativeCommand) -> Option<XiaohongshuCommitWindow> {
+    match command {
+        NativeCommand::InteractionComment(_) => Some(XHS_COMMENT_SUBMIT),
+        NativeCommand::NotificationBrowseComments(_) => Some(XHS_NOTIFICATION_COMMENTS),
+        NativeCommand::NotificationBrowseLikes(_) => Some(XHS_NOTIFICATION_LIKES),
+        NativeCommand::NotificationBrowseFollows(_) => Some(XHS_NOTIFICATION_FOLLOWS),
+        NativeCommand::PublishSubmit(_) => Some(XHS_PUBLISH_SUBMIT),
+        _ => None,
+    }
+}
 
 pub struct CommitWindowRequest {
     pub token: String,

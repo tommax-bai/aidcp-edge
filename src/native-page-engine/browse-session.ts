@@ -40,8 +40,85 @@ export interface NativeBrowseSessionOptions {
   random?: RandomFn;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   overlayConfirmMs?: number;
+  /**
+   * 周期阻断观测的节拍（ms）。默认 2000，可注入 / 可经 `AIDCP_NATIVE_OBSERVATION_MS` 配置。
+   * 写死一个节拍等于把「多久看一眼」焊进代码，既不能按平台调档也不能在测试里驱动。
+   */
+  probeIntervalMs?: number;
+  /**
+   * 检出阻断后普通浏览命令在停手闸里最多等多久（ms）。
+   * 等满仍未清除即回**诚实的未开始**——绝不无界地挂在闸门里（云端等不到回执会被看门狗判死整场会话）。
+   */
+  blockingWaitMs?: number;
+  /** 停手等待循环的轮询间隔（ms）。 */
+  blockingPollMs?: number;
   commitWindow?: CommitWindowGuard;
 }
+
+/** 阻断桶。`none` 之外的三桶都意味着「此刻不该继续对页面动手」。 */
+type BlockingKind = 'none' | 'login' | 'captcha' | 'unknown';
+
+/**
+ * 阻断桶 → 诚实回执原因码。逐字沿用 Facebook 动作闸已在用的三个名字
+ * （`native/page-engine/src/facebook/shared.rs` 的 `login_required` / `blocked_by_captcha` /
+ * `blocked_by_unknown`），**不新造**：云端按名字归因，多一个同义词就多一条无归宿的原因码。
+ */
+const BLOCKING_REASONS: Record<Exclude<BlockingKind, 'none'>, string> = {
+  login: 'login_required',
+  captcha: 'blocked_by_captcha',
+  unknown: 'blocked_by_unknown',
+};
+
+/**
+ * 每平台一份阻断处置策略。上报闸语义（延后确认 / detected-cleared 严格配对 / 世代作废）
+ * 两个平台共用一份实现，差别只在这三格：认哪些桶、要不要在宿主侧本地停手、要不要产出陪伴界面事件。
+ */
+interface BlockingPolicy {
+  classify(value: Record<string, unknown>): BlockingKind;
+  /** 低置信「未知阻断」桶是否成立。 */
+  reportsUnknownBucket: boolean;
+  /** 检出阻断后是否在宿主侧本地停手。 */
+  haltsLocalDispatch: boolean;
+  /** 是否产出陪伴界面事件（产品范围，非可观测性）。 */
+  emitsCompanionUi: boolean;
+}
+
+const FACEBOOK_BLOCKING_POLICY: BlockingPolicy = {
+  classify(value) {
+    if (
+      value.blockingKind === 'captcha'
+      || value.blockingKind === 'unknown'
+      || value.blockingKind === 'login'
+    ) {
+      return value.blockingKind;
+    }
+    if (value.pageKind === 'captcha') return 'captcha';
+    if (value.pageKind === 'login') return 'login';
+    return 'none';
+  },
+  reportsUnknownBucket: true,
+  // Facebook 的停手落在 Rust 侧的逐动作 fail-closed 闸上（每个高危动作提交前各自复检），
+  // 宿主不叠第二道会话级停手——那会改变 Facebook 既有的阻断语义，本次回归明确不动它。
+  haltsLocalDispatch: false,
+  emitsCompanionUi: true,
+};
+
+const XIAOHONGSHU_BLOCKING_POLICY: BlockingPolicy = {
+  classify(value) {
+    // 只认验证码与登录墙两桶。页面探针的「未识别」含义是**这是一个我没认出来的页面**，
+    // 不是**这是一堵我认出来但归不了类的阻断墙**：小红书的看图态 / AI 搜索结果页 / 详情弹层
+    // 都会落进未识别。把它当阻断上报＝每次识别失败换一次账号降级，是一台误报机。
+    // 在页面规则里补出真正的阻断分类器之前，低置信桶是**已声明的缺席**，不是遗漏。
+    if (value.pageKind === 'captcha') return 'captcha';
+    if (value.pageKind === 'login') return 'login';
+    return 'none';
+  },
+  reportsUnknownBucket: false,
+  haltsLocalDispatch: true,
+  // 小红书不补在场感 / 陪伴界面事件：迁移前也没有，属产品范围而非可观测性缺陷。
+  // 排障级证据走结构化诊断行（见 diagnostic()），与陪伴界面是两条互不替代的通路。
+  emitsCompanionUi: false,
+};
 
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
@@ -63,6 +140,9 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 const monotonicNow = (): number => performance.now();
 const DEFAULT_NATIVE_COMMAND_TIMEOUT_MS = 30_000;
+const DEFAULT_OBSERVATION_INTERVAL_MS = 2_000;
+const DEFAULT_BLOCKING_WAIT_MS = 15_000;
+const DEFAULT_BLOCKING_POLL_MS = 250;
 const FACEBOOK_GROUP_JOIN_TIMEOUT_MS = 90_000;
 /**
  * 空关键词首帖开帖的原子上限（change restore-facebook-post-join-comment-continuity）。
@@ -118,10 +198,20 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   private active?: Promise<void>;
   private activeAbort?: AbortController;
   private probeTimer?: NodeJS.Timeout;
-  private facebookBlockingKind: 'none' | 'login' | 'captcha' | 'unknown' = 'none';
-  private facebookReportedBlockingKind?: 'captcha' | 'unknown';
-  private facebookUnknownTimer?: NodeJS.Timeout;
-  private lastFacebookBlockingEvidence?: { url?: string; text?: string };
+  private blockingKind: BlockingKind = 'none';
+  private reportedBlockingKind?: 'captcha' | 'unknown';
+  private unknownConfirmTimer?: NodeJS.Timeout;
+  private lastBlockingEvidence?: { url?: string; text?: string };
+  /**
+   * 阻断 episode 世代号：离开云端上报态即自增，令在途的延后确认当场作废。
+   * 少了它，一个已经自愈的低置信阻断仍会在确认窗到点时补发一次 detected（配对随之错位）。
+   */
+  private blockingEpisode = 0;
+  private observationSuspended = false;
+  private observationDeferredLogged = false;
+  private consecutiveProbeFailures = 0;
+  private lastOkProbeAt?: number;
+  private stopRequested = false;
   private lastFacebookCardsAt = 0;
   private readonly facebookReelViewActivityPostIds = new Set<string>();
   private readonly facebookFeedVideoViewActivityPostIds = new Set<string>();
@@ -141,9 +231,11 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   async start(): Promise<void> {
     if (this.running || this.blocked || this.closed) return;
     this.running = true;
+    this.stopRequested = false;
     try {
       await this.executeAndReport({ kind: 'browse_scroll', params: { reason: 'initial_scan' } });
       this.logger(`[native-page] ${this.options.platform ?? 'xiaohongshu'} Native-only browse session ready`);
+      this.diagnostic('session_ready');
       this.scheduleProbe();
     } finally {
       this.running = false;
@@ -161,6 +253,18 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       this.reportFailure(env, 'capability_unsupported', 'not_started');
       return;
     }
+    // 停手闸只拦**普通浏览**。两类命令必须绕过它，否则闸门自己就是死锁的来源：
+    //  - 出口②：**会话结束命令**。登录墙 / 验证码常驻时闸门会一直拦着普通命令；
+    //    终止命令若也被拦住，云端就再也终止不了这场会话（必须先于闸门判定）。
+    //  - **协调器授予的独占任务命令**。解除阻断本身就是任务干的活（远程协助点验证码），
+    //    把它拦在等验证码消失的闸门里 = 等一个只有它自己能促成的条件。
+    if (env.type !== 'session.end' && !ownedTaskId) {
+      const gate = await this.waitWhileBlocked(env);
+      if (gate) {
+        this.reportFailure(env, gate, 'not_started');
+        return;
+      }
+    }
     const command = nativeCommandForEnvelope(env, this.options.getAccountId?.());
     if (!command) {
       this.reportFailure(env, 'native_command_not_mapped', 'not_started');
@@ -172,7 +276,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     this.active = active;
     try {
       await active;
-      if (env.type === 'session.end') this.stop();
+      if (env.type === 'session.end') this.stop('cloud_session_end');
     } catch (error) {
       const detail = error as { code?: string; detail?: { effectPhase?: string; reasonCode?: string } };
       const phase = detail.detail?.effectPhase;
@@ -183,6 +287,13 @@ export class NativeBrowseSession implements EdgeBrowseSession {
           ? phase
           : 'ambiguous',
       );
+      // 结构化那一行只带 token（可被机械消费、不含现场文本）；下面那条人读的行保留原样，
+      // 它带的是引擎错误消息，只供人排障，不是被解析的证据面。
+      this.diagnostic('command_failed', {
+        command: nativeActionNameForCommand(env.type),
+        code: detail.code ?? 'native_command_failed',
+        effectPhase: phase ?? 'ambiguous',
+      });
       this.logger(`[native-page] ${env.type} failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       if (this.active === active) this.active = undefined;
@@ -190,16 +301,18 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     }
   }
 
-  stop(): void {
+  stop(reason = 'local_stop'): void {
     this.running = false;
+    this.stopRequested = true;
     this.stopProbe();
     this.activeAbort?.abort();
+    this.diagnostic('session_stopped', { reason });
     void this.options.runtime.closeOwner(this.ownerId);
   }
 
   close(): void {
     this.closed = true;
-    this.stop();
+    this.stop('session_closed');
   }
 
   async closeAndWait(timeoutMs = 5_000): Promise<boolean> {
@@ -209,8 +322,10 @@ export class NativeBrowseSession implements EdgeBrowseSession {
 
   async stopAndWait(timeoutMs = 5_000): Promise<boolean> {
     this.running = false;
+    this.stopRequested = true;
     this.stopProbe();
     this.activeAbort?.abort();
+    this.diagnostic('session_stopped', { reason: this.closed ? 'session_closed' : 'drain_stop' });
     const drained = await this.waitActive(timeoutMs);
     await this.options.runtime.closeOwner(this.ownerId);
     return drained;
@@ -220,6 +335,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     this.blocked = true;
     this.stopProbe();
     this.activeAbort?.abort();
+    this.diagnostic('task_yield');
     if (!(await this.waitActive(timeoutMs))) {
       throw new Error(`Native ${this.options.platform ?? 'xiaohongshu'} command did not reach its atomic boundary before takeover`);
     }
@@ -230,6 +346,8 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   async resumeAfterTask(): Promise<void> {
     if (this.closed) return;
     this.blocked = false;
+    this.stopRequested = false;
+    this.diagnostic('task_resume');
     if (this.options.platform === 'facebook') {
       // Facebook task legs are command-driven and may intentionally reuse the current group/post page.
       // Returning home here destroys that handoff; the next explicit feed command restores active_list_url.
@@ -278,10 +396,22 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       command,
       timeoutMs,
       signal,
-      this.options.platform === 'facebook' && this.options.commitWindow
+      // 提交窗口处理器与平台无关：开窗时刻在写入动作的正前方，而写入整段发生在执行体内部，
+      // 宿主无从知道那一刻——窗口只能由执行体发起请求，宿主这里只做仲裁与转发。
+      // 曾经的 `platform === 'facebook'` 条件让小红书拿到的是 undefined，
+      // 于是它的四处不可逆写入等价于「无声照写」。
+      this.options.commitWindow
         ? (request) => this.options.commitWindow!.enter(request.budgetMs, request.label)
         : undefined,
     );
+    // 逐命令留证：不是每条命令都以「动作回执」终结（滚动与开帖的终局是结构化上报），
+    // 少了这一行，一次浏览闭环里那几条命令在日志里就完全没有痕迹。
+    this.diagnostic('command_outcome', {
+      command: command.kind,
+      effectPhase: result.effectPhase,
+      output: result.output?.kind ?? 'none',
+      reason: result.reasonCode ?? 'none',
+    });
     this.report(result, env);
   }
 
@@ -468,7 +598,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
         return;
       }
       case 'page_probe':
-        this.observeFacebookProbe(value);
+        this.observeProbe(value);
         return;
       case 'plan_results': {
         const results = Array.isArray(value.results) ? value.results as unknown as ActionResultPayload[] : [];
@@ -496,7 +626,12 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       groupObservation?: unknown;
       observation?: unknown;
     };
-    if (this.options.platform === 'facebook') {
+    // 逐命令回执诊断与平台无关。它曾整段包在 Facebook 判据里，于是一次小红书浏览闭环
+    // 在日志里只剩「会话就绪」与「失败」两行——没有证据就没有人发现问题，
+    // 小红书那批动作诚实性缺陷长期无人察觉的直接原因就在这里。
+    // 四元组（动作名 / 成功与否 / 效果相位 / 原因码）全部经 token 白名单收敛：
+    // 诊断绝不携带页面正文、凭据或选择器。
+    {
       const action = this.diagnosticToken(receipt.action);
       const reason = this.diagnosticToken(receipt.reason ?? execution.reasonCode ?? 'none');
       this.logger(
@@ -591,90 +726,203 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     try { return await Promise.race([settled, timeout]); } finally { if (timer) clearTimeout(timer); }
   }
 
+  private get blockingPolicy(): BlockingPolicy {
+    return this.options.platform === 'facebook'
+      ? FACEBOOK_BLOCKING_POLICY
+      : XIAOHONGSHU_BLOCKING_POLICY;
+  }
+
+  private now(): number {
+    return (this.options.clock ?? monotonicNow)();
+  }
+
+  private observationIntervalMs(): number {
+    const configured = this.options.probeIntervalMs
+      ?? Number(process.env.AIDCP_NATIVE_OBSERVATION_MS ?? DEFAULT_OBSERVATION_INTERVAL_MS);
+    return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_OBSERVATION_INTERVAL_MS;
+  }
+
+  /**
+   * 周期阻断观测的存活读数。
+   *
+   * `msSinceLastOkProbe === undefined` 表示**一次都没成功探测过**，与「探测成功但没看到情况」
+   * 是两态：MUST NOT 把「探测不了」当成「没情况」——那是传感层的假成功。
+   * 连续失败数与当前保持态一并暴露，外部据此判断「已经看不见多久了」。
+   */
+  observationStatus(): {
+    running: boolean;
+    suspended: boolean;
+    blockingKind: BlockingKind;
+    consecutiveProbeFailures: number;
+    msSinceLastOkProbe?: number;
+  } {
+    return {
+      running: this.probeTimer !== undefined,
+      suspended: this.observationSuspended,
+      blockingKind: this.blockingKind,
+      consecutiveProbeFailures: this.consecutiveProbeFailures,
+      ...(this.lastOkProbeAt === undefined
+        ? {}
+        : { msSinceLastOkProbe: Math.max(0, this.now() - this.lastOkProbeAt) }),
+    };
+  }
+
+  /**
+   * 停掉全部周期观测（执行器连接进入不可恢复终态时用）。幂等。
+   * 不停的后果是：探针继续对一条已死的连接空轮询，一路跑到进程退出。
+   */
+  suspendObservation(reason = 'executor_unrecoverable'): void {
+    if (this.observationSuspended) return;
+    this.observationSuspended = true;
+    this.stopProbe();
+    this.diagnostic('observation_suspended', { reason });
+  }
+
+  /** 重连后整批重启周期观测。启动幂等：没停过就是空操作，停过则干净恢复。 */
+  resumeObservation(): void {
+    if (this.observationSuspended) {
+      this.observationSuspended = false;
+      this.diagnostic('observation_resumed');
+    }
+    this.scheduleProbe();
+  }
+
   private scheduleProbe(): void {
-    if (this.options.platform !== 'facebook' || this.closed || this.blocked || this.probeTimer) return;
+    if (this.closed || this.probeTimer) return;
+    if (this.blocked || this.observationSuspended) {
+      // 「已装配但暂不启动」：待机 / 交接期不起探针，但必须留一条可观测记录——
+      // 否则运维分不清监测体是「没装」还是「装了没开」。翻转才记一次，不刷屏。
+      if (!this.observationDeferredLogged) {
+        this.observationDeferredLogged = true;
+        this.diagnostic('observation_deferred', {
+          reason: this.blocked ? 'task_takeover' : 'suspended',
+        });
+      }
+      return;
+    }
+    this.observationDeferredLogged = false;
     this.probeTimer = setTimeout(() => {
       this.probeTimer = undefined;
-      void this.probeFacebook().finally(() => this.scheduleProbe());
-    }, 2_000);
+      void this.probeOnce().finally(() => this.scheduleProbe());
+    }, this.observationIntervalMs());
     this.probeTimer.unref?.();
   }
 
   private stopProbe(): void {
     if (this.probeTimer) clearTimeout(this.probeTimer);
     this.probeTimer = undefined;
-    if (this.facebookUnknownTimer) clearTimeout(this.facebookUnknownTimer);
-    this.facebookUnknownTimer = undefined;
+    this.clearUnknownConfirm();
   }
 
-  private async probeFacebook(): Promise<void> {
-    if (this.closed || this.blocked || this.options.platform !== 'facebook') return;
+  private clearUnknownConfirm(): void {
+    if (this.unknownConfirmTimer) clearTimeout(this.unknownConfirmTimer);
+    this.unknownConfirmTimer = undefined;
+  }
+
+  /** 一次周期观测。平台无关：判类交给按平台取的策略。 */
+  private async probeOnce(): Promise<void> {
+    if (this.closed || this.blocked || this.observationSuspended) return;
     try {
       const execution = await this.options.runtime.execute(
         this.ownerId,
         { kind: 'page_probe', params: {} },
         5_000,
       );
-      if (execution.output?.kind === 'page_probe') {
-        this.observeFacebookProbe(execution.output.value as Record<string, unknown>);
+      if (execution.output?.kind !== 'page_probe') {
+        this.noteProbeFailure('probe_output_missing');
+        return;
       }
-    } catch (error) {
-      this.logger(`[native-page] Facebook probe failed: ${error instanceof Error ? error.message : String(error)}`);
+      this.lastOkProbeAt = this.now();
+      if (this.consecutiveProbeFailures > 0) {
+        this.diagnostic('observation_recovered', { failures: this.consecutiveProbeFailures });
+        this.consecutiveProbeFailures = 0;
+      }
+      this.observeProbe(execution.output.value as Record<string, unknown>);
+    } catch {
+      this.noteProbeFailure('probe_failed');
     }
   }
 
-  private observeFacebookProbe(value: Record<string, unknown>): void {
-    if (this.options.platform !== 'facebook') return;
-    const blockingKind = value.blockingKind === 'captcha'
-      || value.blockingKind === 'unknown'
-      || value.blockingKind === 'login'
-      ? value.blockingKind
-      : value.pageKind === 'captcha'
-        ? 'captcha'
-        : value.pageKind === 'login'
-          ? 'login'
-          : 'none';
+  /**
+   * 探测失败的容错档 = **sticky**：保持上一状态、绝不翻转。
+   * 翻转的后果是页面正常导航期间的一次瞬时求值失败被当成验证码，刷出假告警。
+   * 只在进入失败态时记一行（旧实现每拍刷一行僵尸日志），持续失败靠存活读数在外部可见。
+   */
+  private noteProbeFailure(reason: string): void {
+    this.consecutiveProbeFailures += 1;
+    if (this.consecutiveProbeFailures === 1) {
+      this.diagnostic('observation_probe_failed', { reason, keptState: this.blockingKind });
+    }
+  }
+
+  /**
+   * @deprecated 兼容别名：既有 Facebook 阻断上报回归用例按这个名字取句柄驱动一次观测。
+   * 判类与上报都在平台无关的 {@link observeProbe} 里，这里不做任何第二份判据；
+   * 那条用例改指 `observeProbe` 之后即可删除本别名。
+   */
+  observeFacebookProbe(value: Record<string, unknown>): void {
+    this.observeProbe(value);
+  }
+
+  /** 驱动一次阻断观测（周期探针与随命令回传的探针输出共用这一段）。 */
+  observeProbe(value: Record<string, unknown>): void {
+    const policy = this.blockingPolicy;
+    const kind = policy.classify(value);
     const url = typeof value.origin === 'string'
       ? `${value.origin}${typeof value.path === 'string' ? value.path : ''}`
       : undefined;
     const evidence = typeof value.blockingText === 'string' && value.blockingText.trim()
       ? value.blockingText.trim().slice(0, 1_000)
       : undefined;
-    this.lastFacebookBlockingEvidence = { url, text: evidence };
-    const previous = this.facebookBlockingKind;
-    this.facebookBlockingKind = blockingKind;
+    this.lastBlockingEvidence = { url, text: evidence };
+    const previous = this.blockingKind;
+    this.blockingKind = kind;
+    if (kind !== previous) this.diagnostic('blocking_state', { from: previous, to: kind });
 
-    if (blockingKind === 'captcha') {
-      if (this.facebookUnknownTimer) clearTimeout(this.facebookUnknownTimer);
-      this.facebookUnknownTimer = undefined;
-      if (this.facebookReportedBlockingKind !== 'captcha') this.reportFacebookBlocking('captcha');
+    if (kind === 'captcha') {
+      this.clearUnknownConfirm();
+      if (this.reportedBlockingKind !== 'captcha') this.reportBlocking('captcha');
       return;
     }
-    if (blockingKind === 'unknown') {
-      if (previous !== 'unknown' && !this.facebookReportedBlockingKind && !this.facebookUnknownTimer) {
+    if (kind === 'unknown') {
+      // 低置信桶必须经一轮持续性确认才上报，滤掉一闪即自愈的瞬时坏页。
+      // 真验证码指纹走上面那条即时路径、不经确认窗（绝不弱化真验证码）。
+      if (!policy.reportsUnknownBucket) return;
+      if (previous !== 'unknown' && !this.reportedBlockingKind && !this.unknownConfirmTimer) {
         const configuredConfirmMs = this.options.overlayConfirmMs ?? Number(process.env.AIDCP_OVERLAY_CONFIRM_MS ?? 2_000);
         const confirmMs = Number.isFinite(configuredConfirmMs) && configuredConfirmMs >= 0
           ? configuredConfirmMs
           : 2_000;
-        this.facebookUnknownTimer = setTimeout(() => {
-          this.facebookUnknownTimer = undefined;
-          if (this.facebookBlockingKind === 'unknown' && !this.facebookReportedBlockingKind) {
-            this.reportFacebookBlocking('unknown');
+        const episode = this.blockingEpisode;
+        this.unknownConfirmTimer = setTimeout(() => {
+          this.unknownConfirmTimer = undefined;
+          // 世代守卫：期间若已离开上报态，这次在途确认作废（自愈后不补发）。
+          if (episode !== this.blockingEpisode) return;
+          if (this.blockingKind === 'unknown' && !this.reportedBlockingKind) {
+            this.reportBlocking('unknown');
           }
         }, confirmMs);
-        this.facebookUnknownTimer.unref?.();
+        this.unknownConfirmTimer.unref?.();
       }
       return;
     }
-    if (this.facebookUnknownTimer) clearTimeout(this.facebookUnknownTimer);
-    this.facebookUnknownTimer = undefined;
-    if (this.facebookReportedBlockingKind) {
-      this.facebookReportedBlockingKind = undefined;
-      this.options.client.send('risk.captcha_cleared', {
-        edgeId: this.options.edgeId,
-        accountId: this.options.getAccountId?.(),
-        ...(url ? { url } : {}),
-      });
+    // 登录墙与无阻断共用这一段：登录墙**只本地停手、不打扰云端**（不发账号级阻断上报）。
+    this.clearUnknownConfirm();
+    if (!this.reportedBlockingKind) {
+      // 从未上报过的阻断态自愈：MUST NOT 发孤儿 cleared。
+      if (previous === 'captcha' || previous === 'unknown') this.blockingEpisode += 1;
+      return;
+    }
+    const cleared = this.reportedBlockingKind;
+    this.reportedBlockingKind = undefined;
+    this.blockingEpisode += 1;
+    this.options.client.send('risk.captcha_cleared', {
+      edgeId: this.options.edgeId,
+      accountId: this.options.getAccountId?.(),
+      ...(url ? { url } : {}),
+    });
+    this.diagnostic('blocking_cleared', { kind: cleared });
+    if (policy.emitsCompanionUi) {
       this.emitUi({
         kind: 'activity',
         type: 'popup_cleared',
@@ -684,9 +932,9 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     }
   }
 
-  private reportFacebookBlocking(kind: 'captcha' | 'unknown'): void {
-    this.facebookReportedBlockingKind = kind;
-    const evidence = this.lastFacebookBlockingEvidence;
+  private reportBlocking(kind: 'captcha' | 'unknown'): void {
+    this.reportedBlockingKind = kind;
+    const evidence = this.lastBlockingEvidence;
     this.options.client.send('risk.captcha_detected', {
       edgeId: this.options.edgeId,
       accountId: this.options.getAccountId?.(),
@@ -703,13 +951,86 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       } : {}),
       reason: 'native_page_probe',
     });
-    const what = kind === 'captcha' ? '验证码' : '未知阻断/限流';
-    this.emitUi({
-      kind: 'activity',
-      type: 'popup',
-      sentence: `遇到${what}，先停一停等处理`,
-      presence: `遇到${what}，暂停操作中…`,
+    // 诊断只记「有没有证据文案」，不记文案本身：那是页面正文。
+    this.diagnostic('blocking_detected', { kind, evidence: evidence?.text ? 'present' : 'absent' });
+    if (this.blockingPolicy.emitsCompanionUi) {
+      const what = kind === 'captcha' ? '验证码' : '未知阻断/限流';
+      this.emitUi({
+        kind: 'activity',
+        type: 'popup',
+        sentence: `遇到${what}，先停一停等处理`,
+        presence: `遇到${what}，暂停操作中…`,
+      });
+    }
+  }
+
+  /**
+   * 停手等待循环。返回 `undefined` 表示可以继续下发；返回一个原因码表示诚实的**未开始**。
+   *
+   * 三个显式出口（少一个就有一种停摆形态）：
+   *  ① **本地停止**：会话被停 / 被关，等待当场结束；
+   *  ② **会话结束命令**：由调用点在进闸门之前放行（见 onCloudCommand），否则登录墙常驻时
+   *     云端永远终止不了这场会话；
+   *  ③ **任务接管信号**：到达即**抛出**，令该命令零副作用作废、当场让路。
+   *     MUST NOT 只 return —— 那会让命令继续对着验证码墙点下去，而交接等的是「命令处理函数还没返回」，
+   *     于是它无界地等一条正在等验证码的命令，那个验证码又只有这次交接要授予的协助任务才能点掉：
+   *     闭环死锁、整台机器停摆。
+   */
+  private async waitWhileBlocked(env: Envelope): Promise<string | undefined> {
+    if (!this.blockingPolicy.haltsLocalDispatch) return undefined;
+    if (this.blockingKind === 'none') return undefined;
+    const deadline = this.now() + (this.options.blockingWaitMs ?? DEFAULT_BLOCKING_WAIT_MS);
+    const pollMs = this.options.blockingPollMs ?? DEFAULT_BLOCKING_POLL_MS;
+    const sleep = this.options.sleep ?? abortableSleep;
+    this.diagnostic('blocking_halt_enter', {
+      kind: this.blockingKind,
+      command: nativeActionNameForCommand(env.type),
     });
+    for (;;) {
+      // 每一轮都重新读一次当前判类：状态由周期观测在闸门之外持续刷新。
+      const kind = this.currentBlockingKind();
+      if (kind === 'none') {
+        this.diagnostic('blocking_halt_exit', { outcome: 'cleared' });
+        return undefined;
+      }
+      // 出口③：接管到达即抛出（零副作用作废）。
+      if (this.blocked) {
+        this.diagnostic('blocking_halt_exit', { outcome: 'preempted_by_task' });
+        throw Object.assign(
+          new Error('Native browse command yielded to task takeover while halted on a blocking overlay'),
+          { code: 'preempted_by_task' },
+        );
+      }
+      // 出口①：本地停止。
+      if (this.closed || this.stopRequested) {
+        this.diagnostic('blocking_halt_exit', { outcome: 'session_stopped' });
+        return 'session_stopped';
+      }
+      if (this.now() >= deadline) {
+        this.diagnostic('blocking_halt_exit', { outcome: 'still_blocked', kind });
+        return BLOCKING_REASONS[kind];
+      }
+      await sleep(pollMs);
+    }
+  }
+
+  private currentBlockingKind(): BlockingKind {
+    return this.blockingKind;
+  }
+
+  private diagnostic(
+    event: string,
+    fields: Record<string, string | number | boolean | undefined> = {},
+  ): void {
+    const parts = [
+      `event=${this.diagnosticToken(event)}`,
+      `platform=${this.diagnosticToken(this.options.platform ?? 'xiaohongshu')}`,
+    ];
+    for (const [key, value] of Object.entries(fields)) {
+      if (value === undefined) continue;
+      parts.push(`${this.diagnosticToken(key)}=${this.diagnosticToken(String(value))}`);
+    }
+    this.logger(`[native-page] session.event ${parts.join(' ')}`);
   }
 
   private emitFacebookAction(payload: ActionCompletedPayload): void {

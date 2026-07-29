@@ -1,6 +1,6 @@
 use crate::cdp::CdpSession;
 use crate::command::{NoteOpenParams, NoteOpenSelection};
-use crate::commit_window::CommitWindowRequester;
+use crate::commit_window::{CommitWindowRequester, xiaohongshu_commit_window};
 use crate::endpoint;
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
@@ -566,7 +566,14 @@ async fn execute_platform_command_once(
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     match session.platform {
         Platform::Xiaohongshu => {
-            execute_xhs_command_once(session, command, cancellation, deadline_unix_ms).await
+            execute_xhs_command_once(
+                session,
+                command,
+                cancellation,
+                commit_windows,
+                deadline_unix_ms,
+            )
+            .await
         }
         Platform::WechatChannels => match command {
             NativeCommand::WechatCaptureSession(_) => {
@@ -603,8 +610,27 @@ async fn execute_xhs_command_once(
     session: &mut EngineSession,
     command: &NativeCommand,
     cancellation: Option<&AtomicBool>,
+    commit_windows: &CommitWindowRequester,
     deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    // ① 高危写动作的提交前即席复检。命中即**零派发**、诚实回执。
+    if let Some(refusal) = ensure_xhs_action_gate(session, command).await {
+        return Ok(refusal);
+    }
+    // ② 不可逆写入的提交窗口。开窗只能落在调用页面规则**之前**：真正的点击发生在页面规则内部，
+    //    引擎无从插进那一刻，故粒度是「整条 router 调用」，预算必须覆盖规则内部的后置校验停顿。
+    //    拿不到窗口时 `enter` 返回 `CommitWindowUnavailable`，整条命令按**未开始**终结——
+    //    MUST NOT 先写了再说。
+    if let Some(contract) = xiaohongshu_commit_window(command) {
+        commit_windows
+            .enter(
+                contract.label,
+                contract.budget_ms,
+                deadline_unix_ms,
+                cancellation,
+            )
+            .await?;
+    }
     use NativeCommand::*;
     match command {
         CaptchaCapture(params) => capture_captcha(session, params).await,
@@ -711,6 +737,63 @@ async fn execute_xhs_command_once(
         }
         _ => evaluate_router(session, command).await,
     }
+}
+
+/// 小红书高危写动作在派发之前的即席新鲜复检（fail-closed）。
+///
+/// 为什么不能只读周期观测的缓存：缓存可能过期约一个节拍，而闸门放行到真正点击之间还隔着
+/// 一段拟人停顿——那段窗口里弹出的验证码只靠缓存必漏。故在派发之前就地再探一次。
+///
+/// 只认验证码与登录墙两桶。`PageKind::Unknown` 的含义是「这个页面我没认出来」，不是
+/// 「我看见一堵归不了类的阻断墙」；小红书的看图态 / AI 搜索结果页 / 详情弹层都会落进它，
+/// 把它算作拒绝等于把「没认出来」变成「所有互动都不做了」——MUST NOT 拒绝。
+///
+/// 探测**本身**拿不到判定时保守当成有挑战：错过一次点赞很便宜，点进风控墙很贵。
+/// 这一档同样是零派发 + 诚实回执，绝不升级成整条命令的引擎错误（方向反了就成了「命令失败」而非「保守停手」）。
+async fn ensure_xhs_action_gate(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+) -> Option<(EffectPhase, CommandOutput)> {
+    let action = xhs_gated_action_name(command)?;
+    let reason = match session.cdp.probe_page().await {
+        Ok(probe) => match probe.page_kind {
+            PageKind::Captcha => "blocked_by_captcha",
+            PageKind::Login => "login_required",
+            _ => return None,
+        },
+        Err(_) => "blocked_by_captcha",
+    };
+    Some(xhs_gate_refusal(action, reason))
+}
+
+/// 走提交前闸的小红书动作与它们的规范动作名（云端按这些名字结案与记账）。
+fn xhs_gated_action_name(command: &NativeCommand) -> Option<&'static str> {
+    match command {
+        NativeCommand::InteractionLike(_) => Some("like"),
+        NativeCommand::InteractionCollect(_) => Some("collect"),
+        NativeCommand::InteractionFollow(_) => Some("follow"),
+        NativeCommand::InteractionComment(_) => Some("comment"),
+        _ => None,
+    }
+}
+
+fn xhs_gate_refusal(action: &'static str, reason: &'static str) -> (EffectPhase, CommandOutput) {
+    (
+        // 一个字节都没写过页面：相位必须是「未开始」，绝不含糊成 ambiguous。
+        EffectPhase::NotStarted,
+        CommandOutput::ActionReceipt(Box::new(ActionReceipt {
+            action: action.to_owned(),
+            ok: false,
+            reason: Some(reason.to_owned()),
+            note_id: None,
+            observation: None,
+            post_observation: None,
+            group_observation: None,
+            group_url: None,
+            clicked: None,
+            candidates: Vec::new(),
+        })),
+    )
 }
 
 async fn execute_search(
