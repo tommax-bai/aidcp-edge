@@ -2303,4 +2303,17 @@ test('宿主装配契约（源码扫描）：闸的接线还在、且没有被�
   assert.match(main, /client\.onPublishAtomCommand\(guardPublishCommandsUnderIdentity</);
   assert.doesNotMatch(main, /const refuseCommandUnderIdentity = /,
     '宿主 MUST NOT 再自己写一份「判 + 回执 + return true」——那份可以被改成恒放行且扫不出来');
+
+  // ⑦ 那句被坐实为假的话 MUST NOT 活在任何一处源码里。
+  //
+  // 「协议上没有负向应答形状」是错的：形状就是 `edge.task.released` + `reason`，云端 onReleased 对已知
+  // 原因即刻 reject、不等 acquire 超时，边缘协调器本身就在用它。缺的只是「身份未落定」这一档 reason。
+  // 之所以要为一句注释写断言：读代码的人先到接线现场，被那句话告知「无路可走」，就永远不会去补那一档
+  // ——这正是本批工作在追的那族病（写着有、其实没有；说没路、其实有路），只是落在了文字上。
+  // 用例既有的日志断言（T24）钉的是运行时字符串，钉不住源码里的拷贝，所以这里单独扫一遍。
+  for (const [name, source] of [['src/main.ts', main], ['src/electron/main.cjs', shell]] as const) {
+    assert.doesNotMatch(source, /没有\*{0,2}负向应答形状/, `${name} 里不得再出现那句已被坐实为假的陈述`);
+  }
+  assert.doesNotMatch(main, /ack:\s*'none'|`ack:'none'`/,
+    "'none' 这个枚举值已删（现为 'unwired'：形状在、这一档 reason 未接线）；注释里也不许留");
 });

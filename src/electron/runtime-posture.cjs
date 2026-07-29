@@ -115,7 +115,11 @@ function runtimePostureOverride(posture) {
 }
 
 /**
- * 恢复自动化的准入（与核心 `postureBlocksAutomationResume` 是同一条判据的外壳镜像）。
+ * 恢复自动化的准入（外壳侧，判 posture）。
+ *
+ * 这**不是**核心那道闸的镜像——两侧判的根本不是同一件事：核心侧是 `identity-guard.ts` 的
+ * `resumeAutomationUnderIdentityGate`（按身份健康度判），外壳侧是这里（按 posture 判）。
+ * 曾有一个自称「两侧共用」的判据，实际零调用方，已删；别再造第二个。
  *
  * 外壳先判一次，是为了**不产生那条乐观投影**：核心侧的拒绝走的是抛异常，`lifecycle.resumed` 因此
  * 永不发出，而外壳早在下发指令前就把界面写成了运行中——没有任何东西会来纠正它。先判再发，界面就

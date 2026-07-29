@@ -873,8 +873,10 @@ async function main(): Promise<void> {
   // 两帧在同一宏任务内派发，connect() 的续体（微任务）还没来得及跑注册代码，后注册的处理器
   // 会静默漏掉首帧。注册本身不需要活连接，先注册零成本。
   // 认领要过身份闸（认领＝接下来会以这个账号的名义动作 + 记账）；释放永远放行（拦掉只会让租约挂着）。
-  // 本通道 `ack:'none'`：协议 v2 里任务租约**没有**负向应答形状，拒绝只响亮记日志、不伪造回执
-  // （理由与登记见 EDGE_TASK_LANE 与 tasks.md 5.11）。
+  // 本通道 `ack:'unwired'`：负向应答形状**已经存在**（`edge.task.released` + `reason`，云端 `onReleased`
+  // 对已知原因即刻 reject、不等 acquire 超时），缺的只是「身份未落定」这一档 reason 取值还没接线。
+  // 在它接上之前，拒绝只响亮记日志、不伪造一条云端收不到的回执——但 MUST NOT 把这说成「没有路可走」，
+  // 补齐配方（两份 protocol.ts 各加一个 reason 值 + 云端 onReleased 一个 if）见 `EDGE_TASK_LANE.ackGap`。
   client.onEdgeTaskCommand(guardCommandsUnderIdentity(EDGE_TASK_LANE, identityGateDeps, (env) => {
     if (env.type === 'edge.task.acquire') {
       taskCoordinator.acquire(env.payload as EdgeTaskAcquirePayload);
