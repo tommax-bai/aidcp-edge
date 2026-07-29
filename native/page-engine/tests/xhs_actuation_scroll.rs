@@ -33,9 +33,15 @@ const FEED_BASELINE_PX: f64 = VIEWPORT_HEIGHT * 0.5;
 
 struct Observed {
     requests: Vec<Value>,
-    /// 可滚区当前位置，随每次滚轮的 deltaY 推进（页面被锁死时不推进）。
+    /// 可滚区当前位置，恒等于 `target - pending`（页面被锁死时两者都不动）。
     position: f64,
     wheel_deltas: Vec<f64>,
+    /// 手势最终会把页面滚到哪（每一帧的 deltaY 累加）。
+    target: f64,
+    /// 还没落地的位移（惯性 / 平滑滚动尚未走完的那一段）。
+    pending: f64,
+    /// 还要读几次可滚区，`pending` 才会全部落地。
+    inertia_left: usize,
 }
 
 impl Observed {
@@ -85,6 +91,9 @@ struct FakePage {
     cancel_at_wheel: usize,
     /// 评论区页面上真实可见的行数。
     comment_rows: u32,
+    /// 惯性 / 懒渲染：手势派完之后位移还要再走几拍才停。0 = 位移随手势瞬时落地。
+    /// 位移没落定前，只读扫描回的仍是**滚动前那一屏**卡片。
+    inertia_probes: usize,
 }
 
 impl Default for FakePage {
@@ -95,6 +104,7 @@ impl Default for FakePage {
             reject_wheel_at: 0,
             cancel_at_wheel: 0,
             comment_rows: 0,
+            inertia_probes: 0,
         }
     }
 }
@@ -170,6 +180,59 @@ async fn feed_paging_hovers_the_measured_scroll_area_then_dispatches_a_multi_fra
     assert!(
         (FEED_BASELINE_PX * 0.8..=FEED_BASELINE_PX * 1.2).contains(&total),
         "单次位移应为约半屏（{FEED_BASELINE_PX}px）的 ±20%，实得 {total}"
+    );
+}
+
+/// 落定判据必须是「位置**不再变化**」，不是「出现了第一次变化」。
+///
+/// 手势原语把 8–15 帧全部派完才返回，所以「等到第一次位移」恒在一个探针往返后命中：
+/// 此刻惯性还没走完、懒渲染还没触发，只读重扫拿到的仍是滚动前那一屏 ⇒ 云端反复选中
+/// 已访问过的笔记、或判定无新候选继续翻页 ⇒「只刷不点」活锁。回执本身是诚实的
+/// （位移确实实测），所以现场没有任何错误码指向这里 —— 只能靠这条用例守。
+#[tokio::test]
+async fn feed_paging_waits_for_the_position_to_stop_changing_before_it_rescans() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            inertia_probes: 3,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let result = engine
+        .execute(&scroll_command(
+            1,
+            command(r#"{"kind":"browse_scroll","params":{"reason":"feed_paging"}}"#),
+            25_000,
+        ))
+        .await
+        .expect("command result");
+
+    let CommandOutput::PageCards(cards) = result.output.expect("output") else {
+        panic!("expected page cards");
+    };
+    let movement = cards.movement.expect("翻页必须带上实测位移");
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    let total: f64 = observed.wheel_deltas.iter().sum();
+    assert!(total > 0.0, "这一场确实滚出去了");
+    // 位移读的是**落定之后**的终值，不是惯性第一拍的中间值。
+    assert!(movement.moved);
+    assert_eq!(
+        movement.after, total,
+        "位移还在走就收工：读到的是中间值 {} 而不是终值 {total}",
+        movement.after
+    );
+    // 后果面：位移没落定就重扫，拿到的是滚动前那一屏卡片。
+    assert_eq!(
+        cards.cards.first().and_then(|card| card.note_id.as_deref()),
+        Some("note-fresh"),
+        "重扫发生在懒渲染之前，拿到的还是滚动前那一屏",
     );
 }
 
@@ -503,6 +566,9 @@ async fn spawn_page(
             requests: Vec::new(),
             position: 0.0,
             wheel_deltas: Vec::new(),
+            target: 0.0,
+            pending: 0.0,
+            inertia_left: 0,
         };
         let mut wheels = 0_usize;
         while let Some(Ok(Message::Text(text))) = websocket.next().await {
@@ -532,7 +598,12 @@ async fn spawn_page(
                         .unwrap_or_default();
                     observed.wheel_deltas.push(delta);
                     if page.scrolls {
-                        observed.position += delta;
+                        observed.target += delta;
+                        if page.inertia_probes > 0 {
+                            observed.pending += delta;
+                            observed.inertia_left = page.inertia_probes;
+                        }
+                        observed.position = observed.target - observed.pending;
                     }
                 }
                 if page.cancel_at_wheel > 0 && wheels == page.cancel_at_wheel {
@@ -544,7 +615,7 @@ async fn spawn_page(
                 json!({"id": id, "error": {"code": -32000, "message": "wheel rejected"}})
             } else {
                 let result = if method == "Runtime.evaluate" {
-                    evaluate(&expression, &page, &observed)
+                    evaluate(&expression, &page, &mut observed)
                 } else {
                     json!({})
                 };
@@ -561,7 +632,23 @@ async fn spawn_page(
     (port, server)
 }
 
-fn evaluate(expression: &str, page: &FakePage, observed: &Observed) -> Value {
+fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value {
+    // 每读一次可滚区，还没落地的位移就送出去一格；`inertia_probes` 拍之后才真正停下。
+    // 这台假页面因此能区分「刚开始动」与「不动了」——引擎的落定判据只有真的等到
+    // 位置不再变化，才会拿到终值。
+    let reads_scroll_area = expression.contains(r#""kind":"feed_scroll_area""#)
+        || expression.contains(r#""kind":"comment_scroll_area""#);
+    if reads_scroll_area && observed.inertia_left > 0 {
+        observed.inertia_left -= 1;
+        // 最后一拍**精确**归零：位置的终值必须逐位等于目标值，否则用例分不清
+        // 「引擎没等落定」与「假页面自己算出了浮点残差」。
+        observed.pending = if observed.inertia_left == 0 {
+            0.0
+        } else {
+            observed.pending * observed.inertia_left as f64 / (observed.inertia_left + 1) as f64
+        };
+        observed.position = observed.target - observed.pending;
+    }
     if expression.contains("feedCardCount") {
         return json!({"result":{"value":{
             "href": "https://www.xiaohongshu.com/explore/note-1",
@@ -615,7 +702,13 @@ fn evaluate(expression: &str, page: &FakePage, observed: &Observed) -> Value {
         }));
     }
     // 只读扫描（注入路由唯一不带副作用的分支）。
+    // 位移还没落定时页面上仍是**滚动前那一屏**——feed 是滚动触发懒渲染的。
     if expression.contains(r#""reason":"initial_scan""#) {
+        let note_id = if observed.pending > 0.5 {
+            "note-stale"
+        } else {
+            "note-fresh"
+        };
         return json!({"result":{"value":{
             "effectPhase": "confirmed",
             "output": {"kind": "page_cards", "value": {"cards": [{
@@ -623,7 +716,7 @@ fn evaluate(expression: &str, page: &FakePage, observed: &Observed) -> Value {
                 "title": "一张卡",
                 "likeCount": 3,
                 "collectCount": 1,
-                "noteId": "note-1"
+                "noteId": note_id
             }]}}
         }}});
     }

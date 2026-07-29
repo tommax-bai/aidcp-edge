@@ -108,6 +108,36 @@ test('发布字段：标题走受控框、正文走富文本，两者的换行�
   assert.equal(content.plainValue, false, '富文本正文必须走裸回车，绝不能被当成受控框');
 });
 
+test('富文本正文的段落数按真实渲染出来的换行数，<br> 分隔与裸首段都不许被读成一段', () => {
+  // 引擎拿 `paragraphs` 当「裸回车有没有真的拆出段落」的结构证据。这个数字被低估的后果
+  // 不是少一层保护，而是**把一次成功的写入判成段落丢失**（内容真在，却清场重来）。
+  // 只按块级子节点数会漏两类真实结构：段落靠 <br> 分隔（一个块都没有）、
+  // 首段是裸文本节点（块数比真实段落数少一）。
+  installXhsDom(PUBLISH_HTML, 'https://creator.xiaohongshu.com/publish/publish');
+  const editor = document.querySelector('[contenteditable="true"]') as HTMLElement;
+
+  // jsdom 不实现 innerText（浏览器里它才是「渲染出来的文本」）；这里按浏览器语义补上。
+  const asRendered = (value: string) => {
+    Object.defineProperty(editor, 'innerText', { configurable: true, value });
+  };
+
+  editor.innerHTML = '第一段<br>第二段';
+  asRendered('第一段\n第二段');
+  assert.equal(
+    runInputTargets({ kind: 'publish_field', op: 'probe', fieldType: 'content' }).paragraphs,
+    2,
+    '<br> 分隔的两段被读成一段 ⇒ 引擎会把一次成功的写入判成段落丢失',
+  );
+
+  editor.innerHTML = '第一段<div>第二段</div>';
+  asRendered('第一段\n第二段');
+  assert.equal(
+    runInputTargets({ kind: 'publish_field', op: 'probe', fieldType: 'content' }).paragraphs,
+    2,
+    '首段是裸文本节点时块数比真实段落数少一',
+  );
+});
+
 test('归尾探针：换行数按顶层块推、读不到目标时 found=false 而不是假装读到了', () => {
   installXhsDom(PUBLISH_HTML, 'https://creator.xiaohongshu.com/publish/publish');
   const editor = document.querySelector('[contenteditable="true"]') as HTMLElement;

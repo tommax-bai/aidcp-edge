@@ -937,12 +937,23 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     this.diagnostic('observation_suspended', { reason });
   }
 
-  /** 重连后整批重启周期观测。启动幂等：没停过就是空操作，停过则干净恢复。 */
+  /**
+   * 重连后整批重启周期观测。启动幂等：没停过就是空操作，停过则干净恢复。
+   *
+   * 它是**显式重新武装**入口，所以必须自己复位停手标志：`stopAndWait()` 之后单独调它
+   * （执行端重连、或「唤醒但保持暂停」）是一条真实的恢复路径，而 `scheduleProbe()` 里的停手闸
+   * 只该拦「在途探测经 `.finally` 自动重新武装」那一条。不在这里复位，闸门就把整条恢复路径
+   * 悄悄变成空操作 —— 外部看到「一切正常」，而传感层全灭，没有任何错误码指向这里。
+   *
+   * 仍然拦得住的两条：会话已 `close()`（终态，不得复活）、以及交接 / 待机期
+   * （`blocked` / `observationSuspended` ⇒ 记一条「装了没开」再返回）。
+   */
   resumeObservation(): void {
     if (this.observationSuspended) {
       this.observationSuspended = false;
       this.diagnostic('observation_resumed');
     }
+    this.stopRequested = false;
     this.scheduleProbe();
   }
 
@@ -950,8 +961,8 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     // `stopRequested` 必须与 `closed` 同列在这里：停手时 `stopProbe()` 只清掉了定时器，
     // **在途**的那一次探测结束后仍会经 `.finally` 重新武装。会话若是 drain 式停手
     // （`stopAndWait`，`closed` 仍为 false），重新武装出来的探针就对着一条已 detach 的
-    // 执行端连接按节拍空轮询，直到进程退出。`start()` / `resumeAfterTask()` 复位该标志，
-    // 所以补这一条不会挡住正常的重启。
+    // 执行端连接按节拍空轮询，直到进程退出。`start()` / `resumeAfterTask()` /
+    // `resumeObservation()` 复位该标志，所以补这一条不会挡住任何一条正常的重启路径。
     if (this.closed || this.stopRequested || this.probeTimer) return;
     if (this.blocked || this.observationSuspended) {
       // 「已装配但暂不启动」：待机 / 交接期不起探针，但必须留一条可观测记录——

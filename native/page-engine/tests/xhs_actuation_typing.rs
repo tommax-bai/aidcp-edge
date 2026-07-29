@@ -29,6 +29,8 @@ struct Observed {
     requests: Vec<Value>,
     editor: String,
     enter_presses: usize,
+    /// 编辑器 `op:"probe"` 读了几次（第 1 次是写前定位，第 2 次起才是写后回读）。
+    editor_probes: usize,
 }
 
 impl Observed {
@@ -64,6 +66,16 @@ impl Observed {
             .filter(|entry| entry["method"] == method)
             .count()
     }
+
+    fn mouse_events(&self, kind: &str) -> usize {
+        self.requests
+            .iter()
+            .filter(|entry| {
+                entry["method"] == "Input.dispatchMouseEvent"
+                    && entry.pointer("/params/type").and_then(Value::as_str) == Some(kind)
+            })
+            .count()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -74,6 +86,16 @@ struct FakePage {
     insert_delay_ms: u64,
     /// 第几次文本写入之后置位接管信号（0 = 从不）。
     cancel_after_inserts: usize,
+    /// 富文本编辑器把裸回车**吞掉**：按键照收（归尾探针照报换行数达标——那正是 ProseMirror
+    /// 留下的空段 `<br>` 造成的现场），但编辑器里不真的多出一段。
+    swallow_enter: bool,
+    /// 回读时页面报的正文（`None` = 报真实写进去的内容）。只作用于 `op:"probe"`，
+    /// 不动写前的清场 / 落焦读数。
+    readback_override: Option<&'static str>,
+    /// 第几次编辑器 `op:"probe"` 之后置位接管信号（0 = 从不）。
+    cancel_at_editor_probe: usize,
+    /// 第几次编辑器 `op:"probe"` 直接回 CDP 错误（0 = 从不）。
+    reject_editor_probe_at: usize,
 }
 
 impl Default for FakePage {
@@ -82,6 +104,10 @@ impl Default for FakePage {
             plain_value: true,
             insert_delay_ms: 0,
             cancel_after_inserts: 0,
+            swallow_enter: false,
+            readback_override: None,
+            cancel_at_editor_probe: 0,
+            reject_editor_probe_at: 0,
         }
     }
 }
@@ -303,6 +329,329 @@ async fn a_newline_in_the_rich_text_body_is_a_bare_enter_key_and_never_a_typed_c
     assert_eq!(observed.editor, "第一段内容\n第二段内容");
 }
 
+/// 富文本正文的换行被编辑器吞掉（回车被 #话题 / @ 候选浮层接走）时，
+/// MUST NOT 报 Confirmed —— 那是「静默假成功」的教科书形态。
+///
+/// 这一场专门躲开另外三道闸：首段满 20 字 ⇒ 头部前缀照样命中；归一把换行折成单空格、
+/// 汉字档只留汉字 ⇒ 两道文本比对都对换行免疫。于是**只剩换行的结构证据**（段落数）拦得住它，
+/// 而那道闸曾被限死在受控框上 —— 恰好是**唯一不走裸回车、最不可能丢段**的那条分支。
+#[tokio::test]
+async fn a_swallowed_paragraph_break_is_never_reported_as_a_confirmed_body() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            plain_value: false,
+            swallow_enter: true,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let params = json!({
+        "kind": "publish_fill_field",
+        "params": {
+            "recordId": 7, "seq": 9, "fieldType": "content",
+            "value": "第一段内容第一段内容第一段内容第一段内容\n第二段内容",
+        },
+    });
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(1, serde_json::from_value(params).expect("command"), 20_000),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::PublishReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected a publish receipt");
+    };
+    assert!(!receipt.ok, "两段正文只落地一段，绝不许报成功");
+    assert_eq!(
+        receipt.error.as_deref(),
+        Some("publish_content_paragraphs_lost")
+    );
+    assert_eq!(result.effect_phase, EffectPhase::Ambiguous);
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    assert_eq!(
+        observed.enter_presses, 1,
+        "回车确实按下去了 —— 是编辑器吞的"
+    );
+    assert_eq!(observed.editor, "", "失败出口必须先清场");
+}
+
+/// 打字**完成之后**的接管：取消原样穿出，但让位之前编辑器必须先清空。
+/// 不清场的现场是：人接手时，页面上正躺着一条填好、只差点一下发送的评论。
+#[tokio::test]
+async fn a_takeover_after_typing_still_clears_the_editor_before_it_surfaces() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            // 回读始终对不上 ⇒ 命令停在回读轮询里，接管缝落在打字之后。
+            readback_override: Some("别人写的评论"),
+            cancel_at_editor_probe: 2,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(
+                1,
+                command(
+                    r#"{"kind":"interaction_comment","params":{"noteId":"note-1","text":"好文，收藏了","groupChatCode":"vx-1234"}}"#,
+                ),
+                12_000,
+            ),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let error = result.error.expect("takeover must surface as an error");
+    assert_eq!(
+        error.code,
+        ErrorCode::Cancelled,
+        "接管原样穿出，不吞成普通失败"
+    );
+    assert!(result.output.is_none());
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    assert!(
+        !observed.inserted_chunks().is_empty(),
+        "接管发生在打字完成之后（这一轮确实写进去了）"
+    );
+    assert_eq!(observed.editor, "", "让位之前必须先清场");
+}
+
+/// 打字完成之后探针报错（CDP 抖动）：错误照样上抛，但编辑器不许留着半截草稿。
+#[tokio::test]
+async fn a_probe_failure_after_typing_clears_the_editor_before_it_surfaces() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            reject_editor_probe_at: 2,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let params = json!({
+        "kind": "publish_fill_field",
+        "params": {"recordId": 7, "seq": 10, "fieldType": "content", "value": "正文内容正文内容正文内容"},
+    });
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(1, serde_json::from_value(params).expect("command"), 20_000),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    assert!(result.error.is_some(), "探针报错必须上抛，不得静默当成收敛");
+    assert!(result.output.is_none());
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    assert!(!observed.inserted_chunks().is_empty(), "这一轮确实写过");
+    assert_eq!(observed.editor, "", "失败出口必须先清场");
+}
+
+/// 有界回读始终对不上 ⇒ 诚实回 Ambiguous + 清场，MUST NOT 因为「写完了」就报 Confirmed。
+#[tokio::test]
+async fn a_body_that_never_reads_back_is_reported_ambiguous_instead_of_confirmed() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            readback_override: Some("完全不相干的内容"),
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let params = json!({
+        "kind": "publish_fill_field",
+        "params": {"recordId": 7, "seq": 11, "fieldType": "content", "value": "正文内容正文内容正文内容"},
+    });
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(1, serde_json::from_value(params).expect("command"), 20_000),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::PublishReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected a publish receipt");
+    };
+    assert!(!receipt.ok, "回读没确认就报成功 = 静默假成功");
+    assert_eq!(
+        receipt.error.as_deref(),
+        Some("publish_field_readback_mismatch")
+    );
+    assert_eq!(result.effect_phase, EffectPhase::Ambiguous);
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    assert!(!observed.inserted_chunks().is_empty(), "这一轮确实写过");
+    assert_eq!(observed.editor, "", "失败出口必须先清场");
+}
+
+/// 评论回读没确认 ⇒ 在提交被点之前就诚实拒绝。提交是不可逆的，
+/// 「写完了但没读到」绝不能一路点下去。
+#[tokio::test]
+async fn a_comment_that_never_reads_back_is_refused_before_the_submit_is_ever_clicked() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            readback_override: Some("别人写的评论"),
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(
+                1,
+                command(
+                    r#"{"kind":"interaction_comment","params":{"noteId":"note-1","text":"好文，收藏了"}}"#,
+                ),
+                12_000,
+            ),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::ActionReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected an action receipt");
+    };
+    assert!(!receipt.ok);
+    assert_eq!(receipt.reason.as_deref(), Some("comment_readback_mismatch"));
+    assert_eq!(result.effect_phase, EffectPhase::NotStarted);
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    // 整条命令只该有落焦那一次点击：提交一次都没被按下去。
+    assert_eq!(
+        observed.mouse_events("mousePressed"),
+        1,
+        "回读没确认却把提交点下去了"
+    );
+    assert_eq!(observed.editor, "", "拒绝出口必须先清场");
+}
+
+/// 编辑器的无害改写不该判成内容丢失 —— 严格等值会误杀。
+/// 这一场**不含汉字**，所以只有语义相似度那一档救得了它（汉字退化档结构上进不去）。
+#[tokio::test]
+async fn a_harmless_rewrite_without_hanzi_still_confirms_through_the_similarity_lane() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            readback_override: Some("Hello world this is the body of the nate"),
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let params = json!({
+        "kind": "publish_fill_field",
+        "params": {
+            "recordId": 7, "seq": 12, "fieldType": "content",
+            "value": "Hello world this is the body of the note",
+        },
+    });
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(1, serde_json::from_value(params).expect("command"), 20_000),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::PublishReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected a publish receipt");
+    };
+    assert!(
+        receipt.ok,
+        "一个字符的无害改写被判成内容丢失：{:?}",
+        receipt.error
+    );
+    assert_eq!(result.effect_phase, EffectPhase::Confirmed);
+
+    drop(engine);
+    let _ = server.await.expect("fake page");
+}
+
+/// 全角 → 半角标点的整批改写：相似度会被拉到阈值以下，只有**汉字档退化比较**救得了它。
+#[tokio::test]
+async fn a_full_width_punctuation_rewrite_still_confirms_through_the_hanzi_lane() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            readback_override: Some("一二三四五六七八九十一二三四五六七八九十,,,,,,,,,,"),
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let params = json!({
+        "kind": "publish_fill_field",
+        "params": {
+            "recordId": 7, "seq": 13, "fieldType": "content",
+            "value": "一二三四五六七八九十一二三四五六七八九十，，，，，，，，，，",
+        },
+    });
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(1, serde_json::from_value(params).expect("command"), 20_000),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::PublishReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected a publish receipt");
+    };
+    assert!(receipt.ok, "全半角改写被判成内容丢失：{:?}", receipt.error);
+    assert_eq!(result.effect_phase, EffectPhase::Confirmed);
+
+    drop(engine);
+    let _ = server.await.expect("fake page");
+}
+
 fn command(raw: &str) -> NativeCommand {
     serde_json::from_str(raw).expect("native command fixture")
 }
@@ -375,6 +724,7 @@ async fn spawn_page(
             requests: Vec::new(),
             editor: String::new(),
             enter_presses: 0,
+            editor_probes: 0,
         };
         let mut inserts = 0_usize;
         while let Some(Ok(Message::Text(text))) = websocket.next().await {
@@ -406,25 +756,53 @@ async fn spawn_page(
                 && request.pointer("/params/type").and_then(Value::as_str) == Some("rawKeyDown")
             {
                 observed.enter_presses += 1;
-                observed.editor.push('\n');
+                // 吞回车的现场：按键计数照增（归尾探针据此认为换行数已达标），
+                // 但编辑器里不真的拆出新的一段。
+                if !page.swallow_enter {
+                    observed.editor.push('\n');
+                }
             }
 
-            let response = if method == "Runtime.evaluate" {
-                evaluate(&expression, &page, &mut observed)
+            let mut rejected = false;
+            if method == "Runtime.evaluate" && is_editor_probe(&expression) {
+                observed.editor_probes += 1;
+                if page.reject_editor_probe_at > 0
+                    && observed.editor_probes == page.reject_editor_probe_at
+                {
+                    rejected = true;
+                }
+                if page.cancel_at_editor_probe > 0
+                    && observed.editor_probes == page.cancel_at_editor_probe
+                {
+                    cancellation.store(true, Ordering::Release);
+                }
+            }
+
+            let response = if rejected {
+                json!({"id": id, "error": {"code": -32000, "message": "probe rejected"}})
             } else {
-                json!({})
+                let result = if method == "Runtime.evaluate" {
+                    evaluate(&expression, &page, &mut observed)
+                } else {
+                    json!({})
+                };
+                json!({"id": id, "result": result})
             };
             observed.requests.push(request);
             websocket
-                .send(Message::Text(
-                    json!({"id": id, "result": response}).to_string().into(),
-                ))
+                .send(Message::Text(response.to_string().into()))
                 .await
                 .expect("CDP response");
         }
         observed
     });
     (port, server)
+}
+
+fn is_editor_probe(expression: &str) -> bool {
+    (expression.contains(r#""kind":"comment_editor""#)
+        || expression.contains(r#""kind":"publish_field""#))
+        && expression.contains(r#""op":"probe""#)
 }
 
 fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value {
@@ -471,14 +849,19 @@ fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value
                 "plainValue": page.plain_value, "x": 240.0, "y": 300.0, "paragraphs": 0,
             }));
         }
-        let paragraphs = observed
-            .editor
+        // 回读覆盖只作用于 `op:"probe"`：写前的清场 / 落焦读数照报真实状态，
+        // 否则「编辑器里还有残文」那道闸会先把用例拦掉，跑不到回读这一段。
+        let reported = match page.readback_override {
+            Some(text) if expression.contains(r#""op":"probe""#) => text.to_owned(),
+            _ => observed.editor.clone(),
+        };
+        let paragraphs = reported
             .split('\n')
             .filter(|line| !line.trim().is_empty())
             .count();
         return value(json!({
-            "found": true, "cleared": observed.editor.is_empty(), "focused": true,
-            "value": observed.editor, "plainValue": page.plain_value,
+            "found": true, "cleared": reported.is_empty(), "focused": true,
+            "value": reported, "plainValue": page.plain_value,
             "x": 240.0, "y": 300.0, "paragraphs": paragraphs,
         }));
     }

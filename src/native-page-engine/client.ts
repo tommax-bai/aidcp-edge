@@ -19,8 +19,13 @@ const DEFAULT_NATIVE_TIMEOUT_MS = 5_000;
  * 2026-07-29 只抬了 ① 而漏了本层，结果每一次首帖开帖都在毫秒级被拒，云端读到的却是
  * 「群内未找到合适的可评论帖子」——比原缺陷更糟，且把诊断指向完全错误的方向。
  * 桩运行时的单测**绕过本校验**，故 `client.test.ts` 里另有走真实校验的回归。
+ *
+ * **导出的理由**：提交窗口的兜底预算**派生自它**（见 `NATIVE_COMMIT_WINDOW_BUDGETS` 的
+ * `xhs_comment_submit`），门禁按「窗口预算 ≥ 这个上限」的恒等式对账。这个数字已经被调过一次
+ * （Facebook 时间预算整体 ×1.5，30_000 → 45_000），任何手抄一份的地方都会在下一次调整时
+ * 静默失配——而窗口比命令短的后果是「已发出的写入被当成没发生 ⇒ 上游重投 ⇒ 重复评论」。
  */
-const MAX_NATIVE_TIMEOUT_MS = 45_000;
+export const MAX_NATIVE_TIMEOUT_MS = 45_000;
 const MAX_FACEBOOK_FEED_SCROLL_TIMEOUT_MS = 180_000;
 const MAX_FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS = 60_000;
 const MAX_FACEBOOK_COMMENT_TIMEOUT_MS = 180_000;
@@ -973,9 +978,10 @@ export const NATIVE_COMMIT_WINDOW_BUDGETS: Readonly<Record<NativeCommitWindowLab
   fb_comment_enter: 30_000,
   fb_publish_submit: 30_000,
   // 评论提交现在把硬件级逐字输入整段包在窗口里（引擎侧 `commit_window.rs` 写了推导），
-  // 故预算 = 命令墙钟上限 `MAX_NATIVE_TIMEOUT_MS`。窗口的真实关闭点仍是命令结束时的 dispose，
-  // 这个数字只是兜底上限。**两侧必须同批改**：这里漏改会让评论写入全部拒发。
-  xhs_comment_submit: 30_000,
+  // 故预算 = 命令墙钟上限。窗口的真实关闭点仍是命令结束时的 dispose，这个数字只是兜底上限。
+  // ⚠️ MUST **引用**那个常量、MUST NOT 手抄字面量：上限低于命令墙钟上限的后果不是报错，
+  // 是窗口静默过期 ⇒ 抢占重新落回提交那一刻 ⇒ 一条可能已发出去的评论被当成没发生 ⇒ 重复评论。
+  xhs_comment_submit: MAX_NATIVE_TIMEOUT_MS,
   xhs_notification_comments: 20_000,
   xhs_notification_likes: 20_000,
   xhs_notification_follows: 20_000,

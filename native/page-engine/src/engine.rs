@@ -40,7 +40,12 @@ const MAX_CAPTCHA_SNAPSHOTS: usize = 8;
 //   ② 准入校验 src/native-page-engine/client.ts（超上限 ⇒ invalid_request，命令根本不下发）
 //   ③ 会话超时 src/native-page-engine/runtime.ts（此处取 session.min(ceiling)，会话值小就静默夹回）
 // 四层任缺其一都不会有编译错误，失败形态却各不相同（被拒 / 静默失效）。
-const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 45_000;
+//
+/// 命令的墙钟上限（宿主侧同一口径叫 `MAX_NATIVE_TIMEOUT_MS`）。
+/// `pub` 是因为提交窗口的兜底预算**派生自它**（见 `commit_window.rs`）：这个数字是会被调的
+/// （Facebook 时间预算整体 ×1.5 就调过一次，30_000 → 45_000），任何手抄一份的地方都会在
+/// 下一次调整时静默失配——而窗口比命令短的后果是「已发出的写入被当成没发生 ⇒ 重复评论」。
+pub const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 45_000;
 const FACEBOOK_FEED_SCROLL_TIMEOUT_MS: u64 = 180_000;
 const FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS: u64 = 60_000;
 const FACEBOOK_COMMENT_TIMEOUT_MS: u64 = 180_000;
@@ -79,9 +84,15 @@ const XHS_FEED_SCROLL_MIN_PX: f64 = 360.0;
 const XHS_FEED_SCROLL_MAX_PX: f64 = 700.0;
 /// 详情页评论滚动的基准位移，与注入路由同口径（评论行比 feed 卡矮，半屏口径不适用）。
 const XHS_COMMENT_SCROLL_PX: f64 = 500.0;
-/// 位移落定的有界等待：按**迭代次数**限界（不按墙钟死循环），命中即提前返回。
+/// 位移落定的有界等待：按**迭代次数**限界（不按墙钟死循环）。
 const XHS_SCROLL_SETTLE_INTERVAL_MS: u64 = 50;
 const XHS_SCROLL_SETTLE_MAX_ROUNDS: usize = 14;
+/// 落定判据 = 连续读到这么多次**同一个位置**（1 次重复即两次读数相同）。
+/// 判据是「位置不再变化」，不是「出现了第一次变化」——后者恒在一个探针往返后就命中。
+const XHS_SCROLL_SETTLE_REPEATS: u32 = 1;
+/// 一次位移都还没读到时的最小耐心轮次。平滑滚动的起步可能比一次探针还慢，
+/// 两轮之内就断言「到底了」等于把「还没开始动」错报成「不会动了」。
+const XHS_SCROLL_SETTLE_MIN_ROUNDS_WITHOUT_MOVEMENT: usize = 6;
 /// 评论滚动每一步之后的加载缓冲，与注入路由同口径。
 const XHS_COMMENT_SCROLL_STEP_SETTLE_MS: u64 = 150;
 /// 评论滚动的步数上限，与注入路由同口径。
@@ -1391,66 +1402,34 @@ async fn execute_xhs_comment(
         }));
     }
 
-    // 回读：正文与串码都必须在，且串码在正文之后（不许丢、不许换序）。
-    let mut readback_reason = "comment_readback_mismatch";
-    let mut confirmed = false;
-    for round in 0..XHS_READBACK_BUDGET_MS.div_ceil(XHS_READBACK_INTERVAL_MS) {
-        if round > 0 {
-            xhs_wait_checked(XHS_READBACK_INTERVAL_MS, cancellation).await?;
+    // 打字已经完成 ⇒ 编辑器里躺着一条填好的评论。此后到「按下提交」之前的**每一个**出口
+    // 都必须先清场，引擎错误与接管穿出也算 —— 否则人接手时，页面上正躺着一条填好、
+    // 只差点一下发送的评论。
+    let (submit_x, submit_y) = match xhs_comment_readback_and_submit_target(
+        session,
+        &body,
+        contact_code.as_deref(),
+        cancellation,
+    )
+    .await
+    {
+        Ok(Ok(point)) => point,
+        Ok(Err(reason)) => {
+            clear_xhs_editor_best_effort(
+                session,
+                serde_json::json!({"kind":"comment_editor","op":"clear"}),
+            )
+            .await;
+            return Ok(refusal(reason));
         }
-        let read = probe_xhs_input_target(
-            session,
-            serde_json::json!({"kind":"comment_editor","op":"probe"}),
-        )
-        .await?;
-        let value = xhs_normalized_field(&xhs_target_text(&read, "value").unwrap_or_default());
-        let Some(body_at) = value.find(body.as_str()) else {
-            readback_reason = "comment_readback_mismatch";
-            continue;
-        };
-        let code_at = match &contact_code {
-            Some(code) => match value.find(code.as_str()) {
-                Some(at) => at,
-                None => {
-                    readback_reason = "comment_contact_code_missing";
-                    continue;
-                }
-            },
-            None => body_at,
-        };
-        if code_at < body_at {
-            readback_reason = "comment_readback_mismatch";
-            continue;
+        Err(error) => {
+            clear_xhs_editor_best_effort(
+                session,
+                serde_json::json!({"kind":"comment_editor","op":"clear"}),
+            )
+            .await;
+            return Err(error);
         }
-        confirmed = true;
-        break;
-    }
-    if !confirmed {
-        clear_xhs_editor_best_effort(
-            session,
-            serde_json::json!({"kind":"comment_editor","op":"clear"}),
-        )
-        .await;
-        return Ok(refusal(readback_reason));
-    }
-
-    let submit =
-        probe_xhs_input_target(session, serde_json::json!({"kind":"comment_submit"})).await?;
-    if !xhs_target_flag(&submit, "found") {
-        clear_xhs_editor_best_effort(
-            session,
-            serde_json::json!({"kind":"comment_editor","op":"clear"}),
-        )
-        .await;
-        return Ok(refusal("comment_submit_not_found"));
-    }
-    let Some((submit_x, submit_y)) = xhs_target_point(&submit) else {
-        clear_xhs_editor_best_effort(
-            session,
-            serde_json::json!({"kind":"comment_editor","op":"clear"}),
-        )
-        .await;
-        return Ok(refusal("comment_submit_not_found"));
     };
     if let Err(failure) = dispatch_pointer_click(
         &mut session.cdp,
@@ -1519,6 +1498,67 @@ async fn execute_xhs_comment(
             &note_id,
         )
     })
+}
+
+/// 评论的有界回读 + 提交目标定位：正文与串码都必须在，且串码在正文之后（不许丢、不许换序）。
+///
+/// 三种结局分开返回：`Ok(Ok(点))` = 已确认且提交点已定位；`Ok(Err(原因))` = 诚实拒绝；
+/// `Err(..)` = 引擎错误 / 接管穿出。
+///
+/// 本函数自身**不清场**：它的每一次调用都发生在「编辑器里已经躺着一条填好的评论」之后，
+/// 清场是调用方对这一整段的统一不变量 —— 写在这里就会漏掉 `?` 抛出去的那几条路径。
+async fn xhs_comment_readback_and_submit_target(
+    session: &mut EngineSession,
+    body: &str,
+    contact_code: Option<&str>,
+    cancellation: Option<&AtomicBool>,
+) -> Result<Result<(f64, f64), &'static str>, EngineError> {
+    let mut readback_reason = "comment_readback_mismatch";
+    let mut confirmed = false;
+    for round in 0..XHS_READBACK_BUDGET_MS.div_ceil(XHS_READBACK_INTERVAL_MS) {
+        if round > 0 {
+            xhs_wait_checked(XHS_READBACK_INTERVAL_MS, cancellation).await?;
+        }
+        let read = probe_xhs_input_target(
+            session,
+            serde_json::json!({"kind":"comment_editor","op":"probe"}),
+        )
+        .await?;
+        let value = xhs_normalized_field(&xhs_target_text(&read, "value").unwrap_or_default());
+        let Some(body_at) = value.find(body) else {
+            readback_reason = "comment_readback_mismatch";
+            continue;
+        };
+        let code_at = match contact_code {
+            Some(code) => match value.find(code) {
+                Some(at) => at,
+                None => {
+                    readback_reason = "comment_contact_code_missing";
+                    continue;
+                }
+            },
+            None => body_at,
+        };
+        if code_at < body_at {
+            readback_reason = "comment_readback_mismatch";
+            continue;
+        }
+        confirmed = true;
+        break;
+    }
+    if !confirmed {
+        return Ok(Err(readback_reason));
+    }
+
+    let submit =
+        probe_xhs_input_target(session, serde_json::json!({"kind":"comment_submit"})).await?;
+    if !xhs_target_flag(&submit, "found") {
+        return Ok(Err("comment_submit_not_found"));
+    }
+    let Some(point) = xhs_target_point(&submit) else {
+        return Ok(Err("comment_submit_not_found"));
+    };
+    Ok(Ok(point))
 }
 
 /// 小红书发布字段填写：正文换行走**裸回车 + 有界归尾确认**，文本写入结构上不携带回车符。
@@ -1636,49 +1676,38 @@ async fn execute_xhs_publish_fill_field(
     }
 
     let wanted = xhs_normalized_field(&params.value);
-    let head: String = wanted.chars().take(20).collect();
     let expected_paragraphs = params
         .value
         .split('\n')
         .filter(|line| !line.trim().is_empty())
         .count();
-    let mut settled = false;
-    for round in 0..XHS_READBACK_BUDGET_MS.div_ceil(XHS_READBACK_INTERVAL_MS) {
-        if round > 0 {
-            xhs_wait_checked(XHS_READBACK_INTERVAL_MS, cancellation).await?;
+    // 打字已经完成 ⇒ 编辑器里躺着一份填好的正文。此后**每一个**失败出口都必须先清场，
+    // 引擎错误与接管穿出也算 —— 否则让位时页面上留着一份半截 / 未确认的草稿，
+    // 下一次写入会拼在它后面，或被人 / 被下一条命令原样提交出去。
+    match xhs_publish_field_readback(
+        session,
+        &field_request,
+        &wanted,
+        expected_paragraphs,
+        cancellation,
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(reason)) => {
+            clear_xhs_editor_best_effort(session, clear_request).await;
+            return Ok(xhs_publish_outcome(
+                EffectPhase::Ambiguous,
+                record_id,
+                seq,
+                false,
+                Some(reason),
+            ));
         }
-        let read = probe_xhs_input_target(session, field_request.clone()).await?;
-        let value = xhs_normalized_field(&xhs_target_text(&read, "value").unwrap_or_default());
-        if value.is_empty() || (!head.is_empty() && !value.starts_with(head.as_str())) {
-            continue;
+        Err(error) => {
+            clear_xhs_editor_best_effort(session, clear_request).await;
+            return Err(error);
         }
-        if plain_value && expected_paragraphs > 1 {
-            let paragraphs = xhs_target_number(&read, "paragraphs").unwrap_or_default() as usize;
-            if paragraphs < expected_paragraphs {
-                continue;
-            }
-        }
-        if value == wanted || bigram_similarity(&value, &wanted) >= XHS_CONTENT_SIMILARITY_THRESHOLD
-        {
-            settled = true;
-            break;
-        }
-        // 汉字档退化比较：编辑器对标点 / 全半角的无害改写不该判成内容丢失。
-        let wanted_hanzi = hanzi_only(&wanted);
-        if !wanted_hanzi.is_empty() && hanzi_only(&value).contains(wanted_hanzi.as_str()) {
-            settled = true;
-            break;
-        }
-    }
-    if !settled {
-        clear_xhs_editor_best_effort(session, clear_request).await;
-        return Ok(xhs_publish_outcome(
-            EffectPhase::Ambiguous,
-            record_id,
-            seq,
-            false,
-            Some("publish_field_readback_mismatch"),
-        ));
     }
     // 光标归尾：后续的话题 / @ 候选都在光标处继续写，光标不在尾部会插到正文中间。
     let _ = probe_xhs_input_target(
@@ -1693,6 +1722,66 @@ async fn execute_xhs_publish_fill_field(
         true,
         None,
     ))
+}
+
+/// 发布正文的有界回读。三种结局分开返回，绝不压成一态：
+///  - `Ok(Ok(()))`  = 收敛，内容确实落在编辑器里；
+///  - `Ok(Err(原因))` = 有界预算内始终没收敛，按**病因**分列上报；
+///  - `Err(..)`     = 引擎错误 / 接管穿出，由调用方先清场再原样上抛。
+///
+/// 本函数自身**不清场**：清场是调用方对「打字之后的每一个出口」的统一不变量，
+/// 放在这里就会漏掉 `?` 抛出去的那几条路径。
+async fn xhs_publish_field_readback(
+    session: &mut EngineSession,
+    field_request: &serde_json::Value,
+    wanted: &str,
+    expected_paragraphs: usize,
+    cancellation: Option<&AtomicBool>,
+) -> Result<Result<(), &'static str>, EngineError> {
+    let head: String = wanted.chars().take(20).collect();
+    let wanted_hanzi = hanzi_only(wanted);
+    let mut reason = "publish_field_readback_mismatch";
+    for round in 0..XHS_READBACK_BUDGET_MS.div_ceil(XHS_READBACK_INTERVAL_MS) {
+        if round > 0 {
+            xhs_wait_checked(XHS_READBACK_INTERVAL_MS, cancellation).await?;
+        }
+        let read = probe_xhs_input_target(session, field_request.clone()).await?;
+        let value = xhs_normalized_field(&xhs_target_text(&read, "value").unwrap_or_default());
+        if value.is_empty() || (!head.is_empty() && !value.starts_with(head.as_str())) {
+            reason = "publish_field_readback_mismatch";
+            continue;
+        }
+        // 换行的结构证据。**富文本分支尤其必须比**：`[contenteditable]` 是正文的默认形态，
+        // 也是唯一走裸回车的那条路 —— 回车被 #话题 / @ 候选浮层接走时段落会整段消失，
+        // 而下面两道比对都对换行免疫（归一把空白折成单空格、汉字档只留汉字）。
+        // 把这道闸限死在受控框上，等于让「段落全丢」以 Confirmed 回报。
+        if expected_paragraphs > 1 {
+            match xhs_target_number(&read, "paragraphs") {
+                Some(paragraphs) if (paragraphs as usize) < expected_paragraphs => {
+                    reason = "publish_content_paragraphs_lost";
+                    continue;
+                }
+                // 「读不到段落数」与「段落数不够」是两态。读不到时**也不能**放行：
+                // 下面两道比对对换行免疫，此刻认定收敛就是静默假成功。分开记病因，
+                // 真机上才分得清是分片没给判定还是编辑器真吞了段。
+                None => {
+                    reason = "publish_content_paragraphs_unreadable";
+                    continue;
+                }
+                Some(_) => {}
+            }
+        }
+        if value == wanted || bigram_similarity(&value, wanted) >= XHS_CONTENT_SIMILARITY_THRESHOLD
+        {
+            return Ok(Ok(()));
+        }
+        // 汉字档退化比较：编辑器对标点 / 全半角的无害改写不该判成内容丢失。
+        if !wanted_hanzi.is_empty() && hanzi_only(&value).contains(wanted_hanzi.as_str()) {
+            return Ok(Ok(()));
+        }
+        reason = "publish_field_readback_mismatch";
+    }
+    Ok(Err(reason))
 }
 
 // ───────────────────────────── 小红书滚动特化（§8 滚动半边）─────────────────────────────
@@ -1788,8 +1877,17 @@ async fn dispatch_xhs_wheel(
     }
 }
 
-/// 有界等位移落定：按**迭代次数**限界（不按墙钟死循环），位移一出现就提前返回；
-/// 命令死线到了也停。返回 `None` 仍然只表示**读不到**。
+/// 有界等位移落定：按**迭代次数**限界（不按墙钟死循环），命令死线到了也停。
+/// 落定判据是**位置不再变化**（连续两次读数相同），不是「出现了第一次变化」。
+///
+/// 为什么不能「见到第一次变化就返回」：手势原语是把 8–15 帧**全部派完**才返回的，
+/// 所以派完之后的第一次探针必然已经读到变化 —— 那条判据恒在一个探针往返后 break，
+/// 随后立刻只读重扫。小红书 feed 是滚动触发懒渲染的，这一刻读到的卡片大概率还是滚动前那一屏，
+/// 云端于是反复选中已访问过的笔记、或判定无新候选继续下发翻页 ——「只刷不点」活锁。
+/// 而回执本身是诚实的（位移确实是实测的），所以现场没有任何错误码指向这里。
+///
+/// 「还没开始动」与「不会动了」同样是两态：位置一直等于 `before` 时不得在两轮之内就断言到底，
+/// 故未观察到位移时另有一条最小耐心轮次。返回 `None` 仍然只表示**读不到**。
 async fn wait_for_xhs_scroll_settled(
     session: &mut EngineSession,
     request: serde_json::Value,
@@ -1798,16 +1896,34 @@ async fn wait_for_xhs_scroll_settled(
     deadline_unix_ms: u64,
 ) -> Result<Option<XhsScrollArea>, EngineError> {
     let mut latest: Option<XhsScrollArea> = None;
-    for _ in 0..XHS_SCROLL_SETTLE_MAX_ROUNDS {
+    let mut previous: Option<f64> = None;
+    let mut repeats = 0_u32;
+    let mut moved = false;
+    for round in 0..XHS_SCROLL_SETTLE_MAX_ROUNDS {
         if unix_time_ms() >= deadline_unix_ms {
             break;
         }
         xhs_wait_checked(XHS_SCROLL_SETTLE_INTERVAL_MS, cancellation).await?;
-        if let Some(area) = probe_xhs_scroll_area(session, request.clone()).await? {
-            latest = Some(area);
-            if area.position != before {
-                break;
-            }
+        let Some(area) = probe_xhs_scroll_area(session, request.clone()).await? else {
+            // 这一轮**读不到**：既不算「还在动」也不算「已停」。连续计数清零后继续有界重试，
+            // 绝不拿一次读不到冒充落定。
+            previous = None;
+            repeats = 0;
+            continue;
+        };
+        latest = Some(area);
+        moved |= area.position != before;
+        repeats = if previous == Some(area.position) {
+            repeats + 1
+        } else {
+            0
+        };
+        previous = Some(area.position);
+        if repeats < XHS_SCROLL_SETTLE_REPEATS {
+            continue;
+        }
+        if moved || round + 1 >= XHS_SCROLL_SETTLE_MIN_ROUNDS_WITHOUT_MOVEMENT {
+            break;
         }
     }
     // 一轮都没能读到（预算已尽 / 每轮都读不到）时就地再读一次：读到什么报什么。
@@ -2035,6 +2151,8 @@ async fn execute_xhs_comment_scroll(
             group_url: None,
             clicked: None,
             candidates: Vec::new(),
+            // 同上：验证码取证只由验证码回执产出，这里显式 None、不用默认值展开绕过。
+            type_report: None,
         })),
     ))
 }

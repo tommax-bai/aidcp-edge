@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
+  MAX_NATIVE_TIMEOUT_MS,
   NATIVE_COMMIT_WINDOW_BUDGETS,
   NativePageEngineClient,
   NativePageEngineError,
@@ -50,25 +51,68 @@ const ENGINE_WINDOW_SOURCES = [
   '../../native/page-engine/src/commit_window.rs',
 ];
 
+/**
+ * 引擎里那些「命令墙钟上限」类的常量。预算允许写成对它们的**引用**而不是字面量 ——
+ * 那正是我们要的：上限被调时（Facebook 时间预算整体 ×1.5 就调过一次）预算自动跟随，
+ * 而不是留一份手抄值在那里等着静默失配。故这里把引用解析开再对账，
+ * 解析不出来 MUST 响亮失败（悄悄跳过等于把那条窗口从对账表里抹掉）。
+ */
+const ENGINE_CONSTANT_SOURCES = ['../../native/page-engine/src/engine.rs'];
+
+async function engineConstants(): Promise<Record<string, number>> {
+  const table: Record<string, number> = {};
+  for (const source of ENGINE_CONSTANT_SOURCES) {
+    const text = await readFile(fileURLToPath(new URL(source, import.meta.url)), 'utf8');
+    for (const entry of text.matchAll(/^(?:pub )?const ([A-Z0-9_]+): u64 = ([0-9_]+);/gm)) {
+      table[entry[1]!] = Number(entry[2]!.replaceAll('_', ''));
+    }
+  }
+  return table;
+}
+
 test('提交窗口的预算只有一处声明：引擎侧的数字是宿主那张表的镜像', async () => {
+  const constants = await engineConstants();
   const mirrored: Record<string, number> = {};
   for (const source of ENGINE_WINDOW_SOURCES) {
     const text = await readFile(fileURLToPath(new URL(source, import.meta.url)), 'utf8');
-    for (const entry of text.matchAll(/label: "([a-z_]+)",\s*\n\s*budget_ms: ([0-9_]+),/g)) {
+    for (const entry of text.matchAll(
+      /label: "([a-z_]+)",\s*\n\s*budget_ms: ([0-9_]+|[A-Za-z_][A-Za-z0-9_:]*),/g,
+    )) {
       const label = entry[1]!;
-      const budget = Number(entry[2]!.replaceAll('_', ''));
+      const raw = entry[2]!;
+      const budget = /^[0-9_]+$/.test(raw)
+        ? Number(raw.replaceAll('_', ''))
+        : constants[raw.split('::').pop()!];
+      assert.equal(
+        typeof budget,
+        'number',
+        `commit window "${label}" derives its budget from "${raw}", which no engine constant declares`,
+      );
       // 同一个标签在两份源里声明两个不同预算 = 又回到「两边各写一份」，当场拦下。
       assert.ok(
         mirrored[label] === undefined || mirrored[label] === budget,
         `commit window "${label}" is declared twice with different budgets in the engine sources`,
       );
-      mirrored[label] = budget;
+      mirrored[label] = budget!;
     }
   }
   // 单边改一个数字（改宿主没改镜像、或反过来）在这里当场失败，而不是等到运行期把引擎杀掉。
   // 引擎新增一处窗口却漏进宿主表，也在这里失败 —— 那处写入否则会在运行期被静默拒发。
   assert.deepEqual(mirrored, NATIVE_COMMIT_WINDOW_BUDGETS);
   assert.equal(Object.keys(mirrored).length, 8);
+});
+
+test('评论提交窗口的预算 ≥ 命令墙钟上限：这条恒等式必须机械成立，不许靠人记得改数字', () => {
+  // 为什么钉的是关系而不是数字：窗口预算低于命令墙钟上限时，窗口会在命令还在跑的时候
+  // **静默过期**（宿主 `isOpen()` 只按 now < openUntil 判定，过期即 false，没有任何告警），
+  // 于是抢占重新落回提交那一刻 —— 一条可能已经发出去的评论被当成没发生 ⇒ 上游重投 ⇒
+  // 重复评论。上限已经被整体调过一次（30s → 45s），任何一处手抄的字面量都会在下一次调整时
+  // 悄悄把这颗雷装回去，而且**不会有任何文本冲突**。
+  assert.ok(
+    NATIVE_COMMIT_WINDOW_BUDGETS.xhs_comment_submit >= MAX_NATIVE_TIMEOUT_MS,
+    `xhs_comment_submit budget ${NATIVE_COMMIT_WINDOW_BUDGETS.xhs_comment_submit}ms is shorter than `
+    + `the command wall-clock ceiling ${MAX_NATIVE_TIMEOUT_MS}ms: the window expires silently mid-command`,
+  );
 });
 
 test('引擎要一个超过事实源上限的预算时，宿主只授上限', async () => {

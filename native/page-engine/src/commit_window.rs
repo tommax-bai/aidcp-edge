@@ -21,13 +21,25 @@ pub struct XiaohongshuCommitWindow {
 /// 所以打穿**不会**让写入被拒发（拒发只发生在「标签不在宿主白名单里」那一种），
 /// 它的真实后果是**抢占会落在提交那一刻**：一条可能已经发出去的评论被当成没发生 ⇒ 上游重投 ⇒ 重复评论。
 ///
-/// 因此预算抬到命令上限（`engine.rs` 的 `DEFAULT_COMMAND_TIMEOUT_MS`，也是宿主
-/// `MAX_NATIVE_TIMEOUT_MS`）。这不等于「整条命令禁抢占 30s」：宿主在命令结束时就 dispose，
+/// 因此预算抬到命令上限。这不等于「整条命令禁抢占」：宿主在命令结束时就 dispose，
 /// 预算只是**兜底上限**，防一个卡死的窗口永久挡住抢占。
+///
+/// ⚠️ 这个数字 MUST **派生**自命令墙钟上限，MUST NOT 手抄一份字面量。上限是会被调的
+/// （Facebook 时间预算整体 ×1.5 就把它从 30s 调到 45s），而窗口预算低于上限的后果不是报错，
+/// 是**窗口静默过期** ⇒ 抢占重新落回提交那一刻 ⇒ 一条可能已发出去的评论被当成没发生
+/// ⇒ 上游重投 ⇒ 重复评论。手抄的那一份既不会有文本冲突、也不会有任何门禁提醒。
 const XHS_COMMENT_SUBMIT: XiaohongshuCommitWindow = XiaohongshuCommitWindow {
     label: "xhs_comment_submit",
-    budget_ms: 30_000,
+    budget_ms: crate::engine::DEFAULT_COMMAND_TIMEOUT_MS,
 };
+/// S2 那颗雷的机械形态，**编译期**恒等式：钉的是关系，不是某个具体毫秒数。
+/// 有人把上面的派生改回字面量、而命令墙钟上限随后又被调大时，这里**编译不过** ——
+/// 比任何用例都早、也比任何用例都响。
+const _: () = assert!(
+    XHS_COMMENT_SUBMIT.budget_ms >= crate::engine::DEFAULT_COMMAND_TIMEOUT_MS,
+    "xhs_comment_submit commit window budget must not expire before the command wall-clock ceiling",
+);
+
 const XHS_NOTIFICATION_COMMENTS: XiaohongshuCommitWindow = XiaohongshuCommitWindow {
     label: "xhs_notification_comments",
     budget_ms: 20_000,

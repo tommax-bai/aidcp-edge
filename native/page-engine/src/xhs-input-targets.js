@@ -136,8 +136,15 @@
       return true;
     }catch{return false;}
   };
+  // 段落数是**换行的结构证据**：引擎拿它判「裸回车有没有真的把段落拆出来」。
+  // 富文本优先按 innerText 数 —— 那是浏览器真实渲染出来的换行（<br> 与块级子节点都算），
+  // 与 readEditor 读回的正文是同一份文本，两边口径因此一致。
+  // 只按块级子节点数会漏两类现场：段落靠 <br> 分隔（一个块都没有）、首段是裸文本节点
+  // （块数比真实段落数少一）—— 两种都会把「N 段」读成「1 段」，让引擎误判成段落丢失。
   const paragraphCount=(el)=>{
     if('value' in el)return String(el.value||'').split('\n').filter((line)=>line.trim().length>0).length;
+    const flat=typeof el.innerText==='string'?el.innerText:'';
+    if(flat)return flat.split('\n').filter((line)=>line.trim().length>0).length;
     const blocks=Array.from(el.children||[]).filter((child)=>/^(P|DIV|LI|H[1-6]|BLOCKQUOTE|PRE)$/.test(child.tagName||''));
     if(blocks.length)return blocks.filter((block)=>text(block,4000).length>0).length;
     return text(el,32000)?1:0;

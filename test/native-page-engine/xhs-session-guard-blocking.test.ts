@@ -322,6 +322,37 @@ test('Xiaohongshu periodic observation is lifecycle-managed and idempotent on bo
   h.session.close();
 });
 
+test('Xiaohongshu observation re-arms after a drain stop: resumeObservation must really put the probe back on cadence', async () => {
+  // 停手闸（`stopRequested`）拦的是「在途探测经 .finally 自动重新武装」那一条路径。
+  // `resumeObservation()` 是**显式**重新武装入口 —— 执行端重连、或「唤醒但保持暂停」都只调它，
+  // 不调 `start()`。它若被同一道闸拦成空操作，观测与校验从此永久哑火，
+  // 而外部看到的是「一切正常」：没有错误码、没有诊断行、状态里也只是 running=false。
+  const h = harness(async () => ({
+    ok: true,
+    effectPhase: 'confirmed',
+    reasonCode: 'confirmed',
+    output: {
+      kind: 'page_probe',
+      value: { origin: 'https://www.xiaohongshu.com', path: '/explore', pageKind: 'explore' },
+    },
+  }), { probeIntervalMs: 1 });
+
+  await h.session.start();
+  assert.equal(await h.session.stopAndWait(), true);
+  assert.equal(h.session.observationStatus().running, false, '停手之后探针确实停了');
+
+  const probesBefore = h.executions.filter((entry) => entry.command.kind === 'page_probe').length;
+  h.session.resumeObservation();
+  assert.equal(h.session.observationStatus().running, true, '恢复必须真的把定时器重新摆上');
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  // 断言的是「探针真的按拍跑起来了」，不是「调用没报错」。
+  assert.ok(
+    h.executions.filter((entry) => entry.command.kind === 'page_probe').length > probesBefore,
+    '恢复之后探针必须真的按拍执行',
+  );
+  h.session.close();
+});
+
 test('Xiaohongshu observation liveness separates "cannot probe" from "nothing to see"', async () => {
   let failing = true;
   let now = 1_000;

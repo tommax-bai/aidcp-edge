@@ -11,7 +11,7 @@
 
 use aidcp_page_engine::commit_window::xiaohongshu_commit_window;
 use aidcp_page_engine::commit_window::{CommitWindowRequest, CommitWindowRequester};
-use aidcp_page_engine::engine::{CommandOutput, Engine};
+use aidcp_page_engine::engine::{CommandOutput, DEFAULT_COMMAND_TIMEOUT_MS, Engine};
 use aidcp_page_engine::error::ErrorCode;
 use aidcp_page_engine::protocol::{
     CommandRecord, EffectPhase, NativeCommand, Platform, SessionOpenParams, SessionOpenRecord,
@@ -41,7 +41,9 @@ fn xiaohongshu_commit_window_contracts_keep_the_pre_migration_labels_and_budgets
     assert_eq!(comment.label, "xhs_comment_submit");
     // 硬件级逐字输入整段落在窗口内之后，4s 必被打穿；预算抬到命令墙钟上限。
     // 打穿的后果实测是「窗口静默过期 ⇒ 抢占可以落在提交那一刻」，不是「写入被拒发」。
-    assert_eq!(comment.budget_ms, 30_000);
+    // 判据是**这条恒等式**、不是某个具体毫秒数：命令上限是会被调的（曾整体 ×1.5），
+    // 在这里手抄一个字面量等于把同一颗雷原样往后推一次。
+    assert_eq!(comment.budget_ms, DEFAULT_COMMAND_TIMEOUT_MS);
 
     // 三条通知分类栏：点击**消费未读、无回滚**，窗口 MUST 覆盖点击那一刻。
     let comments = xiaohongshu_commit_window(&command(
@@ -127,7 +129,8 @@ async fn comment_submit_requests_its_commit_window_before_any_write_dispatch() {
     let (label, budget_ms, requests_before_window) = arbiter.await.expect("arbiter");
     assert_eq!(label, "xhs_comment_submit");
     // 逐字输入整段落在窗口内，预算随之抬到命令墙钟上限（推导见 commit_window.rs）。
-    assert_eq!(budget_ms, 30_000);
+    // 同上：钉的是恒等式，不是字面量。
+    assert_eq!(budget_ms, DEFAULT_COMMAND_TIMEOUT_MS);
     assert_eq!(
         requests_before_window - baseline,
         1,
