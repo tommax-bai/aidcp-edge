@@ -593,7 +593,7 @@ async fn facebook_reel_scroll_uses_one_active_video_wheel_after_unchanged_arrow(
             session_id: "session-1".to_owned(),
             task_id: "browse-1".to_owned(),
             command_id: 1,
-            deadline_unix_ms: unix_time_ms() + 8_000,
+            deadline_unix_ms: unix_time_ms() + HUMANIZED_GESTURE_DEADLINE_MS,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("feed_scroll".to_owned()),
                 dwell_ms: None,
@@ -5043,6 +5043,18 @@ where
         .await
         .expect("CDP response");
 }
+
+/// 拟人手势类用例的墙钟预算。
+///
+/// 这些用例断言的是**手势形状**（帧数 / 落点坐标 / 总位移），墙钟死线在其中只是「别跑成死循环」的
+/// 兜底，不承载任何被断言的语义。而 cargo 会并行跑 14 个测试二进制，负载一上来，同一段带停顿的手势
+/// 真实耗时会被拉长数倍。把兜底值定在手势自身的量级（这条曾经是 8s），门禁就变成掷骰子——实测：
+/// 单独跑本文件连跑 6 次全绿、全量并行跑 8 次红 2 次。**「单独跑一遍全绿」因此会自证出一个假的
+/// 「无抖动」**，这正是本轮要根除的那种「看着像证明、其实什么也没证」。
+///
+/// 故一律给一个与并行负载无关的大预算。它不会让任何断言变松（形状断言不看时间），只是把兜底还原成
+/// 兜底。真要覆盖「超时会怎样」的用例请显式写一个小死线，别指望这些形状用例顺手覆盖到。
+const HUMANIZED_GESTURE_DEADLINE_MS: u64 = 120_000;
 
 fn unix_time_ms() -> u64 {
     SystemTime::now()

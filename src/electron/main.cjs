@@ -58,10 +58,11 @@ const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
 const {
   parseRuntimePosture,
-  projectRuntimePosture,
   postureLatches,
-  runtimePostureOverride,
-  judgeResumeUnderPosture,
+  postureOfLiveCore,
+  runtimePostureTransition,
+  commitPatchUnderPosture,
+  runResumeUnderPosture,
 } = require('./runtime-posture.cjs');
 const commandDiagnostics = require('./command-diagnostics.cjs');
 const { invalidateProxyRuntime, normalizeProxyRuntime } = require('./proxy-runtime.cjs');
@@ -1984,7 +1985,10 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     // 核心运行态的闩（posture 对象 / null，四态见 runtime-posture.cjs）。核心在这些态下**不退出**，
     // 所以退出码那条权威判据永远不触发；不闩住，随便一行普通日志就把四轴改回「运行中」。
     // 它是「外面看到的 = 里面发生的」这条不变量在外壳侧的唯一载体，**MUST NOT** 由日志行或乐观投影写。
+    // 读它**一律经 livePosture()**：闩的作用域是「说这句话的那次 core run」，由 runtimePostureCore
+    // 与当前 handle.child 是否同一个对象来判（见 postureOfLiveCore），不靠各处记得手工清。
     runtimePosture: null,
+    runtimePostureCore: null,
     respawnStreak: 0,
     respawnTimer: null,
     gaveUp: false,
@@ -2897,6 +2901,31 @@ function presencePatch(text) {
 function clearEdgeFailurePatch(handle) {
   handle.lastEdgeFailureLine = '';
   return { edgeFailure: null };
+}
+
+/**
+ * 当前**有效**的运行态闩。
+ *
+ * posture 描述的是「一个还活着的核心此刻怎么样」，所以它的作用域天然是**声明它的那次 core run**。
+ * 判据收在 runtime-posture.cjs 的 postureOfLiveCore 里（读的时候判，不靠各处记得手工清）：
+ * 核心没了或换了一代 ⇒ 闩不再描述任何东西。全部读闩的地方都必须经这里，绝不直读 handle.runtimePosture。
+ */
+function livePosture(handle) {
+  return postureOfLiveCore(handle.runtimePosture, handle.runtimePostureCore, handle.child);
+}
+
+/** posture 投影 → updateStatus 补丁（四格语义各不相同，见 projectRuntimePosture 的注释）。 */
+function posturePatch(handle, projection) {
+  return {
+    ...projection.axes,
+    ...(projection.message ? { lastMessage: projection.message } : {}),
+    ...(projection.presence ? presencePatch(projection.presence) : {}),
+    ...(projection.failure === undefined
+      ? {}
+      : projection.failure === null
+        ? clearEdgeFailurePatch(handle)
+        : edgeFailurePatch(projection.failure)),
+  };
 }
 
 function exitMessage(code, signal) {
@@ -4437,9 +4466,11 @@ async function spawnEdgeChild(handle, {
 
   handle.browserParkingReady = false;
   handle.executorFailure = null;
-  // 运行态闩只反映**本次 core run**：新拉起的核心会自己重走一遍身份确立并重新发 posture，
-  // 不清就会把上一轮的终局 / 残局一直挂在新进程头上。
+  // 运行态闩只反映**本次 core run**。这一句是顺手清爽，**不是**保证：保证在读侧（livePosture →
+  // postureOfLiveCore 按声明它的子进程对象判作用域）。曾经这条不变量只由本处 + spawn 失败 + close
+  // 三句手工赋值扛着，而三处同一字面串让源码扫描只要求「存在其一」——删掉任意一句既扫不出也测不到。
   handle.runtimePosture = null;
+  handle.runtimePostureCore = null;
   handle.browserStateUnconfirmed = false;
   handle.browserPersonaNoticeState = null;
   resetPersonaNoticeGrace(handle);
@@ -4657,28 +4688,14 @@ async function spawnEdgeChild(handle, {
       // 外壳于是停在「运行中、无角标」，而浏览与观测永久停着。分岔的根不是漏发某一条，是入口不止一个。
       const posture = parseRuntimePosture(message);
       if (posture) {
-        // 闩：核心此时**不退出**，退出码那条权威判据永远不触发；这个闩是四轴唯一的守护者，
-        // 此后每一行普通日志都不得把它们改回去（见 handleEdgeLog 末尾的 posture 覆盖层）。
-        handle.runtimePosture = postureLatches(posture) ? posture : null;
-        const projection = projectRuntimePosture(posture);
-        const hasProjection = Object.keys(projection.axes).length > 0
-          || projection.message !== null
-          || projection.presence !== null
-          || projection.failure !== undefined;
-        // healthy 且无内容 ⇒ 只解闩、不动状态：常态下每次唤醒都会来一条，无条件 updateStatus 会把
-        // woken / resumed 随后要写的正确态盖掉。
-        if (hasProjection) {
-          updateStatus(handle, {
-            ...projection.axes,
-            ...(projection.message ? { lastMessage: projection.message } : {}),
-            ...(projection.presence ? presencePatch(projection.presence) : {}),
-            ...(projection.failure === undefined
-              ? {}
-              : projection.failure === null
-                ? clearEdgeFailurePatch(handle)
-                : edgeFailurePatch(projection.failure)),
-          });
-        }
+        // 闩怎么变、界面写不写、写什么，**整段**由 runtimePostureTransition 决定（含「健康态只在真闩着
+        // 时才动界面」与「关闭意图优先」两条守卫，理由与回归实例写在那个函数上）。这里只负责施加。
+        const transition = runtimePostureTransition(livePosture(handle), posture, {
+          closeIntent: Boolean(handle.stopRequested || handle.removed || isQuitting),
+        });
+        handle.runtimePosture = transition.latch;
+        handle.runtimePostureCore = child; // 闩的作用域＝说这句话的那个核心（见 postureOfLiveCore）
+        if (transition.patch) updateStatus(handle, posturePatch(handle, transition.patch));
         return;
       }
     }
@@ -4821,7 +4838,7 @@ async function spawnEdgeChild(handle, {
     settleLaunchReady(handle, false); // 起不来：立刻放行启动队列的下一个，绝不占着队列干等
     handle.child = undefined;
     handle.status.proxyRuntime = invalidateProxyRuntime(handle.status.proxyRuntime);
-    handle.runtimePosture = null; // 同 close 分支：没有活着的核心，posture 就不再描述任何东西
+    handle.runtimePosture = null; // 顺手清爽；真正的作用域判定在读侧（livePosture）
     settleTransientBrowserLease(handle, 'core_spawn_error', false);
     handle.browserOpenPending = false;
     handle.coldStandbyPending = false;
@@ -4925,6 +4942,7 @@ async function spawnEdgeChild(handle, {
     handle.status.proxyRuntime = invalidateProxyRuntime(handle.status.proxyRuntime);
     // posture 描述的是**一个还活着的核心**的运行态。进程都没了，它就不再描述任何东西：留着会让
     // 「已停止」被压成「身份已失效 / 自动化已停摆」。真正的终局归因走退出码那条权威判据（下面）。
+    // 这一句同样只是顺手清爽——`handle.child = undefined` 一执行，livePosture 就已经读不出闩了。
     handle.runtimePosture = null;
     settleTransientBrowserLease(handle, 'core_closed', false);
     handle.browserOpenPending = false;
@@ -5645,7 +5663,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
   // 运行期身份终局 / 自动化残局是**不退出**的第二类终态（第一类是「CDP 输入控制不可用」）：核心还
   // 活着、还会继续打日志，但已经彻底停摆或跑不起来。它经 posture 闩在 handle 上；不把这个闩算进来，
   // 随便哪一行普通日志都会把徽标重置回 running，运营看到的仍是「运行中」。
-  const halting = fleet.declaresCoreHalt(message) || postureLatches(handle.runtimePosture);
+  const halting = fleet.declaresCoreHalt(message) || postureLatches(livePosture(handle));
   const next = { edge: halting ? 'warning' : 'running', lastMessage: proxyRuntimeLine ? '代理运行证据已更新' : message };
   if (!halting && handle.status.edgeFailure) next.edgeFailure = null;
   if (message.includes('[browser-parking] awaiting-login')) {
@@ -5829,12 +5847,10 @@ function handleEdgeLogLine(handle, message, isError = false) {
   // 只把 `edge` 挂进 halting 判据是不够的（那是上一轮的做法）：`session` / `cloud` / `auth` 仍会被
   // 「浏览循环结束」「已连接云端」这类行改回去，界面于是变成半绿半红的自相矛盾态；而唯一诚实的那句话
   // 只活在 `lastMessage` 里，下一行日志就把它冲掉。四轴与在场感必须由闩住的 posture 压回去。
-  const postureOverride = runtimePostureOverride(handle.runtimePosture);
-  if (postureOverride) {
-    Object.assign(next, postureOverride.axes);
-    if (postureOverride.presence) next.presence = { text: postureOverride.presence, at: new Date().toISOString() };
-  }
-  updateStatus(handle, next);
+  //
+  // 施加方式是**在落盘那一次调用的实参位置上合成**，不是「末尾再放一块 if」：上一轮那块可以整块挪到
+  // 日志推断之前而源码扫描照样全绿（覆写症状完整复活）。写成合成就没有可以挪动的块。
+  updateStatus(handle, commitPatchUnderPosture(livePosture(handle), next, new Date().toISOString()));
   if (standbyHintUpdated) applyBrowserStandbyHint(handle, standbyHint);
 }
 
@@ -5901,16 +5917,23 @@ function resumeEdge(handle) {
   // `lifecycle.resumed` 因此永不发出 —— 那条乐观投影没有任何东西会来纠正。核心随后的拒绝日志只能把
   // `edge` 拉回 warning，`session` / `automationPaused` / `automationIntent` 三个字段就此永久说假话。
   // 结论不是「再补一条纠正边」，而是**先判再写**：状态只在确实要发生时才改。
-  const resumeVerdict = judgeResumeUnderPosture(handle.runtimePosture);
-  if (resumeVerdict.kind === 'refuse') {
-    updateStatus(handle, {
-      edge: 'warning',
-      session: 'paused',
-      lastMessage: resumeVerdict.message,
-      ...presencePatch(resumeVerdict.presence),
-    });
-    return;
-  }
+  //
+  // 分支本体在 runtimePosture 模块里（`runResumeUnderPosture` 决定调不调 `proceed`），宿主只提供两个
+  // 出口。上一轮它是这里的 `if (…) { updateStatus(...); return; }`——删掉那句 `return;` 就恢复照常下发，
+  // 而全套用例零红；现在删掉等价那一句会让驱动真实现的用例当场红。
+  runResumeUnderPosture(livePosture(handle), {
+    refuse: (patch) => updateStatus(handle, {
+      edge: patch.edge,
+      session: patch.session,
+      lastMessage: patch.lastMessage,
+      ...presencePatch(patch.presence),
+    }),
+    proceed: () => resumeEdgeUnderPosture(handle),
+  });
+}
+
+/** `resumeEdge` 通过身份闸之后的全部动作（闸的 `proceed` 出口，绝不另有调用方）。 */
+function resumeEdgeUnderPosture(handle) {
   const closingBeforeResume = Boolean(handle.child
     && (handle.pausePending || handle.stopRequested || handle.engineStopReason === 'user_close'));
   ensureEnabledLifecycleGeneration(handle, 'user_start');

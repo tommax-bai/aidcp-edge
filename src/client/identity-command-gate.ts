@@ -100,3 +100,149 @@ export function judgeCloudRebindUnderIdentity(health: IdentityHealth | undefined
       + '请在浏览器里重新登录目标账号后重启本环境，重启时会直接连到新选的云端。',
   };
 }
+
+// ===========================================================================================
+// 闸的**真实现**（判据 + 动作整段）—— 宿主只剩一行接线
+// ===========================================================================================
+//
+// 为什么判据与动作必须待在同一个可注入函数里，而不是「模块给判据、宿主写动作」：
+// 上一轮它们是分开的（模块导出 `judge*`，`src/main.ts` 的 1400 行单 `main()` 里写 `if (…) throw` /
+// `if (…) { 回执; return; }`）。那些动作落在一个**没有导出、拿不到句柄**的大闭包里，用例只能扫源码
+// 文本。而复验实测坐实：把宿主里那半句动作删掉（留下 `const verdict = judge…`、删掉紧随的 `throw`；
+// 或把条件写成 `|| true` / `false &&`），**整套用例零红**——判据算了、日志打了，闸就是不拦。
+//
+// 「判了但不据此动作」正是本系列在追的那一族病。所以本节的每个函数都**自己完成拒绝**（抛出 / 发回执 /
+// 不调用下游处理器），宿主只做一次调用或一次包裹。中性化它们中的任何一处，驱动真实现的用例当场红。
+
+/**
+ * 一条云端命令通道的**负向应答形状**。
+ *
+ * `action_completed`       —— 云端会消费 `action.completed`（浏览 / 页面动作通道）。
+ * `publish_command_result` —— 云端按信封 id 关联 `publish.command.result`（发布原子通道）。
+ * `none`                   —— **协议上没有负向应答形状**。此时唯一诚实的做法是不发、并把这个缺口
+ *                             具名登记下来；伪造一条云端根本不认识的回执比不发更坏——它让人以为
+ *                             「已经兑现了」，而云端照样等满自己的超时。
+ */
+export type IdentityRefusalAck = 'action_completed' | 'publish_command_result' | 'none';
+
+export interface CommandLane {
+  /** 日志里的通道名。 */
+  readonly label: string;
+  readonly ack: IdentityRefusalAck;
+  /** `ack: 'none'` 时必须写清：为什么这条通道没有负向应答，以及云端因此会看到什么。 */
+  readonly ackGap?: string;
+}
+
+/** 浏览 / 页面动作通道：云端消费 `action.completed`，拒绝有真回执。 */
+export const NATIVE_COMMAND_LANE: CommandLane = { label: 'Native', ack: 'action_completed' };
+
+/**
+ * 任务租约通道：**没有**负向应答形状。
+ *
+ * 协议里 `edge.task.acquire` 的对侧只有一条正向消息 `edge.task.acquired`，云端的等待方
+ * （`edge-task-lease-client`）也只听这一条，等不到就按自己的 `acquire_timeout` 收口。
+ * 曾经这里发的是 `action.completed{action:'edge.task.acquire'}`——那个动作名既不在边缘的动作名转发表里、
+ * 也不在云端的入口别名表里，云端没有任何订阅方按它匹配。**发了等于没发**，而且比没发更坏：
+ * 它让读代码的人以为「拒绝已经如实回执了」。真兑现要先在协议侧补一条负向应答（跨仓，见 tasks.md 登记）。
+ */
+export const EDGE_TASK_LANE: CommandLane = {
+  label: '任务',
+  ack: 'none',
+  ackGap: '任务租约通道在协议 v2 上没有负向应答形状（只有 edge.task.acquired 一条正向消息，'
+    + '云端等待方也只听它）；本次拒绝不会有回执，云端会等满自己的 acquire_timeout。',
+};
+
+export interface IdentityCommandGateDeps {
+  /** 现在的运行期身份健康度（每条命令都重新读，绝不缓存——身份是持续校验的状态）。 */
+  health: () => IdentityHealth | undefined;
+  actionNameFor: (type: MessageType) => string;
+  reportActionCompleted: (receipt: { action: string; ok: false; reason: string }) => void;
+  logger: (line: string) => void;
+}
+
+/**
+ * 把一个云端命令处理器包进身份闸：身份未落定时**不调用**下游处理器，并按本通道的应答形状如实收口。
+ *
+ * 宿主接线只有一行：`client.onX(guardCommandsUnderIdentity(LANE, deps, handler))`。
+ */
+export function guardCommandsUnderIdentity<E extends { type: MessageType }>(
+  lane: CommandLane,
+  deps: IdentityCommandGateDeps,
+  handler: (env: E) => void,
+): (env: E) => void {
+  return (env: E): void => {
+    const verdict = judgeCommandUnderIdentity(deps.health(), env.type);
+    if (verdict.kind === 'allow') {
+      handler(env);
+      return;
+    }
+    const action = deps.actionNameFor(env.type);
+    if (lane.ack === 'action_completed') {
+      deps.logger(
+        `[aidcp-edge] ${lane.label} 命令被身份闸拒绝 type=${env.type}：${verdict.detail} 回执 ${action}:${verdict.reason}`,
+      );
+      deps.reportActionCompleted({ action, ok: false, reason: verdict.reason });
+      return;
+    }
+    // 没有负向应答形状的通道：不伪造回执，但**必须响亮**——静默丢弃与「发一条没人收的回执」是同一种病。
+    deps.logger(
+      `[aidcp-edge] ${lane.label} 命令被身份闸拒绝 type=${env.type}：${verdict.detail}。${lane.ackGap ?? ''}`,
+    );
+  };
+}
+
+export interface PublishCommandIdentityGateDeps {
+  health: () => IdentityHealth | undefined;
+  /** 发布原子的应答按信封 id 关联；宿主只提供发送出口，载荷由本模块拼。 */
+  sendResult: (payload: Record<string, unknown>, correlationId: string) => void;
+  logger: (line: string) => void;
+}
+
+export interface PublishAtomEnvelopeLike {
+  id: string;
+  type: MessageType;
+  payload: { recordId: string | number; seq: number; kind: string };
+}
+
+/**
+ * 发布原子命令的身份闸。发布是**在平台上留真实痕迹**的动作，身份未落定时必须拒绝并按发布回执形状
+ * 如实回（静默丢弃会让云端挂起等一个永远不来的结果）。
+ */
+export function guardPublishCommandsUnderIdentity<E extends PublishAtomEnvelopeLike>(
+  deps: PublishCommandIdentityGateDeps,
+  handler: (env: E) => void,
+): (env: E) => void {
+  return (env: E): void => {
+    const verdict = judgeCommandUnderIdentity(deps.health(), env.type);
+    if (verdict.kind === 'allow') {
+      handler(env);
+      return;
+    }
+    deps.sendResult(
+      {
+        recordId: env.payload.recordId,
+        seq: env.payload.seq,
+        kind: env.payload.kind,
+        ok: false,
+        error: verdict.reason,
+      },
+      env.id,
+    );
+    deps.logger(`[aidcp-edge] 发布命令被身份闸拒绝：${verdict.detail}`);
+  };
+}
+
+/**
+ * 切换云端环境的身份闸：**判完再放行才算闸**。
+ *
+ * 重绑动作本体由调用方以回调传入，闸拒绝时它一次都不会被调用（上一轮这里是宿主里的 `if (…) throw`，
+ * 删掉那半句 `throw`，重绑照跑、节点以陈旧身份对新云端宣称在线，而全套用例零红）。
+ */
+export async function rebindCloudUnderIdentityGate<T>(
+  health: IdentityHealth | undefined,
+  rebind: () => Promise<T>,
+): Promise<T> {
+  const verdict = judgeCloudRebindUnderIdentity(health);
+  if (verdict.kind === 'refuse') throw new Error(verdict.reason);
+  return rebind();
+}

@@ -79,3 +79,40 @@ export function postureBlocksAutomationResume(posture: RuntimePosture | null | u
 export function postureLatches(posture: RuntimePosture | null | undefined): boolean {
   return Boolean(posture) && posture!.kind !== 'healthy';
 }
+
+/**
+ * 终局 / 残局在**日志侧**的白名单措辞（IPC 之外的第二道网）。
+ *
+ * 与 `src/electron/fleet.cjs` 的 `declaresCoreHalt` 白名单共用，跨侧对账用例会实跑这两句去撞它。
+ * 这两句不是给人看的文案，是**协议**：改字面必须同步外壳白名单。
+ */
+export const POSTURE_HALT_PHRASES: Readonly<Record<'identity_halted' | 'automation_stalled', string>> = {
+  identity_halted: '身份确立失败',
+  automation_stalled: '自动化已停摆',
+};
+
+/**
+ * posture 的对外发布：IPC 是主路，**发不出去时必须在日志里补一句**。
+ *
+ * `process.send` 在父子通道断开时是**静默 no-op**（`process.connected` 为假就直接不发、不报错、
+ * 不抛异常）。终局与残局目前各只有一条边通到外壳，这条边一丢，界面立刻退回「全绿、无角标」，
+ * 而浏览与观测永久停着——正是本系列在根除的形状。终局态历史上还有第二道网（核心那行「身份确立失败」
+ * 被外壳终态白名单认出来），残局态一条都没有；这里把两者都补齐，且措辞与白名单共用。
+ *
+ * `healthy` / `reestablishing` 不补：前者本就无事发生，后者是几秒的过渡态，丢了不会留下持久假象。
+ */
+export function publishPostureWithFallback(
+  posture: RuntimePosture,
+  deps: { sendIpc: (payload: Record<string, unknown>) => boolean; logger: (line: string) => void },
+): void {
+  const delivered = deps.sendIpc(runtimePostureIpc(posture));
+  if (delivered) return;
+  const phrase = posture.kind === 'healthy' || posture.kind === 'reestablishing'
+    ? undefined
+    : POSTURE_HALT_PHRASES[posture.kind];
+  if (!phrase) return;
+  deps.logger(
+    `[aidcp-edge] ⚠ ${phrase}：${(posture as { reason: string }).reason}`
+      + '（运行态 IPC 未能送达外壳，改由日志如实声明；界面据此仍会翻红）',
+  );
+}

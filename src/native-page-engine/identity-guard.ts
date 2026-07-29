@@ -572,6 +572,23 @@ export type IdentityReestablishmentOutcome =
   | { kind: 'aborted'; step: string; cloudRestored?: boolean; observationSuspendedByChain: boolean }
   | { kind: 'skipped'; reason: 'already_running' };
 
+/**
+ * 「自动化已停摆」残局与外壳终态白名单**共用的措辞**（IPC 之外的第二道保险）。
+ *
+ * 为什么这条保险非有不可：残局态目前**只有一条边**通到外壳——那条 posture IPC。而
+ * `process.send` 在父子通道断开时是**静默 no-op**（`process.connected` 为假时直接不发、不报错）。
+ * 这唯一一条边一丢，界面立刻退回「全绿、无角标」，而浏览与观测永久停着——正是本系列在根除的形状。
+ * 终局态（`identity_halted`）早就有第二道网：核心那行日志里写着「身份确立失败」，外壳的终态白名单
+ * 认得它；残局态一条都不匹配。所以这里给残局也定一句共用措辞，并让核心在**每一条**走向残局的路径上
+ * 都把它打进日志。
+ *
+ * 改这个常量必须同步 `src/electron/fleet.cjs` 的 `declaresCoreHalt` 白名单（有跨侧用例钉住）。
+ */
+export const AUTOMATION_STALLED_HALT_PHRASE = '自动化已停摆';
+
+/** 终局态与外壳白名单共用的措辞（历史上已在用，这里具名固化，便于跨侧用例对账）。 */
+export const IDENTITY_HALTED_HALT_PHRASE = '身份确立失败';
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -630,11 +647,19 @@ export function createIdentityReestablishment(
       }
       // 作废也要如实对外说一次，否则「正在重新确认身份」那句会永远挂在界面上（它是闩住的）。
       // 云端没补回来时这不是「回到正常」而是残局：身份没问题，但节点与云端失联且不会自愈。
-      deps.reportPosture(
-        out.cloudRestored === false
-          ? { kind: 'automation_stalled', reason: `身份重立链在「${step}」处被叫停后未能补回云端连接` }
-          : { kind: 'healthy' },
-      );
+      if (out.cloudRestored === false) {
+        // 第二道网（IPC 之外）：posture 那条边是**静默**可丢的，残局必须在日志里也留下白名单措辞。
+        deps.logger(
+          `[identity-guard] ⚠ ${AUTOMATION_STALLED_HALT_PHRASE}：身份重立链在「${step}」处被叫停后未能补回云端连接，` +
+            '账号身份没有问题，但本节点与云端失联且不会自愈，请点「恢复」重新拉起。',
+        );
+        deps.reportPosture({
+          kind: 'automation_stalled',
+          reason: `身份重立链在「${step}」处被叫停后未能补回云端连接`,
+        });
+      } else {
+        deps.reportPosture({ kind: 'healthy' });
+      }
       return out;
     };
     try {
@@ -755,8 +780,10 @@ export function createIdentityReestablishment(
         // 「恢复观测 / 重启浏览」这些收尾步骤。这里 MUST NOT 报 halt——那句话的字面意思是
         // 「身份确立失败」，而身份恰恰是唯一没出问题的东西；报出去只会把刚解除的红角标重新闩上，
         // 把一台身份完好的机器钉成「请重新登录后重启」。如实说清真正没做完的是什么。
+        // 措辞里的「自动化已停摆」与外壳终态白名单共用（第二道网）：posture IPC 在父子通道断开时
+        // 是静默 no-op，只靠它这一条边，残局一丢就退回「全绿无角标」。
         deps.logger(
-          `[identity-guard] ⚠ 身份已重新确立，但恢复自动化的收尾步骤异常（${reason}）：` +
+          `[identity-guard] ⚠ ${AUTOMATION_STALLED_HALT_PHRASE}：身份已重新确立，但恢复自动化的收尾步骤异常（${reason}）：` +
             '周期观测与浏览可能仍停着，且不会有人再来重启它们。身份本身没有问题，' +
             '请按「自动化没跑起来」排查，不要按「身份失效」处理。',
         );
@@ -882,6 +909,28 @@ export async function resumeAutomationUnderIdentityGate(
   deps.startIdentityGuard();
   // 恢复成功 ⇒ 若此前停在「自动化已停摆」残局上，这一次恢复正是它的处理办法，闩该解除。
   deps.reportPosture({ kind: 'healthy' });
+}
+
+export interface AutomationResumeCallbackDeps extends AutomationResumeDeps {
+  /** 现在的运行期身份健康度（每次恢复都重新读）。 */
+  health: () => IdentityHealth;
+  /** 浏览器缺席（冷待机）⇒ 恢复必须走唤醒那条路，这里如实抛出。 */
+  browserAbsent: () => boolean;
+}
+
+/**
+ * 生命周期控制器的 `resumeAutomation` 回调**整段**实现（宿主只写 `resumeAutomation: automationResumeCallback(...)`）。
+ *
+ * 为什么连这一层薄壳也要搬进来：宿主里那行 `await resumeAutomationUnderIdentityGate(...)` 一旦被加上
+ * `.catch(() => undefined)`，拒绝就被吞掉、回调正常 resolve —— 生命周期控制器随即发出「已恢复」，
+ * 外壳画成运行中，而三件恢复动作一件都没做。复验实测：这么改，26 条用例零红。
+ * 现在这条 `await` 在可注入实现里，用例驱动的就是它本身：吞掉拒绝 ⇒ 返回的 promise 变成 resolve ⇒ 断言当场红。
+ */
+export function automationResumeCallback(deps: AutomationResumeCallbackDeps): () => Promise<void> {
+  return async (): Promise<void> => {
+    if (deps.browserAbsent()) throw new Error('browser_absent_use_wake');
+    await resumeAutomationUnderIdentityGate(deps.health(), deps);
+  };
 }
 
 export type WakeIdentityResettlement =

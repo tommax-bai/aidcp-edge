@@ -70,6 +70,7 @@ import { abortForTakeover, TaskTakeoverError, type TakeoverCtx } from './executi
 import { PublishUiEventTracker, uiSnapshotToLines, writeNoteStageLine } from './flows/ui-event-lines.js';
 import { imageTempPrefixFor, sweepImageTempDirs } from './flows/image-uploader.js';
 import type {
+  PublishCommandPayload,
   PublishCommandResultPayload,
   EdgeTaskAcquirePayload,
   EdgeTaskReleasePayload,
@@ -86,10 +87,10 @@ import {
 } from './native-page-engine/index.js';
 import {
   applyWakeIdentityResettlement,
+  automationResumeCallback,
   createIdentityReestablishment,
   judgeWakeIdentityResettlement,
   refuseWakeUnderIdentityGate,
-  resumeAutomationUnderIdentityGate,
   IdentityRevalidator,
   observedAccountIdFromDecision,
   DEFAULT_IDENTITY_CHECK_MS,
@@ -98,8 +99,15 @@ import {
   PERIODIC_IDENTITY_READ_HYDRATE_MS,
   type IdentityInvalidReason,
 } from './native-page-engine/identity-guard.js';
-import { runtimePostureIpc, type RuntimePosture } from './client/runtime-posture.js';
-import { judgeCloudRebindUnderIdentity, judgeCommandUnderIdentity } from './client/identity-command-gate.js';
+import { publishPostureWithFallback, type RuntimePosture } from './client/runtime-posture.js';
+import {
+  guardCommandsUnderIdentity,
+  guardPublishCommandsUnderIdentity,
+  rebindCloudUnderIdentityGate,
+  EDGE_TASK_LANE,
+  NATIVE_COMMAND_LANE,
+  type IdentityCommandGateDeps,
+} from './client/identity-command-gate.js';
 import {
   buildCaptchaClickResultFacts,
   type NativeCaptchaClickReceipt,
@@ -523,8 +531,11 @@ async function main(): Promise<void> {
     5_000,
     Number(process.env.AIDCP_STANDBY_CLOUD_RETRY_MS ?? 30_000) || 30_000,
   );
-  const sendLifecycleIpc = (payload: Record<string, unknown>): void => {
-    if (typeof process.send === 'function' && process.connected) process.send(payload);
+  /** 返回「这一条真的交给外壳了吗」。父子通道断开时 `process.send` 是**静默 no-op**，调用方需要知道。 */
+  const sendLifecycleIpc = (payload: Record<string, unknown>): boolean => {
+    if (typeof process.send !== 'function' || !process.connected) return false;
+    process.send(payload);
+    return true;
   };
   /**
    * 对外呈现的**唯一**出口（change §5 收口）：核心的运行态 → 外壳画什么，只经这一条边。
@@ -537,7 +548,12 @@ async function main(): Promise<void> {
   let currentPosture: RuntimePosture = { kind: 'healthy' };
   const publishRuntimePosture = (posture: RuntimePosture): void => {
     currentPosture = posture;
-    sendLifecycleIpc(runtimePostureIpc(posture));
+    // IPC 是主路；送不到时**必须**在日志里补一句白名单措辞（终局 / 残局各只有这一条边，
+    // 而 process.send 在通道断开时静默 no-op，丢了界面就退回「全绿无角标」）。判据在 runtime-posture.ts。
+    publishPostureWithFallback(posture, {
+      sendIpc: sendLifecycleIpc,
+      logger: (line) => console.warn(line),
+    });
   };
   const clearColdStandbyCloudRetry = (): void => {
     if (coldStandbyCloudRetryTimer) clearTimeout(coldStandbyCloudRetryTimer);
@@ -751,19 +767,17 @@ async function main(): Promise<void> {
     client.reportActionCompleted({ action, ok: false, reason: 'task_lease_suppressed' });
   };
   /**
-   * 身份闸（S9）：身份未落定时，代表这个账号动作的命令一律拒绝。
+   * 身份闸（S9）的接线依赖：身份未落定时，代表这个账号动作的命令一律拒绝。
    *
-   * **拒绝必须有回执**，沿用既有的「成功位为假 + 具名原因」形状：静默丢弃会让云端分不清「命令没触达」
-   * 与「执行了但没结果」，只能等满自己的步超时。判据在 `client/identity-command-gate.ts`
-   * （按操作登记表的 `identity: 'page_account'` 维度取补集，救援 / 读 / 收尾类具名放行）。
+   * 判据 + 拒绝动作**整段**在 `client/identity-command-gate.ts`（按操作登记表的 `identity:'page_account'`
+   * 维度取补集，救援 / 读 / 收尾类具名放行；各通道按自己的负向应答形状收口）。宿主这里只提供出口——
+   * 上一轮闸体留在本文件里，用例只能扫文本，于是把条件写成 `|| true` 全套零红。
    */
-  const refuseCommandUnderIdentity = (env: Envelope, lane: string): boolean => {
-    const verdict = judgeCommandUnderIdentity(identityGuard?.health, env.type);
-    if (verdict.kind === 'allow') return false;
-    const action = nativeActionNameForCommand(env.type);
-    console.warn(`[aidcp-edge] ${lane} 命令被身份闸拒绝 type=${env.type}：${verdict.detail} 回执 ${action}:${verdict.reason}`);
-    client.reportActionCompleted({ action, ok: false, reason: verdict.reason });
-    return true;
+  const identityGateDeps: IdentityCommandGateDeps = {
+    health: () => identityGuard?.health,
+    actionNameFor: (type) => nativeActionNameForCommand(type),
+    reportActionCompleted: (receipt) => client.reportActionCompleted(receipt),
+    logger: (line) => console.warn(line),
   };
 
   // 发布原子与浏览命令复用同一个 Native 会话串行边界；切换 owner 时旧会话先有界关闭。
@@ -816,33 +830,34 @@ async function main(): Promise<void> {
   let cloudRebindChain = Promise.resolve();
   dispatchCloudRebind = (request) => {
     cloudRebindChain = cloudRebindChain.then(async () => {
-      const sendResult = (payload: Record<string, unknown>): void => sendLifecycleIpc({
-        requestId: request.requestId,
-        targetKey: request.targetKey,
-        ...payload,
-      });
+      const sendResult = (payload: Record<string, unknown>): void => {
+        sendLifecycleIpc({ requestId: request.requestId, targetKey: request.targetKey, ...payload });
+      };
       let quiesced = false;
       try {
         // 身份闸（S9）：身份未落定时**绝不**以陈旧身份对新的云端环境宣称在线。
         // halt 是纯返回、从不关浏览器——浏览器仍开着、登着一个我们已明说「不知道是谁」的账号；
         // 重绑一旦放行，云端就会把它当成那个账号的健康节点照常派发布 / 任务，于是在未知身份下真发帖、
         // 记账挂错账号。裁定为**拒绝**（而不是「上线但不带身份」）的理由写在 judgeCloudRebindUnderIdentity。
-        const rebindVerdict = judgeCloudRebindUnderIdentity(identityGuard?.health);
-        if (rebindVerdict.kind === 'refuse') throw new Error(rebindVerdict.reason);
-        const deadline = Date.now() + 30_000;
-        while ((taskCoordinator.hasActiveLease() || inFlightPublishes.size > 0) && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-        if (taskCoordinator.hasActiveLease() || inFlightPublishes.size > 0) {
-          throw new Error('page_work_drain_timeout');
-        }
-        browse?.discardQueuedCloudCommands('cloud_rebind');
-        if (browse && !coldStandbyActive) {
-          await browse.quiesceForTask();
-          quiesced = true;
-        }
-        await client.rebind(request.url);
-        if (quiesced) await browse?.resumeAfterTask();
+        //
+        // 重绑动作**整段**作为回调交给闸：上一轮这里是「判据一行 + `if (…) throw` 一行」，删掉后半句
+        // 重绑照跑而全套用例零红。现在被拒时下面这个回调一次都不会被调用（用例驱动的就是这个函数）。
+        await rebindCloudUnderIdentityGate(identityGuard?.health, async () => {
+          const deadline = Date.now() + 30_000;
+          while ((taskCoordinator.hasActiveLease() || inFlightPublishes.size > 0) && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+          if (taskCoordinator.hasActiveLease() || inFlightPublishes.size > 0) {
+            throw new Error('page_work_drain_timeout');
+          }
+          browse?.discardQueuedCloudCommands('cloud_rebind');
+          if (browse && !coldStandbyActive) {
+            await browse.quiesceForTask();
+            quiesced = true;
+          }
+          await client.rebind(request.url);
+          if (quiesced) await browse?.resumeAfterTask();
+        });
         sendResult({ type: 'lifecycle.cloud_rebound', ok: true, browserAbsent: coldStandbyActive });
       } catch (error) {
         const reason = (error as Error)?.message || String(error);
@@ -856,40 +871,31 @@ async function main(): Promise<void> {
   // 云端在 welcome 回发后立刻推 hello 快照（ui.snapshot）——若 welcome 与快照同一批 socket 读到达，
   // 两帧在同一宏任务内派发，connect() 的续体（微任务）还没来得及跑注册代码，后注册的处理器
   // 会静默漏掉首帧。注册本身不需要活连接，先注册零成本。
-  client.onEdgeTaskCommand((env) => {
-    // 认领要过身份闸（认领＝接下来会以这个账号的名义动作 + 记账）；释放永远放行（拦掉只会让租约挂着）。
-    if (refuseCommandUnderIdentity(env, '任务')) return;
+  // 认领要过身份闸（认领＝接下来会以这个账号的名义动作 + 记账）；释放永远放行（拦掉只会让租约挂着）。
+  // 本通道 `ack:'none'`：协议 v2 里任务租约**没有**负向应答形状，拒绝只响亮记日志、不伪造回执
+  // （理由与登记见 EDGE_TASK_LANE 与 tasks.md 5.11）。
+  client.onEdgeTaskCommand(guardCommandsUnderIdentity(EDGE_TASK_LANE, identityGateDeps, (env) => {
     if (env.type === 'edge.task.acquire') {
       taskCoordinator.acquire(env.payload as EdgeTaskAcquirePayload);
     } else if (env.type === 'edge.task.release') {
       taskCoordinator.release(env.payload as EdgeTaskReleasePayload);
     }
-  });
+  }));
 
   // 指令驱动发布：云端逐条下发 publish.command，边缘逐条执行 + 后置校验 + 如实回报（onPublishAtomCommand，见下）。
   // 遗留整页发布处理器 client.onPublishCommand（publish.request）已删除（change lease-strict-preemption 5.8）：
   //   全程不过租约闸、云端已无发送方（只发 publish.command），保留只会绕过抢占/租约在途发布假成功修复链。
   // 陪伴界面事件（edge-companion-ui 6.4）：发布终态的本地事实经 [ui-event] 行直达桌面壳。
   const publishUiEvents = new PublishUiEventTracker();
-  client.onPublishAtomCommand((env) => {
-    // 身份闸（S9）先于租约闸：租约说的是「该不该由这条任务来做」，身份说的是「这台机器现在到底代表谁」。
-    // 后者不成立时，发布是**在平台上留真实痕迹**的动作，必须拒绝并按发布回执形状如实回（否则云端挂起等结果）。
-    const publishIdentityVerdict = judgeCommandUnderIdentity(identityGuard?.health, env.type);
-    if (publishIdentityVerdict.kind === 'refuse') {
-      client.send(
-        'publish.command.result',
-        {
-          recordId: env.payload.recordId,
-          seq: env.payload.seq,
-          kind: env.payload.kind,
-          ok: false,
-          error: publishIdentityVerdict.reason,
-        },
-        env.id,
-      );
-      console.warn(`[aidcp-edge] 发布命令被身份闸拒绝：${publishIdentityVerdict.detail}`);
-      return;
-    }
+  // 身份闸（S9）先于租约闸：租约说的是「该不该由这条任务来做」，身份说的是「这台机器现在到底代表谁」。
+  // 后者不成立时，发布是**在平台上留真实痕迹**的动作，必须拒绝并按发布回执形状如实回（否则云端挂起等结果）。
+  // 判据 + 回执 + 「不调用下面这个处理器」整段在 guardPublishCommandsUnderIdentity 里
+  // （上一轮条件写在这里，改成 `false && …` 全套用例零红）。
+  client.onPublishAtomCommand(guardPublishCommandsUnderIdentity<Envelope<PublishCommandPayload>>({
+    health: () => identityGuard?.health,
+    sendResult: (payload, correlationId) => client.send('publish.command.result', payload, correlationId),
+    logger: (line) => console.warn(line),
+  }, (env) => {
     if (!taskCoordinator.canExecute(env.payload.taskId)) {
       client.send(
         'publish.command.result',
@@ -978,7 +984,7 @@ async function main(): Promise<void> {
     })();
     settled.catch(() => {}); // IIFE 自包含（内部已 try/catch）不应抛；防御性避免意外 unhandledRejection
     inFlightPublishCancels.set(env.id, { abort: () => abortForTakeover(abort), settled });
-  });
+  }));
 
   // ui.snapshot 在新能力下只承载自动化运行投影。旧 Cloud 可能仍夹带 persona/publish/account 数据，
   // 必须在引擎边界丢弃；客户端的数据管理真态由 Electron main 通过 customer-auth HTTP 主动拉取。
@@ -1140,21 +1146,28 @@ async function main(): Promise<void> {
     });
     browse = nativeSession;
     nativeBrowse = nativeSession;
+    // 身份闸（S9）：页面动作（评论 / 点赞 / 关注 / 加群…）都以页面上登着的那个账号的名义发生，
+    // 身份未落定时一律拒绝并如实回执（`action.completed` 成功位为假 + 具名原因）。救援 / 读 / 收尾类
+    // 命令在判据里具名放行。判据 + 回执 + 「不往下走」整段在 guardCommandsUnderIdentity 里。
+    const routeNativeCommandUnderIdentity = guardCommandsUnderIdentity(
+      NATIVE_COMMAND_LANE,
+      identityGateDeps,
+      (env: Envelope): void => {
+        const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
+        const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
+        if (env.type !== 'pacing.update' && !taskCoordinator.canExecute(ownedTaskId)) {
+          reportLeaseSuppressed(env, ownedTaskId, 'Native');
+          return;
+        }
+        if (ownedTaskId) taskCoordinator.touch(ownedTaskId);
+        nativeSession.onCloudCommand(env).catch((err) => {
+          console.error(`[aidcp-edge] 执行 Native 命令 ${env.type} 失败:`, err);
+        });
+      },
+    );
     const routeNativeCommand = (env: Envelope): void => {
       if (handleBrowserAbsentCommand(env)) return;
-      // 身份闸（S9）：页面动作（评论 / 点赞 / 关注 / 加群…）都以页面上登着的那个账号的名义发生，
-      // 身份未落定时一律拒绝并如实回执。救援 / 读 / 收尾类命令在判据里具名放行。
-      if (refuseCommandUnderIdentity(env, 'Native')) return;
-      const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
-      const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
-      if (env.type !== 'pacing.update' && !taskCoordinator.canExecute(ownedTaskId)) {
-        reportLeaseSuppressed(env, ownedTaskId, 'Native');
-        return;
-      }
-      if (ownedTaskId) taskCoordinator.touch(ownedTaskId);
-      nativeSession.onCloudCommand(env).catch((err) => {
-        console.error(`[aidcp-edge] 执行 Native 命令 ${env.type} 失败:`, err);
-      });
+      routeNativeCommandUnderIdentity(env);
     };
     installPageCommandHandler(routeNativeCommand);
     if (taskCoordinator.blocksBrowse) {
@@ -1285,24 +1298,24 @@ async function main(): Promise<void> {
       identityGuard?.stop();
       reportBrowseDrainTimeout((await browse?.stopAndWait(BROWSE_DRAIN_MS)) ?? true, 'user_pause');
     },
-    resumeAutomation: async () => {
-      if (coldStandbyActive) throw new Error('browser_absent_use_wake');
-      // 身份准入 + 三件恢复动作**整段**都在 identity-guard 的可注入实现里（判据、顺序、拒绝时的
-      // 「把终局再喊一遍」全在那儿），宿主只做薄接线。留在这里的话，用例只能扫源码文本——而现实形态的
-      // 削弱（保留告警、删掉 throw）在文本断言下全部存活，等于没有闸。
-      await resumeAutomationUnderIdentityGate(identityGuard?.health ?? 'healthy', {
-        logger: (message) => console.error(message),
-        reportPosture: publishRuntimePosture,
-        haltReason: () => (currentPosture.kind === 'identity_halted' ? currentPosture.reason : 'identity_halted'),
-        resumeObservation: () => nativeBrowse?.resumeObservation(),
-        startBrowse: () => {
-          browse?.start().catch((error) => {
-            console.error('[aidcp-edge] 恢复自动化失败:', error);
-          });
-        },
-        startIdentityGuard: () => startIdentityGuard?.(),
-      });
-    },
+    // 「浏览器缺席请走唤醒」+ 身份准入 + 三件恢复动作**整段**都在 identity-guard 的可注入实现里
+    // （判据、顺序、拒绝时的「把终局再喊一遍」全在那儿），宿主只给依赖、连这一层 async 壳也不自己写。
+    // 留一层壳在这里就够被削弱了：给那句 `await` 加一个 `.catch(() => undefined)`，拒绝被吞掉、回调
+    // 正常 resolve，生命周期控制器随即发出「已恢复」，而三件恢复动作一件都没做——实测全套用例零红。
+    resumeAutomation: automationResumeCallback({
+      health: () => identityGuard?.health ?? 'healthy',
+      browserAbsent: () => coldStandbyActive,
+      logger: (message) => console.error(message),
+      reportPosture: publishRuntimePosture,
+      haltReason: () => (currentPosture.kind === 'identity_halted' ? currentPosture.reason : 'identity_halted'),
+      resumeObservation: () => nativeBrowse?.resumeObservation(),
+      startBrowse: () => {
+        browse?.start().catch((error) => {
+          console.error('[aidcp-edge] 恢复自动化失败:', error);
+        });
+      },
+      startIdentityGuard: () => startIdentityGuard?.(),
+    }),
     deactivate: async (reason) => {
       coldStandbyActive = false;
       clearColdStandbyCloudRetry();

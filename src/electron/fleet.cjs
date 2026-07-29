@@ -655,13 +655,20 @@ function declaresCoreHalt(line) {
   const raw = String(line || '');
   if (!raw) return false;
   return (
-    // 核心活着但驱不动浏览器、要求人工重启（唯一「不退出」的终态；见 src/main.ts cdp.control_unavailable）
+    // 核心活着但驱不动浏览器、要求人工重启（见 src/main.ts cdp.control_unavailable）
     /CDP 输入控制不可用/.test(raw) ||
+    // 运行期身份终局：核心**不退出**（halt 是纯返回），故这里是它在 IPC 之外的第二道网
+    /身份确立失败/.test(raw) ||
+    // 自动化残局：身份完好、但浏览与周期观测停着且不会自愈，核心同样**不退出**。
+    // 它此前**没有**第二道网——唯一的边是 posture IPC，而 `process.send` 在父子通道断开时是
+    // 静默 no-op，那条边一丢界面就退回「全绿、无角标」，正是本系列在根除的形状。
+    // 措辞与核心侧 AUTOMATION_STALLED_HALT_PHRASE 共用，有跨侧用例拿核心真日志来撞本白名单；
+    // 改字面必须两边一起改。
+    /自动化已停摆/.test(raw) ||
     // 以下各句核心随即退出；退出处仍是权威判据，这里只是让红早到
     /CDP 重连不可恢复/.test(raw) ||
     /诚实下线/.test(raw) ||
     /回收退出/.test(raw) ||
-    /身份确立失败/.test(raw) ||
     /^\[aidcp-edge\] 启动失败[:：]/.test(raw)
   );
 }

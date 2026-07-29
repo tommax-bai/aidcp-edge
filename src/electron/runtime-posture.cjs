@@ -133,12 +133,107 @@ function judgeResumeUnderPosture(posture) {
   return { kind: 'allow' };
 }
 
+// ===========================================================================================
+// 闩的作用域、覆盖层的施加、恢复按钮的准入 —— 三处都做成**可注入实现**，宿主只剩一行接线
+// ===========================================================================================
+//
+// 上一轮这三处的动作留在 `src/electron/main.cjs`（一个 Electron 耦合、无法 require 的巨型文件）里，
+// 用例只能扫源码文本。复验实测坐实文本扫描抓不住这一族：
+//   - 覆盖层**整块位置挪动**（从 updateStatus 之前挪到日志推断之前）⇒ 全绿，而覆写症状完整复活；
+//   - 恢复被拒分支里删掉 `return;`（继续往下写 running 并下发恢复）⇒ 全绿；
+//   - close 分支的清闩删掉（同一字面串在三处出现，扫描只要求存在其一）⇒ 全绿。
+// 现在这三处的判据与动作都在本文件里，宿主只做一次调用或一次包裹。
+
+/**
+ * 闩的作用域＝**说这句话的那个核心**。
+ *
+ * 上一轮靠三处 `handle.runtimePosture = null`（拉起前 / spawn 失败 / close）手工清闩来保证这件事，
+ * 于是「删掉其中一处」既扫不出也测不到。现在改成读的时候判：posture 只在**声明它的那个子进程仍是
+ * 当前子进程**时有效。核心没了或换了一代 ⇒ 这个闩不再描述任何东西，一律作废。
+ * 这样「闩只属于本次 core run」就是结构性的，不再依赖三处记得清。
+ */
+function postureOfLiveCore(posture, declaredBy, currentChild) {
+  if (!posture) return null;
+  if (!currentChild || !declaredBy || declaredBy !== currentChild) return null;
+  return posture;
+}
+
+/**
+ * 收到一条 posture 之后：闩怎么变、界面该写什么。
+ *
+ * 两条规则，各自都对应一个实测出来的回归：
+ *
+ * ① **健康态只在真闩着时才动界面。** 常态下每次冷待机唤醒都会来一条 `healthy{accountId}`
+ *    （唤醒确实实测过身份），而健康态投影会写 `edge:'running'`、写「身份已重新确立」、**并清掉失败
+ *    卡片**。于是一个已暂停、挂着一张与身份无关的失败卡片（例如代理运行证据缺失）的环境，被唤醒后
+ *    就变成「运行中 + 无卡片 + 身份已重新确立」——一次从未出过问题的普通唤醒，凭空把别人的失败态擦了。
+ *    健康态投影的**用途**本来就是「解除上一局闩住的红角标」；没有闩可解时它无事可做。
+ *
+ * ② **关闭意图优先。** 外壳别处早已写明「迟到的唤醒不得把状态翻回已打开」，而 posture 这一笔比它
+ *    先到、且没有同款守卫。于是在「唤醒撞上关闭」这个代码自己承认的真实竞态里，界面被写成运行中
+ *    且没有任何东西来纠正。这里补上同一条守卫：正在关闭 / 已移除 / 正在退出时只更新闩、不画界面
+ *    （关闭路径随后会写它自己的终态）。
+ */
+function runtimePostureTransition(previousLatch, posture, context) {
+  const closeIntent = Boolean(context && context.closeIntent);
+  const latch = postureLatches(posture) ? posture : null;
+  if (closeIntent) return { latch, patch: null };
+  if (!postureLatches(posture) && !postureLatches(previousLatch)) return { latch, patch: null };
+  const projection = projectRuntimePosture(posture);
+  const hasContent = Object.keys(projection.axes).length > 0
+    || projection.message !== null
+    || projection.presence !== null
+    || projection.failure !== undefined;
+  return { latch, patch: hasContent ? projection : null };
+}
+
+/**
+ * 把 posture 覆盖层施加到一份**已经算完**的状态补丁上，返回要真正落盘的那一份。
+ *
+ * 顺序即语义：posture 必须**赢**。上一轮这是日志行处理函数末尾的一整块 `if (postureOverride) …`，
+ * 而用例只能断言「这块在源码里出现，且在 updateStatus 之前」——把整块挪到日志推断**之前**，
+ * 断言照样成立（`indexOf` 从覆盖层往后找，仍找得到末尾那次 updateStatus），而覆写症状完整复活。
+ * 现在它是一次纯函数合成，直接写在那唯一一次落盘调用的实参位置上：**没有可以挪动的块**。
+ */
+function commitPatchUnderPosture(posture, next, nowIso) {
+  const override = runtimePostureOverride(posture);
+  if (!override) return next;
+  const merged = Object.assign({}, next, override.axes);
+  if (override.presence) merged.presence = { text: override.presence, at: nowIso };
+  return merged;
+}
+
+/**
+ * 「恢复自动化」按钮的整段准入：拒绝时**只**写拒绝态、并且绝不往下走。
+ *
+ * 上一轮宿主里是 `if (verdict.kind === 'refuse') { updateStatus(...); return; }`——删掉那句 `return;`，
+ * 界面照样被写成运行中、恢复指令照常下发，而全套用例零红。现在分支在这里，`proceed` 由本函数决定调不调。
+ */
+function runResumeUnderPosture(posture, deps) {
+  const verdict = judgeResumeUnderPosture(posture);
+  if (verdict.kind === 'refuse') {
+    deps.refuse({
+      edge: 'warning',
+      session: 'paused',
+      lastMessage: verdict.message,
+      presence: verdict.presence,
+    });
+    return false;
+  }
+  deps.proceed();
+  return true;
+}
+
 module.exports = {
   RUNTIME_POSTURE_KINDS,
   RUNTIME_POSTURE_IPC_TYPE,
   parseRuntimePosture,
   projectRuntimePosture,
   postureLatches,
+  postureOfLiveCore,
+  runtimePostureTransition,
+  commitPatchUnderPosture,
   runtimePostureOverride,
   judgeResumeUnderPosture,
+  runResumeUnderPosture,
 };
