@@ -1225,7 +1225,22 @@ mod tests {
     /// 供上面那条检查用的最小合法命令样本。带参数校验的命令给一份能过 `validate()` 的最小参数；
     /// 造不出样本的返回 `None`（该 kind 只做取值集与取消语义检查）。
     fn sample_command(kind: &str) -> Option<NativeCommand> {
-        let params = match kind {
+        let command: NativeCommand = serde_json::from_value(
+            serde_json::json!({"kind": kind, "params": sample_params(kind)}),
+        )
+        .ok()?;
+        command.validate().ok()?;
+        Some(command)
+    }
+
+    /// 每个 kind 的最小合法参数。时间指令门禁把它当**基线**：在基线之上注入 `thinkMs` /
+    /// `dwellMs` 再反序列化，能过就说明该参数结构体真的声明了这个字段（所有结构体都带
+    /// `deny_unknown_fields`，所以这是一条恒真判据，不需要任何文本匹配或手抄名单）。
+    fn sample_params(kind: &str) -> serde_json::Value {
+        match kind {
+            "plan_execute" => serde_json::json!({"steps": []}),
+            "note_browse_images" | "note_scroll_comments" => serde_json::json!({"noteId": "n1"}),
+            "interaction_like" | "interaction_collect" => serde_json::json!({"noteId": "n1"}),
             "group_join" => serde_json::json!({
                 "groupUrl": "https://www.facebook.com/groups/42",
                 "click": true
@@ -1281,10 +1296,109 @@ mod tests {
             | "publish_capture_scheduled"
             | "publish_reconcile_scheduled" => serde_json::json!({"recordId": 1, "seq": 1}),
             _ => serde_json::json!({}),
-        };
-        let command: NativeCommand =
-            serde_json::from_value(serde_json::json!({"kind": kind, "params": params})).ok()?;
-        command.validate().ok()?;
-        Some(command)
+        }
+    }
+
+    // ───────────────── 云端时间指令的跨语言登记表（change restore-native-actuation-humanization-and-locating §4.5）─────────────────
+
+    /// 登记表里某条命令声明了哪些时间字段。
+    fn declared_timing_fields() -> BTreeSet<(String, String)> {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../command-timing.json")).expect("command timing");
+        let mut declared = BTreeSet::new();
+        for command in contract["commands"].as_array().expect("commands") {
+            let kind = command["nativeKind"].as_str().expect("native kind");
+            for field in command["declares"].as_array().expect("declares") {
+                declared.insert((
+                    kind.to_owned(),
+                    field.as_str().expect("declared field").to_owned(),
+                ));
+            }
+        }
+        declared
+    }
+
+    /// 引擎**真实**接受哪些时间字段：在最小合法参数上注入该字段再反序列化，成功即接受。
+    /// 不做任何源码文本匹配——注释、错误文案、以及构造时写 `None` 的死写都会把文本计数喂绿。
+    fn accepted_timing_fields(kinds: &[&str]) -> BTreeSet<(String, String)> {
+        let mut accepted = BTreeSet::new();
+        for kind in kinds {
+            // 基线本身必须能反序列化，否则「注入后失败」会被误读成「该字段未声明」。
+            assert!(
+                serde_json::from_value::<NativeCommand>(
+                    serde_json::json!({"kind": kind, "params": sample_params(kind)}),
+                )
+                .is_ok(),
+                "{kind} has no deserializable baseline params; extend sample_params"
+            );
+            for field in ["thinkMs", "dwellMs"] {
+                let mut params = sample_params(kind);
+                let Some(object) = params.as_object_mut() else {
+                    continue;
+                };
+                object.insert(field.to_owned(), serde_json::json!(1234u64));
+                if serde_json::from_value::<NativeCommand>(
+                    serde_json::json!({"kind": kind, "params": params}),
+                )
+                .is_ok()
+                {
+                    accepted.insert(((*kind).to_owned(), field.to_owned()));
+                }
+            }
+        }
+        accepted
+    }
+
+    fn timing_drift(
+        accepted: &BTreeSet<(String, String)>,
+        declared: &BTreeSet<(String, String)>,
+    ) -> Vec<String> {
+        let mut drift: Vec<String> = accepted
+            .difference(declared)
+            .map(|(kind, field)| format!("undeclared:{kind}:{field}"))
+            .collect();
+        drift.extend(
+            declared
+                .difference(accepted)
+                .map(|(kind, field)| format!("not_accepted:{kind}:{field}")),
+        );
+        drift.sort();
+        drift
+    }
+
+    /// 引擎的时间字段声明面必须与跨语言登记表逐条相等。
+    ///
+    /// 两个方向都是真缺陷、且都不报错只静默走偏：引擎接受一个宿主从不转发的字段＝**死字段**
+    /// （会把任何按声明面计数的检查喂绿）；引擎不接受一个宿主会转发的字段＝该命令每次都被
+    /// `deny_unknown_fields` 判成 `invalid_request`、**根本不下发**。
+    #[test]
+    fn native_timing_declarations_match_the_declared_contract() {
+        let accepted = accepted_timing_fields(NATIVE_COMMAND_KINDS);
+        assert_eq!(timing_drift(&accepted, &declared_timing_fields()), Vec::<String>::new());
+    }
+
+    /// 失败优先 / 植入验证：给登记表塞一条引擎并不接受的声明、或让引擎多接受一个未登记字段时，
+    /// 上面那条检查必须报出来**并点名**。少了这条，门禁自己可能是恒真的。
+    #[test]
+    fn timing_declaration_check_names_the_offender_when_either_side_drifts() {
+        let accepted = accepted_timing_fields(NATIVE_COMMAND_KINDS);
+        let declared = declared_timing_fields();
+
+        let mut ghost = declared.clone();
+        ghost.insert(("interaction_like".to_owned(), "dwellMs".to_owned()));
+        assert_eq!(
+            timing_drift(&accepted, &ghost),
+            vec!["not_accepted:interaction_like:dwellMs".to_owned()],
+        );
+
+        let mut extra = accepted.clone();
+        extra.insert(("note_close".to_owned(), "thinkMs".to_owned()));
+        assert_eq!(
+            timing_drift(&extra, &declared),
+            vec!["undeclared:note_close:thinkMs".to_owned()],
+        );
+
+        // 未被改动的那一对必须仍然对得上，否则上面两条只是「反正都红」。
+        assert_eq!(timing_drift(&accepted, &declared), Vec::<String>::new());
     }
 }

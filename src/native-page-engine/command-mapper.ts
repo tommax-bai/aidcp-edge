@@ -1,7 +1,11 @@
 import type { Envelope, PublishCommandPayload } from '../comm/protocol.js';
 import type { NativePageCommand } from './client.js';
 
-const nativeKinds = {
+/**
+ * 云端信封类型 → Native 命令 kind。导出是为了让门禁**从这张表本身派生**，
+ * 而不是去源码里做文本匹配——文本匹配会被注释与错误文案喂绿（handoff §8.2 已三次踩到）。
+ */
+export const nativeCommandKindByEnvelopeType = {
   'plan.response': 'plan_execute', 'session.end': 'session_stop', 'browse.next': 'browse_next',
   'browse.scroll': 'browse_scroll', 'page.scroll': 'page_scroll', 'feed.refresh': 'feed_refresh',
   'search.execute': 'search_execute', 'note.open': 'note_open', 'note.close': 'note_close',
@@ -48,7 +52,12 @@ export function nativeActionNameForCommand(type: string): string {
   return actionNames[type] ?? type;
 }
 
-const allowedByKind: Record<string, readonly string[]> = {
+/**
+ * 每个 Native 命令允许透传的参数白名单。**时间指令门禁的转发面事实源**：
+ * 出现 `thinkMs` / `dwellMs` 的那些 kind 必须在 `native/page-engine/command-timing.json` 里登记，
+ * 并各自有一个可观测的消费点（见 test/native-page-engine/pacing-consumption.test.ts）。
+ */
+export const nativeAllowedParamsByKind: Record<string, readonly string[]> = {
   plan_execute: ['steps'], session_stop: ['reason'], browse_next: ['reason'], browse_scroll: ['reason'],
   page_scroll: ['reason', 'dwellMs'], feed_refresh: ['reason', 'thinkMs'],
   search_execute: ['keyword', 'container', 'source', 'maxResults', 'sort', 'timeWindow'],
@@ -78,9 +87,9 @@ export function nativeCommandForEnvelope(
   env: Envelope,
   accountId?: string,
 ): NativePageCommand | undefined {
-  const kind = nativeKinds[env.type as keyof typeof nativeKinds];
+  const kind = nativeCommandKindByEnvelopeType[env.type as keyof typeof nativeCommandKindByEnvelopeType];
   if (!kind) return undefined;
-  const params = project(env.payload, allowedByKind[kind]);
+  const params = project(env.payload, nativeAllowedParamsByKind[kind]);
   if (kind === 'plan_execute' && Array.isArray(params.steps)) {
     params.steps = params.steps.map((step) => project(step, ['actionId', 'op', 'value']));
   }

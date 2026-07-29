@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "purpose": "云端时间指令（动作前犹豫 thinkMs / 离页停留 dwellMs）的跨语言登记表。三张真实的表要对上：① Rust 参数结构体的声明面（serde 反序列化是否接受该字段）、② 宿主转发面（command-mapper 的允许字段表）、③ 宿主消费面（是否真的产生一段可观测等待）。三者各自由一条门禁与本表比对：Rust 侧 command.rs 的 native_timing_declarations_match_the_declared_contract，TypeScript 侧 test/native-page-engine/pacing-consumption.test.ts。",
+  "invariants": [
+    "declares 必须同时等于 Rust 声明面与宿主转发面——转发一个引擎没声明的字段会被 deny_unknown_fields 判成 invalid_request，命令根本不下发；引擎声明一个宿主从不转发的字段则是死字段，会把任何按声明面计数的检查喂绿。",
+    "consumes 与 unconsumed 必须恰好切分 declares；unconsumed 的每一条都要写明理由，绝不留空。",
+    "同一条命令不得同时消费 thinkMs 与 dwellMs：宿主把两段等待合成一个入口，是为了让「取 max、不相加」这条判定只有一处；一旦某条命令两者都消费，这个前提就要重新裁定而不是默默相加。"
+  ],
+  "commands": [
+    {
+      "nativeKind": "page_scroll",
+      "declares": ["dwellMs"],
+      "consumes": ["dwellMs"],
+      "unconsumed": []
+    },
+    {
+      "nativeKind": "feed_refresh",
+      "declares": ["thinkMs"],
+      "consumes": ["thinkMs"],
+      "unconsumed": []
+    },
+    {
+      "nativeKind": "note_open",
+      "declares": ["thinkMs"],
+      "consumes": ["thinkMs"],
+      "unconsumed": []
+    },
+    {
+      "nativeKind": "note_close",
+      "declares": ["dwellMs"],
+      "consumes": ["dwellMs"],
+      "unconsumed": []
+    },
+    {
+      "nativeKind": "navigation_back",
+      "declares": ["dwellMs"],
+      "consumes": ["dwellMs"],
+      "unconsumed": []
+    },
+    {
+      "nativeKind": "note_browse_images",
+      "declares": ["thinkMs", "dwellMs"],
+      "consumes": ["thinkMs"],
+      "unconsumed": [
+        {
+          "field": "dwellMs",
+          "reason": "翻图不离开内容，没有「离页」这个时刻可锚。已退役的 TypeScript 实现同样只消费 thinkMs（其命令入口只走动作前统一闸），故这是一条对齐参照实现的已声明缺席，不是遗漏；真要治理翻图节奏，属最小间隔 gating 那一层。"
+        }
+      ]
+    },
+    {
+      "nativeKind": "note_scroll_comments",
+      "declares": ["thinkMs", "dwellMs"],
+      "consumes": ["thinkMs"],
+      "unconsumed": [
+        {
+          "field": "dwellMs",
+          "reason": "同 note_browse_images：滚评论不离开内容，退役实现也只消费 thinkMs。"
+        }
+      ]
+    },
+    {
+      "nativeKind": "profile_open",
+      "declares": ["thinkMs"],
+      "consumes": ["thinkMs"],
+      "unconsumed": []
+    },
+    {
+      "nativeKind": "notification_open",
+      "declares": ["thinkMs"],
+      "consumes": ["thinkMs"],
+      "unconsumed": []
+    },
+    {
+      "nativeKind": "notification_browse_comments",
+      "declares": ["thinkMs"],
+      "consumes": ["thinkMs"],
+      "unconsumed": []
+    },
+    {
+      "nativeKind": "notification_browse_likes",
+      "declares": ["thinkMs"],
+      "consumes": ["thinkMs"],
+      "unconsumed": []
+    },
+    {
+      "nativeKind": "notification_browse_follows",
+      "declares": ["thinkMs"],
+      "consumes": ["thinkMs"],
+      "unconsumed": []
+    },
+    {
+      "nativeKind": "notification_back_home",
+      "declares": ["thinkMs"],
+      "consumes": ["thinkMs"],
+      "unconsumed": []
+    },
+    {
+      "nativeKind": "interaction_like",
+      "declares": ["thinkMs"],
+      "consumes": ["thinkMs"],
+      "unconsumed": []
+    },
+    {
+      "nativeKind": "interaction_collect",
+      "declares": ["thinkMs"],
+      "consumes": ["thinkMs"],
+      "unconsumed": []
+    },
+    {
+      "nativeKind": "interaction_follow",
+      "declares": ["thinkMs"],
+      "consumes": ["thinkMs"],
+      "unconsumed": []
+    },
+    {
+      "nativeKind": "interaction_comment",
+      "declares": ["thinkMs"],
+      "consumes": ["thinkMs"],
+      "unconsumed": []
+    },
+    {
+      "nativeKind": "interaction_like_comment",
+      "declares": ["thinkMs"],
+      "consumes": ["thinkMs"],
+      "unconsumed": []
+    },
+    {
+      "nativeKind": "group_join",
+      "declares": ["thinkMs"],
+      "consumes": ["thinkMs"],
+      "unconsumed": []
+    }
+  ]
+}

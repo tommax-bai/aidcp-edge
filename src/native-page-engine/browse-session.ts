@@ -204,7 +204,7 @@ export function computeInlineReadFloorMs(bodyLen: number, tempo: number): number
   return Math.round(capped * (tempo > 0 ? tempo : 1));
 }
 
-const FACEBOOK_UNSUPPORTED_COMMANDS = new Set<Envelope['type']>([
+export const FACEBOOK_UNSUPPORTED_COMMANDS = new Set<Envelope['type']>([
   'interaction.collect',
   'interaction.like_comment',
   'note.browse_images',
