@@ -1196,9 +1196,18 @@ async function main(): Promise<void> {
     startIdentityGuard = (): void => {
       if (!accountId) return; // 无身份态不启动校验体：没有基线可比，跑起来只会每拍打日志。
       identityGuard?.start((reason: IdentityInvalidReason) => {
-        void reestablishIdentity(reason).catch((err) => {
-          console.error('[aidcp-edge] 身份重立链异常（自动化保持停止，等待人工介入）:', err);
-        });
+        // 链条回执 MUST 回喂校验体：判失效之后校验体停在「重立中」抑制判定，而这条回执是它唯一的出口。
+        // 少喂一次，暂停→恢复之后运行期身份校验就永久哑火（装了但永久不工作），换号再也测不出来。
+        void reestablishIdentity(reason)
+          .then((outcome) => identityGuard?.noteReestablishmentOutcome(outcome))
+          .catch((err) => {
+            // 链条已自带兜底（返回 crashed），能走到这里说明连兜底本身都抛了。状态机照样必须收口。
+            console.error('[aidcp-edge] 身份重立链异常（自动化保持停止，等待人工介入）:', err);
+            identityGuard?.noteReestablishmentOutcome({
+              kind: 'crashed',
+              reason: err instanceof Error ? err.message : String(err),
+            });
+          });
       });
     };
     if (!coldStandbyActive && !startAutomationPaused) startIdentityGuard();

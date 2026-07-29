@@ -10,6 +10,7 @@
  *   T5 正向登出探针三分支（含本次新增的**新鲜度守卫**：陈旧读数绝不压成「真登出」）
  *   T6 重立链顺序（硬约束 A：在途发布诚实判失败早于断开云端）
  *   T7 halt 纯返回（硬约束 B：归位后仍读不出 ⇒ 停在无身份态，绝不回落默认账号）
+ *   T14 判失效之后**这一局怎么收口**（作废 / halt / 链条自身异常三态各有归宿，绝不压成一态）
  * 外加一条**弱断言**（源码文本扫描）覆盖 1.9① 的宿主侧接线，见文件末尾的说明。
  */
 import assert from 'node:assert/strict';
@@ -28,6 +29,7 @@ import {
   REESTABLISH_IDENTITY_READ_HYDRATE_MS,
   type IdentityInvalidReason,
   type IdentityPageContext,
+  type IdentityReestablishmentOutcome,
   type ObservationLiveness,
 } from '../../src/native-page-engine/identity-guard.js';
 import type {
@@ -149,7 +151,9 @@ test('T2 换号连续达阈值才判失效；中途读回基线即清零、绝�
   assert.deepEqual(flipped.invalidated, [], '第 1 次只计数，绝不当场判失效');
   await flipped.guard.check();
   assert.deepEqual(flipped.invalidated, [{ kind: 'changed', newId: 'acct-B' }]);
-  assert.equal(flipped.guard.health, 'invalid');
+  // 判失效 ≠ 终局：球交给了重立链，终局由链条回执定（见 T14）。这一格 MUST NOT 是 'invalid'——
+  // 那会把「链条被叫停作废」与「链条跑完结论是停手」压成一态，前者随后就永久哑火了。
+  assert.equal(flipped.guard.health, 'reestablishing');
   assert.deepEqual(flipped.guard.lastReason, { kind: 'changed', newId: 'acct-B' });
 
   // 中途恢复基线：计数清零，再读到新 id 只重新从 1 起算，不该被前一次凑够阈值。
@@ -710,6 +714,156 @@ test('T13 Facebook 域内一律可读（不再永久跳过）；小红书三态�
   );
 });
 
+// ── T14：判失效之后这一局怎么收口（作废 ≠ halt ≠ 链条自身异常）───────────────────
+//
+// 「已判失效」不是终局，只是把球交给了重立链。三种收场各有归宿：作废＝这次没做完（退回待判）、
+// halt / 链条异常＝做完了结论是停手（终局）。把它们压成一态的代价是决定性的：链条一被叫停作废，
+// 校验体就永久停在已失效态、`check()` 首行早退、`rebaseline` 又永远等不到（链条正是在到达它之前
+// 被作废的）—— 暂停→恢复之后节点可能正跑在错误身份下，而且再也测不出换号。
+
+/**
+ * 按**宿主接线的形状**把校验体与重立链接起来：`guard.start(cb)` → cb 里起链条 → 链条回执回喂 guard。
+ * 本组要证的正是「回执这条边」，只有真接起来才证得动（分开测两个零件永远看不见中间断掉的那根线）。
+ */
+function wired(over: {
+  /** 页面上就地读出来的 id。换号场景里它一直是新 id（问题没被治好，翻转仍在）。 */
+  pageIdentity: string;
+  /** 宿主在链条的哪一步叫停（模拟暂停 / 冷待机 / 停用）。 */
+  stopAt?: string;
+  /** 链条在哪一步抛异常。 */
+  throwAt?: string;
+  /** 归位后重读的决策（halt 场景用）。 */
+  decision?: IdentityDecision;
+}) {
+  const logs: string[] = [];
+  const seq: string[] = [];
+  const halts: string[] = [];
+  const outcomes: IdentityReestablishmentOutcome[] = [];
+  const invalidated: IdentityInvalidReason[] = [];
+  let guard!: IdentityRevalidator;
+  const step = (name: string): void => {
+    seq.push(name);
+    if (over.stopAt === name) guard.stop();
+    if (over.throwAt === name) throw new Error(`${name} 炸了`);
+  };
+  guard = new IdentityRevalidator('acct-A', {
+    threshold: 2,
+    observationIntervalMs: OBSERVATION_INTERVAL_MS,
+    logger: (m) => logs.push(m),
+    setTimer: () => ({ unref: () => undefined }) as unknown as ReturnType<typeof setInterval>,
+    clearTimer: () => undefined,
+    readPageContext: async () => 'consumer',
+    readIdentity: async () => identified(over.pageIdentity),
+    observationStatus: () => liveness(),
+  });
+  const run = createIdentityReestablishment({
+    logger: (m) => logs.push(m),
+    suspendObservation: () => step('suspendObservation'),
+    stopBrowse: async () => step('stopBrowse'),
+    failInFlightPublishesHonestly: () => step('failInFlightPublishesHonestly'),
+    hasActiveLease: () => false,
+    resetTaskCoordinator: () => step('resetTaskCoordinator'),
+    disconnectCloud: async () => step('disconnectCloud'),
+    navigateToConsumerHome: async () => step('navigateToConsumerHome'),
+    readIdentity: async () => {
+      step('readIdentity');
+      return identified(over.pageIdentity);
+    },
+    decideIdentity: () => over.decision ?? { kind: 'use', accountId: over.pageIdentity, source: 'in-place' },
+    nicknameFor: () => undefined,
+    applyIdentity: () => step('applyIdentity'),
+    connectCloud: async () => step('connectCloud'),
+    rebaseline: (id) => {
+      step('rebaseline');
+      guard.rebaseline(id);
+    },
+    resumeObservation: () => step('resumeObservation'),
+    startBrowse: () => step('startBrowse'),
+    generation: () => guard.generation,
+    reportHalt: (reason) => void halts.push(reason),
+  });
+  /** 宿主的 `startIdentityGuard()`。回执回喂那一行正是本组用例钉的东西。 */
+  const startGuard = (): void => {
+    guard.start((reason) => {
+      invalidated.push(reason);
+      void run(reason).then((outcome) => {
+        outcomes.push(outcome);
+        guard.noteReestablishmentOutcome(outcome);
+      });
+    });
+  };
+  return { guard, startGuard, seq, logs, halts, outcomes, invalidated };
+}
+
+/** 排空链条那串立即 resolve 的 await（微任务在下一个宏任务前必然全部跑完）。 */
+const settle = (): Promise<void> => new Promise((resolve) => void setImmediate(resolve));
+
+test('T14 链条回执三态各有归宿：作废退回待判、halt 是终局、链条异常不许裸逸出', async () => {
+  // ① 作废：宿主在「停浏览」处叫停（暂停 / 冷待机就落在这里）。
+  //    这一格是本组的核心——它曾经让运行期身份校验在暂停→恢复之后**永久哑火**。
+  const aborted = wired({ pageIdentity: 'acct-B', stopAt: 'stopBrowse' });
+  aborted.startGuard();
+  await aborted.guard.check();
+  await aborted.guard.check();
+  await settle();
+  assert.equal(aborted.outcomes[0]?.kind, 'aborted');
+  assert.equal(aborted.guard.health, 'healthy', '作废＝这次没做完，MUST 退回待判，绝不停在已失效态');
+  assert.equal(aborted.guard.baseline, 'acct-A', '基线 MUST 保持旧值——正是它让下一拍能把翻转重新判出来');
+  assert.equal(aborted.guard.consecutiveFailures, 0);
+  assert.ok(aborted.logs.some((l) => l.includes('退回**待判**')));
+
+  // 宿主恢复自动化（resumeAutomation → startIdentityGuard）。页面上仍是换过的号（问题没被治好）。
+  aborted.startGuard();
+  await aborted.guard.check();
+  await aborted.guard.check();
+  assert.equal(
+    aborted.invalidated.length,
+    2,
+    '恢复后 MUST 能再次判出换号；停在 1 次 = 校验体永久哑火（装了但永久不工作）',
+  );
+
+  // ② halt：链条跑完了，结论是停手。这是**终局**，恢复自动化 / CDP 重连再怎么 start() 都不复活。
+  const halted = wired({
+    pageIdentity: 'acct-B',
+    decision: { kind: 'halt', reason: '登录态读不出稳定账号 id' },
+  });
+  halted.startGuard();
+  await halted.guard.check();
+  await halted.guard.check();
+  await settle();
+  assert.equal(halted.outcomes[0]?.kind, 'halted');
+  assert.equal(halted.guard.health, 'invalid');
+  halted.startGuard(); // ← 恢复路径反复调它；MUST NOT 顺手把终局洗回健康
+  await halted.guard.check();
+  await halted.guard.check();
+  await halted.guard.check();
+  assert.equal(halted.invalidated.length, 1, 'halt 之后 MUST NOT 再判定：终局就是终局');
+  assert.equal(halted.guard.health, 'invalid');
+
+  // ③ 链条自身抛异常：MUST NOT 裸逸出。逸出之后没有任何东西会收口，校验体永久停在「重立中」，
+  //    而外壳还一直显示「运行中」——两处都是静默假成功。
+  const crashed = wired({ pageIdentity: 'acct-B', throwAt: 'disconnectCloud' });
+  crashed.startGuard();
+  await crashed.guard.check();
+  await crashed.guard.check();
+  await settle();
+  assert.equal(crashed.outcomes[0]?.kind, 'crashed');
+  assert.equal(crashed.halts.length, 1, '半拆终局 MUST 通告外壳（不然左栏一直显示「运行中 / 已连接云端」）');
+  assert.equal(crashed.guard.health, 'invalid');
+  assert.ok(!crashed.seq.includes('startBrowse'));
+
+  // ④ 迟到的回执 MUST NOT 洗掉一个已经收口的局：冷待机唤醒会先 rebaseline，
+  //    此时一条上一局的陈旧回执飘过来，绝不许把刚重立好的健康节点翻成终局。
+  const late = wired({ pageIdentity: 'acct-B', stopAt: 'stopBrowse' });
+  late.startGuard();
+  await late.guard.check();
+  await late.guard.check();
+  await settle();
+  late.guard.rebaseline('acct-B'); // 真正的身份重立（唤醒路径）
+  late.guard.noteReestablishmentOutcome({ kind: 'crashed', reason: '上一局的迟到回执' });
+  assert.equal(late.guard.health, 'healthy', '迟到回执 MUST 是空操作，绝不翻动不属于它的那一局');
+});
+
 // ── 1.9① 宿主侧接线（**弱断言**：源码文本扫描，不计入行为覆盖）──────────────────
 //
 // 下面这条只证明「宿主源码里写了这几处调用」，证不了运行时真的按顺序发生。
@@ -784,6 +938,17 @@ test('宿主装配契约（源码扫描）：分域按平台走、两种读预�
     /nativeBrowse\?\.resumeObservation\(\)/,
     '恢复自动化 MUST 一并恢复周期观测，否则浏览重开了但阻断观测永久全盲',
   );
+
+  // ⑤bis 链条回执 MUST 回喂校验体：判失效之后校验体停在「重立中」抑制判定，回执是它唯一的出口。
+  // 少了这一行，暂停→恢复之后运行期身份校验永久哑火（换号再也测不出来），行为覆盖见 T14。
+  const startGuardStart = main.indexOf('startIdentityGuard = (): void => {');
+  const startGuardEnd = main.indexOf('if (!coldStandbyActive && !startAutomationPaused) startIdentityGuard();', startGuardStart);
+  assert.ok(startGuardStart >= 0 && startGuardEnd > startGuardStart, '必须存在 startIdentityGuard 装配');
+  const startGuardBlock = main.slice(startGuardStart, startGuardEnd);
+  assert.match(startGuardBlock, /noteReestablishmentOutcome\(outcome\)/,
+    '链条回执 MUST 回喂校验体，否则被叫停作废之后它永久停在「重立中」再也不判定');
+  assert.match(startGuardBlock, /kind: 'crashed'/,
+    '连兜底都抛了的那条路 MUST 照样收口状态机，绝不留一个永远等不到回执的中间态');
 
   // ⑥ 外壳真的处理这条 IPC，并把它闩住（否则下一行普通日志就把徽标重置回 running）。
   assert.match(shell, /message\.type === 'lifecycle\.identity_halted'/);

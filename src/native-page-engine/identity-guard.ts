@@ -62,10 +62,38 @@
  * 节点变成外壳再也叫不醒的砖。故：`stop()` **递增代际**；在途 `check()` 与在途链条在**每个 await 点**
  * 复查代际，变了即当场作废。作废时链条会**回滚它自己做过的两件外部改动**（暂停观测 / 断开云端），
  * 因为宿主并没有要求这两件事——不回滚就是把「取消」做成了另一种静默损坏。
+ *
+ * ── 五、判失效之后由**链条回执**收口（三态，绝不压成一态）──
+ * 「已判失效」不是终局，只是**把球交给了重立链**。故健康态是三态而非两态：
+ *
+ *   `healthy`        校验在跑，逐拍判定
+ *   `reestablishing` 阈值已满、`onInvalid` 已发**恰一次**，链条持球；本态**抑制**后续 check
+ *                    （不重复拉链条、不对着正在被替换的基线计数）
+ *   `invalid`        **终局**：链条跑完且结论是停手（halt / 自身异常）。只有一次**真正的**
+ *                    身份重立（`rebaseline`）能解除它。
+ *
+ * 三种链条回执各有归宿，`noteReestablishmentOutcome()` 一处收口：
+ *   - `reestablished` 链条内部已 `rebaseline` ⇒ 已回 healthy，这里不再动
+ *   - `halted` / `crashed` ⇒ 终局 `invalid`（做完了，结论是停手）
+ *   - `aborted` ⇒ **退回 `healthy`，基线保持旧值**（这次没做完，不是结论）
+ *
+ * 最后一条是本文件唯一容易做错的一格，写清楚理由：作废之后基线还是**旧的**，所以退回 healthy
+ * **吞不掉**任何真实翻转——恰恰相反，只有退回 healthy 才能让下一拍拿旧基线重新把翻转判出来。
+ * 反过来，把作废留在 `invalid` 上就是永久哑火：`check()` 首行早退、`rebaseline` 又永远等不到
+ * （链条正是在到达它之前被作废的），于是暂停→恢复之后节点可能正跑在错误身份下，且**再也测不出换号**。
+ * 「装了但永久不工作」就是静默假成功的产品层形态，本模块的存在理由不能在自己身上复发。
+ *
+ * 同样要点名的是**不该**加的那种修法：MUST NOT 在 `start()` / 恢复路径上「兜底把 state 改回 healthy」。
+ * `resumeAutomation` 与 CDP 重连都会调 `start()`，那样写会把一个**真正 halt** 的节点在下一次恢复时
+ * 洗成健康——把「读不出身份、已停在无身份态」悄悄变回「一切正常」。复位只挂在**链条回执**这条边上。
  */
 import type { IdentityDecision, ReadSelfIdentityOptions, SelfIdentityResult } from '../cdp/self-identity.js';
 
-export type IdentityHealth = 'healthy' | 'invalid';
+/**
+ * 校验体健康态三态（文件头「五」）。`reestablishing` 是**中间态**（链条持球），`invalid` 是**终局**。
+ * 两者曾经是同一个 `invalid`，代价是链条一被作废就永久哑火——它们 MUST NOT 再被压回一态。
+ */
+export type IdentityHealth = 'healthy' | 'reestablishing' | 'invalid';
 export type IdentityInvalidReason = { kind: 'lost' } | { kind: 'changed'; newId: string };
 /** 身份校验上下文分域。与 `src/cdp/self-identity.ts` 的 `PageContext` 同形（此处独立声明以免反向依赖）。 */
 export type IdentityPageContext = 'consumer' | 'creator-app' | 'creator-login' | 'unknown';
@@ -188,7 +216,11 @@ export class IdentityRevalidator {
     return this.baselineId;
   }
 
-  /** 重设基线 id（身份重新确立后调用）+ 复位为健康态。缺了它，重立完仍是 invalid、校验体永久哑火。 */
+  /**
+   * 重设基线 id（身份**真正**重新确立后调用）+ 复位为健康态。缺了它，重立完仍停在「重立中」、
+   * 校验体永久哑火。这是 `invalid` 终局唯一的解除方式（另一处调用点是冷待机唤醒：新一代浏览器里
+   * 刚重新确认过身份，等价于一次真重立）。
+   */
   rebaseline(id: string): void {
     this.baselineId = id;
     this.state = 'healthy';
@@ -198,7 +230,46 @@ export class IdentityRevalidator {
     this.livenessAlerted = false;
   }
 
-  /** 启动周期校验。幂等：已在跑则只更新回调、不重复武装定时器。 */
+  /**
+   * 消费一次身份重立链的回执，把「判失效」这一局收口（文件头「五」）。
+   *
+   * 这是 `reestablishing` **唯一**的出口。宿主 MUST 在链条的每一种收场（含抛异常）之后调它一次：
+   * 少调一次，校验体就永久停在「重立中」、`check()` 首行早退，与本次要根除的那个回归同形。
+   */
+  noteReestablishmentOutcome(outcome: IdentityReestablishmentOutcome): void {
+    if (outcome.kind === 'reestablished') return; // 链条内部已 rebaseline，状态早已回 healthy
+    if (outcome.kind === 'skipped') return; // 另一条在跑的链条持球，由它收口
+    if (this.state !== 'reestablishing') return; // 迟到的回执：这一局已被别的边（rebaseline / 更晚的回执）收口
+    if (outcome.kind === 'aborted') {
+      // 「这次没做完」≠「做完了，结论是停手」。基线仍是**旧的**，所以退回待判吞不掉任何真实翻转：
+      // 恢复之后下一拍会拿同一个旧基线把它重新判出来。留在 invalid 上才是永久哑火。
+      this.state = 'healthy';
+      // 计数清零：作废意味着宿主停过手（暂停 / 冷待机会把浏览器整个关掉再开），此前那几拍的证据
+      // 已经陈旧，重新从页面上现读才诚实。`lastReason` 故意保留——它是「最近一次判过什么」的诊断值，
+      // 不是「现在的状态」，下一局会原样覆盖它。
+      this.consecutive = 0;
+      this.stalenessStreak = 0;
+      this.livenessAlerted = false;
+      this.log(
+        `[identity-guard] 身份重立链在「${outcome.step}」处被叫停：校验体退回**待判**（基线仍是 ${this.baselineId}），` +
+          '恢复自动化后下一拍重新判定——绝不停在「已判失效」上永久哑火。',
+      );
+      return;
+    }
+    // halt / crashed：链条跑完了，结论是停手。这是**终局**，只有一次真正的身份重立（rebaseline）能解除。
+    this.state = 'invalid';
+    this.log(
+      `[identity-guard] 身份重立链终局（${outcome.kind}：${outcome.reason}）：校验体停在已失效态，` +
+        '在浏览器里重新登录目标账号并重启本节点之前，不再判定。',
+    );
+  }
+
+  /**
+   * 启动周期校验。幂等：已在跑则只更新回调、不重复武装定时器。
+   *
+   * **MUST NOT 在这里复位健康态。** 恢复自动化与 CDP 重连都走这里，顺手复位就会把一个真正 halt
+   * 的节点在下一次恢复时洗成健康（把「已停在无身份态」悄悄变回「一切正常」）。复位只挂在链条回执上。
+   */
   start(onInvalid?: (reason: IdentityInvalidReason) => void): void {
     this.onInvalid = onInvalid;
     if (this.timer) return;
@@ -251,9 +322,11 @@ export class IdentityRevalidator {
       : { verdict: 'not_logged_out', detail: `无登录墙（blockingKind=${status.blockingKind}）` };
   }
 
-  /** 单次校验（可直接调用以单测）。判失效后置 invalid 并回调一次，不再重复回调。 */
+  /** 单次校验（可直接调用以单测）。判失效后交给链条持球（`reestablishing`）并回调恰一次。 */
   async check(): Promise<void> {
-    if (this.checking || this.state === 'invalid') return;
+    // 只在 healthy 下判定：`reestablishing` 期间链条正在换基线（再判只会对着半截状态计数、
+    // 并重复拉链条），`invalid` 是终局。两者都抑制，但**出口完全不同**（文件头「五」）。
+    if (this.checking || this.state !== 'healthy') return;
     this.checking = true;
     // 代际快照：本轮 check 的每个 await 点之后都要复查。宿主一旦 `stop()`（暂停 / 冷待机 / 停用），
     // 这一轮就地作废——既不计数、也绝不回调 onInvalid 把重立链拉起来。
@@ -314,7 +387,9 @@ export class IdentityRevalidator {
       );
       if (this.consecutive >= this.threshold) {
         this.lastReason = reason;
-        this.state = 'invalid';
+        // 有人接管 ⇒ 进「重立中」，终局由链条回执定；**无人接管 ⇒ 直接停在终局 invalid**：
+        // 那种情况下没有任何东西会来收口，停在一个永远等不到回执的中间态就是另一种永久哑火。
+        this.state = this.onInvalid ? 'reestablishing' : 'invalid';
         this.onInvalid?.(reason);
       }
     } finally {
@@ -447,6 +522,14 @@ export interface IdentityReestablishmentDeps {
 export type IdentityReestablishmentOutcome =
   | { kind: 'reestablished'; accountId: string }
   | { kind: 'halted'; reason: string }
+  /**
+   * 链条自己的某一步抛了（关连接 / 导航 / 重连云端 …）。此刻节点是**半拆状态**：浏览已停、观测已停，
+   * 云端可能已断。它与 `halted` 一样是终局（做完了，结论是停手），但原因不同，故不压成一态。
+   *
+   * 做成回执而不是让异常裸抛出去，是因为异常一旦逸出，**状态机就没人收口了**：校验体停在
+   * 「重立中」永久哑火，外壳还一直显示「运行中」。crashed 让两处都如实落地。
+   */
+  | { kind: 'crashed'; reason: string }
   /**
    * 宿主在链条执行中叫停：`step` 是被叫停的位置；`cloudRestored` 如实回报「本链条断掉的云端连接
    * 补回来了没有」；`observationSuspendedByChain` 如实带出「周期观测还停着、恢复责任在宿主」。
@@ -607,6 +690,21 @@ export function createIdentityReestablishment(
       deps.startBrowse();
       deps.logger(`[identity-guard] ✓ 身份已重新确立：${accountId}（云端会话已按新身份重建，自动化已恢复）`);
       return { kind: 'reestablished', accountId };
+    } catch (error) {
+      // 链条自己的某一步抛了。异常**绝不许裸逸出**：逸出之后没有任何东西会把校验体的「重立中」收口，
+      // 它会永久哑火（`check()` 首行早退），而外壳还一直显示「运行中」。此刻节点是半拆状态
+      // （浏览已停、观测已停、云端可能已断），如实报成终局并通告外壳。
+      const reason = errorText(error);
+      deps.logger(
+        `[identity-guard] ✗ 身份重立链自身异常（${reason}）：节点停在半拆状态——浏览与周期观测已停，` +
+          '云端连接可能已断开。不猜、不重试、不回落默认账号，等待人工介入。',
+      );
+      try {
+        deps.reportHalt(reason);
+      } catch (reportError) {
+        deps.logger(`[identity-guard] ⚠ 通告终局失败（${errorText(reportError)}）：外壳看不到这个终局。`);
+      }
+      return { kind: 'crashed', reason };
     } finally {
       running = false;
     }
