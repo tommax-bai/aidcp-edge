@@ -36,9 +36,11 @@ const FULL_REPORT: CaptchaAssistTypeReportPayload = {
 
 test('captcha click result: 下发了文本但回执不带任何键入取证时，MUST NOT 标 click_type', () => {
   const facts = buildCaptchaClickResultFacts({ text: 'ab12' }, { ok: false, reason: 'captcha_type_failed' });
-  assert.notEqual(
+  // 正向不变量而非 `notEqual(..., 'click_type')`：否定式在 inputMode 整格消失时**恒真**（假绿）。
+  // 钉死具体取值，实现被删光就会红。
+  assert.equal(
     facts.inputMode,
-    'click_type',
+    'click',
     '回执没有携带任何键入取证，却按请求载荷推断成「点击并键入」——这正是要消灭的静默假成功',
   );
   assert.equal(facts.typeReport, undefined, '取证缺席时 MUST NOT 编造一份 typeReport');

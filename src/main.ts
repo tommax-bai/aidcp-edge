@@ -1140,7 +1140,13 @@ async function main(): Promise<void> {
       hasActiveLease: () => taskCoordinator.hasActiveLease(),
       resetTaskCoordinator: (reason) => taskCoordinator.reset(reason),
       disconnectCloud: async () => {
-        await client.closeAndWait(1500).catch(() => undefined);
+        // 断连失败不中断重立（下面的 connect() 会重建连接），但**绝不静默吞掉**：
+        // 关连接抛异常意味着底层 ws 状态可疑，后面那次重连若也出问题，这一行是唯一的线索。
+        await client.closeAndWait(1500).catch((error: unknown) => {
+          console.warn(
+            `[identity-guard] 断开云端连接时报错（照常继续重立，随后会按新身份重连）：${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
       },
       navigateToConsumerHome: () => session.cdp.send('Page.navigate', { url: consumerHomeUrl }).then(() => undefined),
       readIdentity: readIdentityInPlace,
