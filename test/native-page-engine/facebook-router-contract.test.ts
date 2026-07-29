@@ -2346,3 +2346,109 @@ test('Facebook feed recovery target fails closed on近似文案/多目标/离屏
     'feed_recovery_target_out_of_view',
   );
 });
+
+// ─────────────────── feed 面就地读：展开、诚实终态、动作名（change restore-native-facebook-inline-expand-read）───────────────────
+//
+// 判据一律是**外部可见的行为**：正文有没有真的变长、失败回的是哪个具名 reason、动作名是不是云端认得的那个。
+// 只断言「路由分支返回了同形状的结构」等于没测——这次回归正是那样通过的。
+
+const INLINE_NOTE_ID = 'https://www.facebook.com/Alice/posts/pfbidABC';
+
+/** jsdom 没有 innerText。就地读的捷径判据靠 innerText vs textContent 的差，必须显式给一个可控的 innerText。 */
+function setInnerText(element: Element, read: () => string): void {
+  Object.defineProperty(element, 'innerText', { configurable: true, get: read });
+}
+
+function installInlineFeed(messageHtml: string): JSDOM {
+  return install(`
+    <main>
+      <article role="article">
+        <h2><a href="/people/Alice/123456/">Alice</a></h2>
+        <div data-ad-rendering-role="story_message">${messageHtml}</div>
+        <a href="/Alice/posts/pfbidABC/">2h</a>
+        <button aria-label="Like 12">Like 12</button>
+      </article>
+    </main>
+  `);
+}
+
+test('Feed-surface open expands a clamped post and reports the grown body', async () => {
+  const dom = installInlineFeed('<span id="body">短开头</span><div role="button" id="more">查看更多</div>');
+  const message = dom.window.document.querySelector('[data-ad-rendering-role="story_message"]')!;
+  let visibleBody = '短开头';
+  setInnerText(message, () => visibleBody);
+  dom.window.document.getElementById('more')!.addEventListener('click', () => {
+    visibleBody = '短开头，然后是点击展开之后才补进 DOM 的那一大段完整正文内容。';
+  });
+
+  const result = await run({ kind: 'note_open', params: { surface: 'feed', noteId: INLINE_NOTE_ID } });
+  assert.equal(result.output.kind, 'note_detail');
+  const content = String(result.output.value.content);
+  assert.ok(content.includes('点击展开之后才补进 DOM'), `展开后的正文没有被上报：${content}`);
+  assert.ok(content.length > '短开头'.length);
+});
+
+test('Feed-surface open takes the no-click shortcut when the full text is already in the DOM', async () => {
+  const dom = installInlineFeed(
+    '<span>可见开头</span><span id="hidden">这一段全文其实已经在 DOM 里，只是被视觉裁短了而已，不需要点任何东西。</span>'
+    + '<div role="button" id="more">查看更多</div>',
+  );
+  const message = dom.window.document.querySelector('[data-ad-rendering-role="story_message"]')!;
+  setInnerText(message, () => '可见开头');
+  let clicked = false;
+  dom.window.document.getElementById('more')!.addEventListener('click', () => { clicked = true; });
+
+  const result = await run({ kind: 'note_open', params: { surface: 'feed', noteId: INLINE_NOTE_ID } });
+  assert.equal(result.output.kind, 'note_detail');
+  assert.equal(clicked, false, '全文已在 DOM 内时不应再点展开');
+  assert.ok(String(result.output.value.content).includes('只是被视觉裁短了'));
+});
+
+test('Feed-surface open reports expand_no_effect instead of claiming a read', async () => {
+  const dom = installInlineFeed('<span>短开头</span><div role="button" id="more">See more</div>');
+  const message = dom.window.document.querySelector('[data-ad-rendering-role="story_message"]')!;
+  setInnerText(message, () => '短开头'); // 点了也不变长
+
+  const result = await run({ kind: 'note_open', params: { surface: 'feed', noteId: INLINE_NOTE_ID } });
+  assert.equal(result.output.kind, 'action_receipt');
+  assert.equal(result.output.value.action, 'open_note');
+  assert.equal(result.output.value.ok, false);
+  assert.equal(result.output.value.reason, 'expand_no_effect');
+  assert.equal(dom.window.document.querySelectorAll('[data-ad-rendering-role]').length, 1);
+});
+
+test('Feed-surface open aborts to context_changed when a dialog appears mid-expansion', async () => {
+  const dom = installInlineFeed('<span>短开头</span><div role="button" id="more">展开</div>');
+  const message = dom.window.document.querySelector('[data-ad-rendering-role="story_message"]')!;
+  let visibleBody = '短开头';
+  setInnerText(message, () => visibleBody);
+  dom.window.document.getElementById('more')!.addEventListener('click', () => {
+    visibleBody = '短开头加上展开后的正文';
+    const dialog = dom.window.document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dom.window.document.body.appendChild(dialog);
+  });
+
+  const result = await run({ kind: 'note_open', params: { surface: 'feed', noteId: INLINE_NOTE_ID } });
+  assert.equal(result.output.kind, 'action_receipt');
+  assert.equal(result.output.value.action, 'open_note');
+  assert.equal(result.output.value.reason, 'context_changed');
+});
+
+test('Feed-surface open treats a short post without an expand control as a normal success', async () => {
+  const dom = installInlineFeed('<span>这是一条短帖，没有任何展开控件。</span>');
+  const message = dom.window.document.querySelector('[data-ad-rendering-role="story_message"]')!;
+  setInnerText(message, () => '这是一条短帖，没有任何展开控件。');
+
+  const result = await run({ kind: 'note_open', params: { surface: 'feed', noteId: INLINE_NOTE_ID } });
+  assert.equal(result.output.kind, 'note_detail');
+  assert.equal(result.output.value.content, '这是一条短帖，没有任何展开控件。');
+});
+
+test('Feed-surface open failures carry the canonical open_note action name', async () => {
+  install('<main></main>');
+  const result = await run({ kind: 'note_open', params: { surface: 'feed', noteId: INLINE_NOTE_ID } });
+  assert.equal(result.output.kind, 'action_receipt');
+  assert.equal(result.output.value.action, 'open_note');
+  assert.equal(result.output.value.reason, 'target_not_found');
+});

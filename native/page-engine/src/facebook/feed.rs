@@ -6,8 +6,22 @@ use crate::facebook;
 use crate::input::{WheelInputFailure, dispatch_wheel_humanized};
 use crate::model::{PageCards, PageMovement};
 use crate::protocol::{EffectPhase, NativeCommand};
+use crate::command::{NoteOpenParams, NotePurpose, NoteSurface};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
+
+/// 就地读回落判据：只认页面规则脚本发出的那条具名终态，MUST NOT 按 ok=false 泛化——
+/// `target_not_found` / `expand_no_effect` 都是终局，回落导航救不了，救了反而变成
+/// 「读不到就换个页面读点别的回来」的假成功。
+fn facebook_inline_read_context_changed(output: &CommandOutput) -> bool {
+    matches!(
+        output,
+        CommandOutput::ActionReceipt(receipt)
+            if receipt.action == "open_note"
+                && !receipt.ok
+                && receipt.reason.as_deref() == Some("context_changed")
+    )
+}
 
 const FACEBOOK_FEED_RECOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 /// 恢复等待必须给「把诚实回执交出去」留出的余量。
@@ -47,6 +61,52 @@ pub(crate) async fn execute(
                 FACEBOOK_DETAIL_HYDRATION_TIMEOUT,
             )
             .await
+        }
+        // feed 面就地读：页内展开与校验归页面规则脚本，**只有环境变化后的导航回落归这里**。
+        // 脚本没法诚实地自己跳转（跳走后它的执行上下文即刻失效，回执发不出去），且导航必须过
+        // URL 白名单校验与就绪等待——这两样都是本层的既有职责。
+        NativeCommand::NoteOpen(params)
+            if params.surface == Some(NoteSurface::Feed) && params.url.is_none() =>
+        {
+            let latest = evaluate_facebook_router(session, command).await?;
+            if !facebook_inline_read_context_changed(&latest.1) {
+                return Ok(latest);
+            }
+            let Some(note_id) = params.note_id.clone() else {
+                return Ok(latest);
+            };
+            let url = validated_facebook_content_url(note_id.as_str(), Some(note_id.as_str()))?;
+            let target_post_id = canonical_facebook_post_id(url.as_str())
+                .ok_or_else(invalid_facebook_navigation_target)?;
+            let detail_command = NativeCommand::NoteOpen(NoteOpenParams {
+                note_id: Some(note_id.clone()),
+                url: Some(url.to_string()),
+                surface: Some(NoteSurface::Detail),
+                purpose: Some(NotePurpose::Read),
+                ..NoteOpenParams::default()
+            });
+            session.cdp.navigate(url.as_str()).await?;
+            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+            match evaluate_facebook_router_until_requested_detail(
+                session,
+                &detail_command,
+                &target_post_id,
+                FACEBOOK_DETAIL_HYDRATION_TIMEOUT,
+            )
+            .await
+            {
+                Ok(result) => Ok(result),
+                // 回落也没读成：诚实具名失败，MUST NOT 退回就地读那条不可信的读数当成功。
+                Err(error) if error.code == ErrorCode::ProbeFailed => Ok(facebook_action_result(
+                    EffectPhase::NotStarted,
+                    "open_note",
+                    false,
+                    "inline_fallback_detail_unconfirmed",
+                    Some(note_id),
+                    None,
+                )),
+                Err(error) => Err(error),
+            }
         }
         NativeCommand::PageScroll(params)
             if params.reason.as_deref() == Some("empty_feed_reels_fallback") =>

@@ -968,3 +968,99 @@ test('Native Facebook dwell wait is cancelled before runtime actuation', async (
   assert.equal(h.executions.length, 1);
   assert.deepEqual(h.actions.at(-1), { action: 'scroll', ok: false, reason: 'aborted' });
 });
+
+// ─────────── 节奏字段的实际消费（change restore-native-facebook-inline-expand-read）───────────
+// 判据是「有没有真的等」，不是「字段有没有被映射进 payload」——收下即丢弃正是这次要修的回归。
+
+test('Native command honours the cloud thinkMs before touching the page', async () => {
+  const waits: number[] = [];
+  const h = harness(async () => cardsExecution(), {
+    platform: 'facebook',
+    clock: () => 1_000,
+    random: () => 0.25,
+    sleep: async (ms) => { waits.push(ms); },
+  });
+
+  await h.session.onCloudCommand(envelope('interaction.like', { noteId: 'https://www.facebook.com/A/posts/1', thinkMs: 2_400 }));
+
+  assert.deepEqual(waits, [2_400]);
+  assert.equal(h.executions.length, 1);
+});
+
+test('Native in-place read floor and cloud dwell take the larger, never the sum', async () => {
+  let now = 1_000;
+  const waits: number[] = [];
+  const detail: NoteDetailPayload = {
+    noteId: 'https://www.facebook.com/Example/posts/777',
+    title: '',
+    content: 'x'.repeat(200), // read floor = 1200 + 200*20 = 5200ms
+    author: 'Lan',
+    likeCount: 0,
+    collectCount: 0,
+  };
+  const h = harness(async (_owner, command) => (command.kind === 'note_open'
+    ? { ok: true, effectPhase: 'confirmed', reasonCode: 'confirmed', output: { kind: 'note_detail', value: detail } }
+    : cardsExecution()), {
+    platform: 'facebook',
+    clock: () => now,
+    random: () => 0.25,
+    sleep: async (ms) => { waits.push(ms); now += ms; },
+  });
+
+  await h.session.start();       // 立下「本批卡到达」锚点（now=1000）
+  await h.session.onCloudCommand(envelope('note.open', { noteId: detail.noteId, surface: 'feed' }));
+  now = 2_000;                   // 就地读花掉 1s
+  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 3_000 }));
+
+  // dwell 剩余 = 3000-(2000-1000) = 2000；read floor 剩余 = 5200-(2000-1000) = 4200 ⇒ 取 4200，不是 6200。
+  assert.deepEqual(waits, [4_200]);
+});
+
+test('A short in-place read still gets a floor instead of a zero-delay scroll', async () => {
+  let now = 1_000;
+  const waits: number[] = [];
+  const detail: NoteDetailPayload = {
+    noteId: 'https://www.facebook.com/Example/posts/778',
+    title: '',
+    content: 'hi', // read floor = 1200 + 2*20 = 1240ms
+    author: 'Lan',
+    likeCount: 0,
+    collectCount: 0,
+  };
+  const h = harness(async (_owner, command) => (command.kind === 'note_open'
+    ? { ok: true, effectPhase: 'confirmed', reasonCode: 'confirmed', output: { kind: 'note_detail', value: detail } }
+    : cardsExecution()), {
+    platform: 'facebook',
+    clock: () => now,
+    random: () => 0.25,
+    sleep: async (ms) => { waits.push(ms); now += ms; },
+  });
+
+  await h.session.onCloudCommand(envelope('note.open', { noteId: detail.noteId, surface: 'feed' }));
+  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' })); // 云端没给 dwell
+
+  assert.deepEqual(waits, [1_240]);
+});
+
+test('A failed in-place read leaves no read floor behind', async () => {
+  let now = 1_000;
+  const waits: number[] = [];
+  const h = harness(async (_owner, command) => (command.kind === 'note_open'
+    ? {
+        ok: false,
+        effectPhase: 'not_started' as const,
+        reasonCode: 'expand_no_effect',
+        output: { kind: 'action_receipt', value: { action: 'open_note', ok: false, reason: 'expand_no_effect' } },
+      }
+    : cardsExecution()), {
+    platform: 'facebook',
+    clock: () => now,
+    random: () => 0.25,
+    sleep: async (ms) => { waits.push(ms); now += ms; },
+  });
+
+  await h.session.onCloudCommand(envelope('note.open', { noteId: 'https://www.facebook.com/Example/posts/779', surface: 'feed' }));
+  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+
+  assert.deepEqual(waits, []);
+});

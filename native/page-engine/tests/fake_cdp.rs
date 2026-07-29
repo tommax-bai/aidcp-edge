@@ -1,7 +1,8 @@
 use aidcp_page_engine::command::{
     CaptchaCaptureParams, CaptchaClickParams, CaptchaPoint, CommentParams, FollowParams,
     GroupJoinParams, IdentityCaptureParams, NoteInteractionParams, NoteOpenParams,
-    NoteOpenSelection, PageScrollParams, ReasonParams, SearchExecuteParams,
+    NoteOpenSelection, NotePurpose, NoteSurface, PageScrollParams, ReasonParams,
+    SearchExecuteParams,
 };
 use aidcp_page_engine::commit_window::CommitWindowRequester;
 use aidcp_page_engine::engine::{CommandOutput, Engine};
@@ -4053,4 +4054,123 @@ fn unix_time_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// feed 面就地读报环境变化 → **本层**负责回落详情导航重读，且回落读到的必须是被请求的那条帖子。
+/// 反例（本 change 前的行为）：脚本读不可信也照样把读数当成功回上去。
+#[tokio::test]
+async fn facebook_inline_context_change_falls_back_to_detail_navigation() {
+    let target = "https://www.facebook.com/groups/100/posts/2579243155868042";
+    let (port, server) = spawn_facebook_inline_context_change_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 20_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&facebook_inline_note_open_command(1, target, 20_000))
+        .await
+        .expect("detail fallback");
+    let CommandOutput::NoteDetail(detail) = outcome.output.expect("fallback detail output") else {
+        panic!("expected note detail after inline context change")
+    };
+    assert_eq!(detail.note_id, target);
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook inline fallback fake CDP");
+    assert!(
+        requests
+            .iter()
+            .any(|request| request["method"] == "Page.navigate"),
+        "context_changed must navigate to the post instead of trusting the in-place read"
+    );
+    assert_eq!(
+        router_call_count(&requests, "note_open"),
+        2,
+        "one in-place attempt plus one detail re-read"
+    );
+}
+
+fn facebook_inline_note_open_command(
+    command_id: u64,
+    note_id: &str,
+    timeout_ms: u64,
+) -> CommandRecord {
+    CommandRecord {
+        protocol_version: 2,
+        id: format!("facebook-inline-open-{command_id}"),
+        session_id: "session-1".to_owned(),
+        task_id: "browse-1".to_owned(),
+        command_id,
+        deadline_unix_ms: unix_time_ms() + timeout_ms,
+        command: NativeCommand::NoteOpen(NoteOpenParams {
+            index: None,
+            note_id: Some(note_id.to_owned()),
+            url: None,
+            reason: None,
+            surface: Some(NoteSurface::Feed),
+            purpose: Some(NotePurpose::Read),
+            think_ms: None,
+            selection: None,
+            container: None,
+        }),
+    }
+}
+
+async fn spawn_facebook_inline_context_change_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(
+            &listener,
+            port,
+            "https://www.facebook.com/groups/100/posts/2579243155868042",
+        )
+        .await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        let mut opens = 0_u32;
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            let result = match router_kind(&request).as_deref() {
+                Some("page_probe") => facebook_ready_cdp("/groups/100/posts/2579243155868042"),
+                Some("consent_probe") => facebook_consent_absent_cdp(),
+                Some("note_open") => {
+                    opens += 1;
+                    if opens == 1 {
+                        json!({"result":{"value":{
+                            "effectPhase":"not_started",
+                            "output":{"kind":"action_receipt","value":{
+                                "action":"open_note","ok":false,"reason":"context_changed"
+                            }}
+                        }}})
+                    } else {
+                        facebook_note_detail_cdp(
+                            "https://www.facebook.com/groups/100/posts/2579243155868042",
+                            "requested post",
+                        )
+                    }
+                }
+                _ => json!({}),
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
+        requests
+    });
+    (port, server)
 }

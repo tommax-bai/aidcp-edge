@@ -503,8 +503,9 @@ async function(input){
     const link=first(['h2 a[href]','h3 a[href]','h4 a[href]','a[role="link"][href*="/people/"]','a[role="link"][href*="profile.php"]'],root);
     return {name:text(link,200),href:link&&link.href||''};
   };
+  const MESSAGE_CONTAINER_SEL='[data-ad-rendering-role="story_message"],[data-ad-preview="message"],[data-ad-comet-preview="message"]';
   const articleBody=(root)=>{
-    const witness=first(['[data-ad-rendering-role="story_message"]','[data-ad-preview="message"]','[data-ad-comet-preview="message"]'],root);
+    const witness=first(MESSAGE_CONTAINER_SEL.split(','),root);
     if(witness)return text(witness,12000);
     const candidates=all('div[dir="auto"]',root).filter(visible).map((el)=>text(el,12000)).filter((value)=>value.length>1);
     return candidates.sort((a,b)=>b.length-a.length)[0]||'';

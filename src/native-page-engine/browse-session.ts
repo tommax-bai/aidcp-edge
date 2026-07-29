@@ -81,6 +81,21 @@ const FACEBOOK_COMMENT_TIMEOUT_PER_CHAR_MS = 220;
 const FACEBOOK_COMMENT_TIMEOUT_MAX_MS = 90_000;
 const FACEBOOK_COMMENT_RESPONSE_SLACK_MS = 1_000;
 
+/**
+ * 就地读停留地板（edge-local 兜底，纯函数便于单测）：按正文字数线性、封顶，再乘 tempo。
+ * 量级沿用已退役的 TypeScript 就地读实现，不另起一套；本文件自带一份是为了不把已退役的
+ * Facebook 会话模块重新链回生产路径（打包裁剪会把它剔掉，import 它等于把裁剪判据搞坏）。
+ */
+const INLINE_READ_FLOOR_BASE_MS = 1_200;
+const INLINE_READ_FLOOR_PER_CHAR_MS = 20;
+const INLINE_READ_FLOOR_CAP_MS = 9_000;
+
+export function computeInlineReadFloorMs(bodyLen: number, tempo: number): number {
+  const raw = INLINE_READ_FLOOR_BASE_MS + Math.max(0, bodyLen) * INLINE_READ_FLOOR_PER_CHAR_MS;
+  const capped = Math.min(INLINE_READ_FLOOR_CAP_MS, raw);
+  return Math.round(capped * (tempo > 0 ? tempo : 1));
+}
+
 const FACEBOOK_UNSUPPORTED_COMMANDS = new Set<Envelope['type']>([
   'interaction.collect',
   'interaction.like_comment',
@@ -110,6 +125,13 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   private lastFacebookCardsAt = 0;
   private readonly facebookReelViewActivityPostIds = new Set<string>();
   private readonly facebookFeedVideoViewActivityPostIds = new Set<string>();
+  /** 就地读停留地板的锚点与目标（edge-local）。与云端 dwell 的新卡锚点取 max、绝不相加。 */
+  private inlineReadStartedAt = 0;
+  private inlineReadFloorMs = 0;
+  /** 本次 feed 面开帖的起始时刻；只有真读出内容（note_detail 到达）才会晋升成 read floor 锚点。 */
+  private pendingInlineReadStartedAt = 0;
+  /** 握手下发的降速系数。只作用于**边缘本地**兜底值（就地读 read floor），不重复乘到云端已算好的时长上。 */
+  private pacingTempo = 1;
 
   constructor(private readonly options: NativeBrowseSessionOptions) {
     this.ownerId = `browse:${options.startupId}`;
@@ -223,9 +245,13 @@ export class NativeBrowseSession implements EdgeBrowseSession {
 
   applyPacingSnapshot(
     _opFloorsMs?: Partial<Record<PacingOp, PacingFloorPayload>>,
-    _tempo?: number,
+    tempo?: number,
   ): void {
-    // Pacing stays Cloud-owned. Each Native command receives the already-authorized timing fields.
+    // 云端已把内容 / 状态相关的系数算进随指令下发的 thinkMs / dwellMs，边缘不再重复乘一次。
+    // tempo 仍要留：它是**边缘本地兜底值**（这里是就地读 read floor）唯一的降速旋钮。
+    if (typeof tempo === 'number' && Number.isFinite(tempo) && tempo > 0) this.pacingTempo = tempo;
+    // opFloorsMs 尚未接线：command-pacing 要求的「操作类命令最小间隔 gating」在 Native 路径整体缺失，
+    // 属独立一层、单列后续 change 处理。此处不消费不等于此处无事可做——别照着这条注释再判一次「本就该空」。
   }
 
   async recoverAfterCloudReconnect(): Promise<void> {
@@ -238,7 +264,14 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     signal?: AbortSignal,
     env?: Envelope,
   ): Promise<void> {
-    await this.ensureFacebookScrollDwell(command, signal);
+    await this.applyCommandPacing(command, signal);
+    // 就地读锚点在犹豫之后、执行之前记：犹豫属于「决定要看」，不属于「正在看这条」。
+    this.pendingInlineReadStartedAt =
+      this.options.platform === 'facebook'
+        && command.kind === 'note_open'
+        && (command.params as { surface?: unknown }).surface === 'feed'
+        ? (this.options.clock ?? monotonicNow)()
+        : 0;
     const timeoutMs = this.facebookCommandTimeoutMs(command);
     const result = await this.options.runtime.execute(
       ownerId,
@@ -278,16 +311,57 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     return cloudBudgetMs - FACEBOOK_COMMENT_RESPONSE_SLACK_MS;
   }
 
-  private async ensureFacebookScrollDwell(
+  /**
+   * 命令前节奏的**单一入口**：动作前犹豫（thinkMs）与离开内容前的停留（dwellMs / 就地读 read floor）。
+   *
+   * 合成一个入口是为了让「取 max、不相加」这条判定只有一处：拆成两处等待，两边都会以为自己在保证停留，
+   * 实际结果要么相加、要么互相抵消，而这两种错法在日志上长得一样。
+   */
+  private async applyCommandPacing(
     command: Parameters<NativePageRuntime['execute']>[1],
     signal?: AbortSignal,
   ): Promise<void> {
-    if (this.options.platform !== 'facebook' || command.kind !== 'page_scroll' || this.lastFacebookCardsAt <= 0) return;
-    const centerMs = Number(command.params.dwellMs);
+    await this.applyThinkBefore(command, signal);
+    await this.ensureScrollDwell(command, signal);
+  }
+
+  /**
+   * 动作前犹豫：云端已把 tempo / 状态 / 熟悉度系数算进这个中心值，边缘只叠抖动，MUST NOT 再乘一次 tempo。
+   * 收下字段却不等待，等于把云端整层节奏收口悄悄作废——这正是本 change 要修的那类丢弃。
+   */
+  private async applyThinkBefore(
+    command: Parameters<NativePageRuntime['execute']>[1],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const centerMs = Number((command.params as { thinkMs?: unknown }).thinkMs);
     if (!Number.isFinite(centerMs) || centerMs <= 0) return;
-    const targetMs = jitterAround(centerMs, 0.2, this.options.random);
-    const elapsedMs = Math.max(0, (this.options.clock ?? monotonicNow)() - this.lastFacebookCardsAt);
-    const remainingMs = Math.max(0, targetMs - elapsedMs);
+    const waitMs = jitterAround(centerMs, 0.25, this.options.random);
+    if (waitMs <= 0) return;
+    await (this.options.sleep ?? abortableSleep)(waitMs, signal);
+  }
+
+  /**
+   * 离开当前内容前的停留。两个锚点各测各的跨度、**取 max 不相加**：
+   *  ① 云端 dwellMs，锚在本批卡到达时刻；② 就地读 read floor，锚在就地读开始时刻。
+   * 就地读比进详情页快得多，只认 ① 会让长帖读完立刻秒滚。
+   */
+  private async ensureScrollDwell(
+    command: Parameters<NativePageRuntime['execute']>[1],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (this.options.platform !== 'facebook' || command.kind !== 'page_scroll') return;
+    const now = (this.options.clock ?? monotonicNow)();
+    let remainingMs = 0;
+    const centerMs = Number(command.params.dwellMs);
+    if (this.lastFacebookCardsAt > 0 && Number.isFinite(centerMs) && centerMs > 0) {
+      const targetMs = jitterAround(centerMs, 0.2, this.options.random);
+      remainingMs = Math.max(0, targetMs - Math.max(0, now - this.lastFacebookCardsAt));
+    }
+    if (this.inlineReadStartedAt > 0) {
+      remainingMs = Math.max(remainingMs, this.inlineReadFloorMs - Math.max(0, now - this.inlineReadStartedAt));
+      this.inlineReadStartedAt = 0; // 消费一次：绝不让旧锚点留到下一条内容上
+      this.inlineReadFloorMs = 0;
+    }
     if (remainingMs <= 0) return;
     await (this.options.sleep ?? abortableSleep)(remainingMs, signal);
   }
@@ -327,6 +401,15 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       case 'note_detail':
         this.options.client.reportNoteDetail(value as unknown as NoteDetailPayload);
         if (this.options.platform === 'facebook') {
+          // 就地读停留地板：按读到的正文长度定目标，锚点取**就地读开始那一刻**（命令下发前记下的）。
+          // 锚在开始而非读完，是为了让展开与轮询已经花掉的时间被计入、只补差额——与 dwell 的
+          // 「已过去的时间必须计入」同一口径。地板只在真读成功时才立：读失败（展开无效 / 环境变化）
+          // 不产生 note_detail，也就不该压一段停留。
+          if (this.pendingInlineReadStartedAt > 0) {
+            const body = typeof value.content === 'string' ? value.content : '';
+            this.inlineReadFloorMs = computeInlineReadFloorMs(body.length, this.pacingTempo);
+            this.inlineReadStartedAt = this.pendingInlineReadStartedAt;
+          }
           const postId = canonicalPostId(typeof value.noteId === 'string' ? value.noteId : undefined);
           if (
             !postId

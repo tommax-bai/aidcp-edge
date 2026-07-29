@@ -78,8 +78,12 @@
   if(kind==='note_open'){
     if(p.surface==='feed'){
       const root=actionRoot();
-      if(!root)return fail('open','target_not_found');
-      return done(noteDetail(root,permalinkOf(root)||String(p.noteId||'')));
+      // 动作名用云端角色关联的规范名 open_note（既不是消息名 note.open、也不是裸 open）：回错名不会报错，
+      // 只会让云端 open_note 专属的清理（评论迁移标志、评论支线时钟）永远等不到匹配。
+      if(!root)return fail('open_note','target_not_found');
+      const read=await inlineExpandRead(root);
+      if(!read.ok)return fail('open_note',read.reason);
+      return done(noteDetail(root,permalinkOf(root)||String(p.noteId||''),read.body));
     }
     return done(currentDetail());
   }
