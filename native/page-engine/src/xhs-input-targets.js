@@ -39,6 +39,75 @@
   const readEditor=(el)=>'value' in el?String(el.value||''):String((el&&(el.innerText||el.textContent))||'');
   const geometry=(el)=>{const r=el.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};};
   const miss=()=>({found:false,focused:false,value:'',plainValue:false,x:0,y:0,paragraphs:0});
+  const viewport=()=>{
+    const doc=document.documentElement||{};
+    return {w:Number(window.innerWidth)||Number(doc.clientWidth)||0,h:Number(window.innerHeight)||Number(doc.clientHeight)||0};
+  };
+  // 可滚区矩形与视口的**交集**中心，不是矩形几何中心：内层滚动容器常比视口高，
+  // 它的几何中心可能落在视口外，而滚轮事件按视口坐标派发 —— 派到视口外等于没派。
+  const visibleCenter=(el)=>{
+    const v=viewport();
+    if(!(v.w>0&&v.h>0))return null;
+    if(!el)return {x:v.w/2,y:v.h/2};
+    const r=el.getBoundingClientRect();
+    const left=Math.max(0,r.left),top=Math.max(0,r.top);
+    const right=Math.min(v.w,r.right),bottom=Math.min(v.h,r.bottom);
+    if(!(right-left>2&&bottom-top>2))return null;
+    return {x:(left+right)/2,y:(top+bottom)/2};
+  };
+  // 真·可滚判据：内容溢出**且**该轴的 overflow 是滚动语义。只看 scrollHeight>clientHeight
+  // 会把「内容溢出但 overflow:visible」的容器当成滚动容器，于是位置读的是恒为 0 的 scrollTop、
+  // 而真正在滚的是窗口 —— 一次真实的翻页会被读成「没动」（把成功压成失败，同样是不诚实）。
+  const scrollable=(el)=>{
+    if(!el||!el.getBoundingClientRect)return false;
+    if(!(Number(el.scrollHeight||0)-Number(el.clientHeight||0)>4))return false;
+    const s=window.getComputedStyle?getComputedStyle(el):null;
+    if(!s)return true;
+    const overflow=String(s.overflowY||s.overflow||'');
+    return overflow==='auto'||overflow==='scroll'||overflow==='overlay';
+  };
+  const pickScroller=(selectors,root=document)=>{
+    for(const selector of selectors){
+      const hit=all(selector,root).filter(visible).find(scrollable);
+      if(hit)return hit;
+    }
+    return null;
+  };
+  const windowArea=()=>{
+    const center=visibleCenter(null);
+    if(!center)return null;
+    const doc=document.scrollingElement||document.documentElement;
+    const v=viewport();
+    const position=Number(window.scrollY||0)||Number((doc&&doc.scrollTop)||0)||0;
+    const total=Number((doc&&doc.scrollHeight)||0);
+    return {scroller:'window',position,viewportHeight:v.h,atBottom:total>0&&position+v.h>=total-24,...center};
+  };
+  const elementArea=(el)=>{
+    const center=visibleCenter(el);
+    if(!center)return null;
+    const position=Number(el.scrollTop||0);
+    const total=Number(el.scrollHeight||0);
+    const client=Number(el.clientHeight||0);
+    return {scroller:'element',position,viewportHeight:viewport().h,atBottom:total>0&&position+client>=total-24,...center};
+  };
+  // 宽 / 窄两套布局下可滚元素不同（可能是内层容器、也可能就是窗口），所以坐标与位置一律
+  // **实测解析**，不写死视口中心、更不写死某个平台的常量。解析不出来时 found=false ——
+  // 「读不到」与「没滚动」是两态，调用方不得把前者当后者。
+  const scrollArea=(selectors,root=document)=>{
+    const el=pickScroller(selectors,root);
+    const resolved=(el?elementArea(el):null)||windowArea();
+    if(!resolved)return {found:false};
+    return {found:true,windowPosition:Number(window.scrollY||0),...resolved};
+  };
+  const commentRows=(root)=>{
+    // 逐个选择器试，取第一个真数出条目的那个：几个选择器求并集会把「评论行」与
+    // 「评论行里的正文块」重复计一次，回报的条数就比页面上多出一倍。
+    for(const selector of ['[class*="comment-item"]','[class*="commentItem"]','[class*="comment"] [class*="content"]']){
+      const rows=all(selector,root).filter(visible);
+      if(rows.length)return rows;
+    }
+    return [];
+  };
   // 清场：受控框走原型 value setter，contenteditable 走 textContent，再补合成 input/change。
   // 这是「把残文抹掉」，不是「把内容写进去」——内容一律走硬件级逐字/分块输入。
   const clearEditor=(el)=>{
@@ -106,6 +175,25 @@
   if(kind==='comment_submit'){
     const submit=findByWords(['发送','发布','submit'],detailRoot()||document);
     return submit?{found:true,...geometry(submit)}:miss();
+  }
+  // feed 翻页的可滚区。选择器只用来**优先**认内层滚动容器；一个都不成立就回落到窗口，
+  // 两条路都给出实测坐标与实测位置。
+  if(kind==='feed_scroll_area'){
+    return scrollArea(['#exploreFeeds','[class*="feeds-page"]','[class*="feeds-container"]','[class*="feed-container"]','main']);
+  }
+  // 详情页评论区的可滚区 + 当前页面上真实可见的评论条数。
+  if(kind==='comment_scroll_area'){
+    const root=detailRoot()||document;
+    const area=scrollArea(['[class*="comment-list"]','[class*="comments"]','[class*="detail"]'],root);
+    return {...area,rows:commentRows(root).length};
+  }
+  // 详情浮层的关闭控件。`overlay` 与 `found` 是两件事：浮层不在（无需关）与浮层在但关闭控件
+  // 没认出来（关不掉），调用方要分开处置。
+  if(kind==='detail_close'){
+    const modal=detailRoot();
+    if(!modal)return {found:false,overlay:false};
+    const close=first(['[class*="close"]','button[aria-label*="关闭"]'],modal);
+    return close?{found:true,overlay:true,...geometry(close)}:{found:false,overlay:true};
   }
   if(kind==='comment_ack'){
     const wanted=norm(req.text||'',500);

@@ -125,3 +125,98 @@ test('归尾探针：换行数按顶层块推、读不到目标时 found=false �
   assert.equal(missing.newlines, 0);
   assert.equal(missing.atEnd, false);
 });
+
+const FEED_HTML = `<!doctype html><html><body>
+  <div id="exploreFeeds" style="overflow-y:auto"><section>卡片</section></div>
+</body></html>`;
+
+/** 让某个元素在 jsdom 里“真的可滚”：jsdom 的 scrollHeight / clientHeight 恒为 0。 */
+function makeScrollable(el: Element, scrollHeight: number, clientHeight: number, scrollTop: number): void {
+  for (const [name, value] of [
+    ['scrollHeight', scrollHeight],
+    ['clientHeight', clientHeight],
+    ['scrollTop', scrollTop],
+  ] as const) {
+    Object.defineProperty(el, name, { configurable: true, value });
+  }
+}
+
+test('feed 可滚区：认出内层滚动容器时，坐标取它与视口的交集中心、位置取它的 scrollTop', () => {
+  const fixture = installXhsDom(FEED_HTML, 'https://www.xiaohongshu.com/explore');
+  const feed = document.querySelector('#exploreFeeds') as HTMLElement;
+  makeScrollable(feed, 4000, 700, 320);
+  // 容器比视口高：几何中心落在视口外，取交集中心才落得进去。
+  fixture.setRect(feed, { x: 100, y: -200, width: 600, height: 4000 });
+
+  const area = runInputTargets({ kind: 'feed_scroll_area' }) as Record<string, number | string | boolean>;
+  assert.equal(area.found, true);
+  assert.equal(area.scroller, 'element');
+  assert.equal(area.position, 320, '位置必须读该可滚元素自己的 scrollTop');
+  assert.equal(area.x, 400, '交集横向中心 = (100+700)/2');
+  const viewportHeight = Number(area.viewportHeight);
+  assert.ok(viewportHeight > 0);
+  // 交集纵向 = [0, min(视口高, 3800)]，中心即其一半。
+  assert.equal(area.y, Math.min(viewportHeight, 3800) / 2);
+});
+
+test('feed 可滚区：没有真正可滚的内层容器时回落到窗口，仍给出实测坐标与实测位置', () => {
+  installXhsDom('<!doctype html><html><body><div id="exploreFeeds"><section>卡片</section></div></body></html>');
+  // 内容溢出但 overflow:visible —— 真正在滚的是窗口，绝不能把它当滚动容器
+  // （那样位置读的是恒为 0 的 scrollTop，一次真实翻页会被读成「没动」）。
+  makeScrollable(document.querySelector('#exploreFeeds') as HTMLElement, 4000, 700, 0);
+  Object.defineProperty(window, 'scrollY', { configurable: true, value: 512 });
+
+  const area = runInputTargets({ kind: 'feed_scroll_area' }) as Record<string, number | string | boolean>;
+  assert.equal(area.found, true);
+  assert.equal(area.scroller, 'window');
+  assert.equal(area.position, 512);
+  assert.equal(area.x, window.innerWidth / 2);
+  assert.equal(area.y, window.innerHeight / 2);
+});
+
+test('评论可滚区：几何 + 位置 + 页面上真实可见的评论行数一并给出', () => {
+  const fixture = installXhsDom(
+    `<!doctype html><html><body><div class="note-detail-mask">
+       <div class="comment-list" style="overflow-y:scroll">
+         <div class="comment-item">一</div><div class="comment-item">二</div><div class="comment-item">三</div>
+       </div>
+     </div></body></html>`,
+    'https://www.xiaohongshu.com/explore/65f2ab01',
+  );
+  const list = document.querySelector('.comment-list') as HTMLElement;
+  makeScrollable(list, 2400, 500, 180);
+  fixture.setRect(list, { x: 40, y: 60, width: 400, height: 500 });
+
+  const area = runInputTargets({ kind: 'comment_scroll_area' }) as Record<string, number | string | boolean>;
+  assert.equal(area.found, true);
+  assert.equal(area.position, 180);
+  assert.equal(area.rows, 3, '行数按页面上真实可见的评论条数，不按下发步数');
+  assert.equal(area.x, 240);
+  assert.equal(area.y, 310);
+});
+
+test('详情浮层关闭控件：「浮层不在」与「浮层在但控件没认出来」是两态', () => {
+  installXhsDom(
+    `<!doctype html><html><body><div class="note-detail-mask">
+       <button aria-label="关闭">×</button>
+     </div></body></html>`,
+    'https://www.xiaohongshu.com/explore/65f2ab01',
+  );
+  const closable = runInputTargets({ kind: 'detail_close' });
+  assert.equal(closable.overlay, true);
+  assert.equal(closable.found, true);
+  assert.equal(typeof closable.x, 'number');
+
+  installXhsDom(
+    '<!doctype html><html><body><div class="note-detail-mask"><span>正文</span></div></body></html>',
+    'https://www.xiaohongshu.com/explore/65f2ab01',
+  );
+  const stuck = runInputTargets({ kind: 'detail_close' });
+  assert.equal(stuck.overlay, true, '浮层在场必须如实说，否则调用方以为无需关');
+  assert.equal(stuck.found, false, '关不掉就报关不掉，不拿别的元素充数');
+
+  installXhsDom('<!doctype html><html><body><div>首页</div></body></html>');
+  const none = runInputTargets({ kind: 'detail_close' });
+  assert.equal(none.overlay, false);
+  assert.equal(none.found, false);
+});

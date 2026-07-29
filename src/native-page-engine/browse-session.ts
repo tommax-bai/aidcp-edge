@@ -947,7 +947,12 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   }
 
   private scheduleProbe(): void {
-    if (this.closed || this.probeTimer) return;
+    // `stopRequested` 必须与 `closed` 同列在这里：停手时 `stopProbe()` 只清掉了定时器，
+    // **在途**的那一次探测结束后仍会经 `.finally` 重新武装。会话若是 drain 式停手
+    // （`stopAndWait`，`closed` 仍为 false），重新武装出来的探针就对着一条已 detach 的
+    // 执行端连接按节拍空轮询，直到进程退出。`start()` / `resumeAfterTask()` 复位该标志，
+    // 所以补这一条不会挡住正常的重启。
+    if (this.closed || this.stopRequested || this.probeTimer) return;
     if (this.blocked || this.observationSuspended) {
       // 「已装配但暂不启动」：待机 / 交接期不起探针，但必须留一条可观测记录——
       // 否则运维分不清监测体是「没装」还是「装了没开」。翻转才记一次，不刷屏。

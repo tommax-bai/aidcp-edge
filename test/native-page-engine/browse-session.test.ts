@@ -35,6 +35,7 @@ function harness(execute: (
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   overlayConfirmMs?: number;
   commitWindow?: CommitWindowGuard;
+  probeIntervalMs?: number;
 } = {}) {
   const executions: Array<{ ownerId: string; command: NativePageCommand; timeoutMs?: number }> = [];
   const actions: ActionCompletedPayload[] = [];
@@ -73,6 +74,7 @@ function harness(execute: (
     sleep: options.sleep,
     overlayConfirmMs: options.overlayConfirmMs,
     commitWindow: options.commitWindow,
+    probeIntervalMs: options.probeIntervalMs,
     logger: (message) => logs.push(message),
   });
   return { session, executions, actions, cards, details, closedOwners, logs, sent };
@@ -1083,4 +1085,39 @@ test('A failed in-place read leaves no read floor behind', async () => {
   await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
 
   assert.deepEqual(waits, []);
+});
+
+test('A drained Native session never re-arms its probe from an in-flight probe', async () => {
+  let releaseProbe: () => void = () => undefined;
+  const inFlight = new Promise<void>((resolve) => { releaseProbe = resolve; });
+  let probeStarted = 0;
+  let probeArrived: () => void = () => undefined;
+  const firstProbe = new Promise<void>((resolve) => { probeArrived = resolve; });
+
+  const h = harness(async (_owner, command) => {
+    if (command.kind !== 'page_probe') return cardsExecution();
+    probeStarted += 1;
+    probeArrived();
+    await inFlight;
+    return {
+      ok: true,
+      effectPhase: 'confirmed' as const,
+      reasonCode: 'confirmed',
+      output: { kind: 'page_probe', value: { pageKind: 'feed' } },
+    };
+  }, { probeIntervalMs: 1 });
+
+  await h.session.start();
+  await firstProbe;
+  assert.equal(probeStarted, 1, '会话起来后必须真的开始周期观测');
+
+  // 停手发生在探测「已发出、未返回」的窗口里：定时器被清掉了，但在途的那一次仍会走到
+  // 它的收尾分支。收尾分支若照旧重新武装，探针就会对着一条已停手（乃至已 detach）的
+  // 连接一直空轮询下去。
+  await h.session.stopAndWait(50);
+  releaseProbe();
+  await inFlight;
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.equal(probeStarted, 1, '停手之后不得再武装出任何一次探测');
 });

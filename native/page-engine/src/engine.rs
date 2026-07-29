@@ -6,15 +6,15 @@ use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
 use crate::input::{
     ContentNewline, ContentUnit, PointerClickOptions, PointerInputFailure, TextInputFailure,
-    bigram_similarity, build_content_units, dispatch_pointer_click, hanzi_only,
-    normalize_field_text, type_captcha_with_key_events, type_content_burst_humanized,
-    type_text_humanized,
+    WheelInputFailure, bigram_similarity, build_content_units, dispatch_pointer_click,
+    dispatch_wheel_humanized, hanzi_only, normalize_field_text, type_captcha_with_key_events,
+    type_content_burst_humanized, type_text_humanized,
 };
 use crate::model::{
-    ActionReceipt, CaptchaSnapshot, CaptchaTypeReport, FacebookIdentityReceipt,
+    ActionEvidence, ActionReceipt, CaptchaSnapshot, CaptchaTypeReport, FacebookIdentityReceipt,
     IdentityObservation, IdentityObservationSource, IdentityPageEffect, NoteDetail,
-    NotificationHome, NotificationItems, ObservedActionReceipt, PageCards, PlanResults,
-    ProfileDetail, PublishReceipt,
+    NotificationHome, NotificationItems, ObservedActionReceipt, PageCards, PageMovement,
+    PlanResults, ProfileDetail, PublishReceipt,
 };
 use crate::probe::PageKind;
 use crate::probe::ProbeResult;
@@ -68,6 +68,26 @@ const XHS_COMMENT_SETTLE_MS: u64 = 800;
 const XHS_CONTENT_SIMILARITY_THRESHOLD: f64 = 0.9;
 /// 与注入路由一致的字段级上限（按码点）。
 const XHS_TEXT_CLIP_CHARS: usize = 32_000;
+/// feed 单次翻页的基准位移 = 视口高度的这一份额，再裁进 [下限, 上限]。
+///
+/// 退役实现是 **500px 定值**，注释写明理由：约半屏可让相邻两次扫描的可见卡片**重叠**，
+/// 整屏会让 borderline 卡只剩一次评估机会。迁移后的注入路由改成了 `innerHeight×0.78`
+/// ≈ 0.78 屏，重叠因此被吃掉。这里改回半屏口径，但按**实测视口**取值而不是照抄 500 ——
+/// 桌面端视口高度跨机器能差一倍，定值在小屏上就又是整屏。±20% 的随机由手势原语内部叠。
+const XHS_FEED_SCROLL_VIEWPORT_SHARE: f64 = 0.5;
+const XHS_FEED_SCROLL_MIN_PX: f64 = 360.0;
+const XHS_FEED_SCROLL_MAX_PX: f64 = 700.0;
+/// 详情页评论滚动的基准位移，与注入路由同口径（评论行比 feed 卡矮，半屏口径不适用）。
+const XHS_COMMENT_SCROLL_PX: f64 = 500.0;
+/// 位移落定的有界等待：按**迭代次数**限界（不按墙钟死循环），命中即提前返回。
+const XHS_SCROLL_SETTLE_INTERVAL_MS: u64 = 50;
+const XHS_SCROLL_SETTLE_MAX_ROUNDS: usize = 14;
+/// 评论滚动每一步之后的加载缓冲，与注入路由同口径。
+const XHS_COMMENT_SCROLL_STEP_SETTLE_MS: u64 = 150;
+/// 评论滚动的步数上限，与注入路由同口径。
+const XHS_COMMENT_SCROLL_MAX_STEPS: u32 = 20;
+/// 关闭详情浮层之后的落定等待。
+const XHS_OVERLAY_CLOSE_SETTLE_MS: u64 = 250;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -726,6 +746,44 @@ async fn execute_xhs_command_once(
         PublishFillField(params) => {
             execute_xhs_publish_fill_field(session, params, cancellation, deadline_unix_ms).await
         }
+        // 滚动特化：共享惯性滚轮手势（滚前把光标移到**实测**可滚区中心），位移按实测回报。
+        // 只有 `browse_next` 需要先关详情浮层——注入路由也只在这一条上关，另两条是纯翻页。
+        BrowseNext(params) => {
+            execute_xhs_feed_scroll(
+                session,
+                command,
+                params.reason.as_deref(),
+                true,
+                cancellation,
+                deadline_unix_ms,
+            )
+            .await
+        }
+        BrowseScroll(params) => {
+            execute_xhs_feed_scroll(
+                session,
+                command,
+                params.reason.as_deref(),
+                false,
+                cancellation,
+                deadline_unix_ms,
+            )
+            .await
+        }
+        PageScroll(params) => {
+            execute_xhs_feed_scroll(
+                session,
+                command,
+                params.reason.as_deref(),
+                false,
+                cancellation,
+                deadline_unix_ms,
+            )
+            .await
+        }
+        NoteScrollComments(params) => {
+            execute_xhs_comment_scroll(session, params, cancellation, deadline_unix_ms).await
+        }
         PublishUploadImage(params) => {
             validate_publish_file(&params.path)?;
             let selector = xhs::file_input_selector()?;
@@ -1066,6 +1124,14 @@ fn xhs_target_text(value: &serde_json::Value, name: &str) -> Option<String> {
         .pointer(&format!("/result/value/{name}"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
+}
+
+/// 三态读法：`Some(true)` / `Some(false)` / `None`（分片没给出这一判定）。
+/// 与 `xhs_target_flag` 的区别就是不把「读不到」折成 `false`。
+fn xhs_target_optional_bool(value: &serde_json::Value, name: &str) -> Option<bool> {
+    value
+        .pointer(&format!("/result/value/{name}"))
+        .and_then(serde_json::Value::as_bool)
 }
 
 fn xhs_target_number(value: &serde_json::Value, name: &str) -> Option<f64> {
@@ -1627,6 +1693,364 @@ async fn execute_xhs_publish_fill_field(
         true,
         None,
     ))
+}
+
+// ───────────────────────────── 小红书滚动特化（§8 滚动半边）─────────────────────────────
+
+/// 注入路由里唯一**不带副作用**的分支：只扫卡片、不滚动。引擎自己滚完之后用它取卡片，
+/// 卡片解析因此不必在引擎里再实现一份。
+const XHS_INITIAL_SCAN_REASON: &str = "initial_scan";
+
+/// 一处可滚区的**实测**几何与位置。坐标由页面判据分片解析——宽 / 窄两套布局的可滚元素不同
+/// （可能是内层容器，也可能就是窗口），所以既不写死视口中心，也不照抄别的平台的落点常量。
+#[derive(Clone, Copy, Debug)]
+struct XhsScrollArea {
+    x: f64,
+    y: f64,
+    position: f64,
+    viewport_height: f64,
+    /// `None` = 分片没给出这一判定（读不到），**不是** `false`（读到了、不在底部）。
+    at_bottom: Option<bool>,
+    /// 评论区才有的可见行数；feed 可滚区不带这一项。
+    rows: Option<u32>,
+}
+
+/// 读一处可滚区。返回 `None` 的含义是**读不到**（解析不出可滚区，或数值字段缺失），
+/// 与「读到了、但页面没动」是两态——调用方 MUST NOT 把前者当后者。
+async fn probe_xhs_scroll_area(
+    session: &mut EngineSession,
+    request: serde_json::Value,
+) -> Result<Option<XhsScrollArea>, EngineError> {
+    let value = probe_xhs_input_target(session, request).await?;
+    if !xhs_target_flag(&value, "found") {
+        return Ok(None);
+    }
+    let (Some((x, y)), Some(position), Some(viewport_height)) = (
+        xhs_target_point(&value),
+        xhs_target_number(&value, "position"),
+        xhs_target_number(&value, "viewportHeight"),
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(XhsScrollArea {
+        x,
+        y,
+        position,
+        viewport_height,
+        at_bottom: xhs_target_optional_bool(&value, "atBottom"),
+        rows: xhs_target_number(&value, "rows").map(|value| value.max(0.0) as u32),
+    }))
+}
+
+/// 一次手势派发的结局。**「派发失败」与「页面没动」是两态**：前者是手势没能送出去，
+/// 后者是送出去了、页面确实没动（到底 / 不可滚）。压成一态会让一次引擎侧的瞬时超时
+/// 被读成「feed 到底了」。回执字段归并行 change，故两态经诊断通道分开记
+/// （宿主保留 stderr 尾部，见 `src/native-page-engine/client.ts` 的 stderr 缓冲）。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum XhsWheelOutcome {
+    Dispatched,
+    Aborted,
+}
+
+/// 派发一次惯性滚轮手势。原语自带「滚前把光标移到目标点」，故调用方只给坐标。
+///
+/// 失败处置的顺序是 8.4 的顺序：**接管优先于死线**——取消原样穿出，死线 / CDP 瞬时失败
+/// 只中止本轮，**MUST NOT `return Err`**（一次瞬时超时不得终结整个浏览循环）。
+async fn dispatch_xhs_wheel(
+    session: &mut EngineSession,
+    area: XhsScrollArea,
+    baseline_distance_px: f64,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+    stage: &str,
+) -> Result<XhsWheelOutcome, EngineError> {
+    match dispatch_wheel_humanized(
+        &mut session.cdp,
+        area.x,
+        area.y,
+        baseline_distance_px,
+        cancellation,
+        deadline_unix_ms,
+    )
+    .await
+    {
+        Ok(()) => Ok(XhsWheelOutcome::Dispatched),
+        Err(WheelInputFailure::Cancelled) => Err(cancelled_before_dispatch()),
+        Err(failure) => {
+            let cause = match failure {
+                WheelInputFailure::Deadline => "deadline",
+                WheelInputFailure::Cdp(_) => "cdp",
+                WheelInputFailure::Cancelled => "cancelled",
+            };
+            eprintln!("native_page_engine_xhs_wheel_aborted:{stage}:{cause}");
+            Ok(XhsWheelOutcome::Aborted)
+        }
+    }
+}
+
+/// 有界等位移落定：按**迭代次数**限界（不按墙钟死循环），位移一出现就提前返回；
+/// 命令死线到了也停。返回 `None` 仍然只表示**读不到**。
+async fn wait_for_xhs_scroll_settled(
+    session: &mut EngineSession,
+    request: serde_json::Value,
+    before: f64,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<Option<XhsScrollArea>, EngineError> {
+    let mut latest: Option<XhsScrollArea> = None;
+    for _ in 0..XHS_SCROLL_SETTLE_MAX_ROUNDS {
+        if unix_time_ms() >= deadline_unix_ms {
+            break;
+        }
+        xhs_wait_checked(XHS_SCROLL_SETTLE_INTERVAL_MS, cancellation).await?;
+        if let Some(area) = probe_xhs_scroll_area(session, request.clone()).await? {
+            latest = Some(area);
+            if area.position != before {
+                break;
+            }
+        }
+    }
+    // 一轮都没能读到（预算已尽 / 每轮都读不到）时就地再读一次：读到什么报什么。
+    if latest.is_none() {
+        latest = probe_xhs_scroll_area(session, request).await?;
+    }
+    Ok(latest)
+}
+
+/// `browse_next` 滚前先关详情浮层，否则手势落在浮层上（浮层自己也可滚）——
+/// 位移读到了、feed 却一步没动。
+///
+/// 「浮层不在」与「浮层在但关闭控件没认出来」是两态：前者无需关，后者是关不掉。
+/// 后者仍照常去滚，位移按实测回报，所以不会退化成静默假成功。
+async fn close_xhs_detail_overlay(
+    session: &mut EngineSession,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<(), EngineError> {
+    let probe =
+        probe_xhs_input_target(session, serde_json::json!({ "kind": "detail_close" })).await?;
+    if !xhs_target_flag(&probe, "overlay") {
+        return Ok(());
+    }
+    let Some((x, y)) = xhs_target_point(&probe).filter(|_| xhs_target_flag(&probe, "found")) else {
+        eprintln!("native_page_engine_xhs_detail_close_control_missing");
+        return Ok(());
+    };
+    match dispatch_pointer_click(
+        &mut session.cdp,
+        x,
+        y,
+        PointerClickOptions::default(),
+        cancellation,
+        deadline_unix_ms,
+    )
+    .await
+    {
+        Ok(_) => xhs_wait_checked(XHS_OVERLAY_CLOSE_SETTLE_MS, cancellation).await?,
+        // 接管原样穿出，不吞成普通失败。
+        Err(PointerInputFailure::CancelledBeforePress) => return Err(cancelled_before_dispatch()),
+        Err(_) => eprintln!("native_page_engine_xhs_detail_close_not_actuated"),
+    }
+    Ok(())
+}
+
+/// 小红书 feed 翻页 / 页面滚动。
+///
+/// 形状：读 before → 惯性滚轮手势 → 有界等位移落定 → 读 after → 用只读扫描取卡片 →
+/// 把**自测**的位移回填进卡片结果。回执形状与注入路由逐字段一致。
+async fn execute_xhs_feed_scroll(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+    reason: Option<&str>,
+    close_detail_overlay: bool,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    // 只读扫描：不滚动、不触碰页面，原样交给注入路由。
+    if reason == Some(XHS_INITIAL_SCAN_REASON) {
+        return evaluate_router(session, command).await;
+    }
+    if close_detail_overlay {
+        close_xhs_detail_overlay(session, cancellation, deadline_unix_ms).await?;
+    }
+    let request = serde_json::json!({ "kind": "feed_scroll_area" });
+    let Some(before) = probe_xhs_scroll_area(session, request.clone()).await? else {
+        return Err(xhs_scroll_area_unresolved());
+    };
+    let baseline = (before.viewport_height * XHS_FEED_SCROLL_VIEWPORT_SHARE)
+        .clamp(XHS_FEED_SCROLL_MIN_PX, XHS_FEED_SCROLL_MAX_PX);
+    // 中止的是这一轮手势，不是这条命令的诚实回报：随后照常读一次位置、按实测位移回报。
+    dispatch_xhs_wheel(
+        session,
+        before,
+        baseline,
+        cancellation,
+        deadline_unix_ms,
+        "feed",
+    )
+    .await?;
+    let Some(after) = wait_for_xhs_scroll_settled(
+        session,
+        request,
+        before.position,
+        cancellation,
+        deadline_unix_ms,
+    )
+    .await?
+    else {
+        return Err(xhs_scroll_area_unresolved());
+    };
+    let (phase, output) = evaluate_router(session, &xhs_initial_scan_command(command)?).await?;
+    let CommandOutput::PageCards(mut cards) = output else {
+        return Err(xhs_scroll_scan_invalid());
+    };
+    cards.movement = Some(PageMovement {
+        before: before.position,
+        after: after.position,
+        moved: after.position != before.position,
+        at_bottom: after.at_bottom,
+    });
+    Ok((phase, CommandOutput::PageCards(cards)))
+}
+
+/// 同一条命令的只读扫描形态：只把 `reason` 换成 `initial_scan`，其余参数原样带过去。
+fn xhs_initial_scan_command(command: &NativeCommand) -> Result<NativeCommand, EngineError> {
+    let reason = Some(XHS_INITIAL_SCAN_REASON.to_owned());
+    Ok(match command {
+        NativeCommand::BrowseNext(_) => {
+            NativeCommand::BrowseNext(crate::command::ReasonParams { reason })
+        }
+        NativeCommand::BrowseScroll(_) => {
+            NativeCommand::BrowseScroll(crate::command::ReasonParams { reason })
+        }
+        NativeCommand::PageScroll(params) => {
+            NativeCommand::PageScroll(crate::command::PageScrollParams {
+                reason,
+                dwell_ms: params.dwell_ms,
+            })
+        }
+        _ => return Err(xhs_scroll_scan_invalid()),
+    })
+}
+
+/// 详情页评论区滚动。每一步一次手势，位置不再变化即停手（到底 / 不可滚），
+/// 「滚了几条」按页面上真实可见的评论行数回报，不是按下发了几步。
+async fn execute_xhs_comment_scroll(
+    session: &mut EngineSession,
+    params: &crate::command::NoteTraverseParams,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let note_id = params.note_id.clone();
+    let guard = probe_xhs_input_target(
+        session,
+        serde_json::json!({"kind":"note_guard","noteId":note_id}),
+    )
+    .await?;
+    if !xhs_target_flag(&guard, "match") {
+        return Ok(xhs_action_outcome(
+            EffectPhase::NotStarted,
+            "scroll_comments",
+            false,
+            Some("note_page_mismatch"),
+            &note_id,
+        ));
+    }
+    let request = serde_json::json!({ "kind": "comment_scroll_area" });
+    // 步数是**请求值**（云端下发几步），不是实测量：缺省即 1 步，与注入路由同口径。
+    // 真正回报出去的「滚了几条」在下面按实测行数取，绝不拿这个数字充数。
+    let steps = params
+        .count
+        .unwrap_or(1)
+        .clamp(1, XHS_COMMENT_SCROLL_MAX_STEPS);
+    let mut moved = false;
+    for _ in 0..steps {
+        let Some(before) = probe_xhs_scroll_area(session, request.clone()).await? else {
+            return Err(xhs_scroll_area_unresolved());
+        };
+        let outcome = dispatch_xhs_wheel(
+            session,
+            before,
+            XHS_COMMENT_SCROLL_PX,
+            cancellation,
+            deadline_unix_ms,
+            "comments",
+        )
+        .await?;
+        let Some(after) = wait_for_xhs_scroll_settled(
+            session,
+            request.clone(),
+            before.position,
+            cancellation,
+            deadline_unix_ms,
+        )
+        .await?
+        else {
+            return Err(xhs_scroll_area_unresolved());
+        };
+        let advanced = after.position != before.position;
+        if advanced {
+            moved = true;
+        }
+        // 两个 break 条件分列，不合并：上面那条是「手势没派完」，下面那条是「页面到底了」。
+        // 合成一条就等于在代码里把两态压成一态，日后没人分得清停手的真实原因。
+        if outcome == XhsWheelOutcome::Aborted {
+            break;
+        }
+        if !advanced {
+            break;
+        }
+        xhs_wait_checked(XHS_COMMENT_SCROLL_STEP_SETTLE_MS, cancellation).await?;
+    }
+    if !moved {
+        return Ok(xhs_action_outcome(
+            EffectPhase::Ambiguous,
+            "scroll_comments",
+            false,
+            Some("no_scroll"),
+            &note_id,
+        ));
+    }
+    // 数不出来时回 `None`（读不到），MUST NOT 拿步数或 0 顶上。
+    let rows = probe_xhs_scroll_area(session, request)
+        .await?
+        .and_then(|area| area.rows);
+    Ok((
+        EffectPhase::Confirmed,
+        CommandOutput::ActionReceipt(Box::new(ActionReceipt {
+            action: "scroll_comments".to_owned(),
+            ok: true,
+            reason: rows.map(|rows| format!("scrolled={rows}")),
+            note_id: Some(note_id),
+            observation: Some(ActionEvidence {
+                surface: None,
+                list_key: None,
+                author: None,
+                text_preview_head: None,
+                reaction_text: None,
+                article_index: rows,
+            }),
+            post_observation: None,
+            group_observation: None,
+            group_url: None,
+            clicked: None,
+            candidates: Vec::new(),
+        })),
+    ))
+}
+
+fn xhs_scroll_area_unresolved() -> EngineError {
+    EngineError::new(
+        ErrorCode::CdpError,
+        "native Xiaohongshu scroll area could not be resolved",
+    )
+}
+
+fn xhs_scroll_scan_invalid() -> EngineError {
+    EngineError::new(
+        ErrorCode::CdpError,
+        "native Xiaohongshu scroll scan returned an invalid output",
+    )
 }
 
 async fn probe_xhs_search_input(
