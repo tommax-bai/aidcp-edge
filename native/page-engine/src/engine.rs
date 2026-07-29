@@ -2173,6 +2173,19 @@ async fn execute_xhs_feed_scroll(
     let CommandOutput::PageCards(mut cards) = output else {
         return Err(xhs_scroll_scan_invalid());
     };
+    // 两处语义都容易被「看起来合理」的改动悄悄拧掉，故就地写死判据：
+    //
+    // ① `moved` 的判据是「位置**变了**」，不是「位置**变大了**」。位置回退在真机上可达 ——
+    //    懒渲染换掉滚动容器 / feed 刷新回顶 ⇒ 位置从 p 跳回 0，而页面**确实动了**（卡片还整批
+    //    换了）。此时报 `moved=false` 就是把一次真实位移谎报成静止，再配上消费面
+    //    「到底了且没动就收工」，直接变成提前收工。注入路由自己是 `window.scrollY!==before`
+    //    （`xhs-command-router.js`），同引擎的 Facebook feed 也是 `!=`（`facebook/feed.rs`）；
+    //    退役 TS 路径的 `after > before`（`src/browse/browse-session.ts`）**不是**本流要对齐的
+    //    口径 —— 照它「订正」成 `>` 是本处最像修 bug 的一次改坏。
+    //
+    // ② `at_bottom` 取的必须是**滚动之后**那次读数：这一项的全部意义就是它会因为这一滚而翻转。
+    //    取滚前读数 ⇒ 恰好在「这一滚真的到底了」那一次回执说「没到底」，云端的到底检测被系统性
+    //    推迟一条命令；反方向（刷新回顶、判定 true→false）则是替云端提前收工。
     cards.movement = Some(PageMovement {
         before: before.position,
         after: after.position,

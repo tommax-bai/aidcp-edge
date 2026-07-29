@@ -120,9 +120,17 @@ struct FakePage {
     omit_comment_rows: bool,
     /// 详情浮层探针**不给** `overlay` 判定：关闭控件认出来了，浮层在不在却读不到。
     omit_overlay_verdict: bool,
-    /// 可滚区的 `atBottom` 判定。`None` = 分片不给这一项（读不到），
+    /// **滚动前**那次基准读数给出的 `atBottom`。`None` = 分片不给这一项（读不到），
     /// **不是** `false`（读到了、不在底部）。
-    at_bottom: Option<bool>,
+    at_bottom_before: Option<bool>,
+    /// **滚动后**那些读数给出的 `atBottom`。与 `at_bottom_before` 取不同值时，
+    /// 用例才分得出回执取的是哪一次读数 —— 两边同值的假页面在原理上分辨不出 after 与 before。
+    at_bottom_after: Option<bool>,
+    /// 滚动**前**可滚区已经在的位置。默认 0 = 页面停在顶部。
+    start_position: f64,
+    /// 手势之后可滚区**回退**到 0，并就此停住。真机成因是懒渲染换掉了滚动容器 / feed 刷新回顶：
+    /// 页面**确实动了**（卡片还整批换了），只是位置比滚动前**小**。
+    rewinds_after_gesture: bool,
 }
 
 impl Default for FakePage {
@@ -140,7 +148,10 @@ impl Default for FakePage {
             frozen_reads_after_blind: 0,
             omit_comment_rows: false,
             omit_overlay_verdict: false,
-            at_bottom: Some(false),
+            at_bottom_before: Some(false),
+            at_bottom_after: Some(false),
+            start_position: 0.0,
+            rewinds_after_gesture: false,
         }
     }
 }
@@ -782,13 +793,18 @@ async fn comment_scrolling_reports_an_unreadable_row_count_as_unknown_never_as_o
 /// 断言因此落在**云端真正看到的那份回执**上：读不到时这一项必须是空的，让上游回落到它自己的
 /// 推断（`browse-session.ts` 的 `afterProbe.atBottom ?? …`）；任何一个确定的布尔值都会
 /// 顶掉那条兜底，把「不知道」变成一句替云端拍的板。
+///
+/// **这一条只钉「三态原样透传」，钉不住「这份判定是滚动后测的」**：它的假页面滚前滚后逐字
+/// 给同一个判定，在原理上分辨不出 after 与 before。取滚前读数这一折由下面那条
+/// `the_at_bottom_verdict_is_the_one_measured_after_the_scroll_not_before_it` 单独钉。
 #[tokio::test]
 async fn the_at_bottom_verdict_reaches_the_cloud_exactly_as_the_page_reported_it() {
     for reported in [Some(true), Some(false), None] {
         let cancellation = Arc::new(AtomicBool::new(false));
         let (port, server) = spawn_page(
             FakePage {
-                at_bottom: reported,
+                at_bottom_before: reported,
+                at_bottom_after: reported,
                 ..FakePage::default()
             },
             cancellation.clone(),
@@ -832,6 +848,118 @@ async fn the_at_bottom_verdict_reaches_the_cloud_exactly_as_the_page_reported_it
         drop(engine);
         let _ = server.await.expect("fake page");
     }
+}
+
+/// 「到底了」取的必须是**滚动之后**那次读数，不是滚动前那次基准读数。
+///
+/// `atBottom` 的全部意义就是它会**因为这一滚而翻转**，所以「取了哪一次读数」不是细节：
+///  - 取滚前读数 ⇒ 恰好在「这一滚真的到底了」那一次，回执说「没到底」。消费面是
+///    `browse-session.ts` 的「到底了且没动就收工」，于是**到底检测被系统性推迟一条命令**；
+///  - 反方向（页面刷新回顶、判定由 true 变 false）⇒ 回执说「到底了」，替云端**提前收工**，
+///    这个账号这一轮就少刷了大半个 feed。
+///
+/// 两条都是静默的：位移是实测的、判定也确实来自页面，回执从头到尾没有任何一处看着不诚实。
+/// 因此假页面在这里滚前滚后给**不同**的判定，并把两个方向各跑一遍。
+#[tokio::test]
+async fn the_at_bottom_verdict_is_the_one_measured_after_the_scroll_not_before_it() {
+    // (滚前判定, 滚后判定)：先是「这一滚真的滚到底了」，再是「页面刷新回顶、不再到底」。
+    for (before_verdict, after_verdict) in [(false, true), (true, false)] {
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let (port, server) = spawn_page(
+            FakePage {
+                at_bottom_before: Some(before_verdict),
+                at_bottom_after: Some(after_verdict),
+                ..FakePage::default()
+            },
+            cancellation.clone(),
+        )
+        .await;
+        let mut engine = Engine::default();
+        engine.open(&session_open(port)).await.expect("open");
+
+        let result = engine
+            .execute(&scroll_command(
+                1,
+                command(r#"{"kind":"browse_scroll","params":{"reason":"feed_paging"}}"#),
+                25_000,
+            ))
+            .await
+            .expect("command result");
+
+        let CommandOutput::PageCards(cards) = result.output.expect("output") else {
+            panic!("expected page cards");
+        };
+        let movement = cards.movement.expect("翻页必须带上实测位移");
+        assert_eq!(
+            movement.at_bottom,
+            Some(after_verdict),
+            "「到底了」取的是滚动**前**那次读数（滚前 {before_verdict} / 滚后 {after_verdict}）：\
+             取 false 会把到底检测推迟一条命令，取 true 会让云端提前收工",
+        );
+
+        drop(engine);
+        let _ = server.await.expect("fake page");
+    }
+}
+
+/// `moved` 的判据是「位置**变了**」，不是「位置**变大了**」——位置回退也算动过。
+///
+/// **裁定**：保持 `!=`，`moved` 计双向位移。理由三条：
+///  ① 这条流对齐的是**注入路由**的回执形状，而注入路由自己就是 `window.scrollY!==before`
+///     （`native/page-engine/src/xhs-command-router.js`）；同引擎的 Facebook feed 也是 `!=`
+///     （`native/page-engine/src/facebook/feed.rs`）。退役 TS 路径的 `after > before`
+///     （`src/browse/browse-session.ts` 的 `inertialScrollByProbe`）不是本流的对齐口径 ——
+///     照它把 Rust 侧「订正」成 `>` 是这里最像修 bug 的一次改坏。
+///  ② 位置回退在真机上可达，成因就是别处已经建模过的那件事：懒渲染换掉滚动容器 / feed 刷新
+///     回顶 ⇒ 位置从 p 跳回 0。此刻页面**确实动了**，卡片还整批换了。
+///  ③ 报 `moved=false` 就是把一次真实位移谎报成静止；再配上消费面「到底了且没动就收工」
+///     （`browse-session.ts`），直接变成提前收工。而回执本身看着完全诚实。
+#[tokio::test]
+async fn a_scroll_position_that_jumps_backwards_still_counts_as_moved() {
+    // 滚动前页面已经翻下去一截；手势照常往下派，页面却在这一拍刷新回顶。
+    const START_POSITION: f64 = 1_800.0;
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            start_position: START_POSITION,
+            rewinds_after_gesture: true,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let result = engine
+        .execute(&scroll_command(
+            1,
+            command(r#"{"kind":"browse_scroll","params":{"reason":"feed_paging"}}"#),
+            25_000,
+        ))
+        .await
+        .expect("command result");
+
+    let CommandOutput::PageCards(cards) = result.output.expect("output") else {
+        panic!("expected page cards");
+    };
+    let movement = cards.movement.expect("翻页必须带上实测位移");
+    assert_eq!(movement.before, START_POSITION, "滚动前确实不在顶部");
+    assert_eq!(movement.after, 0.0, "这一滚之后页面回到了顶部");
+    assert!(
+        movement.moved,
+        "位置回退被判成了没动：页面确实动了（还换了整批卡片），\
+         报没动会让「到底了且没动就收工」提前收工",
+    );
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    // 这一场手势是照常**往下**派的：位移的方向翻转来自页面，不是来自我们少发了几帧。
+    assert!(
+        observed.wheel_deltas.iter().all(|delta| *delta > 0.0),
+        "手势本身仍是向下的：{:?}",
+        observed.wheel_deltas
+    );
 }
 
 #[tokio::test]
@@ -934,9 +1062,9 @@ async fn spawn_page(
         let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
         let mut observed = Observed {
             requests: Vec::new(),
-            position: 0.0,
+            position: page.start_position,
             wheel_deltas: Vec::new(),
-            target: 0.0,
+            target: page.start_position,
             pending: 0.0,
             inertia_left: 0,
             stall_left: 0,
@@ -1050,6 +1178,19 @@ fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value
             observed.position = observed.target - observed.pending;
         }
     }
+    // feed 刷新回顶 / 懒渲染换掉滚动容器：手势之后位置**回退**到 0 并就此停住。
+    // 惯性那几拍算完之后再压，位置才不会被算回去。
+    if reads_scroll_area && page.rewinds_after_gesture && observed.wheels_seen > 0 {
+        observed.target = 0.0;
+        observed.pending = 0.0;
+        observed.position = 0.0;
+    }
+    // 滚动前那次基准读数与滚动后那些读数给**不同**的 `atBottom`：回执取错哪一次，用例当场分得出。
+    let at_bottom = if observed.wheels_seen > 0 {
+        page.at_bottom_after
+    } else {
+        page.at_bottom_before
+    };
     if expression.contains("feedCardCount") {
         return json!({"result":{"value":{
             "href": "https://www.xiaohongshu.com/explore/note-1",
@@ -1091,7 +1232,7 @@ fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value
             "x": AREA_X,
             "y": AREA_Y,
         });
-        if let Some(at_bottom) = page.at_bottom {
+        if let Some(at_bottom) = at_bottom {
             area["atBottom"] = json!(at_bottom);
         }
         return value(area);
@@ -1106,7 +1247,7 @@ fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value
             "x": AREA_X,
             "y": AREA_Y,
         });
-        if let Some(at_bottom) = page.at_bottom {
+        if let Some(at_bottom) = at_bottom {
             area["atBottom"] = json!(at_bottom);
         }
         // 「数不出来」与「数到了 0」是两态：前者把这一项整个拿掉，后者给出 0。
