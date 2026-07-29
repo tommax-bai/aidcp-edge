@@ -25,12 +25,20 @@ function normalizeProxyRuntime(value) {
   if (!state) return null;
   const bytes = Number(value.sessionReceivedBytes);
   const generation = Number(value.generation);
+  const normalizedGeneration = Number.isSafeInteger(generation) && generation >= 0 ? generation : 0;
+  if (state === 'stale') {
+    return {
+      state,
+      generation: normalizedGeneration,
+      sessionReceivedBytes: 0,
+    };
+  }
   const checkedAtMs = typeof value.checkedAt === 'string' ? Date.parse(value.checkedAt) : NaN;
   const browserIp = normalizeIp(value.browserIp);
   const directIp = normalizeIp(value.directIp);
   return {
     state,
-    generation: Number.isSafeInteger(generation) && generation >= 0 ? generation : 0,
+    generation: normalizedGeneration,
     sessionReceivedBytes: Number.isFinite(bytes) && bytes >= 0 ? Math.floor(bytes) : 0,
     ...(browserIp ? { browserIp } : {}),
     ...(directIp ? { directIp } : {}),
@@ -38,4 +46,14 @@ function normalizeProxyRuntime(value) {
   };
 }
 
-module.exports = { normalizeProxyRuntime };
+function invalidateProxyRuntime(value) {
+  const current = normalizeProxyRuntime(value);
+  if (!current) return null;
+  return {
+    state: 'stale',
+    generation: current.generation,
+    sessionReceivedBytes: 0,
+  };
+}
+
+module.exports = { invalidateProxyRuntime, normalizeProxyRuntime };

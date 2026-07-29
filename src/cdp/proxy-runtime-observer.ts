@@ -151,6 +151,7 @@ export class ProxyRuntimeObserver {
 
   suspendGeneration(reason = 'browser_standby'): void {
     this.generation += 1; // 使任何旧探测结果作废。
+    this.receivedBytes = 0;
     this.state = 'stale';
     this.browserIp = undefined;
     this.directIp = undefined;
@@ -166,6 +167,7 @@ export class ProxyRuntimeObserver {
   }
 
   private onLoadingFinished(params: unknown): void {
+    if (this.state === 'stale') return;
     const length = Number((params as { encodedDataLength?: unknown } | undefined)?.encodedDataLength);
     if (!Number.isFinite(length) || length < 0) return;
     this.receivedBytes += length;

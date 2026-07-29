@@ -98,9 +98,16 @@ test('同出口标疑似直连；浏览器探测失败不得用 Node 结果冒�
     emit: () => undefined,
   });
   assert.equal((await same.startGeneration()).state, 'same_as_host');
+  sameCdp.emit('Network.loadingFinished', { encodedDataLength: 2048 });
+  assert.equal(same.snapshot().sessionReceivedBytes, 2048);
   same.suspendGeneration();
   assert.equal(same.snapshot().state, 'stale');
   assert.equal(same.snapshot().browserIp, undefined);
+  assert.equal(same.snapshot().directIp, undefined);
+  assert.equal(same.snapshot().checkedAt, undefined);
+  assert.equal(same.snapshot().sessionReceivedBytes, 0);
+  sameCdp.emit('Network.loadingFinished', { encodedDataLength: 1024 });
+  assert.equal(same.snapshot().sessionReceivedBytes, 0, 'late traffic from an expired generation stays discarded');
   same.dispose();
 
   const failed = new ProxyRuntimeObserver({

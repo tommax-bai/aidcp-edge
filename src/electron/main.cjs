@@ -57,7 +57,7 @@ const {
 const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
 const commandDiagnostics = require('./command-diagnostics.cjs');
-const { normalizeProxyRuntime } = require('./proxy-runtime.cjs');
+const { invalidateProxyRuntime, normalizeProxyRuntime } = require('./proxy-runtime.cjs');
 const {
   createProxyPreflightController,
   preflightFacebookProxy,
@@ -3708,6 +3708,7 @@ function onColdStandbyAck(handle) {
     session: handle.automationPaused ? 'paused' : 'resting',
     loopStage: null,
     overlayBlocked: false,
+    proxyRuntime: invalidateProxyRuntime(handle.status.proxyRuntime),
     browserStandby: coldStandbyStatus('sleeping', hint, decision.ok ? {
       wakeDelayMs: decision.wakeDelayMs,
       warmupMs: decision.warmupMs,
@@ -3995,6 +3996,9 @@ async function startBrowserAbsentCore(handle, {
   if (!handle || !isCurrentLifecycleGeneration(handle, generation) || handle.child || handle.controlPlaneStarting
     || handle.removed || handle.stopRequested || isQuitting) return false;
   handle.controlPlaneStarting = true;
+  updateStatus(handle, {
+    proxyRuntime: invalidateProxyRuntime(handle.status.proxyRuntime),
+  });
   try {
     const coreOnlyBootstrap = !slotAdmission && !queueAdmission;
     const bootstrap = await resolveControlBootstrap(handle);
@@ -4717,6 +4721,7 @@ async function spawnEdgeChild(handle, {
     failPendingCoreRebind(handle, `core_spawn_error:${(err && err.message) || String(err)}`);
     settleLaunchReady(handle, false); // 起不来：立刻放行启动队列的下一个，绝不占着队列干等
     handle.child = undefined;
+    handle.status.proxyRuntime = invalidateProxyRuntime(handle.status.proxyRuntime);
     settleTransientBrowserLease(handle, 'core_spawn_error', false);
     handle.browserOpenPending = false;
     handle.coldStandbyPending = false;
@@ -4817,6 +4822,7 @@ async function spawnEdgeChild(handle, {
     const controlPlaneNeverEstablished = handle.controlPlaneOnly && !handle.controlPlaneBootstrapped;
     const wasColdStandby = !controlPlaneNeverEstablished && (handle.coldStandbyPending || handle.coldStandbyActive);
     handle.child = undefined;
+    handle.status.proxyRuntime = invalidateProxyRuntime(handle.status.proxyRuntime);
     settleTransientBrowserLease(handle, 'core_closed', false);
     handle.browserOpenPending = false;
     if (controlPlaneNeverEstablished) {
@@ -5276,7 +5282,11 @@ async function ensureAdsRuntimeAndKernel(handle) {
 // 浏览器启动 / 登录态 / 身份确立全由核心进程经 AdsPower 本地 API 完成（未登录 → 核心诚实非零退出并弹窗）。
 async function startAdsPowerFlow(handle, generation = handle && handle.lifecycleGeneration) {
   if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return false;
-  updateStatus(handle, { provider: 'adspower', ...clearEdgeFailurePatch(handle) });
+  updateStatus(handle, {
+    provider: 'adspower',
+    ...(!handle.child ? { proxyRuntime: invalidateProxyRuntime(handle.status.proxyRuntime) } : {}),
+    ...clearEdgeFailurePatch(handle),
+  });
   if (!handle.profileId || !handle.profileId.trim()) {
     // 缺分身 ID 无法启动：诚实提示待配置，不静默假装在跑。
     updateStatus(handle, {

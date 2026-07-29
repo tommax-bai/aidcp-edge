@@ -1154,7 +1154,6 @@ async function main(): Promise<void> {
       // 当成意外掉线、触发有界重连，最后把连接对象搞成一个 recovering/unavailable 的僵尸（今天的 bug）。
       // 释放后任何页面命令都会响亮失败，绝不静默假成功。
       session.detach();
-      proxyRuntime?.suspendGeneration('browser_standby');
       try {
         const freed = await chrome.killAndConfirmDead();
         if (!freed) {
@@ -1163,6 +1162,7 @@ async function main(): Promise<void> {
           clearColdStandbyCloudRetry();
           return false;
         }
+        proxyRuntime?.suspendGeneration('browser_standby');
         return true;
       } catch (error) {
         console.warn(`[aidcp-edge] ⚠ 冷待机关闭浏览器异常：${(error as Error)?.message || String(error)}`);

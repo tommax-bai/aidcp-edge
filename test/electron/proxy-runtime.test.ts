@@ -6,7 +6,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
-const { normalizeProxyRuntime } = require('../../src/electron/proxy-runtime.cjs') as {
+const { invalidateProxyRuntime, normalizeProxyRuntime } = require('../../src/electron/proxy-runtime.cjs') as {
+  invalidateProxyRuntime: (value: unknown) => Record<string, unknown> | null;
   normalizeProxyRuntime: (value: unknown) => Record<string, unknown> | null;
 };
 const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
@@ -41,6 +42,28 @@ test('fleet 投影严格 allowlist，非法 IP/额外敏感字段不会进入 re
   });
 });
 
+test('失效投影与迟到 stale 事件只保留代际标记，不恢复旧出口或流量', () => {
+  const previous = {
+    state: 'verified',
+    generation: 3,
+    sessionReceivedBytes: 31.4 * 1024 * 1024,
+    browserIp: '203.0.113.7',
+    directIp: '198.51.100.4',
+    checkedAt: '2026-07-20T08:00:00.000Z',
+  };
+  assert.deepEqual(invalidateProxyRuntime(previous), {
+    state: 'stale',
+    generation: 3,
+    sessionReceivedBytes: 0,
+  });
+  assert.deepEqual(normalizeProxyRuntime({ ...previous, state: 'stale' }), {
+    state: 'stale',
+    generation: 3,
+    sessionReceivedBytes: 0,
+  });
+  assert.equal(invalidateProxyRuntime(null), null);
+});
+
 test('视图只有运行证据能给“代理已验证”，配置存在但证据未知仍是无法确认', () => {
   const verified = uiLogic.proxyRuntimeView(
     { state: 'verified', sessionReceivedBytes: 12 * 1024, browserIp: '203.0.113.7', directIp: '198.51.100.4' },
@@ -67,6 +90,22 @@ test('视图只有运行证据能给“代理已验证”，配置存在但证�
 
 test('浏览器证据缺失时展示预检状态，当前运行证据始终优先', () => {
   const config = { known: true, noProxy: false, summary: 'http · proxy.example' };
+  const expired = invalidateProxyRuntime({
+    state: 'verified',
+    generation: 4,
+    sessionReceivedBytes: 31.4 * 1024 * 1024,
+    browserIp: '203.0.113.7',
+    directIp: '198.51.100.4',
+    checkedAt: '2026-07-21T01:00:00.000Z',
+  });
+  const stopped = uiLogic.proxyRuntimeView(expired, config);
+  assert.equal(stopped.label, '验证已失效');
+  assert.notEqual(stopped.tone, 'verified');
+  assert.equal(stopped.compact, '验证已失效 · 本次 0 B');
+  assert.equal(stopped.browserIp, '未取得');
+  assert.equal(stopped.directIp, '未取得');
+  assert.equal(stopped.checkedAt, '');
+
   const available = uiLogic.proxyRuntimeView(
     { state: 'stale', generation: 1, sessionReceivedBytes: 0 },
     config,
@@ -80,12 +119,96 @@ test('浏览器证据缺失时展示预检状态，当前运行证据始终优�
   assert.equal(failed.label, '代理不可用');
   assert.equal(failed.tone, 'danger');
 
+  const expiredThenFailed = uiLogic.proxyRuntimeView(expired, config, { state: 'unavailable' });
+  assert.equal(expiredThenFailed.label, '代理不可用');
+  assert.equal(expiredThenFailed.tone, 'danger');
+
+  const verifiedWins = uiLogic.proxyRuntimeView(
+    { state: 'verified', browserIp: '203.0.113.7', directIp: '198.51.100.4' },
+    config,
+    { state: 'unavailable' },
+  );
+  assert.equal(verifiedWins.label, '代理已验证');
+
   const runtimeWins = uiLogic.proxyRuntimeView(
     { state: 'same_as_host', browserIp: '198.51.100.4', directIp: '198.51.100.4' },
     config,
     { state: 'available' },
   );
   assert.equal(runtimeWins.label, '疑似直连');
+});
+
+test('生命周期装配契约：只在新启动前或代际确认结束后使运行证据失效', () => {
+  const startFlowStart = mainSource.indexOf('async function startAdsPowerFlow');
+  const startFlowEnd = mainSource.indexOf('// 按环境分派启动流程', startFlowStart);
+  const startFlow = mainSource.slice(startFlowStart, startFlowEnd);
+  const runtimeInvalidation = 'proxyRuntime: invalidateProxyRuntime(handle.status.proxyRuntime)';
+  const startInvalidationIndex = startFlow.indexOf(runtimeInvalidation);
+  const preparationIndex = startFlow.indexOf('await ensureAdsRuntimeAndKernel(handle)');
+  assert.ok(startInvalidationIndex >= 0, 'replacement start must invalidate previous runtime evidence');
+  assert.match(startFlow, /\.\.\.\(!handle\.child \? \{ proxyRuntime: invalidateProxyRuntime\(handle\.status\.proxyRuntime\) \} : \{\}\)/,
+    'replacement-start invalidation must require no current child');
+  assert.ok(preparationIndex > startInvalidationIndex,
+    'old runtime evidence must expire before asynchronous preparation can fail');
+
+  const browserAbsentStart = mainSource.indexOf('async function startBrowserAbsentCore');
+  const browserAbsentEnd = mainSource.indexOf('async function startRestrictedOffboardCleanupCore', browserAbsentStart);
+  assert.ok(browserAbsentStart >= 0 && browserAbsentEnd > browserAbsentStart, 'missing browser-absent bootstrap');
+  const browserAbsent = mainSource.slice(browserAbsentStart, browserAbsentEnd);
+  const browserAbsentInvalidationIndex = browserAbsent.indexOf(runtimeInvalidation);
+  assert.ok(browserAbsentInvalidationIndex >= 0, 'browser-absent bootstrap must invalidate previous runtime evidence');
+  assert.ok(browserAbsent.indexOf('await resolveControlBootstrap(handle)') > browserAbsentInvalidationIndex,
+    'queue-full and manual-open bootstrap failures must not retain previous runtime evidence');
+
+  const standbyStart = mainSource.indexOf('function onColdStandbyAck');
+  const standbyEnd = mainSource.indexOf('function updateColdStandbyCloudRecovery', standbyStart);
+  const standbyAck = mainSource.slice(standbyStart, standbyEnd);
+  assert.match(standbyAck, /proxyRuntime: invalidateProxyRuntime\(handle\.status\.proxyRuntime\)/);
+
+  const spawnChildStart = mainSource.indexOf('async function spawnEdgeChild');
+  assert.ok(spawnChildStart >= 0, 'missing spawnEdgeChild');
+  const childErrorStart = mainSource.indexOf("child.on('error'", spawnChildStart);
+  const childCloseStart = mainSource.indexOf("child.on('close'", childErrorStart);
+  assert.ok(childErrorStart > spawnChildStart && childCloseStart > childErrorStart,
+    'missing spawnEdgeChild error/close lifecycle handlers');
+  const childError = mainSource.slice(childErrorStart, childCloseStart);
+  const childErrorInvalidationIndex = childError.indexOf(
+    'handle.status.proxyRuntime = invalidateProxyRuntime(handle.status.proxyRuntime)',
+  );
+  assert.ok(childErrorInvalidationIndex > childError.indexOf('handle.child = undefined'));
+  assert.ok(childErrorInvalidationIndex < childError.indexOf("settleTransientBrowserLease(handle, 'core_spawn_error'"),
+    'spawn error must invalidate before a transient-lease settlement broadcasts fleet state');
+  assert.ok(childErrorInvalidationIndex < childError.indexOf('if (handle.removed) return'));
+
+  const childCloseEnd = mainSource.indexOf('function stopLoginPoller', childCloseStart);
+  const childClose = mainSource.slice(childCloseStart, childCloseEnd);
+  const childCloseInvalidationIndex = childClose.indexOf(
+    'handle.status.proxyRuntime = invalidateProxyRuntime(handle.status.proxyRuntime)',
+  );
+  assert.ok(childCloseInvalidationIndex > childClose.indexOf('handle.child = undefined'));
+  assert.ok(childCloseInvalidationIndex < childClose.indexOf("settleTransientBrowserLease(handle, 'core_closed'"),
+    'child close must invalidate before a transient-lease settlement broadcasts fleet state');
+  assert.ok(childCloseInvalidationIndex < childClose.indexOf('if (handle.removed) return'));
+
+  const standbyRequestStart = mainSource.indexOf('function enterColdStandby');
+  const standbyRequestEnd = mainSource.indexOf('function onColdStandbyAck', standbyRequestStart);
+  assert.doesNotMatch(mainSource.slice(standbyRequestStart, standbyRequestEnd), /invalidateProxyRuntime/,
+    'an unconfirmed standby request must not make current runtime evidence expire');
+
+  const coreStandbyStart = coreSource.indexOf('enterStandby: async () =>');
+  const coreStandbyEnd = coreSource.indexOf('wakeFromStandby: async', coreStandbyStart);
+  const coreStandby = coreSource.slice(coreStandbyStart, coreStandbyEnd);
+  assert.match(
+    coreStandby,
+    /const freed = await chrome\.killAndConfirmDead\(\);[\s\S]*if \(!freed\) \{[\s\S]*return false;[\s\S]*proxyRuntime\?\.suspendGeneration\('browser_standby'\);[\s\S]*return true;/,
+    'core evidence must stay current when browser closure is not confirmed',
+  );
+
+  assert.equal(
+    [...mainSource.matchAll(/invalidateProxyRuntime\(handle\.status\.proxyRuntime\)/g)].length,
+    5,
+    'Electron invalidation stays limited to no-child starts, confirmed standby, and child termination boundaries',
+  );
 });
 
 test('装配契约：Facebook 或配置代理接管证据启用 Network，注入 /egress，IP 事件落盘前脱敏', () => {
