@@ -681,6 +681,112 @@ test('人工昵称统一覆盖环境身份锚点，旧系统名心跳不得回�
   assert.match(w.document.querySelector('#guide-title')?.textContent || '', /Tianxing Bai1/);
 });
 
+test('环境管理复用人工昵称且代理读取仍以稳定 profile ID 寻址', async () => {
+  const proxyReads: Array<Record<string, unknown>> = [];
+  const status = makeStatus({
+    envId: 'ads-p1',
+    envName: 'AdsPower 旧环境名',
+    edge: 'stopped',
+    session: 'idle',
+    account: { id: 'fb-1', name: '平台账号名', source: 'facebook' },
+  });
+  const { w } = await boot({
+    getStatus: async () => status,
+    fleetGet: async () => ({
+      provider: 'adspower',
+      selectedEnvId: 'ads-p1',
+      railCollapsed: false,
+      environments: [{
+        envId: 'ads-p1',
+        kind: 'adspower',
+        profileId: 'p1',
+        name: '运营重点号',
+        nameSource: 'manual',
+        platform: 'facebook',
+        status,
+      }],
+    }),
+    adsStatus: async () => ({ ok: true }),
+    adsListProfiles: async () => ({
+      ok: true,
+      profiles: [{
+        userId: 'p1',
+        name: 'AdsPower 旧环境名',
+        serialNumber: '1',
+        groupName: '',
+        proxy: '无代理',
+        platform: 'facebook',
+      }],
+    }),
+    adsGetEnvProxy: async (args: Record<string, unknown>) => {
+      proxyReads.push(args);
+      return { ok: true, noProxy: true, proxy: { proxyType: 'no_proxy' } };
+    },
+  }, {
+    adsProfileId: 'p1',
+    adsProfileName: '运营重点号',
+    railCollapsed: false,
+    environments: [{
+      profileId: 'p1',
+      name: '运营重点号',
+      nameSource: 'manual',
+      platform: 'facebook',
+    }],
+  });
+  await tick();
+  await tick();
+
+  (w.document.querySelector('#rail-add') as HTMLButtonElement).click();
+  await tick();
+  const railName = w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-name')?.textContent;
+  const managementName = w.document.querySelector('.ads-env-item .env-name');
+  assert.equal(railName, '运营重点号');
+  assert.equal(managementName?.lastChild?.textContent, '运营重点号');
+  assert.doesNotMatch(managementName?.textContent || '', /AdsPower 旧环境名/);
+
+  const batchToggle = w.document.querySelector('#ads-batch-proxy-toggle') as HTMLButtonElement;
+  batchToggle.click();
+  const initialCheck = w.document.querySelector('.ads-env-check') as HTMLInputElement;
+  assert.equal(initialCheck.getAttribute('aria-label'), '选择 运营重点号');
+  initialCheck.click();
+  const batchProxyText = w.document.querySelector('#ads-batch-proxy-text') as HTMLTextAreaElement;
+  batchProxyText.value = '127.0.0.1:8080';
+  batchProxyText.dispatchEvent(new w.Event('input', { bubbles: true }));
+  await tick();
+  await tick();
+  assert.match(w.document.querySelector('#ads-batch-proxy-preview')?.textContent || '', /运营重点号 → 127\.0\.0\.1:8080/);
+
+  (w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-name') as HTMLElement)
+    .dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+  const nicknameInput = w.document.querySelector('.rail-name-editor') as HTMLInputElement;
+  nicknameInput.value = '运营重点号二';
+  nicknameInput.dispatchEvent(new w.KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+  await tick();
+  await tick();
+  assert.equal(
+    w.document.querySelector('.ads-env-item .env-name')?.lastChild?.textContent,
+    '运营重点号二',
+    '环境管理已打开时也要随人工昵称保存结果重绘',
+  );
+  assert.equal(
+    w.document.querySelector('.ads-env-check')?.getAttribute('aria-label'),
+    '选择 运营重点号二',
+  );
+  assert.match(
+    w.document.querySelector('#ads-batch-proxy-preview')?.textContent || '',
+    /运营重点号二 → 127\.0\.0\.1:8080/,
+    '批量代理预览已生成时也要同步刷新昵称',
+  );
+  assert.doesNotMatch(w.document.querySelector('#ads-batch-proxy-preview')?.textContent || '', /运营重点号 →/);
+
+  batchToggle.click();
+  (w.document.querySelector('.ads-env-proxy') as HTMLButtonElement).click();
+  await tick();
+  assert.equal(proxyReads.length, 1);
+  assert.equal(proxyReads[0]?.userId, 'p1', '展示昵称不得进入代理动作寻址');
+  assert.equal(w.document.querySelector('#proxy-pop-env')?.textContent, '· 运营重点号二');
+});
+
 test('环境昵称编辑支持 Escape 取消、空值清除人工名恢复系统名与失焦提交', async () => {
   const saved: Array<{ profileId: string; nickname: string }> = [];
   const { w } = await boot({

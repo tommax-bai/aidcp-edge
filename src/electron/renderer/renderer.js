@@ -5736,6 +5736,10 @@ function makeRailRow(row) {
 function refreshEnvironmentIdentityAnchors(envId) {
   fleetView.lastRailSig = '';
   renderRail();
+  if (lastProfiles.length > 0 && fields.envAddPanel?.classList.contains('open')) {
+    populateEnvs(lastProfiles);
+    if (batchProxyMode) void refreshBatchProxyPreview();
+  }
   if (!envId || fleetView.selected !== envId) return;
   const env = fleetView.envs.get(envId);
   const status = env && effectiveEnvironmentStatus(env, env.status || currentStatus);
@@ -6634,9 +6638,11 @@ async function probeAds() {
 // 与该环境的平台（platform，来自其 remark；同步进 settings 供启动注入 AIDCP_PLATFORM）。
 // 多环境（edge-multi-environment-fleet）：选中即**加入运行花名册**（多选累积）；已在花名册的成员
 // 再点只切换当前值、诚实提示已加入，MUST NOT 重复出现两次（防 edgeId 撞车）。
-function selectProfile(userId, itemEl, profileName, platform) {
+// profileName 保留 AdsPower 原始环境名用于新成员入册；displayName 仅供当前客户端界面提示。
+function selectProfile(userId, itemEl, profileName, platform, displayName = profileName) {
+  const label = displayName || profileName || userId;
   settingsUi.adsProfile.value = userId;
-  selectedProfileName = profileName || '';
+  selectedProfileName = displayName || profileName || '';
   selectedPlatform = normPlatform(platform);
   let added = false;
   if (userId && !rosterHas(userId)) {
@@ -6644,7 +6650,7 @@ function selectProfile(userId, itemEl, profileName, platform) {
     if (lastAssignmentScoped) clientRosterExcludedEnvIds.delete(userId);
     added = true;
   } else if (userId) {
-    setEnvMsg(`「${profileName || userId}」已加入。`, false);
+    setEnvMsg(`「${label}」已加入。`, false);
   }
   updateProfileDisplay();
   settingsUi.adsEnvList.querySelectorAll('.ads-env-item').forEach((el) => el.classList.remove('selected'));
@@ -6652,11 +6658,11 @@ function selectProfile(userId, itemEl, profileName, platform) {
   refreshRosterMarks();
   // 加入即落盘（根治「加入后左栏不显示」）：main 据此 syncEnvHandles + 广播花名册 → 左栏立刻出现该环境的离线行。
   if (added) {
-    setEnvMsg(`已加入「${profileName || userId}」，在左栏可见并可启动。`, false);
+    setEnvMsg(`已加入「${label}」，在左栏可见并可启动。`, false);
     const persisted = persistRoster();
     void persisted.then((saved) => {
       if (saved && saved.saveOk === false) {
-        setEnvMsg(`已移入「${profileName || userId}」（本次生效），但写盘失败：${saved.saveError || '未知错误'}。重启后可能丢失。`, true);
+        setEnvMsg(`已移入「${label}」（本次生效），但写盘失败：${saved.saveError || '未知错误'}。重启后可能丢失。`, true);
       }
     });
     return persisted;
@@ -6845,6 +6851,30 @@ function profileRuntimeForManagement(userId) {
   return { active: false, label: '状态未知' };
 }
 
+function environmentManagementDisplayName(profile, knownMember) {
+  const profileId = String((profile && profile.userId) || '').trim();
+  const member = knownMember || roster.find((item) => item.profileId === profileId);
+  const fleetEnvironment = authoritativeFleetEnvironmentForProfile(profileId);
+  const rawName = String((profile && (profile.name || profile.username)) || '').trim();
+  const candidate = fleetEnvironment
+    ? {
+      ...fleetEnvironment,
+      status: effectiveEnvironmentStatus(fleetEnvironment, fleetEnvironment.status),
+    }
+    : {
+      ...(member || {}),
+      envId: profileId ? `ads-${profileId}` : '',
+      profileId,
+    };
+  if (member && member.nameSource === 'manual') {
+    candidate.name = member.name;
+    candidate.nameSource = 'manual';
+  } else if (!candidate.name && rawName) {
+    candidate.name = rawName;
+  }
+  return resolveEnvironmentDisplayName(candidate).name || rawName || profileId || '(未命名)';
+}
+
 function profileActiveForProxy(userId) {
   return profileRuntimeForManagement(userId).active;
 }
@@ -6990,7 +7020,7 @@ async function refreshBatchProxyPreview() {
     const sample = userIds.slice(0, 4).map((userId, index) => {
       const profile = profileById.get(userId);
       const proxy = proxies[index % proxies.length];
-      return `${profile && profile.name ? profile.name : userId} → ${proxy.proxyHost}:${proxy.proxyPort}`;
+      return `${profile ? environmentManagementDisplayName(profile) : userId} → ${proxy.proxyHost}:${proxy.proxyPort}`;
     });
     const reusedCount = Math.max(0, userIds.length - proxies.length);
     const reuse = reusedCount > 0 ? ` · 其中 ${reusedCount} 个环境复用代理` : '';
@@ -7067,7 +7097,7 @@ fields.adsBatchProxySave?.addEventListener('click', async () => {
 
 // 每行删除按钮：点两次确认（第一次「删」→「确认删除?」armed 态，4s 自动收回；第二次才真删）。
 // 删除不可恢复（若已登录账号其登录态一并丢失）——故绝不一次点就删、绝不自动/批量（C3 放宽为 UI 确认删）。
-function makeDeleteBtn(prof) {
+function makeDeleteBtn(prof, displayName) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'ads-env-del';
@@ -7088,23 +7118,23 @@ function makeDeleteBtn(prof) {
       btn.textContent = cleanupPending ? '确认继续清理?' : '确认删除?';
       btn.classList.add('armed');
       btn.title = cleanupPending
-        ? `继续核对「${prof.name || prof.userId}」的 Edge 清密文结果；Cloud 确认前不会物理删除`
-        : `永久删除「${prof.name || prof.userId}」，不可恢复；视频号环境会先撤权并清除 Edge 登录密文`;
+        ? `继续核对「${displayName}」的 Edge 清密文结果；Cloud 确认前不会物理删除`
+        : `永久删除「${displayName}」，不可恢复；视频号环境会先撤权并清除 Edge 登录密文`;
       timer = setTimeout(disarm, 4000);
       return;
     }
     disarm();
     if (!window.aidcpEdge || typeof window.aidcpEdge.adsDeleteEnv !== 'function') return;
     btn.disabled = true;
-    setEnvMsg(`正在删除「${prof.name || prof.userId}」…`, false);
+    setEnvMsg(`正在删除「${displayName}」…`, false);
     try {
       const r = await window.aidcpEdge.adsDeleteEnv({ ...formAdsOpts(), userId: prof.userId });
       if (r && r.ok && r.cleanupPending) {
-        setEnvMsg(r.message || `已撤销「${prof.name || prof.userId}」的访问，等待设备确认清理。`, false);
+        setEnvMsg(r.message || `已撤销「${displayName}」的访问，等待设备确认清理。`, false);
         btn.disabled = false;
         await refreshEnvs({ suppressAutoJoin: true });
       } else if (r && r.ok) {
-        setEnvMsg(`已删除环境「${prof.name || prof.userId}」。`, false);
+        setEnvMsg(`已删除环境「${displayName}」。`, false);
         // 删除云端 profile 成功后一并把它从本地运行花名册移出——否则本地残留成「谁都删不掉」的孤儿：
         // 移出按钮只在云端实时列表里的环境行上出现，profile 一删该行随即消失、再无移除入口（刷新剔孤儿是补救）。
         if (rosterHas(prof.userId)) removeFromRoster(prof.userId, { remember: false });
@@ -7145,6 +7175,7 @@ function populateEnvs(profiles, allowAutoJoin = false) {
   for (const prof of profiles) {
     // 平台显示优先级：花名册成员的人工标注（settings 持久化）> 列表推断（remark 权威 / 兜底信号）。
     const member = roster.find((m) => m.profileId === prof.userId);
+    const displayName = environmentManagementDisplayName(prof, member);
     const displayPlat = normPlatform(member ? member.platform : prof.platform);
     const inferred = !member && prof.platformSource && prof.platformSource !== 'remark';
     const runtime = profileRuntimeForManagement(prof.userId);
@@ -7157,7 +7188,7 @@ function populateEnvs(profiles, allowAutoJoin = false) {
       const check = document.createElement('input');
       check.type = 'checkbox';
       check.className = 'ads-env-check';
-      check.setAttribute('aria-label', `选择 ${prof.name || prof.userId}`);
+      check.setAttribute('aria-label', `选择 ${displayName}`);
       check.checked = batchProxySelectedIds.has(prof.userId);
       check.disabled = batchDisabled;
       check.title = batchDisabled ? '该环境正在使用或清理中，请先关闭后再修改代理' : '选择该环境';
@@ -7182,7 +7213,7 @@ function populateEnvs(profiles, allowAutoJoin = false) {
         : '平台由环境信息推断；如不对可点「改平台」修正')
       : '该环境的运行平台';
     name.appendChild(platChip);
-    name.appendChild(document.createTextNode(prof.name || '(未命名)'));
+    name.appendChild(document.createTextNode(displayName));
     const meta = document.createElement('div');
     meta.className = 'env-meta';
     const bits = [];
@@ -7231,19 +7262,27 @@ function populateEnvs(profiles, allowAutoJoin = false) {
       joinBtn.textContent = '加入';
       joinBtn.addEventListener('click', (event) => {
         event.stopPropagation();
-        void selectProfile(prof.userId, item, prof.name, prof.platform);
+        void selectProfile(prof.userId, item, prof.name || prof.username || '', prof.platform, displayName);
       });
       item.appendChild(joinBtn);
     }
-    if (!batchProxyMode && !prof.offboardPending) item.appendChild(makePlatformBtn(prof, displayPlat));
-    if (!batchProxyMode && !prof.offboardPending) item.appendChild(makeProxyBtn(prof));
-    if (!batchProxyMode) item.appendChild(makeDeleteBtn(prof));
+    if (!batchProxyMode && !prof.offboardPending) item.appendChild(makePlatformBtn(prof, displayPlat, displayName));
+    if (!batchProxyMode && !prof.offboardPending) item.appendChild(makeProxyBtn(prof, displayName));
+    if (!batchProxyMode) item.appendChild(makeDeleteBtn(prof, displayName));
     if (!batchProxyMode && !prof.offboardPending) {
-      item.addEventListener('click', () => { void selectProfile(prof.userId, item, prof.name, member ? member.platform : prof.platform); });
+      item.addEventListener('click', () => {
+        void selectProfile(
+          prof.userId,
+          item,
+          prof.name || prof.username || '',
+          member ? member.platform : prof.platform,
+          displayName,
+        );
+      });
     }
     if (!batchProxyMode && prof.userId && prof.userId === current) {
       item.classList.add('selected');
-      currentSelected = prof.name || prof.userId;
+      currentSelected = displayName;
     }
     if (!firstItem) firstItem = item;
     list.appendChild(item);
@@ -7261,7 +7300,7 @@ function populateEnvs(profiles, allowAutoJoin = false) {
 // 显式改平台入口（edge-client-proxy-platform-persona-ux）：纠正无 remark 标注环境的误推断。
 // 人工选择写进花名册成员（settings 持久化）并覆盖推断；remark 有标注的环境同样可覆盖显示/启动平台
 // （启动注入以 settings 花名册为准）。非成员先就地改显示，加入花名册时随之持久化。
-function makePlatformBtn(prof, displayPlat) {
+function makePlatformBtn(prof, displayPlat, displayName) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'ads-env-plat-switch';
@@ -7276,13 +7315,13 @@ function makePlatformBtn(prof, displayPlat) {
     if (member) { member.platform = next; void persistRoster(); }
     if (settingsUi.adsProfile.value.trim() === prof.userId) selectedPlatform = next;
     refreshRosterMarks(); // lastProfiles 就地更新，重绘列表行
-    setEnvMsg(`已把「${prof.name || prof.userId}」标为 ${platformLabel(next)}${member ? '（已保存，下次启动生效）' : '（加入后随启动生效）'}。`, false);
+    setEnvMsg(`已把「${displayName}」标为 ${platformLabel(next)}${member ? '（已保存，下次启动生效）' : '（加入后随启动生效）'}。`, false);
   });
   return btn;
 }
 
 // 每行「代理」编辑入口：点击后只按该环境精确读取完整配置（密码仅当前内存态），再经受限 user/update 保存。
-function makeProxyBtn(prof) {
+function makeProxyBtn(prof, displayName) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'ads-env-proxy';
@@ -7295,7 +7334,7 @@ function makeProxyBtn(prof) {
       return;
     }
     btn.disabled = true;
-    setEnvMsg(`正在读取「${prof.name || prof.userId}」的代理配置…`, false);
+    setEnvMsg(`正在读取「${displayName}」的代理配置…`, false);
     try {
       const r = await window.aidcpEdge.adsGetEnvProxy({ ...formAdsOpts(), userId: prof.userId });
       if (!r || !r.ok) {
@@ -7306,7 +7345,7 @@ function makeProxyBtn(prof) {
         setEnvMsg('目标环境已不在当前列表，已丢弃本次代理读取结果。', true);
         return;
       }
-      openProxyPop(prof, { ...(r.proxy || {}), noProxy: r.noProxy === true });
+      openProxyPop(prof, { ...(r.proxy || {}), noProxy: r.noProxy === true }, displayName);
       if (r.repairRequired) {
         setProxyPopMsg(r.readWarning || '当前代理配置无法读取，请重新填写并覆盖。', true);
       }
@@ -7680,10 +7719,10 @@ async function parseProxyQuickPaste() {
   fields.proxyPopPass.value = proxy.proxyPassword || '';
   setProxyPopMsg('已解析并填入，可继续修改后保存。', false);
 }
-function openProxyPop(prof, proxyConfig) {
+function openProxyPop(prof, proxyConfig, displayName) {
   if (!fields.proxyPop) return;
   proxyQuickParseEpoch += 1;
-  proxyPopTarget = { userId: prof.userId, name: prof.name || prof.userId };
+  proxyPopTarget = { userId: prof.userId, name: displayName };
   if (fields.proxyPopEnv) fields.proxyPopEnv.textContent = `· ${proxyPopTarget.name}`;
   // 当前配置如实呈现（含 UI 下拉表达不了的代理厂商类型——保存会整体替换，这行让用户知道在替换什么）。
   if (fields.proxyPopCurrent) fields.proxyPopCurrent.textContent = `当前：${prof.proxy || '无代理配置'}`;
