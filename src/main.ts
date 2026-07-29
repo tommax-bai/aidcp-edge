@@ -466,6 +466,10 @@ async function main(): Promise<void> {
   // 平台无关的命令会话句柄（EdgeBrowseSession 契约）。小红书与 Facebook 现在都由 Native 浏览会话承接；
   // 迁前那条按平台分叉到 JavaScript Facebook 会话的装配已随恒假块一并删除，别按旧注释去找它。
   let browse: EdgeBrowseSession | undefined;
+  // 同一个会话对象的 Native 具体类型句柄。`EdgeBrowseSession` 契约里没有周期观测的三个方法
+  // （suspendObservation / resumeObservation / observationStatus），而生命周期托管要用它们。
+  // 在装配处一并赋上，避免为此去动平台无关的 `EdgeBrowseSession` 契约。
+  let nativeBrowse: NativeBrowseSession | undefined;
   // 关浏览器前等浏览循环排空的预算。有界是刚性要求：某个动作卡住时，无界等待会把冷待机 / 退出本身卡死
   // （浏览器关不掉 = 待机失效、回收挂僵尸），比原 bug 更糟。超时即诚实告警后照常关。
   const BROWSE_DRAIN_MS = Math.max(0, Number(process.env.AIDCP_BROWSE_DRAIN_MS ?? 5_000) || 5_000);
@@ -1039,7 +1043,7 @@ async function main(): Promise<void> {
     console.warn(`[aidcp-edge] platform=${platformDriver.platform} does not support browse; NativeBrowseSession will not start.`);
   }
   if (autoBrowse) {
-    browse = new NativeBrowseSession({
+    const nativeSession = new NativeBrowseSession({
       runtime: nativePageRuntime,
       client,
       startupId: browserStartupId,
@@ -1049,7 +1053,8 @@ async function main(): Promise<void> {
       logger: (message) => console.log(message),
       commitWindow: browseGuard,
     });
-    const nativeBrowse = browse;
+    browse = nativeSession;
+    nativeBrowse = nativeSession;
     const routeNativeCommand = (env: Envelope): void => {
       if (handleBrowserAbsentCommand(env)) return;
       const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
@@ -1059,7 +1064,7 @@ async function main(): Promise<void> {
         return;
       }
       if (ownedTaskId) taskCoordinator.touch(ownedTaskId);
-      nativeBrowse.onCloudCommand(env).catch((err) => {
+      nativeSession.onCloudCommand(env).catch((err) => {
         console.error(`[aidcp-edge] 执行 Native 命令 ${env.type} 失败:`, err);
       });
     };
@@ -1151,6 +1156,10 @@ async function main(): Promise<void> {
       // 停留等待里，醒来后照样摸页面——那时浏览器已被下面 killAndConfirmDead() 杀掉，调用直接打在死 CDP 上。
       // 用 stopAndWait（非 closeAndWait）：待机是**可回来的**，close() 的 closing 是终态、唤醒后就再也起不来了。
       reportBrowseDrainTimeout((await browse?.stopAndWait(BROWSE_DRAIN_MS)) ?? true, 'cold_standby');
+      // 周期阻断观测必须显式**置暂停**，不能只靠 stopAndWait 的停表：一个在途的探针跑完后会在
+      // `.finally` 里重新武装定时器（会话侧的 scheduleProbe 不查「已请求停止」），于是待机期探针会
+      // 对着已 detach 的 CDP 一路空轮询。suspendObservation 幂等，唤醒时由 resumeObservation 对称恢复。
+      nativeBrowse?.suspendObservation('cold_standby');
       // 释放浏览器层：断开 CDP 并进入「浏览器缺席」态。必须**在杀浏览器之前**——否则 WS 被动断开会被
       // 当成意外掉线、触发有界重连，最后把连接对象搞成一个 recovering/unavailable 的僵尸（今天的 bug）。
       // 释放后任何页面命令都会响亮失败，绝不静默假成功。
@@ -1218,6 +1227,9 @@ async function main(): Promise<void> {
             `[aidcp-edge] ✗ 唤醒后身份确认失败（${decision.reason}）：浏览器起来了但读不出登录身份。` +
               '如实判唤醒失败、留在待机态（可再次唤醒），绝不以默认账号开跑。',
           );
+          // 这条路径要把浏览器杀回槽位，在途发布必然跟着死。与下面「账号已变」分支同口径：先诚实回执，
+          // 否则审批 / 通知侧永远等不到结果（云端无限期挂起等一个再也不会来的回执）。
+          failInFlightPublishesHonestly('browser_wake_identity_failed');
           session.detach();
           proxyRuntime?.suspendGeneration('wake_identity_failed');
           await chrome?.killAndConfirmDead().catch(() => undefined);
@@ -1242,6 +1254,8 @@ async function main(): Promise<void> {
         clearColdStandbyCloudRetry();
         const wakePacing = client.getPacing();
         browse?.applyPacingSnapshot(wakePacing?.opFloorsMs, wakePacing?.tempo);
+        // 与 enterStandby 的 suspendObservation('cold_standby') 对称：整批重启周期观测（幂等）。
+        nativeBrowse?.resumeObservation();
         if (resumeAutomation) {
           browse?.start().catch((err) => console.error('[aidcp-edge] 唤醒后浏览会话异常:', err));
         }
@@ -1326,6 +1340,13 @@ async function main(): Promise<void> {
     failInFlightPublishesHonestly(reason);
     taskCoordinator.reset(reason);
     browse?.discardQueuedCloudCommands(reason);
+    // 周期观测停在**这里**、而不是在冷待机成功路径上，理由是决定性的：本函数末尾请求的冷待机
+    // 在「有活跃租约」或「复用外部浏览器」时会被 enterStandby 直接拒绝（return false），而
+    // coldStandbyActive 仍是 false —— 此时连接已经是终态、待机又没进去，把停手挂在待机路径上就会漏，
+    // 探针对着一条已死的连接一路空轮询到进程退出。本函数是 cdp.unrecoverable 与
+    // cdp.control_unavailable 两条终态路径的共同收口，且自带 executorFailureTransitioning 去重闩，
+    // 与 suspendObservation 的幂等叠加不会重复打日志。**别顺手把它挪进 enterStandby。**
+    nativeBrowse?.suspendObservation(reason);
     sendLifecycleIpc({ type: 'lifecycle.executor_failed', reason });
     void lifecycle.request('standby').finally(() => {
       executorFailureTransitioning = false;
@@ -1367,6 +1388,15 @@ async function main(): Promise<void> {
       return;
     }
     isolateExecutorFailure('cdp_unrecoverable');
+  });
+
+  // 重连成功 → 整批重启周期观测（resumeObservation 幂等：没停过是空操作，停过则干净恢复）。
+  // 少了这一半，任何一次「连接掉了又回来」都会让观测永久哑火——外部看到的是「一切正常」，
+  // 实际是传感层全灭（静默假成功）。
+  session.cdp.on('cdp.reconnected', () => {
+    // 待机期由 wakeFromStandby 统一恢复，此处不抢：那时浏览器还没重建，起了也只是对空页面轮询。
+    if (coldStandbyActive) return;
+    nativeBrowse?.resumeObservation();
   });
 
   process.on('SIGINT', () => void shutdown({ exitCode: 0, recycle: false, reason: 'SIGINT' }));
