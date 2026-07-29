@@ -1603,6 +1603,68 @@ mod tests {
         }
     }
 
+    /// 反证「滚轮帧背靠背派发」：帧间延迟必须有**正的下界**，且一次手势内必须散开。
+    ///
+    /// 上面那条形状断言只查「落在上下界常量之间」——把上下界一起改成 0 它照过（`0..=0` 含 0），
+    /// 而滚轮就退化成零延迟的一次性投递：整段位移在同一毫秒内发完，帧数还在、时序特征全没。
+    /// 这里的判据取自**人手**、不引用被测常量：滚一次滚轮的两帧之间至少隔着 8ms
+    /// （远低于实现的量级，只把 0 挡在外面），且同一次手势里的帧间隔不可能全等
+    /// （极差 ≥ 10ms，实测每个种子都在 23ms 以上）。种子固定，故本条零随机性。
+    #[test]
+    fn wheel_frame_delays_keep_a_floor_and_are_not_constant() {
+        const HUMAN_FLOOR_MS: u64 = 8;
+        const MIN_SPREAD_MS: u64 = 10;
+        for seed in 1..=64 {
+            let mut rhythm = WheelRhythm::from_seed(seed);
+            let gesture = generate_wheel_gesture(650.0, &mut rhythm);
+            let delays: Vec<u64> = gesture.frames.iter().map(|frame| frame.delay_ms).collect();
+            let floor = delays.iter().copied().min().expect("wheel frame");
+            let ceiling = delays.iter().copied().max().expect("wheel frame");
+            assert!(
+                floor >= HUMAN_FLOOR_MS,
+                "滚轮帧间延迟失去了下界（seed={seed} 最小 {floor}ms）：零延迟等于一次性投递"
+            );
+            assert!(
+                ceiling - floor >= MIN_SPREAD_MS,
+                "滚轮帧间延迟塌成了等间隔（seed={seed} 极差 {}ms）：dt 方差为 0 本身是机器特征",
+                ceiling - floor
+            );
+        }
+    }
+
+    /// 反证「抖动塌成恒定间隔」：围绕中心值的停顿采样必须真的散开。
+    ///
+    /// 分散度归零时采样恒等于中心值——每两个动作之间停一样久，这正是拟人化本来要取代的固定间隔，
+    /// 而所有「≤ 上界」类断言对它一声不吭。判据是分布性的、且不引用被测常量：256 次采样必须
+    /// 出现多种取值、极差至少到中心值的一成，同时保住一个正的下界。
+    /// 实测最坏一轮为「171 种取值 / 极差 451ms / 下界 220ms」，门槛离它们各有一个数量级。
+    #[test]
+    fn sampled_pauses_spread_around_their_center_instead_of_repeating_it() {
+        const CENTER_MS: f64 = 400.0;
+        const SAMPLES: usize = 256;
+        const MIN_DISTINCT: usize = 16;
+        const MIN_SPREAD_MS: u64 = 40;
+        const HUMAN_FLOOR_MS: u64 = 100;
+        let samples: Vec<u64> = (0..SAMPLES).map(|_| sample_pause_ms(CENTER_MS)).collect();
+        let floor = samples.iter().copied().min().expect("pause sample");
+        let ceiling = samples.iter().copied().max().expect("pause sample");
+        let distinct: std::collections::HashSet<u64> = samples.iter().copied().collect();
+        assert!(
+            distinct.len() >= MIN_DISTINCT,
+            "停顿采样只剩 {} 种取值：抖动没了，动作间隔就是恒定的机器节拍",
+            distinct.len()
+        );
+        assert!(
+            ceiling - floor >= MIN_SPREAD_MS,
+            "停顿采样的极差只有 {}ms：分散度被压没了",
+            ceiling - floor
+        );
+        assert!(
+            floor >= HUMAN_FLOOR_MS,
+            "停顿采样失去了下界（最小 {floor}ms）：停顿归零等于动作背靠背"
+        );
+    }
+
     /// 反证「瞬移」：一次点击的移动帧必须多于 1 帧，且末帧落在目标的有界抖动范围内。
     #[test]
     fn pointer_path_is_multi_frame_and_lands_within_bounded_jitter() {
@@ -1952,6 +2014,100 @@ mod tests {
         let tight = plan_typing_step(2_000, 2_000, 60);
         assert!(tight.chunk_size >= roomy.chunk_size);
         assert!(tight.pause_center_ms <= roomy.pause_center_ms);
+    }
+
+    /// 打字节奏的取样文本：汉字 / 拉丁 / 空白 / 标点各占一部分，
+    /// 让「标点与空白后停得更久」这一支也进入样本。
+    const TYPING_RHYTHM_SAMPLE_TEXT: &str = "今天天气不错，出门走走。abc def! ok?";
+
+    /// 反证「零延迟爆发式打字」：逐字飞行间隔必须有**正的下界**，且必须散开。
+    ///
+    /// 这一族缺口的形状是：所有触及停顿量级的断言都是上界（`停顿 × 次数 ≤ 预算的一半`）或
+    /// 自指（`中心值 ≤ 上限常量`），把间隔恒定成 0 时它们全部照过、回执还一路诚实地报「写完了」。
+    /// 判据取自**人**、不取自实现常量：人的两次击键之间至少隔着几十毫秒（这里取 25ms 这个
+    /// 所有人都远远超过的下界），且 1024 次击键不可能落在同一个间隔上（实测最坏 254 种取值）。
+    #[test]
+    fn typing_flight_rhythm_keeps_a_floor_and_a_spread() {
+        const SAMPLES: usize = 1_024;
+        const HUMAN_FLOOR_MS: u64 = 25;
+        const MIN_DISTINCT: usize = 32;
+        let text: Vec<char> = TYPING_RHYTHM_SAMPLE_TEXT.chars().collect();
+        let mut rhythm = KeyboardRhythm::new();
+        let delays: Vec<u64> = (0..SAMPLES)
+            .map(|index| rhythm.flight_delay_ms(text[index % text.len()]))
+            .collect();
+        let floor = delays.iter().copied().min().expect("flight sample");
+        assert!(
+            floor >= HUMAN_FLOOR_MS,
+            "逐字间隔失去了下界（最小 {floor}ms）：字间零延迟就是机器爆发式写入"
+        );
+        let distinct: std::collections::HashSet<u64> = delays.iter().copied().collect();
+        assert!(
+            distinct.len() >= MIN_DISTINCT,
+            "逐字间隔塌成了 {} 种取值：等间隔本身是机器特征",
+            distinct.len()
+        );
+    }
+
+    /// 反证「停顿被规划成 0」：预算宽裕时，块间停顿的中心值必须留住一个人类量级的下界。
+    ///
+    /// 与「不许超过剩余预算的一半」是**方向相反**的一条：那条是上界，`0 ≤ 任何预算的一半`
+    /// 恒成立，所以把停顿规划成 0 它一声不吭。下界只在**预算宽裕**的组合上断言 ——
+    /// 预算真的紧张时压缩停顿是设计（拿拟人化换「内容写得完」），不是退化。
+    #[test]
+    fn the_pause_plan_keeps_a_human_floor_when_the_budget_is_roomy() {
+        const HUMAN_FLOOR_MS: u64 = 60;
+        for (chars, budget_ms) in [
+            (1_usize, 30_000_u64),
+            (24, 20_000),
+            (200, 20_000),
+            (2_000, 60_000),
+        ] {
+            let step = plan_typing_step(chars, budget_ms, 60);
+            assert!(
+                step.pause_center_ms >= HUMAN_FLOOR_MS,
+                "{chars} 字 / {budget_ms}ms 预算宽裕，停顿中心值却只有 {}ms：拟人化被悄悄关掉了",
+                step.pause_center_ms
+            );
+        }
+    }
+
+    /// 反证「封顶把节奏压扁」：预算宽裕的逐字档里，停顿封顶不得咬住键盘节奏的长尾。
+    ///
+    /// 真人打字带偶发的长停顿（想词、看屏、切输入法）；把每次停顿都压到中心值附近，
+    /// 时序特征就退回匀速机器 —— 而这一步既不报错也不降级，回执照报「已写入、已确认」。
+    /// 判据是分布性的、且不引用被测常量：1024 次逐字停顿里必须有一批越过 260ms
+    /// （实测常态约 100 次、最坏一轮 66 次，取 16 次做门槛，远离随机涨落）。
+    #[test]
+    fn per_char_pauses_keep_the_long_tail_of_a_real_typist() {
+        const SAMPLES: usize = 1_024;
+        const HUMAN_FLOOR_MS: u64 = 25;
+        const LONG_PAUSE_MS: u64 = 260;
+        const MIN_LONG_PAUSES: usize = 16;
+        let step = plan_typing_step(24, 20_000, 60);
+        assert_eq!(
+            step.chunk_size, 1,
+            "本条守卫针对逐字档，先钉住它确实是逐字档"
+        );
+        let text: Vec<char> = TYPING_RHYTHM_SAMPLE_TEXT.chars().collect();
+        let mut rhythm = KeyboardRhythm::new();
+        let delays: Vec<u64> = (0..SAMPLES)
+            .map(|index| step.delay_ms(&mut rhythm, text[index % text.len()]))
+            .collect();
+        let floor = delays.iter().copied().min().expect("pause sample");
+        assert!(
+            floor >= HUMAN_FLOOR_MS,
+            "逐字停顿失去了下界（最小 {floor}ms）：字间零延迟就是机器爆发式写入"
+        );
+        let long_pauses = delays
+            .iter()
+            .filter(|value| **value > LONG_PAUSE_MS)
+            .count();
+        assert!(
+            long_pauses >= MIN_LONG_PAUSES,
+            "{SAMPLES} 次逐字停顿里只有 {long_pauses} 次越过 {LONG_PAUSE_MS}ms：\
+             封顶把人的长停顿削平了，节奏退回匀速机器"
+        );
     }
 
     /// 归尾探针的读数：异常 / 结构缺失 = **这一轮没读到**，绝不冒充「读到了坏消息」。
