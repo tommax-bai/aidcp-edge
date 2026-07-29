@@ -1,21 +1,28 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 
 const require = createRequire(import.meta.url);
+const electronMainSource = readFileSync(new URL('../../src/electron/main.cjs', import.meta.url), 'utf8');
 const standby = require('../../src/electron/browser-cold-standby.cjs') as {
-  DEFAULT_BROWSER_COLD_STANDBY_MIN_WAIT_MS: number;
+  MIN_VALID_BROWSER_STANDBY_WAIT_MS: number;
   DEFAULT_BROWSER_COLD_STANDBY_WARMUP_MS: number;
   DEFAULT_BROWSER_COLD_STANDBY_MIN_HOLD_MS: number;
   normalizeColdStandbySettings: (settings?: Record<string, unknown>, env?: Record<string, string | undefined>) => {
-    enabled: boolean; minWaitMs: number; warmupMs: number; minHoldMs: number;
+    enabled: boolean; warmupMs: number; minHoldMs: number;
   };
+  omitLegacyColdStandbyMinWaitSetting: (settings?: Record<string, unknown>) => Record<string, unknown>;
   normalizeBrowserStandbyHint: (input: unknown) => Record<string, unknown> | null;
+  classifyBrowserStandbyHintUpdate: (
+    input: unknown,
+    state?: { active?: boolean; pending?: boolean; hasCachedHint?: boolean },
+  ) => { action: 'apply' | 'retain_active' | 'wake_pending' | 'clear_awake' | 'ignore'; hint: Record<string, unknown> | null };
   shouldEnterColdStandby: (input: {
     status: Record<string, unknown>;
     flags: Record<string, unknown>;
     hint: unknown;
-    settings: { enabled: boolean; minWaitMs: number; warmupMs: number; minHoldMs?: number };
+    settings: { enabled: boolean; warmupMs: number; minHoldMs?: number };
     now: number;
     lastWokenAt?: number;
   }) => { ok: boolean; reason: string; remainingMs?: number; warmupMs?: number; wakeDelayMs?: number; holdRemainingMs?: number };
@@ -65,7 +72,7 @@ function flags(overrides: Record<string, unknown> = {}) {
 test('browser-cold-standby: settings default enabled and can be disabled by env', () => {
   const defaults = standby.normalizeColdStandbySettings({}, {});
   assert.equal(defaults.enabled, true);
-  assert.equal(defaults.minWaitMs, standby.DEFAULT_BROWSER_COLD_STANDBY_MIN_WAIT_MS);
+  assert.equal(Object.hasOwn(defaults, 'minWaitMs'), false);
   assert.equal(defaults.warmupMs, standby.DEFAULT_BROWSER_COLD_STANDBY_WARMUP_MS);
 
   const disabled = standby.normalizeColdStandbySettings({ browserColdStandbyEnabled: true }, {
@@ -79,7 +86,7 @@ test('browser-cold-standby: eligible safe resting session enters standby with wa
     status: status(),
     flags: flags(),
     hint: hint(),
-    settings: { enabled: true, minWaitMs: 20 * 60_000, warmupMs: 90_000 },
+    settings: { enabled: true, warmupMs: 90_000 },
     now,
   });
   assert.equal(decision.ok, true);
@@ -94,7 +101,7 @@ test('browser-cold-standby: disabled and unsafe states skip', () => {
       status: status(),
       flags: flags(),
       hint: hint(),
-      settings: { enabled: false, minWaitMs: 20 * 60_000, warmupMs: 90_000 },
+      settings: { enabled: false, warmupMs: 90_000 },
       now,
     }).reason,
     'disabled',
@@ -104,7 +111,7 @@ test('browser-cold-standby: disabled and unsafe states skip', () => {
       status: status({ overlayBlocked: true }),
       flags: flags(),
       hint: hint(),
-      settings: { enabled: true, minWaitMs: 20 * 60_000, warmupMs: 90_000 },
+      settings: { enabled: true, warmupMs: 90_000 },
       now,
     }).reason,
     'overlay_blocked',
@@ -114,7 +121,7 @@ test('browser-cold-standby: disabled and unsafe states skip', () => {
       status: status(),
       flags: flags({ closePending: true }),
       hint: hint(),
-      settings: { enabled: true, minWaitMs: 20 * 60_000, warmupMs: 90_000 },
+      settings: { enabled: true, warmupMs: 90_000 },
       now,
     }).reason,
     'closePending',
@@ -123,55 +130,120 @@ test('browser-cold-standby: disabled and unsafe states skip', () => {
 
 test('browser-cold-standby: malformed or short hints do not enter standby', () => {
   assert.equal(standby.normalizeBrowserStandbyHint({ ...hint(), reason: '' }), null);
+  const missingThresholdHint = { ...hint(), minWaitMs: undefined };
+  assert.equal(standby.normalizeBrowserStandbyHint(missingThresholdHint), null);
+  assert.equal(
+    standby.shouldEnterColdStandby({
+      status: status(),
+      flags: flags(),
+      hint: missingThresholdHint,
+      settings: { enabled: true, warmupMs: 90_000 },
+      now,
+    }).reason,
+    'invalid_hint',
+  );
   assert.equal(
     standby.shouldEnterColdStandby({
       status: status(),
       flags: flags(),
       hint: hint({ wakeAt: now + 5 * 60_000, waitMs: 5 * 60_000 }),
-      settings: { enabled: true, minWaitMs: 20 * 60_000, warmupMs: 90_000 },
+      settings: { enabled: true, warmupMs: 90_000 },
       now,
     }).reason,
     'short_wait',
   );
 });
 
-// ─── change standby-covers-idle-waits ────────────────────────────────────────────────────
-
-test('browser-cold-standby: 默认门槛 5 分钟，且 MUST 与云端那份逐字一致', () => {
-  assert.equal(standby.DEFAULT_BROWSER_COLD_STANDBY_MIN_WAIT_MS, 5 * 60_000);
-
-  // **这是「只改一端不生效且无任何报错」那个陷阱的唯一机械防线。**
-  // shouldEnterColdStandby 取的是 max(本地门槛, 云端提示里的门槛)：只把云端调到 5 分钟、边缘仍是 20 分钟时，
-  // 边缘会静默按 20 分钟拦下所有 5–20 分钟的等待——改动完全不生效，却不会有任何报错或告警。
-  // 云端那份由 aidcp-cloud 的 test/comm/browser-standby.test.ts 断言同为 5 分钟。
-  const cfg = standby.normalizeColdStandbySettings({}, {});
-  assert.equal(cfg.minWaitMs, 5 * 60_000);
+test('browser-cold-standby: non-positive or sub-second Cloud thresholds are invalid', () => {
+  assert.equal(standby.MIN_VALID_BROWSER_STANDBY_WAIT_MS, 1_000);
+  for (const minWaitMs of [0, 999]) {
+    const invalid = hint({ minWaitMs });
+    assert.equal(standby.normalizeBrowserStandbyHint(invalid), null);
+    assert.equal(
+      standby.shouldEnterColdStandby({
+        status: status(),
+        flags: flags(),
+        hint: invalid,
+        settings: { enabled: true, warmupMs: 90_000 },
+        now,
+      }).reason,
+      'invalid_hint',
+    );
+  }
+  assert.notEqual(standby.normalizeBrowserStandbyHint(hint({ minWaitMs: 1_000 })), null);
 });
 
-test('browser-cold-standby: 5 分钟等待现在够格待机（旧门槛 20 分钟会拦下它）', () => {
+test('browser-cold-standby: invalid snapshot update revokes only a not-yet-active cycle', () => {
+  assert.equal(standby.classifyBrowserStandbyHintUpdate(null, {}).action, 'ignore');
+  assert.equal(standby.classifyBrowserStandbyHintUpdate(null, { hasCachedHint: true }).action, 'clear_awake');
+  assert.equal(
+    standby.classifyBrowserStandbyHintUpdate(null, { pending: true, hasCachedHint: true }).action,
+    'wake_pending',
+  );
+  assert.equal(
+    standby.classifyBrowserStandbyHintUpdate(null, { active: true, hasCachedHint: true }).action,
+    'retain_active',
+  );
+  assert.equal(
+    standby.classifyBrowserStandbyHintUpdate(null, { pending: true, hasCachedHint: false }).action,
+    'ignore',
+    'manual browser-close pending state has no Cloud hint and must not be auto-woken',
+  );
+  assert.equal(standby.classifyBrowserStandbyHintUpdate(hint(), { active: true }).action, 'apply');
+});
+
+// ─── change make-cloud-standby-threshold-authoritative ───────────────────────────────────
+
+test('browser-cold-standby: 遗留本地 20 分钟与 Edge env 均不能覆盖 Cloud 5 分钟', () => {
+  const loaded = standby.omitLegacyColdStandbyMinWaitSetting({
+    browserColdStandbyEnabled: true,
+    browserColdStandbyMinWaitMs: 20 * 60_000,
+  });
+  const cfg = standby.normalizeColdStandbySettings(loaded, {
+    AIDCP_BROWSER_COLD_STANDBY_MIN_WAIT_MS: String(20 * 60_000),
+  });
+  assert.equal(Object.hasOwn(loaded, 'browserColdStandbyMinWaitMs'), false);
+  assert.equal(Object.hasOwn(cfg, 'minWaitMs'), false);
+
   const decision = standby.shouldEnterColdStandby({
     status: status(),
     flags: flags(),
     hint: hint({ wakeAt: now + 5 * 60_000, waitMs: 5 * 60_000, minWaitMs: 5 * 60_000 }),
-    settings: { enabled: true, minWaitMs: 5 * 60_000, warmupMs: 90_000, minHoldMs: 3 * 60_000 },
+    settings: cfg,
     now,
   });
   assert.equal(decision.ok, true);
   assert.equal(decision.remainingMs, 5 * 60_000);
-  // 净收益 = 门槛 − 热身：让出约 3.5 分钟，成本约 40s 的全局串行启动队列占用。
   assert.equal(decision.wakeDelayMs, 5 * 60_000 - 90_000);
 });
 
-test('browser-cold-standby: 云端门槛更大时取较大值（两端取 max，这正是那个陷阱）', () => {
+test('browser-cold-standby: legacy threshold is omitted from load/readback and cannot re-enter through save', () => {
+  const loaded = standby.omitLegacyColdStandbyMinWaitSetting({
+    provider: 'self',
+    browserColdStandbyMinWaitMs: 20 * 60_000,
+  });
+  const afterSavePatch = standby.omitLegacyColdStandbyMinWaitSetting({
+    ...loaded,
+    browserColdStandbyMinWaitMs: 60 * 60_000,
+  });
+  assert.deepEqual(loaded, { provider: 'self' });
+  assert.deepEqual(afterSavePatch, { provider: 'self' });
+  assert.doesNotMatch(electronMainSource, /browserColdStandbyMinWaitMs/);
+  assert.match(electronMainSource, /settings = omitLegacyColdStandbyMinWaitSetting\(\{ \.\.\.DEFAULT_SETTINGS, \.\.\.parsed \}\)/);
+  assert.match(electronMainSource, /const p = omitLegacyColdStandbyMinWaitSetting\(\{ \.\.\.\(patch \|\| \{\}\) \}\)/);
+  assert.match(electronMainSource, /settings = omitLegacyColdStandbyMinWaitSetting\(\{ \.\.\.settings, \.\.\.p \}\)/);
+});
+
+test('browser-cold-standby: 当前剩余等待只按 Cloud 门槛复核', () => {
   const decision = standby.shouldEnterColdStandby({
     status: status(),
     flags: flags(),
-    hint: hint({ wakeAt: now + 8 * 60_000, waitMs: 8 * 60_000, minWaitMs: 20 * 60_000 }), // 云端仍是旧门槛
-    settings: { enabled: true, minWaitMs: 5 * 60_000, warmupMs: 90_000, minHoldMs: 3 * 60_000 },
+    hint: hint({ wakeAt: now + 8 * 60_000, waitMs: 8 * 60_000, minWaitMs: 20 * 60_000 }),
+    settings: { enabled: true, warmupMs: 90_000, minHoldMs: 3 * 60_000 },
     now,
   });
   assert.equal(decision.ok, false);
-  assert.equal(decision.reason, 'short_wait', '边缘取 max → 8 分钟仍够不上云端那份 20 分钟');
+  assert.equal(decision.reason, 'short_wait');
 });
 
 test('browser-cold-standby: 最短持有时长——刚醒来的环境不得立刻再次待机', () => {
@@ -179,7 +251,7 @@ test('browser-cold-standby: 最短持有时长——刚醒来的环境不得立�
     status: status(),
     flags: flags(),
     hint: hint({ minWaitMs: 5 * 60_000 }),
-    settings: { enabled: true, minWaitMs: 5 * 60_000, warmupMs: 90_000, minHoldMs: 3 * 60_000 },
+    settings: { enabled: true, warmupMs: 90_000, minHoldMs: 3 * 60_000 },
     now,
     lastWokenAt: now - 30_000, // 30 秒前刚醒
   });
@@ -194,7 +266,7 @@ test('browser-cold-standby: 持有时长满足后恢复判定（不抖动，但�
     status: status(),
     flags: flags(),
     hint: hint({ minWaitMs: 5 * 60_000 }),
-    settings: { enabled: true, minWaitMs: 5 * 60_000, warmupMs: 90_000, minHoldMs: 3 * 60_000 },
+    settings: { enabled: true, warmupMs: 90_000, minHoldMs: 3 * 60_000 },
     now,
     lastWokenAt: now - 3 * 60_000, // 恰好满足
   });
@@ -206,7 +278,7 @@ test('browser-cold-standby: 从未唤醒过的环境不受最短持有时长约�
     status: status(),
     flags: flags(),
     hint: hint({ minWaitMs: 5 * 60_000 }),
-    settings: { enabled: true, minWaitMs: 5 * 60_000, warmupMs: 90_000, minHoldMs: 3 * 60_000 },
+    settings: { enabled: true, warmupMs: 90_000, minHoldMs: 3 * 60_000 },
     now,
     // lastWokenAt 缺省
   });
@@ -225,7 +297,7 @@ test('browser-cold-standby: 冻结账号的回访提示（小时级 wakeAt）正
       wakeAt: now + 6 * 3_600_000,
       minWaitMs: 5 * 60_000,
     }),
-    settings: { enabled: true, minWaitMs: 5 * 60_000, warmupMs: 90_000, minHoldMs: 3 * 60_000 },
+    settings: { enabled: true, warmupMs: 90_000, minHoldMs: 3 * 60_000 },
     now,
   });
   assert.equal(decision.ok, true);
@@ -243,7 +315,7 @@ test('browser-cold-standby: 排期外提示（source=session）与风控提示�
       wakeAt: now + 8 * 3_600_000,
       minWaitMs: 5 * 60_000,
     }),
-    settings: { enabled: true, minWaitMs: 5 * 60_000, warmupMs: 90_000, minHoldMs: 3 * 60_000 },
+    settings: { enabled: true, warmupMs: 90_000, minHoldMs: 3 * 60_000 },
     now,
   });
   assert.equal(decision.ok, true, 'session 来源必须被 normalizeBrowserStandbyHint 接受');
@@ -254,7 +326,7 @@ test('browser-cold-standby: 最短持有时长可关（设 0）', () => {
     status: status(),
     flags: flags(),
     hint: hint({ minWaitMs: 5 * 60_000 }),
-    settings: { enabled: true, minWaitMs: 5 * 60_000, warmupMs: 90_000, minHoldMs: 0 },
+    settings: { enabled: true, warmupMs: 90_000, minHoldMs: 0 },
     now,
     lastWokenAt: now - 1_000,
   });

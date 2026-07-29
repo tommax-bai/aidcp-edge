@@ -102,29 +102,38 @@ test('ui-event-lines: 标题未知时 submitted/published 行都不带 title（�
   assert.equal(published.publish?.code, '#83');
 });
 
-test('ui-event-lines: uiSnapshotToLines 全量快照 → identity + lastPublish 两行', () => {
+test('ui-event-lines: uiSnapshotToLines 全量快照 → data lines + standby authority update', () => {
   const lines = uiSnapshotToLines({
     account: { id: 'acc-1', nickname: '晚风手作' },
     lastPublish: { title: '上一篇', at: 1730000000000 },
   });
-  assert.equal(lines.length, 2);
-  const [identity, lastPublish] = lines.map(parseLine) as Array<Record<string, any>>;
+  assert.equal(lines.length, 3);
+  const [identity, lastPublish, browserStandby] = lines.map(parseLine) as Array<Record<string, any>>;
   assert.equal(identity.kind, 'identity');
   assert.deepEqual(identity.account, { id: 'acc-1', name: '晚风手作' });
   assert.equal(lastPublish.kind, 'lastPublish');
   assert.deepEqual(lastPublish.lastPublish, { title: '上一篇', at: 1730000000000 });
+  assert.equal(browserStandby.kind, 'browserStandby');
+  assert.equal(browserStandby.browserStandby, null);
 });
 
 test('ui-event-lines: 空昵称绝不发 identity（壳有环境名/尾4位兜底链，空名会顶掉兜底）', () => {
-  assert.deepEqual(uiSnapshotToLines({ account: { id: 'acc-1', nickname: '' } }), []);
-  assert.deepEqual(uiSnapshotToLines({ account: { id: 'acc-1', nickname: '   ' } }), []);
-  assert.deepEqual(uiSnapshotToLines({ account: { id: 'acc-1' } }), []);
+  for (const payload of [
+    { account: { id: 'acc-1', nickname: '' } },
+    { account: { id: 'acc-1', nickname: '   ' } },
+    { account: { id: 'acc-1' } },
+  ]) {
+    const events = uiSnapshotToLines(payload).map(parseLine);
+    assert.equal(events.some((event) => event.kind === 'identity'), false);
+    assert.deepEqual(events, [{ kind: 'browserStandby', browserStandby: null }]);
+  }
 });
 
 test('ui-event-lines: 审批状态推送 → publish 行透传 state/title/code', () => {
   const lines = uiSnapshotToLines({ publish: { state: 'pending', title: '候审笔记', code: '#84' } });
-  assert.equal(lines.length, 1);
-  const evt = parseLine(lines[0]);
+  assert.equal(lines.length, 2);
+  const evt = lines.map(parseLine).find((event) => event.kind === 'publish');
+  assert.ok(evt);
   assert.equal(evt.kind, 'publish');
   assert.deepEqual(evt.publish, { state: 'pending', title: '候审笔记', code: '#84' });
 });
@@ -184,8 +193,9 @@ test('ui-event-lines: uiSnapshotToLines forwards account daily usage for Electro
       },
     },
   });
-  assert.equal(lines.length, 1);
-  const evt = parseLine(lines[0]);
+  assert.equal(lines.length, 2);
+  const evt = lines.map(parseLine).find((event) => event.kind === 'dailyUsage');
+  assert.ok(evt);
   assert.equal(evt.kind, 'dailyUsage');
   assert.deepEqual(evt.dailyUsage, {
     asOf: 1730000001000,
@@ -249,9 +259,10 @@ test('ui-event-lines: uiSnapshotToLines forwards sanitized browser standby hint'
   });
 });
 
-test('ui-event-lines: malformed browser standby hint is dropped', () => {
-  assert.deepEqual(
-    uiSnapshotToLines({
+test('ui-event-lines: missing, malformed, or sub-second standby hints emit revocation', () => {
+  const malformedPayloads = [
+    {},
+    {
       browserStandby: {
         enabled: true,
         eligible: true,
@@ -263,45 +274,66 @@ test('ui-event-lines: malformed browser standby hint is dropped', () => {
         minWaitMs: 1,
         warmupMs: 1,
       },
-    }),
-    [],
-  );
+    },
+    {
+      browserStandby: {
+        enabled: true,
+        eligible: true,
+        reason: 'view_quota:minute',
+        waitMs: 10_000,
+        wakeAt: 20_000,
+        generatedAt: 1_000,
+        source: 'risk',
+        minWaitMs: 999,
+        warmupMs: 1,
+      },
+    },
+  ] as const;
+  for (const payload of malformedPayloads) {
+    const events = uiSnapshotToLines(payload).map(parseLine);
+    assert.deepEqual(events, [{ kind: 'browserStandby', browserStandby: null }]);
+  }
 });
 
-test('ui-event-lines: 空快照 / 坏 at → 不产行（缺数据不造数据）', () => {
-  assert.deepEqual(uiSnapshotToLines({}), []);
-  assert.deepEqual(
-    uiSnapshotToLines({ lastPublish: { title: '标题', at: Number.NaN } }),
-    [],
-    'at 非有限数不发 lastPublish',
-  );
-  assert.deepEqual(uiSnapshotToLines({ lastPublish: { title: '  ', at: 1 } }), [], '空标题不发 lastPublish');
+test('ui-event-lines: 空快照 / 坏 at 只产 standby 撤销，不伪造业务数据', () => {
+  for (const payload of [
+    {},
+    { lastPublish: { title: '标题', at: Number.NaN } },
+    { lastPublish: { title: '  ', at: 1 } },
+  ]) {
+    assert.deepEqual(
+      uiSnapshotToLines(payload).map(parseLine),
+      [{ kind: 'browserStandby', browserStandby: null }],
+    );
+  }
 });
 
 // 人设绑定态三态（change persona-bound-tristate）：true / false 都必须转成行给外壳；
 // 只转 true 的话，权威的「未绑」在核心里就被吞掉，外壳只能靠计时猜——猜错就给已设置人设的账号误弹向导。
 test('ui-event-lines: personaBound 三态 → true/false 都出行，缺省不出行', () => {
   const boundLine = uiSnapshotToLines({ personaBound: true });
-  assert.equal(boundLine.length, 1);
-  assert.match(boundLine[0], /"kind":"personaBound"/);
-  assert.match(boundLine[0], /"personaBound":true/);
+  assert.equal(boundLine.length, 2);
+  assert.match(boundLine.find((line) => line.includes('"kind":"personaBound"')) ?? '', /"personaBound":true/);
 
   const unboundLine = uiSnapshotToLines({ personaBound: false });
-  assert.equal(unboundLine.length, 1, '权威「未绑」必须发出去，绝不吞掉');
-  assert.match(unboundLine[0], /"personaBound":false/);
+  assert.equal(unboundLine.length, 2, '权威「未绑」与 standby 撤销都必须发出去');
+  assert.match(unboundLine.find((line) => line.includes('"kind":"personaBound"')) ?? '', /"personaBound":false/);
 
-  assert.deepEqual(uiSnapshotToLines({}), [], '未知（字段缺省）不发行：外壳保持未知，未知永不弹窗');
+  assert.equal(
+    uiSnapshotToLines({}).some((line) => line.includes('"kind":"personaBound"')),
+    false,
+    '未知 persona 字段不发行：外壳保持未知，未知永不弹窗',
+  );
 });
 
 test('ui-event-lines: personaWritingLanguage 显式值/null 出行，缺省不覆盖旧状态', () => {
   const configured = uiSnapshotToLines({ personaWritingLanguage: 'vi' });
-  assert.equal(configured.length, 1);
-  assert.match(configured[0], /"kind":"personaWritingLanguage"/);
-  assert.match(configured[0], /"personaWritingLanguage":"vi"/);
+  assert.equal(configured.length, 2);
+  assert.match(configured.find((line) => line.includes('"kind":"personaWritingLanguage"')) ?? '', /"personaWritingLanguage":"vi"/);
 
   const legacy = uiSnapshotToLines({ personaWritingLanguage: null });
-  assert.equal(legacy.length, 1);
-  assert.match(legacy[0], /"personaWritingLanguage":null/);
+  assert.equal(legacy.length, 2);
+  assert.match(legacy.find((line) => line.includes('"kind":"personaWritingLanguage"')) ?? '', /"personaWritingLanguage":null/);
 
   assert.equal(uiSnapshotToLines({}).some((line) => line.includes('personaWritingLanguage')), false);
 });

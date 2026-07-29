@@ -113,8 +113,43 @@ test('browser cold standby uses lifecycle.standby and manual controls cancel tim
   assert.match(edgeMain, /onIdle:\s*\(\)\s*=>\s*sendLifecycleIpc\(\{ type: 'lifecycle\.task_idle' \}\)/,
     'core should report only a safe-idle hint after task coordination settles');
   assert.match(main, /message\.type === 'lifecycle\.task_idle'/);
-  assert.match(main, /if \(standbyHint\) applyBrowserStandbyHint\(handle, standbyHint\)/,
-    'Electron must reapply the latest hint through existing safety gates, not close directly');
+  assert.match(main, /if \(standbyHint && !handle\.coldStandbyHintRevoked\) applyBrowserStandbyHint\(handle, standbyHint\)/,
+    'Electron must reapply only a current hint through existing safety gates, not close directly');
+
+  const revoke = functionSource('revokeBrowserStandbyHint', 'applyBrowserStandbyHint');
+  assert.match(revoke, /action === 'ignore'/,
+    'a manual browser-close state without a cached Cloud hint must not be auto-woken');
+  assert.match(revoke, /clearColdStandbyHoldTimer\(handle\)/,
+    'missing Cloud evidence must cancel a cached post-hold recheck');
+  assert.match(revoke, /action === 'retain_active'[\s\S]*handle\.coldStandbyHintRevoked = true[\s\S]*return/,
+    'an already sleeping browser keeps its deterministic wake cycle');
+  assert.match(revoke, /coldStandbyStatus\('skipped', null, \{ reason: 'hint_revoked' \}\)/,
+    'awake/pending revocation must remove the cached hint from status readback');
+  assert.match(revoke, /action === 'wake_pending'[\s\S]*wakeColdStandby\(handle, 'hint_revoked'\)/,
+    'a close that is only pending must be cancelled through the existing wake path');
+
+  const apply = functionSource('applyBrowserStandbyHint', 'enterColdStandby');
+  assert.match(apply, /const cachedHint = normalizeBrowserStandbyHint\(handle\.status\.browserStandby/);
+  assert.match(apply, /classifyBrowserStandbyHintUpdate\(rawHint/);
+  assert.match(apply, /hasCachedHint: Boolean\(cachedHint\)/);
+  assert.match(apply, /if \(update\.action !== 'apply'\)[\s\S]*revokeBrowserStandbyHint\(handle, update\.action\)/);
+  assert.match(apply, /handle\.coldStandbyHintRevoked = false/,
+    'a later valid Cloud hint must supersede an earlier revocation');
+
+  const enter = functionSource('enterColdStandby', 'onColdStandbyAck');
+  assert.match(enter, /const hintRevoked = Boolean\(handle\.coldStandbyHintRevoked\)[\s\S]*hintRevoked \? null : decision\.hint/,
+    'a revoked pending hint must not be restored when the original standby request fails');
+
+  const output = functionSource('handleEdgeOutput', 'pauseEdge');
+  assert.match(output, /evt\.kind === 'browserStandby' \|\| Object\.prototype\.hasOwnProperty\.call\(evt, 'browserStandby'\)/);
+  assert.match(output, /if \(standbyHintUpdated\) applyBrowserStandbyHint\(handle, standbyHint\)/,
+    'the null revocation marker must reach the same authority-update path');
+
+  const woken = functionSource('onColdStandbyWoken', 'onColdStandbyWakeFailed');
+  assert.match(woken, /const hintRevoked = Boolean\(handle\.coldStandbyHintRevoked\)/);
+  assert.match(woken, /const completedHint = hintRevoked[\s\S]*\? null[\s\S]*handle\.status\.browserStandby/);
+  assert.match(woken, /coldStandbyStatus\('awake', completedHint, hintRevoked \? \{ reason: 'hint_revoked' \} : \{\}\)/,
+    'an active cycle may wake normally but must not carry the revoked hint into the next cycle');
 
   const pause = functionSource('pauseEdge', 'resumeEdge');
   assert.match(pause, /clearColdStandbyTimer\(handle\)/, 'manual pause must cancel cold standby timers');

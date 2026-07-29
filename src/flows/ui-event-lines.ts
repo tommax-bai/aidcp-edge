@@ -212,6 +212,7 @@ function sanitizeBrowserStandby(input: UiSnapshotPayload['browserStandby']): Rec
   const minWaitMs = finiteNonNegative(input.minWaitMs);
   const warmupMs = finiteNonNegative(input.warmupMs);
   if (waitMs === null || wakeAt === null || generatedAt === null || minWaitMs === null || warmupMs === null) return null;
+  if (minWaitMs < 1_000) return null;
   return {
     enabled: input.enabled,
     eligible: input.eligible,
@@ -332,7 +333,10 @@ export function uiSnapshotToLines(p: UiSnapshotPayload): string[] {
   const dailyUsage = sanitizeDailyUsage(p.dailyUsage);
   if (dailyUsage) lines.push(line({ kind: 'dailyUsage', dailyUsage }));
   const browserStandby = sanitizeBrowserStandby(p.browserStandby);
-  if (browserStandby) lines.push(line({ kind: 'browserStandby', browserStandby }));
+  // `browserStandby` is optional on the Cloud wire, but absence in a received full snapshot is
+  // authoritative revocation. Always emit one internal line so Electron can cancel a cached
+  // post-hold recheck instead of silently reusing stale Cloud evidence.
+  lines.push(line({ kind: 'browserStandby', browserStandby }));
   // 人设绑定态（change persona-bound-tristate）：云端 true / false 都下发，两者都必须转成 ui-event 行给壳。
   // 只转 true 的话，权威的「未绑」在这里就被吞掉，外壳只能靠「等了 6 秒还没收到」去猜——猜错就误弹向导。
   // 字段缺省（未知）不发行：外壳保持「未知」，而未知永不触发弹窗。

@@ -1,21 +1,10 @@
 'use strict';
 
 const DEFAULT_BROWSER_COLD_STANDBY_ENABLED = true;
-
-/**
- * 待机门槛（change standby-covers-idle-waits：20min → 5min）。
- *
- * **红线：这个默认值在云端也有一份**（aidcp-cloud `src/comm/browser-standby.ts` 的
- * `DEFAULT_BROWSER_STANDBY_MIN_WAIT_MS`），而下面 `shouldEnterColdStandby` 取的是**两者的较大值**。
- * 只改一端 **不生效且无任何报错**——只改云端时，边缘仍按自己这份旧门槛把提示拦下来。改门槛 MUST 两端同改。
- *
- * 为什么 5 分钟站得住：唤醒是**原地重开浏览器、不重启核心进程**（main.cjs 的 wakeColdStandby），成本约
- * 30–45s 的全局串行启动队列占用；一次待机的净收益 = 门槛 − 热身(90s)。盈亏平衡点约 2min10s，5 分钟留
- * 约 2.3 倍余量。再往下（如 3 分钟）余量过薄，不建议。
- */
-const DEFAULT_BROWSER_COLD_STANDBY_MIN_WAIT_MS = 5 * 60_000;
-
 const DEFAULT_BROWSER_COLD_STANDBY_WARMUP_MS = 90_000;
+const MIN_VALID_BROWSER_STANDBY_WAIT_MS = 1_000;
+// 旧客户端会把当时的默认门槛固化进 settings.json；升级后必须丢弃，Cloud hint 才是唯一门槛权威。
+const LEGACY_BROWSER_COLD_STANDBY_MIN_WAIT_SETTING = 'browserColdStandbyMinWaitMs';
 
 /**
  * 最短持有时长（change standby-covers-idle-waits）：唤醒后至少保持浏览器开启这么久，才允许再次进入待机。
@@ -35,11 +24,6 @@ function normalizeColdStandbySettings(settings = {}, env = process.env) {
   const envEnabled = parseBooleanOverride(env.AIDCP_BROWSER_COLD_STANDBY);
   return {
     enabled: envEnabled == null ? settingEnabled : envEnabled,
-    minWaitMs: parsePositiveMs(
-      settings.browserColdStandbyMinWaitMs,
-      env.AIDCP_BROWSER_COLD_STANDBY_MIN_WAIT_MS,
-      DEFAULT_BROWSER_COLD_STANDBY_MIN_WAIT_MS,
-    ),
     warmupMs: parsePositiveMs(
       settings.browserColdStandbyWarmupMs,
       env.AIDCP_BROWSER_COLD_STANDBY_WARMUP_MS,
@@ -51,6 +35,12 @@ function normalizeColdStandbySettings(settings = {}, env = process.env) {
       DEFAULT_BROWSER_COLD_STANDBY_MIN_HOLD_MS,
     ),
   };
+}
+
+function omitLegacyColdStandbyMinWaitSetting(input = {}) {
+  const settings = input && typeof input === 'object' ? { ...input } : {};
+  delete settings[LEGACY_BROWSER_COLD_STANDBY_MIN_WAIT_SETTING];
+  return settings;
 }
 
 function normalizeBrowserStandbyHint(input) {
@@ -66,6 +56,7 @@ function normalizeBrowserStandbyHint(input) {
   const minWaitMs = nonNegativeInt(input.minWaitMs);
   const warmupMs = nonNegativeInt(input.warmupMs);
   if ([waitMs, wakeAt, generatedAt, minWaitMs, warmupMs].some((v) => v == null)) return null;
+  if (minWaitMs < MIN_VALID_BROWSER_STANDBY_WAIT_MS) return null;
   return {
     enabled: input.enabled,
     eligible: input.eligible,
@@ -77,6 +68,15 @@ function normalizeBrowserStandbyHint(input) {
     minWaitMs,
     warmupMs,
   };
+}
+
+function classifyBrowserStandbyHintUpdate(input, state = {}) {
+  const hint = normalizeBrowserStandbyHint(input);
+  if (hint) return { action: 'apply', hint };
+  if (!state.hasCachedHint) return { action: 'ignore', hint: null };
+  if (state.active) return { action: 'retain_active', hint: null };
+  if (state.pending) return { action: 'wake_pending', hint: null };
+  return { action: 'clear_awake', hint: null };
 }
 
 /**
@@ -95,8 +95,8 @@ function shouldEnterColdStandby({ status = {}, flags = {}, hint, settings, now =
   if (!normalizedHint.eligible) return skip(normalizedHint.reason || 'ineligible', normalizedHint);
 
   const remainingMs = Math.max(0, normalizedHint.wakeAt - now);
-  const effectiveMinWaitMs = Math.max(config.minWaitMs, normalizedHint.minWaitMs || 0);
-  if (remainingMs < effectiveMinWaitMs) return skip('short_wait', normalizedHint);
+  // 仍在 Edge 复核 remaining，防止 hint 延迟到达或 min_hold 到点重判时，剩余等待已短于 Cloud 门槛。
+  if (remainingMs < normalizedHint.minWaitMs) return skip('short_wait', normalizedHint);
 
   // 最短持有时长（抗抖动）：刚醒过来的环境不得立刻再次待机。holdRemainingMs 一并回传，
   // 供调用方排一个「持有满足后重新判定」的定时器——绝不能把提示丢掉。
@@ -167,10 +167,12 @@ function nonNegativeInt(value) {
 
 module.exports = {
   DEFAULT_BROWSER_COLD_STANDBY_ENABLED,
-  DEFAULT_BROWSER_COLD_STANDBY_MIN_WAIT_MS,
   DEFAULT_BROWSER_COLD_STANDBY_WARMUP_MS,
   DEFAULT_BROWSER_COLD_STANDBY_MIN_HOLD_MS,
+  MIN_VALID_BROWSER_STANDBY_WAIT_MS,
   normalizeColdStandbySettings,
+  omitLegacyColdStandbyMinWaitSetting,
   normalizeBrowserStandbyHint,
+  classifyBrowserStandbyHintUpdate,
   shouldEnterColdStandby,
 };

@@ -75,11 +75,12 @@ const {
 } = require('./browser-parking.cjs');
 const {
   DEFAULT_BROWSER_COLD_STANDBY_ENABLED,
-  DEFAULT_BROWSER_COLD_STANDBY_MIN_WAIT_MS,
   DEFAULT_BROWSER_COLD_STANDBY_WARMUP_MS,
   normalizeColdStandbySettings,
+  omitLegacyColdStandbyMinWaitSetting,
   shouldEnterColdStandby,
   normalizeBrowserStandbyHint,
+  classifyBrowserStandbyHintUpdate,
 } = require('./browser-cold-standby.cjs');
 const fleet = require('./fleet.cjs');
 const { createCoreBootstrapSupervisor } = require('./core-bootstrap.cjs');
@@ -257,7 +258,6 @@ const DEFAULT_SETTINGS = {
   browserParkingMode: DEFAULT_PARKING_MODE,
   // 长等待冷待机：默认开启；由云端给确定性长等待 hint，壳本地二次判断后关闭浏览器并预热恢复。
   browserColdStandbyEnabled: DEFAULT_BROWSER_COLD_STANDBY_ENABLED,
-  browserColdStandbyMinWaitMs: DEFAULT_BROWSER_COLD_STANDBY_MIN_WAIT_MS,
   browserColdStandbyWarmupMs: DEFAULT_BROWSER_COLD_STANDBY_WARMUP_MS,
   // 浏览器调度（change browser-slot-scheduling）：两个上限都可在设置里显式给定，0 = 未设 = 自动。
   //  - browserSlotLimit：同时执行的浏览器数上限。自动 = ⌊Edge 启动时可用内存快照 ÷ 单环境估值⌋。
@@ -334,7 +334,7 @@ function loadSettings() {
   } catch {
     parsed = {};
   }
-  settings = { ...DEFAULT_SETTINGS, ...parsed };
+  settings = omitLegacyColdStandbyMinWaitSetting({ ...DEFAULT_SETTINGS, ...parsed });
   if (settings.provider !== 'self' && settings.provider !== 'adspower') settings.provider = 'adspower';
   settings.systemProxyUpstreamEnabled = settings.systemProxyUpstreamEnabled === true;
   settings.browserParkingMode = normalizeParkingMode(settings.browserParkingMode);
@@ -1177,7 +1177,7 @@ function applyLegacyMirror() {
 // 红线（绝不静默假成功）：写盘失败时当次仍用内存设置继续跑，但 MUST 把「未持久化」如实回报给上层 / UI，
 // 绝不谎报保存成功——否则用户以为已存、重启后配置丢失却毫无提示。
 function saveSettings(patch) {
-  const p = { ...(patch || {}) };
+  const p = omitLegacyColdStandbyMinWaitSetting({ ...(patch || {}) });
   // 花名册来源二选一：显式 environments 优先；否则旧 adsProfileId 补丁（旧渲染层/单环境语义）转单元素花名册。
   if (Array.isArray(p.environments)) {
     p.environments = fleet.normalizeEnvironments(p.environments);
@@ -1189,7 +1189,7 @@ function saveSettings(patch) {
     });
     p.environments = single ? [single] : [];
   }
-  settings = { ...settings, ...p };
+  settings = omitLegacyColdStandbyMinWaitSetting({ ...settings, ...p });
   if (settings.provider !== 'self' && settings.provider !== 'adspower') settings.provider = 'adspower';
   settings.systemProxyUpstreamEnabled = settings.systemProxyUpstreamEnabled === true;
   settings.browserParkingMode = normalizeParkingMode(settings.browserParkingMode);
@@ -1214,7 +1214,6 @@ function saveSettings(patch) {
 function normalizeColdStandbySettingsIntoSettings() {
   const normalized = normalizeColdStandbySettings(settings, process.env);
   settings.browserColdStandbyEnabled = normalized.enabled;
-  settings.browserColdStandbyMinWaitMs = normalized.minWaitMs;
   settings.browserColdStandbyWarmupMs = normalized.warmupMs;
 }
 
@@ -1973,6 +1972,9 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     coldStandbyWakeAt: 0,
     coldStandbyActive: false,
     coldStandbyPending: false,
+    // A missing/malformed later Cloud hint revokes reuse of the cached hint. An already sleeping
+    // browser still completes its deterministic wake cycle before this marker is cleared.
+    coldStandbyHintRevoked: false,
     // 控制面与浏览器槽位解耦：核心/Cloud 已上线但浏览器从未启动。只有 lifecycle.standby ack 后
     // controlPlaneBootstrapped 才为真，握手前退出不得被误洗成“正常待机退出”。
     controlPlaneOnly: false,
@@ -3561,6 +3563,7 @@ function clearColdStandbyTimer(handle) {
   handle.coldStandbyPending = false;
   handle.coldStandbyActive = false;
   handle.coldStandbyWaking = false;
+  handle.coldStandbyHintRevoked = false;
   handle.wakeGeneration = 0;
   clearColdStandbyHoldTimer(handle);
 }
@@ -3594,9 +3597,35 @@ function coldStandbyFlags(handle) {
   };
 }
 
+function revokeBrowserStandbyHint(handle, action) {
+  if (!handle || action === 'ignore') return;
+  clearColdStandbyHoldTimer(handle);
+  if (action === 'retain_active') {
+    handle.coldStandbyHintRevoked = true;
+    return;
+  }
+
+  handle.coldStandbyHintRevoked = action === 'wake_pending';
+  updateStatus(handle, {
+    browserStandby: coldStandbyStatus('skipped', null, { reason: 'hint_revoked' }),
+  });
+  if (action === 'wake_pending') wakeColdStandby(handle, 'hint_revoked');
+}
+
 function applyBrowserStandbyHint(handle, rawHint) {
   if (!handle) return;
-  const hint = normalizeBrowserStandbyHint(rawHint);
+  const cachedHint = normalizeBrowserStandbyHint(handle.status.browserStandby && handle.status.browserStandby.hint);
+  const update = classifyBrowserStandbyHintUpdate(rawHint, {
+    active: handle.coldStandbyActive,
+    pending: handle.coldStandbyPending,
+    hasCachedHint: Boolean(cachedHint),
+  });
+  if (update.action !== 'apply') {
+    revokeBrowserStandbyHint(handle, update.action);
+    return;
+  }
+  const hint = update.hint;
+  handle.coldStandbyHintRevoked = false;
   const settingsView = normalizeColdStandbySettings(settings, process.env);
   // 重新判定 → 先撤掉上一次 min_hold 排的重判定时器（本次会按最新提示重排）。
   clearColdStandbyHoldTimer(handle);
@@ -3672,11 +3701,16 @@ function enterColdStandby(handle, decision) {
   const child = handle.child;
   sendCoreLifecycle(handle, 'standby', (error) => {
     if (handle.child !== child) return;
+    const hintRevoked = Boolean(handle.coldStandbyHintRevoked);
     clearColdStandbyTimer(handle);
     updateStatus(handle, {
       edge: 'warning',
       session: handle.status.session === 'resting' ? 'running' : handle.status.session,
-      browserStandby: coldStandbyStatus('skipped', decision.hint, { reason: 'standby_failed' }),
+      browserStandby: coldStandbyStatus(
+        'skipped',
+        hintRevoked ? null : decision.hint,
+        { reason: hintRevoked ? 'hint_revoked' : 'standby_failed' },
+      ),
       lastMessage: `冷待机失败：${error.message}。浏览器关闭状态未确认。`,
       ...edgeFailurePatch(`冷待机失败：${error.message}`),
       ...presencePatch('冷待机请求未送达'),
@@ -3916,6 +3950,10 @@ function onColdStandbyWoken(handle) {
     if (typeof handle.wakeSettle === 'function') handle.wakeSettle(false);
     return;
   }
+  const hintRevoked = Boolean(handle.coldStandbyHintRevoked);
+  const completedHint = hintRevoked
+    ? null
+    : (handle.status.browserStandby && handle.status.browserStandby.hint);
   handle.browserOpenPending = false;
   releaseStartQueue(handle);
   handle.coldStandbyWaking = false;
@@ -3938,7 +3976,7 @@ function onColdStandbyWoken(handle) {
   updateStatus(handle, {
     edge: 'running',
     session: manualBrowserOnly ? 'idle' : handle.automationPaused ? 'paused' : 'running',
-    browserStandby: coldStandbyStatus('awake', handle.status.browserStandby && handle.status.browserStandby.hint, {}),
+    browserStandby: coldStandbyStatus('awake', completedHint, hintRevoked ? { reason: 'hint_revoked' } : {}),
     lastMessage: manualBrowserOnly
       ? '浏览器已打开；自动化保持关闭。'
       : handle.automationPaused
@@ -4631,7 +4669,7 @@ async function spawnEdgeChild(handle, {
       // 无最新提示即 no-op；提示过时、最短持有未满、验证码/认证/新任务等均由既有双层安全闸拦截。
       updateStatus(handle, { loopStage: null });
       const standbyHint = handle.status.browserStandby && handle.status.browserStandby.hint;
-      if (standbyHint) applyBrowserStandbyHint(handle, standbyHint);
+      if (standbyHint && !handle.coldStandbyHintRevoked) applyBrowserStandbyHint(handle, standbyHint);
       return;
     }
     if (message.type === 'lifecycle.paused') {
@@ -5603,6 +5641,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
   // 结构化 [ui-event] 行优先，中文日志行映射兜底；计数只认 ✓ 成功行。
   const evt = handle.uiEvents.push(structuredMessage);
   let standbyHint = null;
+  let standbyHintUpdated = false;
   if (evt) {
     if (evt.account) {
       // 账号标签兜底链：已验证的平台昵称 > AdsPower 环境名 > 渲染层再兜尾4位。
@@ -5663,7 +5702,8 @@ function handleEdgeLogLine(handle, message, isError = false) {
         next.stats = statsFromDailyUsage(dailyUsage);
       }
     }
-    if (evt.browserStandby) {
+    if (evt.kind === 'browserStandby' || Object.prototype.hasOwnProperty.call(evt, 'browserStandby')) {
+      standbyHintUpdated = true;
       standbyHint = normalizeBrowserStandbyHint(evt.browserStandby);
       if (standbyHint) next.browserStandby = coldStandbyStatus('hint', standbyHint);
     }
@@ -5716,7 +5756,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
     else if (evt.type === 'popup_cleared' || evt.type === 'session_end') next.overlayBlocked = false;
   }
   updateStatus(handle, next);
-  if (standbyHint) applyBrowserStandbyHint(handle, standbyHint);
+  if (standbyHintUpdated) applyBrowserStandbyHint(handle, standbyHint);
 }
 
 function pauseEdge(handle) {
