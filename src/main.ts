@@ -87,8 +87,9 @@ import {
 import {
   applyWakeIdentityResettlement,
   createIdentityReestablishment,
-  judgeAutomationResume,
   judgeWakeIdentityResettlement,
+  refuseWakeUnderIdentityGate,
+  resumeAutomationUnderIdentityGate,
   IdentityRevalidator,
   observedAccountIdFromDecision,
   DEFAULT_IDENTITY_CHECK_MS,
@@ -97,6 +98,8 @@ import {
   PERIODIC_IDENTITY_READ_HYDRATE_MS,
   type IdentityInvalidReason,
 } from './native-page-engine/identity-guard.js';
+import { runtimePostureIpc, type RuntimePosture } from './client/runtime-posture.js';
+import { judgeCloudRebindUnderIdentity, judgeCommandUnderIdentity } from './client/identity-command-gate.js';
 import {
   buildCaptchaClickResultFacts,
   type NativeCaptchaClickReceipt,
@@ -523,6 +526,19 @@ async function main(): Promise<void> {
   const sendLifecycleIpc = (payload: Record<string, unknown>): void => {
     if (typeof process.send === 'function' && process.connected) process.send(payload);
   };
+  /**
+   * 对外呈现的**唯一**出口（change §5 收口）：核心的运行态 → 外壳画什么，只经这一条边。
+   *
+   * 此前是两条分离的通告（identity_halted / identity_restored）＋外壳各入口自己拼状态，于是每加一条
+   * 恢复路径就多一处对不上。现在核心只说一个具名事实（posture，四态定义见 client/runtime-posture.ts），
+   * 外壳只负责翻译。这里额外记住**当前值**：拒绝恢复自动化时要把同一个终局再喊一遍，把外壳可能已经
+   * 抢先写下的乐观投影纠回来。
+   */
+  let currentPosture: RuntimePosture = { kind: 'healthy' };
+  const publishRuntimePosture = (posture: RuntimePosture): void => {
+    currentPosture = posture;
+    sendLifecycleIpc(runtimePostureIpc(posture));
+  };
   const clearColdStandbyCloudRetry = (): void => {
     if (coldStandbyCloudRetryTimer) clearTimeout(coldStandbyCloudRetryTimer);
     coldStandbyCloudRetryTimer = undefined;
@@ -734,6 +750,21 @@ async function main(): Promise<void> {
     );
     client.reportActionCompleted({ action, ok: false, reason: 'task_lease_suppressed' });
   };
+  /**
+   * 身份闸（S9）：身份未落定时，代表这个账号动作的命令一律拒绝。
+   *
+   * **拒绝必须有回执**，沿用既有的「成功位为假 + 具名原因」形状：静默丢弃会让云端分不清「命令没触达」
+   * 与「执行了但没结果」，只能等满自己的步超时。判据在 `client/identity-command-gate.ts`
+   * （按操作登记表的 `identity: 'page_account'` 维度取补集，救援 / 读 / 收尾类具名放行）。
+   */
+  const refuseCommandUnderIdentity = (env: Envelope, lane: string): boolean => {
+    const verdict = judgeCommandUnderIdentity(identityGuard?.health, env.type);
+    if (verdict.kind === 'allow') return false;
+    const action = nativeActionNameForCommand(env.type);
+    console.warn(`[aidcp-edge] ${lane} 命令被身份闸拒绝 type=${env.type}：${verdict.detail} 回执 ${action}:${verdict.reason}`);
+    client.reportActionCompleted({ action, ok: false, reason: verdict.reason });
+    return true;
+  };
 
   // 发布原子与浏览命令复用同一个 Native 会话串行边界；切换 owner 时旧会话先有界关闭。
   const nativePublishExecutor = new NativePublishExecutor(
@@ -792,6 +823,12 @@ async function main(): Promise<void> {
       });
       let quiesced = false;
       try {
+        // 身份闸（S9）：身份未落定时**绝不**以陈旧身份对新的云端环境宣称在线。
+        // halt 是纯返回、从不关浏览器——浏览器仍开着、登着一个我们已明说「不知道是谁」的账号；
+        // 重绑一旦放行，云端就会把它当成那个账号的健康节点照常派发布 / 任务，于是在未知身份下真发帖、
+        // 记账挂错账号。裁定为**拒绝**（而不是「上线但不带身份」）的理由写在 judgeCloudRebindUnderIdentity。
+        const rebindVerdict = judgeCloudRebindUnderIdentity(identityGuard?.health);
+        if (rebindVerdict.kind === 'refuse') throw new Error(rebindVerdict.reason);
         const deadline = Date.now() + 30_000;
         while ((taskCoordinator.hasActiveLease() || inFlightPublishes.size > 0) && Date.now() < deadline) {
           await new Promise((resolve) => setTimeout(resolve, 100));
@@ -820,6 +857,8 @@ async function main(): Promise<void> {
   // 两帧在同一宏任务内派发，connect() 的续体（微任务）还没来得及跑注册代码，后注册的处理器
   // 会静默漏掉首帧。注册本身不需要活连接，先注册零成本。
   client.onEdgeTaskCommand((env) => {
+    // 认领要过身份闸（认领＝接下来会以这个账号的名义动作 + 记账）；释放永远放行（拦掉只会让租约挂着）。
+    if (refuseCommandUnderIdentity(env, '任务')) return;
     if (env.type === 'edge.task.acquire') {
       taskCoordinator.acquire(env.payload as EdgeTaskAcquirePayload);
     } else if (env.type === 'edge.task.release') {
@@ -833,6 +872,24 @@ async function main(): Promise<void> {
   // 陪伴界面事件（edge-companion-ui 6.4）：发布终态的本地事实经 [ui-event] 行直达桌面壳。
   const publishUiEvents = new PublishUiEventTracker();
   client.onPublishAtomCommand((env) => {
+    // 身份闸（S9）先于租约闸：租约说的是「该不该由这条任务来做」，身份说的是「这台机器现在到底代表谁」。
+    // 后者不成立时，发布是**在平台上留真实痕迹**的动作，必须拒绝并按发布回执形状如实回（否则云端挂起等结果）。
+    const publishIdentityVerdict = judgeCommandUnderIdentity(identityGuard?.health, env.type);
+    if (publishIdentityVerdict.kind === 'refuse') {
+      client.send(
+        'publish.command.result',
+        {
+          recordId: env.payload.recordId,
+          seq: env.payload.seq,
+          kind: env.payload.kind,
+          ok: false,
+          error: publishIdentityVerdict.reason,
+        },
+        env.id,
+      );
+      console.warn(`[aidcp-edge] 发布命令被身份闸拒绝：${publishIdentityVerdict.detail}`);
+      return;
+    }
     if (!taskCoordinator.canExecute(env.payload.taskId)) {
       client.send(
         'publish.command.result',
@@ -1085,6 +1142,9 @@ async function main(): Promise<void> {
     nativeBrowse = nativeSession;
     const routeNativeCommand = (env: Envelope): void => {
       if (handleBrowserAbsentCommand(env)) return;
+      // 身份闸（S9）：页面动作（评论 / 点赞 / 关注 / 加群…）都以页面上登着的那个账号的名义发生，
+      // 身份未落定时一律拒绝并如实回执。救援 / 读 / 收尾类命令在判据里具名放行。
+      if (refuseCommandUnderIdentity(env, 'Native')) return;
       const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
       const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
       if (env.type !== 'pacing.update' && !taskCoordinator.canExecute(ownedTaskId)) {
@@ -1183,18 +1243,9 @@ async function main(): Promise<void> {
         client.setAccountIdentity(accountId, accountNickname);
       },
       generation: () => identityGuard?.generation ?? 0,
-      reportHalt: (reason) => {
-        // 让外壳看得见这个终局：halt 之后浏览停了、观测停了、云端连接被 intentionalClose 关掉
-        // （既不自动重连、也不 emit 断连事件）。不发这条 IPC，桌面客户端左栏会一直显示「运行中 /
-        // 已连接云端」，运营看不到任何角标——那正是静默假成功的产品层形态。
-        sendLifecycleIpc({ type: 'lifecycle.identity_halted', reason });
-      },
-      reportIdentityRestored: (restoredAccountId) => {
-        // 与上面的 halt 通告成对：外壳收到 halt 之后会把红角标**闩住**（此后任何一行普通日志都不许
-        // 把徽标翻回运行中），闩住的代价是它只能被显式解除。不发这条，一次真正的身份重立之后核心
-        // 已经健康、浏览也跑起来了，左栏却仍挂着不可撤销的红「运行期身份确立失败」。
-        sendLifecycleIpc({ type: 'lifecycle.identity_restored', accountId: restoredAccountId });
-      },
+      // 链条每一个出口都经这条唯一的边对外说一次（持球中 / 终局 / 残局 / 已重立 / 已作废）。
+      // 少说一次，外壳就停在上一句话上——本轮根除的两条回归都是这么来的。
+      reportPosture: publishRuntimePosture,
       connectCloud: () => client.connect(),
       rebaseline: (nextAccountId) => identityGuard?.rebaseline(nextAccountId),
       resumeObservation: () => nativeSession.resumeObservation(),
@@ -1236,23 +1287,21 @@ async function main(): Promise<void> {
     },
     resumeAutomation: async () => {
       if (coldStandbyActive) throw new Error('browser_absent_use_wake');
-      // 身份准入：恢复自动化不带来任何新的身份事实（判据与理由在 identity-guard.ts）。停在无身份终局
-      // 时放行，就是把冷待机那条路上的同一个洞换个入口再挖一遍——浏览重新跑起来、云端始终没连上、
-      // 判定首行永久早退。如实拒绝（与上面「浏览器缺席请走唤醒」同口径：抛出 = 保持暂停态）。
-      const resumeVerdict = judgeAutomationResume(identityGuard?.health ?? 'healthy');
-      if (resumeVerdict.kind === 'refuse') {
-        console.error(`[aidcp-edge] ✗ 拒绝恢复自动化：${resumeVerdict.reason}`);
-        throw new Error('identity_halted_relogin_required');
-      }
-      // 周期观测的恢复责任在这里（幂等：没停过就是空操作）。暂停期间可能有一条在途的身份重立链被
-      // 叫停在「已暂停观测」的位置——链条**故意不**自己恢复（叫停的另两条路径马上就要关浏览器，
-      // 那时恢复观测＝对着已 detach 的 CDP 空轮询到唤醒）。不在这里补，浏览会重开但观测永远起不来
-      // （会话侧 scheduleProbe 见 suspended 直接早退）：阻断观测从此全盲，且没有任何人会发现。
-      nativeBrowse?.resumeObservation();
-      browse?.start().catch((error) => {
-        console.error('[aidcp-edge] 恢复自动化失败:', error);
+      // 身份准入 + 三件恢复动作**整段**都在 identity-guard 的可注入实现里（判据、顺序、拒绝时的
+      // 「把终局再喊一遍」全在那儿），宿主只做薄接线。留在这里的话，用例只能扫源码文本——而现实形态的
+      // 削弱（保留告警、删掉 throw）在文本断言下全部存活，等于没有闸。
+      await resumeAutomationUnderIdentityGate(identityGuard?.health ?? 'healthy', {
+        logger: (message) => console.error(message),
+        reportPosture: publishRuntimePosture,
+        haltReason: () => (currentPosture.kind === 'identity_halted' ? currentPosture.reason : 'identity_halted'),
+        resumeObservation: () => nativeBrowse?.resumeObservation(),
+        startBrowse: () => {
+          browse?.start().catch((error) => {
+            console.error('[aidcp-edge] 恢复自动化失败:', error);
+          });
+        },
+        startIdentityGuard: () => startIdentityGuard?.(),
       });
-      startIdentityGuard?.();
     },
     deactivate: async (reason) => {
       coldStandbyActive = false;
@@ -1385,32 +1434,36 @@ async function main(): Promise<void> {
           logger: (m) => console.log(m),
         });
         const decision = platformDriver.decideIdentity(idRes, overrideAccountId);
+        // 唤醒被身份闸拒绝的两条路共用同一个**真拆**收场（可注入实现，见 identity-guard.ts）：
+        // 诚实回执在途发布 → 释放浏览器层 → 停代理世代 → 杀浏览器并把槽位还回去 → 如实回 false。
+        // 只打一行告警就 return false 是不够的：半开的浏览器会一直占着内存槽位挡别的账号。
+        const wakeRefusalDeps = {
+          logger: (message: string) => console.error(message),
+          failInFlightPublishesHonestly,
+          detachSession: () => session.detach(),
+          suspendProxyGeneration: (reason: string) => proxyRuntime?.suspendGeneration(reason),
+          killBrowser: async () => {
+            await chrome?.killAndConfirmDead().catch(() => undefined);
+          },
+        };
         if (decision.kind === 'halt') {
-          console.error(
-            `[aidcp-edge] ✗ 唤醒后身份确认失败（${decision.reason}）：浏览器起来了但读不出登录身份。` +
-              '如实判唤醒失败、留在待机态（可再次唤醒），绝不以默认账号开跑。',
+          return await refuseWakeUnderIdentityGate(
+            `唤醒后身份确认失败（${decision.reason}）：浏览器起来了但读不出登录身份，绝不以默认账号开跑`,
+            'browser_wake_identity_failed',
+            wakeRefusalDeps,
           );
-          // 这条路径要把浏览器杀回槽位，在途发布必然跟着死。与下面「账号已变」分支同口径：先诚实回执，
-          // 否则审批 / 通知侧永远等不到结果（云端无限期挂起等一个再也不会来的回执）。
-          failInFlightPublishesHonestly('browser_wake_identity_failed');
-          session.detach();
-          proxyRuntime?.suspendGeneration('wake_identity_failed');
-          await chrome?.killAndConfirmDead().catch(() => undefined);
-          return false;
         }
         // 唤醒后的身份收口判据（纯函数，判据与用例都在 identity-guard.ts）：这一代浏览器里实测到 id
         // 了吗、上一局是不是正停在无身份终局上。副作用在下面统一施加，绝不在这里边判边做。
         const resettlement = judgeWakeIdentityResettlement(decision, identityGuard?.health ?? 'healthy');
         if (resettlement.kind === 'wake_rejected') {
           // 上一局停在无身份终局，而这次唤醒没能实测出身份（只有 AIDCP_ACCOUNT_ID 覆盖值顶着）。
-          // 放它回来 = 浏览跑着、外壳显示运行中，而身份校验是死的、云端是断的。如实判唤醒失败，
-          // 与上面「唤醒后身份确认失败」同口径（留在待机态、可再次唤醒）。
-          console.error(`[aidcp-edge] ✗ ${resettlement.reason}：上一局停在无身份终局，本次唤醒未能解除它，如实判唤醒失败。`);
-          failInFlightPublishesHonestly('browser_wake_identity_unmeasured');
-          session.detach();
-          proxyRuntime?.suspendGeneration('wake_identity_unmeasured');
-          await chrome?.killAndConfirmDead().catch(() => undefined);
-          return false;
+          // 放它回来 = 浏览跑着、外壳显示运行中，而身份校验是死的、云端是断的。
+          return await refuseWakeUnderIdentityGate(
+            `${resettlement.reason}：上一局停在无身份终局，本次唤醒未能解除它`,
+            'browser_wake_identity_unmeasured',
+            wakeRefusalDeps,
+          );
         }
         // 新一代浏览器里刚实测到的 id（读不出实测值则不覆盖旧值）。
         observedAccountId = observedAccountIdFromDecision(decision) ?? observedAccountId;
@@ -1443,9 +1496,7 @@ async function main(): Promise<void> {
           rebaseline: (nextBaseline) => identityGuard?.rebaseline(nextBaseline),
           cloudLinkAttached: () => client.isConnected(),
           restoreCloudLink: () => client.connect(),
-          reportIdentityRestored: (restoredAccountId) => {
-            sendLifecycleIpc({ type: 'lifecycle.identity_restored', accountId: restoredAccountId });
-          },
+          reportPosture: publishRuntimePosture,
           startBrowse: () => {
             browse?.start().catch((err) => console.error('[aidcp-edge] 唤醒后浏览会话异常:', err));
           },

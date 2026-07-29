@@ -56,6 +56,13 @@ const {
 } = require('./facebook-persona-auto-fill.cjs');
 const os = require('node:os');
 const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
+const {
+  parseRuntimePosture,
+  projectRuntimePosture,
+  postureLatches,
+  runtimePostureOverride,
+  judgeResumeUnderPosture,
+} = require('./runtime-posture.cjs');
 const commandDiagnostics = require('./command-diagnostics.cjs');
 const { invalidateProxyRuntime, normalizeProxyRuntime } = require('./proxy-runtime.cjs');
 const {
@@ -1974,9 +1981,10 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     launchGeneration: 0,
     wakeGeneration: 0,
     lastEdgeFailureLine: '',
-    // 运行期身份重立走到 halt 的闩（reason 串 / null）。核心此时**不退出**，所以退出码那条权威判据
-    // 永远不触发；不闩住，halt 之后随便一行普通日志就把徽标重置回 running。
-    identityHalted: null,
+    // 核心运行态的闩（posture 对象 / null，四态见 runtime-posture.cjs）。核心在这些态下**不退出**，
+    // 所以退出码那条权威判据永远不触发；不闩住，随便一行普通日志就把四轴改回「运行中」。
+    // 它是「外面看到的 = 里面发生的」这条不变量在外壳侧的唯一载体，**MUST NOT** 由日志行或乐观投影写。
+    runtimePosture: null,
     respawnStreak: 0,
     respawnTimer: null,
     gaveUp: false,
@@ -4429,9 +4437,9 @@ async function spawnEdgeChild(handle, {
 
   handle.browserParkingReady = false;
   handle.executorFailure = null;
-  // 身份 halt 闩只反映**本次 core run** 的终局：新拉起的核心会自己重走一遍身份确立，
-  // 不清就会把上一轮的红一直挂在新进程头上。
-  handle.identityHalted = null;
+  // 运行态闩只反映**本次 core run**：新拉起的核心会自己重走一遍身份确立并重新发 posture，
+  // 不清就会把上一轮的终局 / 残局一直挂在新进程头上。
+  handle.runtimePosture = null;
   handle.browserStateUnconfirmed = false;
   handle.browserPersonaNoticeState = null;
   resetPersonaNoticeGrace(handle);
@@ -4640,43 +4648,39 @@ async function spawnEdgeChild(handle, {
       onColdStandbyAck(handle);
       return;
     }
-    if (message.type === 'lifecycle.identity_halted') {
-      // 运行期身份重立走到 halt：核心还活着，但已彻底停摆——浏览停了、周期观测停了、云端连接被
-      // intentionalClose 关掉（既不自动重连、也不 emit 断连事件）。**核心不会退出**，所以
-      // child.on('close') 那条权威判据永远不触发；这条 IPC 是外壳唯一能知道的途径。
-      // 不接它的后果不是「晚一点看到」，而是左栏一直显示「运行中 / 已连接云端」，运营看不到任何角标。
-      const reason = typeof message.reason === 'string' && message.reason ? message.reason : 'identity_halted';
-      // 闩住：此后核心再打任何一行普通日志都不得把徽标翻回 running（见下方 handleEdgeLog 的 halting 判据）。
-      handle.identityHalted = reason;
-      updateStatus(handle, {
-        edge: 'warning',
-        session: 'idle',
-        cloud: 'disconnected',
-        auth: 'login required',
-        lastMessage: `运行期身份确立失败：${reason}。自动化已停止、自动化引擎已断开，请在浏览器里重新登录该账号后重启本环境。`,
-        ...presencePatch('身份已失效，请重新登录后重启'),
-        ...edgeFailurePatch(`运行期身份确立失败：${reason}`),
-      });
-      return;
-    }
-    if (message.type === 'lifecycle.identity_restored') {
-      // 与上面那条闩成对：halt 之后核心**不退出**，所以红角标只能靠核心自己说「解除了」。
-      // 一次真正的身份重立（重立链步 11 / 冷待机唤醒里重新实测到身份）之后核心已经健康、浏览也会
-      // 跑起来，不解除这个闩，左栏就一直挂着不可撤销的红「运行期身份确立失败」——核心说健康、外壳
-      // 说终局，同一台机器同一时刻两套口径。
+    {
+      // 核心运行态的**唯一**入口（change §5 收口）：身份健康 / 重立中 / 终局未知 / 崩溃后残局，
+      // 四态都只走这一条消息，外壳这一侧也只有这一处把它翻译成界面（映射表在 runtime-posture.cjs）。
       //
-      // 只在真闩着时才动状态：常态下每次唤醒都会来一条，无条件 updateStatus 会把 woken / resumed
-      // 随后要写的正确态盖掉。
-      if (!handle.identityHalted) return;
-      handle.identityHalted = null;
-      const restoredId = typeof message.accountId === 'string' && message.accountId ? message.accountId : '';
-      updateStatus(handle, {
-        edge: 'running',
-        lastMessage: `运行期身份已重新确立${restoredId ? `：${restoredId}` : ''}，自动化引擎恢复正常。`,
-        ...presencePatch('身份已重新确立'),
-        ...clearEdgeFailurePatch(handle),
-      });
-      return;
+      // 它取代了此前的 lifecycle.identity_halted / lifecycle.identity_restored 两条：两条分离的通告
+      // 意味着「既不是 halt 也不是 restored」的那些格子谁都不发——重立链在重设基线之后崩掉就落在那里，
+      // 外壳于是停在「运行中、无角标」，而浏览与观测永久停着。分岔的根不是漏发某一条，是入口不止一个。
+      const posture = parseRuntimePosture(message);
+      if (posture) {
+        // 闩：核心此时**不退出**，退出码那条权威判据永远不触发；这个闩是四轴唯一的守护者，
+        // 此后每一行普通日志都不得把它们改回去（见 handleEdgeLog 末尾的 posture 覆盖层）。
+        handle.runtimePosture = postureLatches(posture) ? posture : null;
+        const projection = projectRuntimePosture(posture);
+        const hasProjection = Object.keys(projection.axes).length > 0
+          || projection.message !== null
+          || projection.presence !== null
+          || projection.failure !== undefined;
+        // healthy 且无内容 ⇒ 只解闩、不动状态：常态下每次唤醒都会来一条，无条件 updateStatus 会把
+        // woken / resumed 随后要写的正确态盖掉。
+        if (hasProjection) {
+          updateStatus(handle, {
+            ...projection.axes,
+            ...(projection.message ? { lastMessage: projection.message } : {}),
+            ...(projection.presence ? presencePatch(projection.presence) : {}),
+            ...(projection.failure === undefined
+              ? {}
+              : projection.failure === null
+                ? clearEdgeFailurePatch(handle)
+                : edgeFailurePatch(projection.failure)),
+          });
+        }
+        return;
+      }
     }
     if (message.type === 'lifecycle.executor_failed') {
       const reason = typeof message.reason === 'string' && message.reason ? message.reason : 'executor_failed';
@@ -4817,6 +4821,7 @@ async function spawnEdgeChild(handle, {
     settleLaunchReady(handle, false); // 起不来：立刻放行启动队列的下一个，绝不占着队列干等
     handle.child = undefined;
     handle.status.proxyRuntime = invalidateProxyRuntime(handle.status.proxyRuntime);
+    handle.runtimePosture = null; // 同 close 分支：没有活着的核心，posture 就不再描述任何东西
     settleTransientBrowserLease(handle, 'core_spawn_error', false);
     handle.browserOpenPending = false;
     handle.coldStandbyPending = false;
@@ -4918,6 +4923,9 @@ async function spawnEdgeChild(handle, {
     const wasColdStandby = !controlPlaneNeverEstablished && (handle.coldStandbyPending || handle.coldStandbyActive);
     handle.child = undefined;
     handle.status.proxyRuntime = invalidateProxyRuntime(handle.status.proxyRuntime);
+    // posture 描述的是**一个还活着的核心**的运行态。进程都没了，它就不再描述任何东西：留着会让
+    // 「已停止」被压成「身份已失效 / 自动化已停摆」。真正的终局归因走退出码那条权威判据（下面）。
+    handle.runtimePosture = null;
     settleTransientBrowserLease(handle, 'core_closed', false);
     handle.browserOpenPending = false;
     if (controlPlaneNeverEstablished) {
@@ -5634,10 +5642,10 @@ function handleEdgeLogLine(handle, message, isError = false) {
   // 注释写着「致命启动失败立即非零退出，让桌面外壳的 edgeProcess.on('exit') 立刻看见」。日志行只做预测、
   // 退出码才是权威；把预测调准，权威一分不动。白名单里保留「CDP 输入控制不可用」是因为那条是唯一
   // **不退出**的终态（核心活着但驱不动浏览器、要求人工重启），少了它「边缘在线但浏览器驱不动」就没人报。
-  // 运行期身份 halt 是**不退出**的第二类终态（第一类是「CDP 输入控制不可用」）：核心还活着、还会
-  // 继续打日志，但已经彻底停摆。它经 lifecycle.identity_halted 闩在 handle 上；不把这个闩算进来，
-  // halt 之后随便哪一行普通日志都会把徽标重置回 running，运营看到的仍是「运行中」。
-  const halting = fleet.declaresCoreHalt(message) || Boolean(handle.identityHalted);
+  // 运行期身份终局 / 自动化残局是**不退出**的第二类终态（第一类是「CDP 输入控制不可用」）：核心还
+  // 活着、还会继续打日志，但已经彻底停摆或跑不起来。它经 posture 闩在 handle 上；不把这个闩算进来，
+  // 随便哪一行普通日志都会把徽标重置回 running，运营看到的仍是「运行中」。
+  const halting = fleet.declaresCoreHalt(message) || postureLatches(handle.runtimePosture);
   const next = { edge: halting ? 'warning' : 'running', lastMessage: proxyRuntimeLine ? '代理运行证据已更新' : message };
   if (!halting && handle.status.edgeFailure) next.edgeFailure = null;
   if (message.includes('[browser-parking] awaiting-login')) {
@@ -5815,6 +5823,17 @@ function handleEdgeLogLine(handle, message, isError = false) {
     if (evt.type === 'popup') next.overlayBlocked = true;
     else if (evt.type === 'popup_cleared' || evt.type === 'session_end') next.overlayBlocked = false;
   }
+  // posture 覆盖层**最后生效、且赢**（顺序即语义）。上面几十条按文本推断的规则各自只看一行日志，
+  // 而 posture 是核心对整体运行态的判断——两者冲突时后者是权威。
+  //
+  // 只把 `edge` 挂进 halting 判据是不够的（那是上一轮的做法）：`session` / `cloud` / `auth` 仍会被
+  // 「浏览循环结束」「已连接云端」这类行改回去，界面于是变成半绿半红的自相矛盾态；而唯一诚实的那句话
+  // 只活在 `lastMessage` 里，下一行日志就把它冲掉。四轴与在场感必须由闩住的 posture 压回去。
+  const postureOverride = runtimePostureOverride(handle.runtimePosture);
+  if (postureOverride) {
+    Object.assign(next, postureOverride.axes);
+    if (postureOverride.presence) next.presence = { text: postureOverride.presence, at: new Date().toISOString() };
+  }
   updateStatus(handle, next);
   if (standbyHintUpdated) applyBrowserStandbyHint(handle, standbyHint);
 }
@@ -5875,6 +5894,23 @@ function pauseEdge(handle) {
 
 function resumeEdge(handle) {
   if (!handle) return;
+  // 身份闸（与核心侧同一条判据的外壳镜像）：**先判再发**。
+  //
+  // 回归形态：这个函数曾在下发 IPC **之前**就无条件把界面写成 `{edge:'running', session:'running'}`
+  // 并置 `automationPaused=false` / `automationIntent='enabled'`。核心侧的拒绝走的是抛异常，
+  // `lifecycle.resumed` 因此永不发出 —— 那条乐观投影没有任何东西会来纠正。核心随后的拒绝日志只能把
+  // `edge` 拉回 warning，`session` / `automationPaused` / `automationIntent` 三个字段就此永久说假话。
+  // 结论不是「再补一条纠正边」，而是**先判再写**：状态只在确实要发生时才改。
+  const resumeVerdict = judgeResumeUnderPosture(handle.runtimePosture);
+  if (resumeVerdict.kind === 'refuse') {
+    updateStatus(handle, {
+      edge: 'warning',
+      session: 'paused',
+      lastMessage: resumeVerdict.message,
+      ...presencePatch(resumeVerdict.presence),
+    });
+    return;
+  }
   const closingBeforeResume = Boolean(handle.child
     && (handle.pausePending || handle.stopRequested || handle.engineStopReason === 'user_close'));
   ensureEnabledLifecycleGeneration(handle, 'user_start');

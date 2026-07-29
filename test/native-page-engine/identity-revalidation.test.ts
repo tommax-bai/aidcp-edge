@@ -28,6 +28,8 @@ import {
   judgeWakeIdentityResettlement,
   observedAccountIdFromDecision,
   reestablishIdentityReadOptions,
+  refuseWakeUnderIdentityGate,
+  resumeAutomationUnderIdentityGate,
   PERIODIC_IDENTITY_READ_HYDRATE_MS,
   REESTABLISH_IDENTITY_READ_HYDRATE_MS,
   type IdentityInvalidReason,
@@ -44,6 +46,16 @@ import type {
 import { facebookPlatformDriver, classifyFacebookIdentityContext } from '../../src/facebook/driver.js';
 import { xhsPlatformDriver } from '../../src/xhs/driver.js';
 import { CoreLifecycleController } from '../../src/client/core-lifecycle.js';
+import {
+  RUNTIME_POSTURE_IPC_TYPE,
+  RUNTIME_POSTURE_KINDS,
+  runtimePostureIpc,
+  type RuntimePosture,
+} from '../../src/client/runtime-posture.js';
+import {
+  judgeCloudRebindUnderIdentity,
+  judgeCommandUnderIdentity,
+} from '../../src/client/identity-command-gate.js';
 
 const OBSERVATION_INTERVAL_MS = 2_000;
 
@@ -312,6 +324,7 @@ function chain(over: {
   const logs: string[] = [];
   const halts: string[] = [];
   const restored: string[] = [];
+  const postures: RuntimePosture[] = [];
   const readOpts: ReadSelfIdentityOptions[] = [];
   const rebaselined: string[] = [];
   const state = { accountId: 'acct-A', nickname: undefined as string | undefined };
@@ -362,10 +375,13 @@ function chain(over: {
       if (over.bumpGenerationOnNthRead === generationReads) generation += 1;
       return current;
     },
-    reportHalt: (reason) => void halts.push(reason),
-    reportIdentityRestored: (accountId) => void restored.push(accountId),
+    reportPosture: (posture) => {
+      postures.push(posture);
+      if (posture.kind === 'identity_halted') halts.push(posture.reason);
+      if (posture.kind === 'healthy' && posture.accountId) restored.push(posture.accountId);
+    },
   });
-  return { run, seq, state, logs, halts, restored, readOpts, rebaselined };
+  return { run, seq, state, logs, halts, restored, postures, readOpts, rebaselined };
 }
 
 test('T6 重立链顺序：在途发布诚实判失败严格早于断开云端；成功路径按全序收口', async () => {
@@ -746,6 +762,7 @@ function wired(over: {
   const seq: string[] = [];
   const halts: string[] = [];
   const restored: string[] = [];
+  const postures: RuntimePosture[] = [];
   const outcomes: IdentityReestablishmentOutcome[] = [];
   const invalidated: IdentityInvalidReason[] = [];
   let guard!: IdentityRevalidator;
@@ -788,8 +805,11 @@ function wired(over: {
     resumeObservation: () => step('resumeObservation'),
     startBrowse: () => step('startBrowse'),
     generation: () => guard.generation,
-    reportHalt: (reason) => void halts.push(reason),
-    reportIdentityRestored: (accountId) => void restored.push(accountId),
+    reportPosture: (posture) => {
+      postures.push(posture);
+      if (posture.kind === 'identity_halted') halts.push(posture.reason);
+      if (posture.kind === 'healthy' && posture.accountId) restored.push(posture.accountId);
+    },
   });
   /** 宿主的 `startIdentityGuard()`。回执回喂那一行正是本组用例钉的东西。 */
   const startGuard = (): void => {
@@ -801,7 +821,7 @@ function wired(over: {
       });
     });
   };
-  return { guard, startGuard, seq, logs, halts, restored, outcomes, invalidated };
+  return { guard, startGuard, seq, logs, halts, restored, postures, outcomes, invalidated };
 }
 
 /** 排空链条那串立即 resolve 的 await（微任务在下一个宏任务前必然全部跑完）。 */
@@ -913,9 +933,11 @@ function wakeHarness(over: { cloudAttached?: boolean; restoreThrows?: boolean } 
         seq.push('restoreCloudLink');
         if (over.restoreThrows) throw new Error('云端不可达');
       },
-      reportIdentityRestored: (id) => {
-        seq.push('reportIdentityRestored');
-        restored.push(id);
+      reportPosture: (posture) => {
+        if (posture.kind === 'healthy' && posture.accountId) {
+          seq.push('reportIdentityRestored');
+          restored.push(posture.accountId);
+        }
       },
       startBrowse: () => void seq.push('startBrowse'),
       startIdentityGuard: () => void seq.push('startIdentityGuard'),
@@ -1062,8 +1084,9 @@ test('T15ter 端到端：真 lifecycle 驱动「暂停 → 冷待机 → 唤醒 
     resumeObservation: () => undefined,
     startBrowse: () => { browsing = true; },
     generation: () => guard.generation,
-    reportHalt: (reason) => { shellHalted = reason; },
-    reportIdentityRestored: () => { shellHalted = null; },
+    reportPosture: (posture) => {
+      shellHalted = posture.kind === 'identity_halted' ? posture.reason : null;
+    },
   });
   const startIdentityGuard = (): void => {
     if (!accountId) return;
@@ -1086,7 +1109,7 @@ test('T15ter 端到端：真 lifecycle 驱动「暂停 → 冷待机 → 唤醒 
         rebaseline: (id) => guard.rebaseline(id),
         cloudLinkAttached: () => cloudAttached,
         restoreCloudLink: async () => { cloudAttached = true; },
-        reportIdentityRestored: () => { shellHalted = null; },
+        reportPosture: (posture) => { if (posture.kind === 'healthy') shellHalted = null; },
         startBrowse: () => { browsing = true; },
         startIdentityGuard: () => startIdentityGuard(),
       });
@@ -1138,9 +1161,14 @@ test('T15quater 恢复自动化的身份准入：终局身份下 MUST 拒绝放�
     '拒绝必须给出处理办法，否则运营只会反复点「恢复」');
 
   // ── 行为层：真 lifecycle 驱动 halt → 暂停 → 恢复（**不经冷待机**）。
+  // 关键差别（本轮修正）：`resumeAutomation` 里跑的是**真实现** `resumeAutomationUnderIdentityGate`，
+  // 不再是用例自己重写一遍宿主逻辑。上一轮那种写法测的是自家闭包——把源码里的 `throw` 整行删掉，
+  // 整套用例仍然全绿，等于没有闸。
   let pageIdentity = 'acct-A';
   let browsing = false;
   let cloudAttached = true;
+  let observationRunning = true;
+  const postures: RuntimePosture[] = [];
   const guard = new IdentityRevalidator('acct-A', {
     threshold: 2,
     observationIntervalMs: OBSERVATION_INTERVAL_MS,
@@ -1168,21 +1196,23 @@ test('T15quater 恢复自动化的身份准入：终局身份下 MUST 拒绝放�
     resumeObservation: () => undefined,
     startBrowse: () => { browsing = true; },
     generation: () => guard.generation,
-    reportHalt: () => undefined,
-    reportIdentityRestored: () => undefined,
+    reportPosture: (posture) => void postures.push(posture),
   });
   const startIdentityGuard = (): void => {
     guard.start((reason) => void reestablish(reason).then((o) => guard.noteReestablishmentOutcome(o)));
   };
+  // 宿主薄接线：把**真**闸接进真 lifecycle。用例不再复制任何判定。
+  const resumeAutomation = (): Promise<void> => resumeAutomationUnderIdentityGate(guard.health, {
+    logger: () => undefined,
+    reportPosture: (posture) => void postures.push(posture),
+    haltReason: () => '登录态读不出稳定账号 id',
+    resumeObservation: () => { observationRunning = true; },
+    startBrowse: () => { browsing = true; },
+    startIdentityGuard,
+  });
   const lifecycle = new CoreLifecycleController({
-    pauseAutomation: async () => { guard.stop(); browsing = false; },
-    resumeAutomation: async () => {
-      // 宿主形状：准入不过就抛（与「浏览器缺席请走唤醒」同口径 —— 抛出 = 保持暂停态）。
-      const verdict = judgeAutomationResume(guard.health);
-      if (verdict.kind === 'refuse') throw new Error('identity_halted_relogin_required');
-      browsing = true;
-      startIdentityGuard();
-    },
+    pauseAutomation: async () => { guard.stop(); browsing = false; observationRunning = false; },
+    resumeAutomation,
     deactivate: async () => undefined,
     closeOwnedBrowser: async () => true,
     exit: () => undefined,
@@ -1198,10 +1228,32 @@ test('T15quater 恢复自动化的身份准入：终局身份下 MUST 拒绝放�
   assert.equal(cloudAttached, false, '前置：halt 断掉了云端连接');
 
   await lifecycle.request('pause');
+  postures.length = 0;
   await lifecycle.request('resume').catch(() => undefined);
 
   assert.equal(browsing, false, '终局身份下 MUST NOT 把浏览重新拉起来（云端还断着，跑起来就是白烧动作 + 上报全丢）');
+  assert.equal(observationRunning, false, '被拒的恢复 MUST 一件副作用都不做（连观测都不许重启）');
   assert.equal(lifecycle.state, 'paused', '拒绝之后 MUST 如实留在暂停态，绝不投影成「已恢复」');
+  // 拒绝走的是抛异常 ⇒ 不会有 lifecycle.resumed；**必须**由这里把终局再喊一遍，否则外壳那条乐观投影
+  // （它在下发指令前就把界面写成运行中了）永远没人纠正。这一条正是回归①在核心侧的对应闸。
+  assert.deepEqual(postures, [{ kind: 'identity_halted', reason: '登录态读不出稳定账号 id' }],
+    '被拒时 MUST 把当前终局重新对外通告一次');
+
+  // 直接驱动真实现再钉一遍「拒绝＝抛出」：宿主契约里，抛出才是「保持暂停态」。
+  // 副作用用**记账**而不是 assert.fail：后者会让「删掉 throw」这次突变照样以 AssertionError 的形式
+  // 满足 assert.rejects（用例自己把突变盖住了）。记账后单独断言，两条独立判据都得成立。
+  const refusedCalls: string[] = [];
+  const settledAsRefused = await resumeAutomationUnderIdentityGate('invalid', {
+    logger: () => undefined,
+    reportPosture: () => undefined,
+    haltReason: () => 'x',
+    resumeObservation: () => void refusedCalls.push('resumeObservation'),
+    startBrowse: () => void refusedCalls.push('startBrowse'),
+    startIdentityGuard: () => void refusedCalls.push('startIdentityGuard'),
+  }).then(() => 'resolved', (error: unknown) => (error as Error).message);
+  assert.equal(settledAsRefused, 'identity_halted_relogin_required',
+    '删掉这一 throw ⇒ 恢复静默放行、宿主以为成功：这条断言就是那次突变的杀手');
+  assert.deepEqual(refusedCalls, [], '被拒的恢复 MUST 一件副作用都不做');
 
   // 唯一的出路仍然是一次带实测的入口：冷待机唤醒（或重启节点）。
   const wake = wakeHarness();
@@ -1272,6 +1324,13 @@ test('T17 重立成功之后收尾步骤抛异常：MUST NOT 报成身份终局�
     '身份恰恰是唯一没出问题的东西：报 halt 会把刚解除的红角标重新闩上，文案还写着「身份确立失败」',
   );
   assert.deepEqual(c.restored, ['acct-B'], '身份确实重立了，通告 MUST 已经发出去');
+  // 本轮新增的那一格：**「不说假话」不等于「说了真话」。** 上一轮只做到不报 halt，于是外壳停在步 11.5
+  // 刚解除完角标的那个状态——运行中、无角标，而浏览与观测永久停着、没有任何东西会重启它们。
+  assert.deepEqual(
+    c.postures.at(-1),
+    { kind: 'automation_stalled', reason: 'resumeObservation 炸了' },
+    '身份完好但自动化没跑起来 MUST 如实说出这第三态；缺了它，外界看到的是「运行中、无角标」＝静默假成功',
+  );
   assert.equal(c.guard.health, 'healthy', '基线已换、状态已回健康：一次与身份无关的故障 MUST NOT 把它钉成终局');
   assert.equal(c.guard.baseline, 'acct-B');
   assert.ok(
@@ -1305,6 +1364,337 @@ test('T17 重立成功之后收尾步骤抛异常：MUST NOT 报成身份终局�
   assert.equal(early.halts.length, 1);
   assert.deepEqual(early.restored, []);
   assert.equal(early.guard.health, 'invalid');
+});
+
+// ── T18：身份未落定时，节点不许代表这个账号动作，也不许以陈旧身份重新上线（S9）─────────
+//
+// `halt` 是**纯返回**：它停浏览、停观测、断云端，但**从不关浏览器**。浏览器仍开着、登着一个我们已经
+// 明说「不知道是谁」的账号。于是两条路能把它重新拉回线上并真的动手：
+//   ① 运营在客户端切一次云端环境 → 重绑一步到位、全程不问身份 ⇒ 以陈旧身份对新云端宣称在线；
+//   ② 云端随后派下来的发布 / 任务认领会经协调器与执行器**真的执行** ⇒ 真发帖、记账挂错账号。
+// 后者比「浏览循环空转」重一个量级：它在平台上留下真实痕迹，且账目是错的。
+
+test('T18 身份闸：写动作与重绑被拦并如实回执，救援 / 读 / 收尾类照常放行', () => {
+  // ── ① 写动作（以页面账号名义动作的那些）在两种未落定态下都 MUST 被拦。
+  for (const health of ['invalid', 'reestablishing'] as const) {
+    for (const type of ['publish.command', 'interaction.comment', 'interaction.like', 'edge.task.acquire', 'group.join'] as const) {
+      const verdict = judgeCommandUnderIdentity(health, type);
+      assert.equal(verdict.kind, 'refuse', `${health} 下 ${type} MUST 被拦：它会在平台上留下该账号名下的真实痕迹`);
+      assert.equal(verdict.kind === 'refuse' ? verdict.reason : '', 'identity_unresolved',
+        '拒绝 MUST 有具名原因并回执——静默丢弃会让云端分不清「没触达」与「执行了但没结果」');
+    }
+  }
+
+  // ── ② 救援 / 读 / 收尾类 MUST 放行：拦掉它们只会让节点更难救。
+  for (const type of [
+    'edge.task.release',
+    'identity.read_current',
+    'identity.read_self_profile',
+    'captcha.assist.capture',
+    'captcha.assist.click',
+    'session.end',
+  ] as const) {
+    assert.deepEqual(judgeCommandUnderIdentity('invalid', type), { kind: 'allow' },
+      `${type} 是救援 / 读 / 收尾，拦掉等于把唯一的自救路径也堵死`);
+  }
+  // 不代表账号动作的控制类命令本来就不在闸的辖区内。
+  assert.deepEqual(judgeCommandUnderIdentity('invalid', 'pacing.update'), { kind: 'allow' });
+  assert.deepEqual(judgeCommandUnderIdentity('invalid', 'ping'), { kind: 'allow' });
+
+  // ── ③ 身份健康时一律放行（这道闸只在身份未落定时存在）。
+  assert.deepEqual(judgeCommandUnderIdentity('healthy', 'publish.command'), { kind: 'allow' });
+  assert.deepEqual(judgeCommandUnderIdentity(undefined, 'publish.command'), { kind: 'allow' },
+    '没有装配校验体（无浏览 / 无身份闭环）时 MUST NOT 凭空拦——那会把一台正常机器停掉');
+
+  // ── ④ 重绑：终局 / 重立中 MUST 拒绝，且理由里带处理办法。
+  assert.deepEqual(judgeCloudRebindUnderIdentity('healthy'), { kind: 'allow' });
+  for (const health of ['invalid', 'reestablishing'] as const) {
+    const verdict = judgeCloudRebindUnderIdentity(health);
+    assert.equal(verdict.kind, 'refuse');
+    const reason = verdict.kind === 'refuse' ? verdict.reason : '';
+    assert.match(reason, /identity_unresolved/);
+    assert.match(reason, /重新登录/, '拒绝必须给出处理办法，否则运营只会反复点切换');
+  }
+});
+
+// ── T19：唤醒被身份闸拒绝时**真的拆**（不是只打一行告警）───────────────────────────
+//
+// 抽成可注入实现的唯一理由是**可杀**：上一轮这段留在宿主大闭包里，用例只能扫源码文本，
+// 而「保留告警但不再拆除、照常返回成功」这种现实形态的削弱在文本断言下完全存活。
+
+test('T19 唤醒被拒：MUST 诚实回执在途发布 + 释放浏览器层 + 停代理世代 + 杀浏览器，并如实回 false', async () => {
+  const seq: string[] = [];
+  const logs: string[] = [];
+  const result = await refuseWakeUnderIdentityGate('唤醒后仍读不出稳定账号 id', 'browser_wake_identity_unmeasured', {
+    logger: (m) => void logs.push(m),
+    failInFlightPublishesHonestly: (reason) => void seq.push(`fail:${reason}`),
+    detachSession: () => void seq.push('detach'),
+    suspendProxyGeneration: (reason) => void seq.push(`proxy:${reason}`),
+    killBrowser: async () => void seq.push('kill'),
+  });
+
+  assert.equal(result, false, '唤醒失败 MUST 如实回 false（＝留在待机态、可再次唤醒），绝不把身份未知的浏览器当就绪');
+  assert.deepEqual(seq, [
+    'fail:browser_wake_identity_unmeasured',
+    'detach',
+    'proxy:browser_wake_identity_unmeasured',
+    'kill',
+  ], '四件副作用与顺序都是不变量：先诚实回执（否则云端无限期挂起）、再释放 CDP（否则被动断开会被当成意外掉线留僵尸）、最后才杀浏览器');
+  assert.ok(logs.some((l) => l.includes('留在待机态')), '拒绝必须说清「现在是什么状态、还能怎么办」');
+});
+
+// ── T20：交付前自查表 —— 八条终局 / 恢复路径 × **外界看到什么** ───────────────────────
+//
+// 上一轮的教训：改完只核了核心侧，于是把一个「看得见、且处理办法恰好正确」的假失败，换成了一个
+// 「外壳全绿、无角标」的假成功。所以这条用例从**外壳那一侧**逐条驱动，每条都问同一个问题：
+// 外面看到的，和里面真实发生的，是不是同一件事。
+//
+// 判定全部来自真模块（核心的 identity-guard + 外壳的 runtime-posture.cjs）；这里只保留 main.cjs 那几条
+// 与本主题无关的日志推断（「已连接云端」「浏览循环结束」…），用来复现**覆写**这个真实威胁。
+
+const requireCjs = createRequire(import.meta.url);
+const shellPostureModule = requireCjs('../../src/electron/runtime-posture.cjs') as {
+  RUNTIME_POSTURE_KINDS: string[];
+  parseRuntimePosture: (message: unknown) => unknown;
+  projectRuntimePosture: (posture: unknown) => {
+    axes: Record<string, string>;
+    message: string | null;
+    presence: string | null;
+    failure: string | null | undefined;
+  };
+  postureLatches: (posture: unknown) => boolean;
+  runtimePostureOverride: (posture: unknown) => { axes: Record<string, string>; presence: string | null } | null;
+  judgeResumeUnderPosture: (posture: unknown) => { kind: string; message?: string; presence?: string };
+};
+
+interface VisibleStatus {
+  edge: string;
+  session: string;
+  cloud: string;
+  auth: string;
+  lastMessage: string;
+  presence: string;
+  edgeFailure: string | null;
+}
+
+function shellView() {
+  const status: VisibleStatus = {
+    edge: 'running',
+    session: 'running',
+    cloud: 'connected',
+    auth: 'logged in',
+    lastMessage: '自动化运行中',
+    presence: '自动化运行中',
+    edgeFailure: null,
+  };
+  let latch: unknown = null;
+  return {
+    status,
+    /** 外壳收到核心的运行态 IPC（与 main.cjs 那一段逐行对应；判定全部来自真模块）。 */
+    receive(ipc: Record<string, unknown>): void {
+      const posture = shellPostureModule.parseRuntimePosture(ipc);
+      if (!posture) return;
+      latch = shellPostureModule.postureLatches(posture) ? posture : null;
+      const projection = shellPostureModule.projectRuntimePosture(posture);
+      Object.assign(status, projection.axes);
+      if (projection.message) status.lastMessage = projection.message;
+      if (projection.presence) status.presence = projection.presence;
+      if (projection.failure !== undefined) status.edgeFailure = projection.failure;
+    },
+    /** 核心又打了一行普通日志（这正是覆写威胁的来源）。 */
+    log(line: string): void {
+      const next: Record<string, string | null> = { edge: 'running', lastMessage: line };
+      if (line.includes('已连接云端')) next.cloud = 'connected';
+      if (line.includes('浏览循环结束')) next.session = 'idle';
+      if (line.includes('自动浏览已启动')) next.session = 'running';
+      if (!shellPostureModule.postureLatches(latch)) next.edgeFailure = null;
+      const override = shellPostureModule.runtimePostureOverride(latch);
+      if (override) {
+        Object.assign(next, override.axes);
+        if (override.presence) next.presence = override.presence;
+      }
+      Object.assign(status, next);
+    },
+    /** 运营点了「恢复」。 */
+    clickResume(): { kind: string; message?: string } {
+      const verdict = shellPostureModule.judgeResumeUnderPosture(latch);
+      if (verdict.kind === 'refuse') {
+        Object.assign(status, {
+          edge: 'warning',
+          session: 'paused',
+          lastMessage: verdict.message ?? '',
+          presence: verdict.presence ?? '',
+        });
+      }
+      return verdict;
+    },
+  };
+}
+
+/** 核心的 posture 直投到外壳：等价于宿主的 `publishRuntimePosture`。 */
+function pipe(view: ReturnType<typeof shellView>) {
+  return (posture: RuntimePosture): void => view.receive(runtimePostureIpc(posture));
+}
+
+test('T20 自查表：八条路径逐条核对「外面看到的 = 里面发生的」', async () => {
+  // ① 真 halt：里面＝浏览停 / 观测停 / 云端被主动断开 / 不知道登着谁。
+  {
+    const view = shellView();
+    const c = wired({ pageIdentity: 'acct-B', decision: { kind: 'halt', reason: '登录态读不出稳定账号 id' } });
+    c.startGuard();
+    await c.guard.check();
+    await c.guard.check();
+    await settle();
+    for (const posture of c.postures) pipe(view)(posture);
+    view.log('[aidcp-edge] 心跳 ok');            // ← 覆写威胁：普通日志一行
+    view.log('[aidcp-edge] 已连接云端 ws://x');   // ← 更坏的一行：它会去写 cloud
+    assert.equal(view.status.edge, 'warning', '① 终局 MUST 有角标');
+    assert.equal(view.status.session, 'idle');
+    assert.equal(view.status.cloud, 'disconnected', '① 云端确实被断开了，界面 MUST NOT 说「已连接」');
+    assert.equal(view.status.auth, 'login required');
+    assert.ok(view.status.edgeFailure?.includes('运行期身份确立失败'), '① 失败卡片 MUST 扛得住日志行覆写');
+    assert.match(view.status.presence, /重新登录/, '① 在场感 MUST 给出处理办法');
+  }
+
+  // ② 重立成功：里面＝身份换成新号、云端按新身份连上、浏览与观测都回来了。
+  {
+    const view = shellView();
+    view.receive(runtimePostureIpc({ kind: 'identity_halted', reason: '上一局的终局' })); // 先闩上
+    const c = wired({ pageIdentity: 'acct-B' });
+    c.startGuard();
+    await c.guard.check();
+    await c.guard.check();
+    await settle();
+    for (const posture of c.postures) pipe(view)(posture);
+    view.log('[aidcp-edge] 自动浏览已启动');
+    assert.equal(view.status.edge, 'running', '② 真重立之后 MUST 解除角标，否则核心说健康、外壳说终局');
+    assert.equal(view.status.edgeFailure, null);
+    assert.equal(view.status.session, 'running', '② 闩解除后日志推断 MUST 重新生效');
+    assert.match(view.status.presence, /身份已重新确立/);
+  }
+
+  // ③ 重立被作废（宿主暂停 / 冷待机中途叫停）：里面＝这次没做完、基线仍是旧的、云端已补回。
+  {
+    const view = shellView();
+    const c = wired({ pageIdentity: 'acct-B', stopAt: 'stopBrowse' });
+    c.startGuard();
+    await c.guard.check();
+    await c.guard.check();
+    await settle();
+    assert.equal(c.outcomes[0]?.kind, 'aborted', '前置：确实走的是作废那条路');
+    for (const posture of c.postures) pipe(view)(posture);
+    view.log('[aidcp-edge] 心跳 ok');
+    assert.equal(view.status.edge, 'running', '③ 作废不是失败：MUST NOT 留角标');
+    assert.equal(view.status.edgeFailure, null);
+    assert.ok(!view.status.presence.includes('正在重新确认'),
+      '③ 「正在重新确认身份」是闩住的文案，作废后 MUST 被解除，否则它会永远挂在界面上');
+  }
+
+  // ④ 崩在步 11（重设基线）之前：里面＝身份没换成、节点半拆。
+  {
+    const view = shellView();
+    const c = wired({ pageIdentity: 'acct-B', throwAt: 'disconnectCloud' });
+    c.startGuard();
+    await c.guard.check();
+    await c.guard.check();
+    await settle();
+    for (const posture of c.postures) pipe(view)(posture);
+    view.log('[aidcp-edge] 心跳 ok');
+    assert.equal(view.status.edge, 'warning', '④ 半拆终局 MUST 有角标');
+    assert.equal(view.status.session, 'idle');
+    assert.ok(view.status.edgeFailure?.includes('运行期身份确立失败'));
+  }
+
+  // ⑤ 崩在步 11 **之后**：里面＝身份完好、云端已按新身份连上，但浏览与观测停着且无人会重启。
+  //    这一格是本轮要根除的回归：上一轮它长成「外壳全绿、无角标」。
+  {
+    const view = shellView();
+    const c = wired({ pageIdentity: 'acct-B', throwAt: 'resumeObservation' });
+    c.startGuard();
+    await c.guard.check();
+    await c.guard.check();
+    await settle();
+    for (const posture of c.postures) pipe(view)(posture);
+    view.log('[aidcp-edge] 心跳 ok');
+    view.log('[aidcp-edge] 浏览循环结束');
+    assert.equal(view.status.edge, 'warning', '⑤ MUST 有角标：浏览与观测永久停着，「运行中、无角标」＝静默假成功');
+    assert.equal(view.status.session, 'idle');
+    assert.ok(view.status.edgeFailure?.includes('自动化已停摆'), '⑤ 失败卡片 MUST 说清是自动化停摆、不是身份失败');
+    assert.ok(!view.status.edgeFailure?.includes('身份确立失败'),
+      '⑤ MUST NOT 讲成身份失败：那会把运营推去「重新登录 + 重启」，而有效动作是点「恢复」');
+    assert.match(view.status.presence, /恢复/, '⑤ 在场感 MUST 指向正确的处理办法');
+    // 而且它 MUST 允许「恢复」——那正是它的处理办法。
+    assert.equal(view.clickResume().kind, 'allow', '⑤ MUST NOT 把一台身份完好、只是没跑起来的机器拦死');
+  }
+
+  // ⑥ 终局身份下点「恢复」：外壳先判再发 ⇒ 一秒钟都不许出现「运行中」。
+  {
+    const view = shellView();
+    view.receive(runtimePostureIpc({ kind: 'identity_halted', reason: '登录态读不出稳定账号 id' }));
+    const verdict = view.clickResume();
+    assert.equal(verdict.kind, 'refuse');
+    assert.equal(view.status.edge, 'warning', '⑥ 回归形态：这里曾在下发指令前就写成 running，而拒绝走抛异常、没有人来纠正');
+    assert.equal(view.status.session, 'paused', '⑥ session MUST NOT 被乐观写成 running');
+    assert.match(view.status.lastMessage, /重新登录/, '⑥ 拒绝 MUST 给处理办法');
+    // 核心侧那道闸同时也在（外壳闩陈旧时的兜底），且拒绝时会把终局再喊一遍。
+    const postures: RuntimePosture[] = [];
+    const effects: string[] = [];
+    const settled = await resumeAutomationUnderIdentityGate('invalid', {
+      logger: () => undefined,
+      reportPosture: (p) => void postures.push(p),
+      haltReason: () => '登录态读不出稳定账号 id',
+      resumeObservation: () => void effects.push('resumeObservation'),
+      startBrowse: () => void effects.push('startBrowse'),
+      startIdentityGuard: () => void effects.push('startIdentityGuard'),
+    }).then(() => 'resolved', () => 'rejected');
+    assert.equal(settled, 'rejected', '⑥ 核心侧 MUST 抛出（抛出＝保持暂停态）');
+    assert.deepEqual(effects, [], '⑥ 被拒的恢复 MUST 一件副作用都不做');
+    assert.deepEqual(postures, [{ kind: 'identity_halted', reason: '登录态读不出稳定账号 id' }]);
+  }
+
+  // ⑦ 终局身份下唤醒被拒：外壳侧 MUST 仍然是那个终局（唤醒没能解除它），浏览器已还回槽位。
+  {
+    const view = shellView();
+    view.receive(runtimePostureIpc({ kind: 'identity_halted', reason: '登录态读不出稳定账号 id' }));
+    const seq: string[] = [];
+    const woke = await refuseWakeUnderIdentityGate('唤醒后仍读不出稳定账号 id', 'browser_wake_identity_unmeasured', {
+      logger: () => undefined,
+      failInFlightPublishesHonestly: () => void seq.push('fail'),
+      detachSession: () => void seq.push('detach'),
+      suspendProxyGeneration: () => void seq.push('proxy'),
+      killBrowser: async () => void seq.push('kill'),
+    });
+    view.log('[aidcp-edge] 心跳 ok');
+    assert.equal(woke, false);
+    assert.deepEqual(seq, ['fail', 'detach', 'proxy', 'kill'], '⑦ 半开的浏览器 MUST 还回槽位，否则它挡着别的账号');
+    assert.equal(view.status.edge, 'warning', '⑦ 唤醒没解除终局 ⇒ 界面 MUST 仍是终局');
+    assert.equal(view.status.cloud, 'disconnected');
+  }
+
+  // ⑧ 终局身份下切云端环境（S9）：MUST 拒绝，且界面仍是终局——绝不以陈旧身份宣称在线。
+  {
+    const view = shellView();
+    view.receive(runtimePostureIpc({ kind: 'identity_halted', reason: '登录态读不出稳定账号 id' }));
+    const verdict = judgeCloudRebindUnderIdentity('invalid');
+    assert.equal(verdict.kind, 'refuse');
+    view.log('[aidcp-edge] 心跳 ok');
+    assert.equal(view.status.edge, 'warning');
+    assert.equal(view.status.cloud, 'disconnected', '⑧ 重绑被拒 ⇒ 节点对任何云端都不在场，界面 MUST NOT 说「已连接」');
+    // 而且此刻云端就算把发布派下来，也不许执行。
+    assert.equal(judgeCommandUnderIdentity('invalid', 'publish.command').kind, 'refuse');
+  }
+});
+
+test('T20bis 跨侧对账：核心与外壳的四态名册 MUST 逐字一致（两份手工契约的唯一机械守卫）', () => {
+  assert.deepEqual([...shellPostureModule.RUNTIME_POSTURE_KINDS], [...RUNTIME_POSTURE_KINDS]);
+  // IPC 形状不对时 MUST 返回 null（绝不拿半截字段去画界面）。
+  assert.equal(shellPostureModule.parseRuntimePosture({ type: RUNTIME_POSTURE_IPC_TYPE }), null);
+  assert.equal(shellPostureModule.parseRuntimePosture({ type: RUNTIME_POSTURE_IPC_TYPE, posture: { kind: 'bogus' } }), null);
+  assert.equal(shellPostureModule.parseRuntimePosture({ type: 'lifecycle.paused' }), null);
+  assert.deepEqual(
+    shellPostureModule.parseRuntimePosture(runtimePostureIpc({ kind: 'healthy', accountId: 'acct-B' })),
+    { kind: 'healthy', accountId: 'acct-B' },
+  );
 });
 
 // ── 1.9① 宿主侧接线（**弱断言**：源码文本扫描，不计入行为覆盖）──────────────────
@@ -1368,9 +1758,12 @@ test('宿主装配契约（源码扫描）：分域按平台走、两种读预�
   assert.match(block, /new IdentityRevalidator\(observedAccountId \?\? accountId \?\? ''/);
   assert.match(main, /observedAccountId = observedAccountIdFromDecision\(resolved\)/);
 
-  // ④ 取消点与 halt 通告都接上了。
+  // ④ 取消点与「对外呈现只经一条边」都接上了。
   assert.match(block, /generation: \(\) => identityGuard\?\.generation/);
-  assert.match(block, /sendLifecycleIpc\(\{ type: 'lifecycle\.identity_halted', reason \}\)/);
+  assert.match(block, /reportPosture: publishRuntimePosture/,
+    '链条的对外通告 MUST 走那条唯一的边；宿主自己另拼一条 IPC 就是在重造分岔');
+  assert.match(main, /const publishRuntimePosture = \(posture: RuntimePosture\): void =>/);
+  assert.match(main, /sendLifecycleIpc\(runtimePostureIpc\(posture\)\)/);
 
   // ⑤ 被叫停的链条留下的「观测还停着」由宿主的恢复路径补上——链条自己不补（见 T11③）。
   const resumeStart = main.indexOf('resumeAutomation: async () => {');
@@ -1382,12 +1775,12 @@ test('宿主装配契约（源码扫描）：分域按平台走、两种读预�
     /nativeBrowse\?\.resumeObservation\(\)/,
     '恢复自动化 MUST 一并恢复周期观测，否则浏览重开了但阻断观测永久全盲',
   );
-  // ⑤ter 身份准入：恢复自动化不带来任何新的身份事实，停在无身份终局时 MUST 拒绝放行（行为覆盖见 T15quater）。
-  assert.match(resumeBlock, /judgeAutomationResume\(identityGuard\?\.health/);
-  assert.ok(
-    resumeBlock.indexOf('judgeAutomationResume') < resumeBlock.indexOf('browse?.start()'),
-    '身份准入 MUST 早于把浏览拉起来——判完再放行才算闸，放行完再判只是打一行日志',
-  );
+  // ⑤ter 身份准入：整段（判据 + 三件恢复动作 + 拒绝时重喊终局）都在可注入实现里，宿主只做薄接线。
+  //      行为覆盖在 T15quater / T20⑥ —— 那两条驱动的是**真实现**，删掉 throw 会当场红。
+  //      这条只防「有人把它搬回宿主大闭包里自己写一遍」（那样就又回到了扫不出、杀不掉的状态）。
+  assert.match(resumeBlock, /await resumeAutomationUnderIdentityGate\(identityGuard\?\.health/);
+  assert.doesNotMatch(resumeBlock, /browse\?\.start\(\)\.catch[\s\S]*resumeAutomationUnderIdentityGate/,
+    '恢复动作 MUST 在闸之内，绝不能在闸之外先跑一遍');
 
   // ⑤bis 链条回执 MUST 回喂校验体：判失效之后校验体停在「重立中」抑制判定，回执是它唯一的出口。
   // 少了这一行，暂停→恢复之后运行期身份校验永久哑火（换号再也测不出来），行为覆盖见 T14。
@@ -1400,11 +1793,24 @@ test('宿主装配契约（源码扫描）：分域按平台走、两种读预�
   assert.match(startGuardBlock, /kind: 'crashed'/,
     '连兜底都抛了的那条路 MUST 照样收口状态机，绝不留一个永远等不到回执的中间态');
 
-  // ⑥ 外壳真的处理这条 IPC，并把它闩住（否则下一行普通日志就把徽标重置回 running）。
-  assert.match(shell, /message\.type === 'lifecycle\.identity_halted'/);
-  assert.match(shell, /handle\.identityHalted = reason/);
-  assert.match(shell, /fleet\.declaresCoreHalt\(message\) \|\| Boolean\(handle\.identityHalted\)/);
-  assert.match(shell, /handle\.identityHalted = null/, '新拉起的核心 MUST 清掉上一轮的 halt 闩');
+  // ⑥ 外壳侧只有**一处**把运行态翻成界面，且闩住期间日志行推断必须让位。
+  //    行为覆盖在 T20（八条路径逐条核对外界看到什么）；这条只防「有人在别处再拼一份状态」。
+  assert.match(shell, /const posture = parseRuntimePosture\(message\);/);
+  assert.match(shell, /handle\.runtimePosture = postureLatches\(posture\) \? posture : null;/);
+  assert.match(shell, /fleet\.declaresCoreHalt\(message\) \|\| postureLatches\(handle\.runtimePosture\)/);
+  assert.match(shell, /handle\.runtimePosture = null;/, '新拉起的核心 MUST 清掉上一轮的运行态闩');
+  // 覆盖层 MUST 在全部日志行推断**之后**、`updateStatus` **之前**：顺序即语义，posture 要赢。
+  const overrideAt = shell.indexOf('const postureOverride = runtimePostureOverride(handle.runtimePosture);');
+  const updateAt = shell.indexOf('updateStatus(handle, next);', overrideAt);
+  assert.ok(overrideAt > 0 && updateAt > overrideAt, 'posture 覆盖层 MUST 紧接在 updateStatus 之前施加');
+  // 恢复按钮：**先判再写**。乐观投影写在判定之前，就是回归①那条永远没人纠正的假话。
+  const resumeEdgeAt = shell.indexOf('function resumeEdge(handle) {');
+  const resumeEdgeEnd = shell.indexOf('\nfunction ', resumeEdgeAt + 10);
+  const resumeEdgeBlock = shell.slice(resumeEdgeAt, resumeEdgeEnd);
+  assert.ok(
+    resumeEdgeBlock.indexOf('judgeResumeUnderPosture') < resumeEdgeBlock.indexOf("edge: 'running'"),
+    '身份闸 MUST 早于任何乐观投影：核心的拒绝走抛异常、不会有 lifecycle.resumed 来纠正它',
+  );
 
   // ⑦ 唤醒后的身份收口 MUST 与 resumeAutomation 解耦：宿主只调收口函数，自己不再判「要不要重设基线」。
   //    行为覆盖在 T15；这条只防「有人把它挪回 `if (resumeAutomation)` 里」。
@@ -1420,13 +1826,22 @@ test('宿主装配契约（源码扫描）：分域按平台走、两种读预�
   assert.doesNotMatch(wakeBlock, /identityGuard\?\.rebaseline\(wakeBaseline\)/,
     '基线 MUST NOT 再由宿主自己拼（曾经拼成 observedAccountId ?? accountId：读不出时会把覆盖值钉进校验体）');
 
-  // ⑧ 「身份已重新确立」的通告：链条与唤醒两条路都接上，外壳照它解除闩。
-  assert.match(block, /sendLifecycleIpc\(\{ type: 'lifecycle\.identity_restored', accountId: restoredAccountId \}\)/);
-  assert.match(wakeBlock, /lifecycle\.identity_restored/);
-  assert.match(shell, /message\.type === 'lifecycle\.identity_restored'/,
-    '外壳 MUST 处理这条 IPC：halt 闩是不可撤销的，不解除就是核心说健康、外壳说终局');
-  const restoredStart = shell.indexOf("message.type === 'lifecycle.identity_restored'");
-  const restoredEnd = shell.indexOf("message.type === 'lifecycle.executor_failed'", restoredStart);
-  assert.ok(restoredStart >= 0 && restoredEnd > restoredStart);
-  assert.match(shell.slice(restoredStart, restoredEnd), /handle\.identityHalted = null/);
+  // ⑧ 唤醒的两条身份拒绝路径都走**真拆**的可注入实现（行为覆盖见 T19 / T20⑦）。
+  assert.match(wakeBlock, /reportPosture: publishRuntimePosture/);
+  assert.equal(
+    (wakeBlock.match(/refuseWakeUnderIdentityGate\(/g) ?? []).length,
+    2,
+    '「读不出身份」与「唤醒没能解除终局」两条路 MUST 共用同一个真拆收场，绝不各写一份',
+  );
+
+  // ⑨ S9 身份闸：重绑与三个命令入口都过闸（行为覆盖见 T18 / T20⑧）。
+  assert.match(main, /const rebindVerdict = judgeCloudRebindUnderIdentity\(identityGuard\?\.health\);/);
+  const rebindAt = main.indexOf('const rebindVerdict = judgeCloudRebindUnderIdentity');
+  const clientRebindAt = main.indexOf('await client.rebind(request.url)');
+  assert.ok(rebindAt > 0 && clientRebindAt > rebindAt,
+    '身份闸 MUST 早于真正重绑——判完再放行才算闸');
+  assert.match(main, /const refuseCommandUnderIdentity = \(env: Envelope, lane: string\): boolean =>/);
+  assert.match(main, /if \(refuseCommandUnderIdentity\(env, '任务'\)\) return;/);
+  assert.match(main, /if \(refuseCommandUnderIdentity\(env, 'Native'\)\) return;/);
+  assert.match(main, /const publishIdentityVerdict = judgeCommandUnderIdentity\(identityGuard\?\.health, env\.type\);/);
 });
