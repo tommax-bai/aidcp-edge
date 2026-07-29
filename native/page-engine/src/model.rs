@@ -24,8 +24,24 @@ pub struct PageCard {
     pub cover_desc: Option<String>,
     #[serde(default)]
     pub note_id: Option<String>,
+    /// `note_id` 的身份分档（change generalize-facebook-content-derived-post-identity）。
+    /// 缺省 = 平台永久链接 ⇒ 老边端与既有路径逐位等于今天。
+    /// `ContentRef` = 内容派生的**会话内**引用：可评估、可计浏览、可就地点赞，
+    /// 但 MUST NOT 用于导航 / 打开详情 / 定向评论 / 交付人工 / 跨会话去重。
+    /// 消费方 MUST 读本字段判定能力，MUST NOT 去正则匹配 note_id 的字符串形态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_id_kind: Option<PostIdentityKind>,
     #[serde(default)]
     pub is_video: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostIdentityKind {
+    /// 平台永久链接：可导航、可跨会话引用。
+    Permalink,
+    /// 内容派生的会话内引用：只在签发它的会话与列表面内有效。
+    ContentRef,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -584,6 +600,7 @@ mod tests {
                     collect_count: 2,
                     cover_desc: None,
                     note_id: Some("n".repeat(500)),
+                    note_id_kind: None,
                     is_video: Some(false),
                 })
                 .collect(),

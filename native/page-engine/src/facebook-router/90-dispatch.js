@@ -5,7 +5,7 @@
   }
   if(kind==='identity_read')return done(identity());
   if(kind==='consent_probe')return done({kind:'consent_probe',value:consentProbe()});
-  if(kind==='feed_probe')return done(feedProbe());
+  if(kind==='feed_probe')return done(await feedProbe());
   if(kind==='identity_candidates')return done(identityCandidates());
   if(kind==='feed_home_target')return done({kind:'point_target',value:feedHomeTarget()});
   if(kind==='feed_recovery_target')return done({kind:'point_target',value:feedRecoveryTarget()});
@@ -34,7 +34,7 @@
   if(kind==='publish_submitted_probe')return done({kind:'publish_submitted_probe',value:publishSubmittedProbe()});
   if(kind==='reel_probe')return done({kind:'reel_probe',value:reelProbeValue(activeReel())});
   if(kind==='reel_next_target')return done({kind:'reel_next_target',value:reelNextTarget()});
-  if(kind==='reel_cards')return done(feedCards());
+  if(kind==='reel_cards')return done(await feedCards());
   if(kind==='page_probe'){
     const surface=classify();
     const cards=topArticles().length;
@@ -62,16 +62,16 @@
       const before=feedScrollBy(Math.max(420,Math.round((window.innerHeight||800)*0.8)));
       await sleep(450);
       if(p.reason==='first_commentable_group_post_probe')await sleep(2000);
-      const output=p.reason==='first_commentable_group_post_probe'?await firstPostCards():feedCards();
+      const output=p.reason==='first_commentable_group_post_probe'?await firstPostCards():await feedCards();
       output.value.movement=feedScrollMovement(before);
       return done(output);
     }
-    return done(feedCards());
+    return done(await feedCards());
   }
-  if(kind==='feed_refresh')return done(p.reason==='first_commentable_group_post_probe'?await firstPostCards():feedCards());
+  if(kind==='feed_refresh')return done(p.reason==='first_commentable_group_post_probe'?await firstPostCards():await feedCards());
   if(kind==='search_execute'){
     if(!p.container)return fail('search','permission_gated');
-    const output=feedCards();
+    const output=await feedCards();
     const heading=first(['main h1','[role="main"] h1','[role="heading"][aria-level="1"]']);
     output.value.containerName=text(heading,200)||undefined;
     return done(output);

@@ -1149,6 +1149,7 @@ mod tests {
             collect_count: 0,
             cover_desc: None,
             note_id: Some("https://www.facebook.com/watch?v=1".to_owned()),
+            note_id_kind: None,
             is_video: None,
         }];
         probe

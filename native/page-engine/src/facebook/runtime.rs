@@ -433,6 +433,7 @@ mod tests {
                     collect_count: 0,
                     cover_desc: None,
                     note_id: Some((*note_id).to_owned()),
+                    note_id_kind: None,
                     is_video: None,
                 })
                 .collect(),

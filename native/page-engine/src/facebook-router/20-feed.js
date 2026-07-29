@@ -1,20 +1,67 @@
-  const cardOf=(article,index,preferredHref='')=>{
+  /**
+   * 成卡（change generalize-facebook-content-derived-post-identity）。
+   *
+   * 拿得到平台永久链接 ⇒ 身份是 `permalink`，与今天逐位一致。
+   * 拿不到 ⇒ **不再整张丢掉**，改签发内容派生的会话内引用（复用群组首帖那套证据 + 摘要 + DOM 标记机制）。
+   * 2026-07-29 真机：群组帖在零交互下拿不到任何可接受地址（6/6 卡为 0），整条浏览链路因此 100% 阻塞。
+   *
+   * 红线：两类身份必须**显式分档**回传。消费方按分档判能力，绝不能靠正则匹配字符串形态去猜——
+   * 漏判一处就是把会话内引用当地址用。
+   */
+  /** feed 是否正在加载（与 feedProbe 的 loading 同源判据，抽出来供成卡判定共用）。 */
+  const feedLoading=()=>{
+    const scope=first(['div[role="feed"]','[role="main"]','main'])||document.body;
+    return Boolean(scope&&scope.querySelector('[role="progressbar"],[aria-busy="true"]'));
+  };
+  const cardOf=async(article,index,preferredHref='')=>{
     const href=cleanPermalink(preferredHref)||permalinkOf(article);
     const id=postId(href);
-    if(!href||!id)return null;
     const author=articleAuthor(article);
     const body=articleBody(article)||(preferredHref?text(article,12000):'');
-    return {
+    const base={
       index,
       title:body.slice(0,200),
       author:author.name||undefined,
       likeCount:count(reactionCountWitness(article)),
       collectCount:0,
       coverDesc:body.slice(0,200)||undefined,
+    };
+    if(href&&id)return {
+      ...base,
       noteId:href,
+      noteIdKind:'permalink',
       isVideo:Boolean(first(['video'],article)||/\/videos\/|\/reel\/|\/watch/.test(href)),
     };
+    // 加载中一律不签发引用：此刻永久链接**可能只是还没水合**。先发一个内容引用、等链接出来再发一次
+    // 平台身份，同一条帖子就会被上报两次、浏览也被记两次。宁可这一轮不报（下一轮判稳后自然会有），
+    // 也不制造重复身份。（既有用例 facebook-router-contract「区分加载中 / 可见不可上报 / 明确空态」守住这条。）
+    if(feedLoading())return null;
+    const evidence=firstPostEvidence(article);
+    if(!evidence)return null;                        // 证据不足以成立 ⇒ 仍然不成卡，绝不臆造身份
+    // 已绑过且证据未变 ⇒ 直接复用，跳过摘要计算。判稳期每 500ms 就要重扫一次，
+    // 群组帖那种「整屏都没有平台地址」的页面上，不复用等于每半秒把全屏卡片重新哈希一遍。
+    const existingRef=article.getAttribute&&article.getAttribute('data-aidcp-native-first-post-target');
+    if(existingRef){
+      const state=firstPostTargetState();
+      const record=state&&state.targets instanceof Map?state.targets.get(existingRef):null;
+      if(record&&record.root===article&&record.evidence===evidence.value)return {
+        ...base,
+        noteId:existingRef,
+        noteIdKind:'content_ref',
+        isVideo:Boolean(first(['video'],article)),
+      };
+    }
+    const bound=await bindFirstPostTarget(article,evidence);
+    if(!bound.ok)return null;                        // 歧义 / 绑定失败 ⇒ 不成卡
+    return {
+      ...base,
+      noteId:bound.targetRef,
+      noteIdKind:'content_ref',
+      isVideo:Boolean(first(['video'],article)),
+    };
   };
+  /** 去重键：永久链接走规范化 id（同帖不同链接形态要归一）；会话内引用本身即已是摘要，直接用。 */
+  const cardDedupeKey=(card)=>!card?'':card.noteIdKind==='content_ref'?String(card.noteId||''):postId(card.noteId);
   // 身份候选筛选（change acquire-facebook-feed-post-identity-by-hover）。
   // Facebook 把帖子地址扣在 DOM 之外：一张卡里有几个指向站点根路径的链接，只有**时间戳**那个
   // 在可信指针落上去之后才换出真地址（2026-07-29 越南语首页实测：可信指针 5/5、页面内合成事件 0/8）。
@@ -69,14 +116,14 @@
       resolvedCount:resolved,
     }};
   };
-  const feedCards=()=>{
+  const feedCards=async()=>{
     const cards=[];
     const seen=new Set();
     const active=reelSurface()?activeReel():null;
     const articles=active&&active.ok&&active.root?[active.root]:reelSurface()?[]:topArticles();
     for(const article of articles){
-      const card=cardOf(article,cards.length,active&&active.ok?active.noteId:'');
-      const id=card&&postId(card.noteId);
+      const card=await cardOf(article,cards.length,active&&active.ok?active.noteId:'');
+      const id=cardDedupeKey(card);
       if(!card||!id||seen.has(id))continue;
       seen.add(id);
       cards.push(card);
@@ -154,7 +201,7 @@
     if(!evidence)return {card:null,reason:'target_context_mismatch'};
     const canonical=permalinkOf(root);
     if(canonical){
-      const card=cardOf(root,0,canonical);
+      const card=await cardOf(root,0,canonical);
       return card?{card}:{card:null,reason:'target_context_mismatch'};
     }
     const editors=firstPostCommentEditors(root);
@@ -177,7 +224,7 @@
     }};
   };
   const firstPostCards=async()=>{
-    const base=feedCards();
+    const base=await feedCards();
     const selected=await firstCommentableGroupPostCard();
     if(selected.card){
       base.value.cards=[selected.card];
@@ -275,8 +322,8 @@
     }
     return {ok:true,cx,cy};
   };
-  const feedProbe=()=>{
-    const output=feedCards();
+  const feedProbe=async()=>{
+    const output=await feedCards();
     const scope=first(['div[role="feed"]','[role="main"]','main'])||document.body;
     const scrollMetrics=feedScrollMetrics();
     const loading=Boolean(scope&&scope.querySelector('[role="progressbar"],[aria-busy="true"]'));

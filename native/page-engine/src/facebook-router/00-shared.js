@@ -172,9 +172,23 @@ async function(input){
   });
   const firstPostTargetPrefix='aidcp:facebook-group-feed-post:v1:';
   const isFirstPostTarget=(value)=>new RegExp(`^${firstPostTargetPrefix}[0-9a-f]{64}$`).test(String(value||''));
-  const firstPostGroupScope=()=>{
+  /**
+   * 内容派生身份的作用域键（change generalize-facebook-content-derived-post-identity）。
+   *
+   * 原为 `firstPostGroupScope`，只认群组页——这条限制正是首页信息流用不上内容派生身份的**唯一**原因，
+   * 机制本身完全适用。现放宽到「当前列表面」：群组页**逐字返回原值**（群组首帖那条路零回归），
+   * 首页与搜索页各自成域。返回空串表示当前不是列表面 ⇒ 不签发引用（与今天一致）。
+   *
+   * 为什么必须绑面：引用一旦跨面复用，就可能解析到另一张卡上——虚拟化会把 DOM 节点复用给别的帖子。
+   * 换面即失效是结构性防漂移，不是保守。
+   */
+  const contentRefScope=()=>{
     const hit=location.pathname.match(/^\/groups\/([^/?#]+)/i);
-    return hit?`${location.origin}/groups/${hit[1]}`:'';
+    if(hit)return `${location.origin}/groups/${hit[1]}`;
+    const surface=classify();
+    if(surface==='home')return `${location.origin}/`;
+    if(surface==='search')return `${location.origin}${location.pathname}${String(location.search||'').slice(0,120)}`;
+    return '';
   };
   const stableFirstPostLinkEvidence=(root)=>{
     const values=[];
@@ -214,7 +228,7 @@ async function(input){
   };
   const firstPostEvidence=(root)=>{
     if(!root||!root.isConnected)return null;
-    const scope=firstPostGroupScope();
+    const scope=contentRefScope();
     if(!scope)return null;
     const author=articleAuthor(root);
     const authorHref=(()=>{
@@ -248,7 +262,7 @@ async function(input){
     return `${firstPostTargetPrefix}${hex}`;
   };
   const firstPostTargetState=()=>{
-    const scope=firstPostGroupScope();
+    const scope=contentRefScope();
     let state=window.__aidcpNativeFirstPostTargets;
     if(!state||state.scope!==scope||!(state.targets instanceof Map)){
       state={scope,targets:new Map()};
@@ -275,7 +289,7 @@ async function(input){
   const boundFirstPostRoot=(targetRef)=>{
     if(!isFirstPostTarget(targetRef))return null;
     const state=window.__aidcpNativeFirstPostTargets;
-    if(!state||state.scope!==firstPostGroupScope()||!(state.targets instanceof Map))return null;
+    if(!state||state.scope!==contentRefScope()||!(state.targets instanceof Map))return null;
     const record=state.targets.get(targetRef);
     if(!record||!record.root||!record.root.isConnected)return null;
     if(record.root.getAttribute('data-aidcp-native-first-post-target')!==targetRef)return null;
