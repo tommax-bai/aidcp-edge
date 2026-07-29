@@ -938,7 +938,11 @@ test('Native Facebook page.scroll absorbs elapsed evaluation time and ignores mi
   assert.equal(h.executions.length, 3);
 });
 
-test('Native Xiaohongshu page.scroll does not use the Facebook dwell anchor', async () => {
+// 这条用例原本断言「小红书 page.scroll 不使用停留锚点」——它编码的是**被修掉的缺陷本身**
+// （change restore-native-actuation-humanization-and-locating 任务 4.6：翻页停留曾整段包在
+// Facebook 判据里，小红书全线失效，而退役的小红书实现本来就有这一段）。改成锁真正的不变量：
+// 锚点与平台无关；不等的条件是「缺锚点」或「缺中心值」，不是「平台不是 Facebook」。
+test('Native Xiaohongshu page.scroll uses the same platform-neutral dwell anchor', async () => {
   const waits: number[] = [];
   const h = harness(async () => cardsExecution(), {
     platform: 'xiaohongshu',
@@ -946,10 +950,18 @@ test('Native Xiaohongshu page.scroll does not use the Facebook dwell anchor', as
     random: () => 0.25,
     sleep: async (ms) => { waits.push(ms); },
   });
-  await h.session.start();
 
+  // 还没有任何一批卡到达 ⇒ 无锚点，不凭空补停留。
   await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 7_000 }));
+  assert.deepEqual(waits, []);
 
+  await h.session.start(); // 首屏扫描回 page.cards ⇒ 立下锚点
+  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 7_000 }));
+  assert.deepEqual(waits, [7_000]);
+
+  // 云端没给中心值（返回未刷新 / 旧云端 / 断连）⇒ 立即翻页、不额外等待。
+  waits.length = 0;
+  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
   assert.deepEqual(waits, []);
 });
 

@@ -373,3 +373,37 @@ test('离页停留等待被接管时当场让路，且零执行器派发', async
   assert.equal(h.executions.length, dispatched, '停留被取消后绝不派发');
   assert.deepEqual(h.actions.at(-1), { action: 'back', ok: false, reason: 'aborted' });
 });
+
+test('被接管掐断的停留不消费锚点：重下的返回命令仍然补足停留，绝不因一次接管变成秒退', async () => {
+  const waits: number[] = [];
+  let takeover = true;
+  const h = harness({
+    platform: 'xiaohongshu',
+    sleep: (ms, signal) => new Promise((resolve, reject) => {
+      waits.push(ms);
+      if (!takeover) { resolve(); return; }
+      const fail = (): void => reject(Object.assign(new Error('cancelled'), { code: 'aborted' }));
+      if (signal?.aborted) fail();
+      signal?.addEventListener('abort', fail, { once: true });
+      queueMicrotask(() => h.session.discardQueuedCloudCommands());
+    }),
+  });
+  await h.session.onCloudCommand(envelope('note.open', { noteId: 'note-1' }));
+  waits.length = 0;
+
+  await within(
+    h.session.onCloudCommand(envelope('navigation.back', { reason: 'r', dwellMs: 6_000 })),
+    1_000,
+    '被接管的停留未让路',
+  );
+  assert.deepEqual(waits, [6_000], '第一次返回应当先进入停留');
+
+  // 云端重下同一条命令：锚点还在（时钟未推进 ⇒ 欠额未变），停留必须原样补足。
+  takeover = false;
+  await h.session.onCloudCommand(envelope('navigation.back', { reason: 'r', dwellMs: 6_000 }));
+  assert.deepEqual(waits, [6_000, 6_000], '接管把锚点吃掉了 ⇒ 重下的返回直接秒退');
+
+  // 而真正等完的那一次确实消费掉了锚点：再下一条不再重复补一段停留。
+  await h.session.onCloudCommand(envelope('navigation.back', { reason: 'r', dwellMs: 6_000 }));
+  assert.deepEqual(waits, [6_000, 6_000], '锚点已消费，不得再补一段');
+});

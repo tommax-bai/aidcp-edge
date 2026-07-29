@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { nativeCommandKindByEnvelopeType } from '../../src/native-page-engine/command-mapper.js';
 
 /**
  * 命令清单的 `receipts` / `requestContract` 声明 ↔ 宿主真能发出的回执 的机械对账。
@@ -33,7 +34,6 @@ const manifest = JSON.parse(
   await readFile(repoFile('native/page-engine/command-manifest.json'), 'utf8'),
 ) as { commands: ManifestCommand[]; sessionControls: Array<{ edgeType: string; requestContract: string; receipt: string | null }> };
 const browseSessionSource = await readFile(repoFile('src/native-page-engine/browse-session.ts'), 'utf8');
-const commandMapperSource = await readFile(repoFile('src/native-page-engine/command-mapper.ts'), 'utf8');
 const protocolSource = await readFile(repoFile('src/comm/protocol.ts'), 'utf8');
 const commandRsSource = await readFile(repoFile('native/page-engine/src/command.rs'), 'utf8');
 
@@ -385,17 +385,15 @@ const OUT_OF_BAND_EMITTERS: Readonly<Record<string, string>> = {
   captcha_click: 'src/captcha/* 协助链路',
 };
 
-function browseRoutedKinds(): Set<string> {
-  const block = commandMapperSource.slice(
-    commandMapperSource.indexOf('const nativeKinds = {'),
-    commandMapperSource.indexOf('} as const;'),
-  );
-  const kinds = new Set<string>();
-  for (const entry of block.matchAll(/'[a-z._]+':\s*'([a-z_]+)'/g)) kinds.add(entry[1]!);
-  return kinds;
-}
-
-const BROWSE_ROUTED = browseRoutedKinds();
+/**
+ * 经浏览会话下发的命令 kind。**直接取那张表本身**，不再切源码文本。
+ *
+ * 原先按 `const nativeKinds = {` 到第一处 `} as const;` 切一段源码再正则捞 kind：
+ * 改一次变量名（本仓 change `restore-native-actuation-humanization-and-locating` 把它导出成
+ * `nativeCommandKindByEnvelopeType`，供时间指令门禁按表派生）就切出空串、已路由集合变成空集。
+ * 这类失效不会报「找不到那张表」，只会让对账退化成「空集 == 空集」；改成从真实产物派生。
+ */
+const BROWSE_ROUTED = new Set<string>(Object.values(nativeCommandKindByEnvelopeType));
 
 test('每条命令都必须登记它的下发路径（浏览会话 / 其他出口），不许有第三种「没人管」', () => {
   const kinds = manifest.commands.map((command) => command.nativeKind).sort();

@@ -29,13 +29,15 @@ pub struct ReasonParams {
     pub reason: Option<String>,
 }
 
+/// `note_close` 的参数。**只有离页停留、没有动作前犹豫**：转发面（宿主 command-mapper）
+/// 从来只投影 `reason` / `dwellMs`，曾经多声明的 `thinkMs` 是一个云端永远不会下发、
+/// 引擎也永远读不到的**死字段**——它的唯一作用是把任何按「声明面」计数的检查喂绿。
+/// 声明面与转发面的相等性由 `native_timing_declarations_match_the_declared_contract` 钉死。
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TimingParams {
     #[serde(default)]
     pub reason: Option<String>,
-    #[serde(default)]
-    pub think_ms: Option<u64>,
     #[serde(default)]
     pub dwell_ms: Option<u64>,
 }
@@ -1374,7 +1376,10 @@ mod tests {
     #[test]
     fn native_timing_declarations_match_the_declared_contract() {
         let accepted = accepted_timing_fields(NATIVE_COMMAND_KINDS);
-        assert_eq!(timing_drift(&accepted, &declared_timing_fields()), Vec::<String>::new());
+        assert_eq!(
+            timing_drift(&accepted, &declared_timing_fields()),
+            Vec::<String>::new()
+        );
     }
 
     /// 失败优先 / 植入验证：给登记表塞一条引擎并不接受的声明、或让引擎多接受一个未登记字段时，

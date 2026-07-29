@@ -2,7 +2,7 @@ import { performance } from 'node:perf_hooks';
 import type { EdgeBrowseSession } from '../browse/edge-browse-session.js';
 import type { EdgeClient } from '../client/edge-client.js';
 import type { CommitWindowGuard } from '../execution/commit-window.js';
-import { jitterAround, type RandomFn } from '../humanize/timing.js';
+import { jitterAround, sampleDelay, type RandomFn, type TimingConfig } from '../humanize/timing.js';
 import type {
   ActionCompletedPayload,
   ActionResultPayload,
@@ -204,6 +204,28 @@ export function computeInlineReadFloorMs(bodyLen: number, tempo: number): number
   return Math.round(capped * (tempo > 0 ? tempo : 1));
 }
 
+/**
+ * 详情页停留的**边缘本地兜底区间**（毫秒）。旧云端 / 断连时云端不下发停留中心值，
+ * 此时若一步不等就是「无价值秒退」——那是最容易被行为分析拎出来的形态。
+ * 由握手 / 重连的节奏快照里的 `detail_dwell` 覆盖；缺省沿用退役实现的内置区间。
+ */
+const DEFAULT_DETAIL_DWELL_FLOOR_MS = { minMs: 2_500, maxMs: 5_000 } as const;
+
+/** 降速档位上限（防呆）：云端现役最大 1.6；越界即忽略、保留现值，杜绝失控停留逼近云端 idle 看门狗。 */
+const MAX_PACING_TEMPO = 3;
+
+/** 把协议的 {minMs,maxMs} 区间变成一份 lognormal 采样配置（中位数取几何中点）。 */
+function dwellFloorTiming(range: { minMs: number; maxMs: number }): TimingConfig {
+  const lo = Math.max(1, Math.min(range.minMs, range.maxMs));
+  const hi = Math.max(lo, Math.max(range.minMs, range.maxMs));
+  return { mu: Math.log(Math.sqrt(lo * hi)), sigma: 0.25, min: lo, max: hi };
+}
+
+/** 协议里所有节奏数值（毫秒区间端点与档位乘子）的共同准入：有限正数才作数，其余一律判无效。 */
+function positiveNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 export const FACEBOOK_UNSUPPORTED_COMMANDS = new Set<Envelope['type']>([
   'interaction.collect',
   'interaction.like_comment',
@@ -240,7 +262,17 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   private consecutiveProbeFailures = 0;
   private lastOkProbeAt?: number;
   private stopRequested = false;
-  private lastFacebookCardsAt = 0;
+  /**
+   * 本批卡到达时刻（离页停留的锚点之一）。**与平台无关**：它曾经只在 Facebook 分支里记，
+   * 于是小红书的翻页停留整条失效——而退役的小红书实现本来就有这一段。
+   */
+  private lastCardsAt = 0;
+  /**
+   * 内容开始展示的时刻（详情停留的锚点）。`note.close` / `navigation.back` 据此只补差额，
+   * 把云端评估耗时天然吸收掉。锚点缺席（没有打开中的内容）时**不补一段等待**——
+   * 「读不到锚点」与「停留不足」是两态，压成一态就会在 feed 上凭空补停留。
+   */
+  private contentShownAt = 0;
   private readonly facebookReelViewActivityPostIds = new Set<string>();
   private readonly facebookFeedVideoViewActivityPostIds = new Set<string>();
   /** 就地读停留地板的锚点与目标（edge-local）。与云端 dwell 的新卡锚点取 max、绝不相加。 */
@@ -248,8 +280,14 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   private inlineReadFloorMs = 0;
   /** 本次 feed 面开帖的起始时刻；只有真读出内容（note_detail 到达）才会晋升成 read floor 锚点。 */
   private pendingInlineReadStartedAt = 0;
-  /** 握手下发的降速系数。只作用于**边缘本地**兜底值（就地读 read floor），不重复乘到云端已算好的时长上。 */
+  /**
+   * 握手 / 重连下发的降速系数。只作用于**边缘本地采样兜底**（就地读 read floor、详情停留兜底），
+   * MUST NOT 再乘到云端已算好的时长上——云端已把状态系数烘进中心值，边缘再乘一次就是 double-count
+   * （退役的 Facebook 会话正是这么双乘的，明确不照抄）。
+   */
   private pacingTempo = 1;
+  /** 详情停留的本地兜底区间；由节奏快照的 `detail_dwell` 覆盖。 */
+  private detailDwellFloorMs: { minMs: number; maxMs: number } = { ...DEFAULT_DETAIL_DWELL_FLOOR_MS };
 
   constructor(private readonly options: NativeBrowseSessionOptions) {
     this.ownerId = `browse:${options.startupId}`;
@@ -260,6 +298,9 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     if (this.running || this.blocked || this.closed) return;
     this.running = true;
     this.stopRequested = false;
+    // 首屏扫描把页面带回列表面：此刻没有任何「打开中的内容」，旧的详情停留锚点必须作废，
+    // 否则下一条返回命令会拿一个属于上一场会话的时刻去判「已停够」。
+    this.contentShownAt = 0;
     try {
       await this.executeAndReport({ kind: 'browse_scroll', params: { reason: 'initial_scan' } });
       this.logger(`[native-page] ${this.options.platform ?? 'xiaohongshu'} Native-only browse session ready`);
@@ -271,7 +312,12 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   }
 
   async onCloudCommand(env: Envelope): Promise<void> {
-    if (env.type === 'pacing.update') return;
+    if (env.type === 'pacing.update') {
+      // 中途风控档位刷新：**只改档位**。收下即丢弃等于把风控升档挡在边缘节奏层之外——
+      // 云端以为已经降速，边缘还在按原速跑。
+      this.applyTempoUpdate((env.payload as { tempo?: unknown } | undefined)?.tempo);
+      return;
+    }
     const ownedTaskId = this.ownedTaskId(env);
     if (this.closed || (this.blocked && !ownedTaskId)) {
       this.reportFailure(env, 'native_session_quiesced', 'not_started');
@@ -389,15 +435,46 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     this.activeAbort?.abort();
   }
 
+  /**
+   * 连接级节奏快照的**重注入**入口（握手 / 唤醒 / 重连）。会话对象只构造一次、身份翻转重连复用同一个，
+   * 不重注入的话连接级快照就退化成进程级，风控升级到不了边缘节奏层。
+   *
+   * 它与 {@link applyTempoUpdate} 是两种入口、语义不同：这条是「连接换了」，可以连带重置间隔锚点；
+   * 中途刷新那条只换档位、绝不碰任何锚点（否则等于借一次刷新跳过一次等待）。
+   *
+   * 注：这里**不**清离页停留的两个锚点（本批卡到达时刻 / 内容展示时刻）。云端连接重连不代表页面变了，
+   * 清了会让紧接着的一条返回命令整段跳过停留——那正是「秒退」。页面真变了的清点在 {@link start}。
+   * 最小间隔 gating 那一层在 Native 路径尚不存在，所以此刻没有间隔锚点可清（见本 change 4.7 的残留缺口登记）。
+   */
   applyPacingSnapshot(
-    _opFloorsMs?: Partial<Record<PacingOp, PacingFloorPayload>>,
+    opFloorsMs?: Partial<Record<PacingOp, PacingFloorPayload>>,
     tempo?: number,
   ): void {
     // 云端已把内容 / 状态相关的系数算进随指令下发的 thinkMs / dwellMs，边缘不再重复乘一次。
-    // tempo 仍要留：它是**边缘本地兜底值**（这里是就地读 read floor）唯一的降速旋钮。
-    if (typeof tempo === 'number' && Number.isFinite(tempo) && tempo > 0) this.pacingTempo = tempo;
-    // opFloorsMs 尚未接线：command-pacing 要求的「操作类命令最小间隔 gating」在 Native 路径整体缺失，
-    // 属独立一层、单列后续 change 处理。此处不消费不等于此处无事可做——别照着这条注释再判一次「本就该空」。
+    // tempo 仍要留：它是**边缘本地采样兜底**唯一的降速旋钮。
+    this.applyTempoUpdate(tempo);
+    const detailDwell = opFloorsMs?.detail_dwell;
+    const minMs = positiveNumber(detailDwell?.minMs);
+    const maxMs = positiveNumber(detailDwell?.maxMs);
+    // 逐字段回落：任一端非正数即整体判无效、保留现值，绝不回落到 0（零延迟是红线）。
+    if (minMs !== undefined && maxMs !== undefined) this.detailDwellFloorMs = { minMs, maxMs };
+    // 其余 op 的 floor 区间是最小间隔 gating 的输入，那一层整体缺失，此处存下来就是死字段——
+    // 故意不存。缺席已在 4.7 具名登记，别照着这条注释再判一次「本就该空」。
+  }
+
+  /**
+   * 中途风控档位刷新（`pacing.update`）：只更新**边缘本地兜底**所用的降速系数。
+   * 校验正数且不超上限，越界忽略、保留现值。**不动任何锚点**——中途刷新 ≠ 重连。
+   */
+  private applyTempoUpdate(tempo?: unknown): void {
+    if (tempo === undefined) return; // 「没下发」不是「下发了个坏值」，两态不合并、也不留痕
+    const value = positiveNumber(tempo);
+    if (value === undefined || value > MAX_PACING_TEMPO) {
+      // 丢弃必须留痕：静默忽略一个坏档位会让「云端以为已降速」与「边缘仍按原速跑」两件事同时无从发现。
+      this.diagnostic('pacing_tempo_rejected', { value: String(tempo), max: MAX_PACING_TEMPO });
+      return;
+    }
+    this.pacingTempo = value;
   }
 
   async recoverAfterCloudReconnect(): Promise<void> {
@@ -483,7 +560,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     signal?: AbortSignal,
   ): Promise<void> {
     await this.applyThinkBefore(command, signal);
-    await this.ensureScrollDwell(command, signal);
+    await this.ensureContentDwell(command, signal);
   }
 
   /**
@@ -498,33 +575,76 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     if (!Number.isFinite(centerMs) || centerMs <= 0) return;
     const waitMs = jitterAround(centerMs, 0.25, this.options.random);
     if (waitMs <= 0) return;
+    this.diagnostic('command_think', { command: command.kind, waitMs: Math.round(waitMs) });
     await (this.options.sleep ?? abortableSleep)(waitMs, signal);
   }
 
   /**
-   * 离开当前内容前的停留。两个锚点各测各的跨度、**取 max 不相加**：
-   *  ① 云端 dwellMs，锚在本批卡到达时刻；② 就地读 read floor，锚在就地读开始时刻。
-   * 就地读比进详情页快得多，只认 ① 会让长帖读完立刻秒滚。
+   * 离开当前内容前的停留（治「无价值秒退」）。**平台无关**，按锚点类别分派：
+   *
+   *  - 翻页（`page_scroll`）锚在**本批卡到达时刻**：云端按新卡数算出中心值，边缘只补差额；
+   *    同时与就地读的阅读地板**取 max 不相加**——就地读比进详情页快得多，只认云端那一支会让长帖读完立刻秒滚。
+   *  - 关帖 / 返回（`note_close` / `navigation_back`）锚在**内容开始展示的时刻**：确有打开中的内容才生效；
+   *    云端没给中心值（旧云端 / 断连）时从本地区间采样并**按档位放大**，仍然非零。
+   *
+   * 三条一起守：① 已达标不再叠加（云端评估耗时被天然吸收，绝不产生双重延迟）；
+   * ② 云端已下发的中心值只叠抖动、MUST NOT 再乘档位；③ 全程是安全取消点。
    */
-  private async ensureScrollDwell(
+  private async ensureContentDwell(
     command: Parameters<NativePageRuntime['execute']>[1],
     signal?: AbortSignal,
   ): Promise<void> {
-    if (this.options.platform !== 'facebook' || command.kind !== 'page_scroll') return;
     const now = (this.options.clock ?? monotonicNow)();
+    const cloudCenterMs = Number((command.params as { dwellMs?: unknown }).dwellMs);
+    const hasCloudCenter = Number.isFinite(cloudCenterMs) && cloudCenterMs > 0;
     let remainingMs = 0;
-    const centerMs = Number(command.params.dwellMs);
-    if (this.lastFacebookCardsAt > 0 && Number.isFinite(centerMs) && centerMs > 0) {
+    let anchor: 'batch_cards' | 'content_shown';
+
+    if (command.kind === 'page_scroll') {
+      anchor = 'batch_cards';
+      if (this.lastCardsAt > 0 && hasCloudCenter) {
+        const targetMs = jitterAround(cloudCenterMs, 0.2, this.options.random);
+        remainingMs = Math.max(0, targetMs - Math.max(0, now - this.lastCardsAt));
+      }
+      if (this.inlineReadStartedAt > 0) {
+        remainingMs = Math.max(remainingMs, this.inlineReadFloorMs - Math.max(0, now - this.inlineReadStartedAt));
+      }
+    } else if (command.kind === 'note_close' || command.kind === 'navigation_back') {
+      anchor = 'content_shown';
+      // 锚点缺席 = 此刻并没有打开中的内容（例如就停在列表面）。这时**不补一段停留**：
+      // 凭空补等于把「读不到」当成「停留不足」，两态不得压成一态。
+      if (this.contentShownAt <= 0) return;
+      const centerMs = hasCloudCenter
+        // 云端已按内容算好、已烘入状态系数 ⇒ 只叠抖动。
+        ? cloudCenterMs
+        // 边缘本地采样兜底 ⇒ 这一支（且只有这一支）按当前档位放大。
+        : sampleDelay(dwellFloorTiming(this.detailDwellFloorMs), this.options.random) * this.pacingTempo;
       const targetMs = jitterAround(centerMs, 0.2, this.options.random);
-      remainingMs = Math.max(0, targetMs - Math.max(0, now - this.lastFacebookCardsAt));
+      remainingMs = Math.max(0, targetMs - Math.max(0, now - this.contentShownAt));
+    } else {
+      return;
     }
-    if (this.inlineReadStartedAt > 0) {
-      remainingMs = Math.max(remainingMs, this.inlineReadFloorMs - Math.max(0, now - this.inlineReadStartedAt));
+
+    if (remainingMs > 0) {
+      // 这一层此前完全不留痕：命令回执上看不出等了多久，于是「云端下发的时长有没有被消费」
+      // 在真机上无从判断（本 change 修的正是「收下就丢」）。留一行有界证据，也是真机验收
+      // 观测「命令间隔分布 vs 会话看门狗余量」的唯一依据。
+      this.diagnostic('command_dwell', {
+        command: command.kind,
+        anchor,
+        waitMs: Math.round(remainingMs),
+        center: hasCloudCenter ? 'cloud' : 'edge_fallback',
+      });
+      await (this.options.sleep ?? abortableSleep)(remainingMs, signal);
+    }
+    // 锚点在**等完之后**才消费：接管异常从上面原样穿出，锚点原样留着。
+    // 提前清掉的话，一次接管就会把紧随其后的那条返回命令变成秒退——而那正是本段要治的形态。
+    if (anchor === 'batch_cards') {
       this.inlineReadStartedAt = 0; // 消费一次：绝不让旧锚点留到下一条内容上
       this.inlineReadFloorMs = 0;
+    } else {
+      this.contentShownAt = 0; // 消费一次：离页之后这条内容的停留跨度就结束了
     }
-    if (remainingMs <= 0) return;
-    await (this.options.sleep ?? abortableSleep)(remainingMs, signal);
   }
 
   private report(execution: NativePageCommandExecution, env?: Envelope): void {
@@ -534,10 +654,12 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     switch (output.kind) {
       case 'page_cards':
         this.options.client.reportPageCards({ ...(value as unknown as PageCardsPayload), startupId: this.options.startupId });
+        // 「本批卡到达时刻」与平台无关：翻页停留在两个平台上都靠它起算。搜索结果不是「在浏览的这一批」，
+        // 排除掉，否则一次搜索会把翻页停留的锚点推到搜索时刻上。
+        if (env?.type !== 'search.execute') {
+          this.lastCardsAt = (this.options.clock ?? monotonicNow)();
+        }
         if (this.options.platform === 'facebook') {
-          if (env?.type !== 'search.execute') {
-            this.lastFacebookCardsAt = (this.options.clock ?? monotonicNow)();
-          }
           this.projectFacebookCardActivity(value as unknown as PageCardsPayload);
           const reels = value.listKind === 'reels';
           this.emitUi({
@@ -561,6 +683,12 @@ export class NativeBrowseSession implements EdgeBrowseSession {
         return;
       case 'note_detail':
         this.options.client.reportNoteDetail(value as unknown as NoteDetailPayload);
+        // 详情停留的锚点 = **内容开始展示的那一刻**，两个平台同一口径。
+        // 「刷新参考图」那类随行快照带 refreshOnly，它不是一次新的展示，不得重置锚点
+        // （重置会把已经读过的那段时间抹掉，凭空多补一段停留）。
+        if (value.refreshOnly !== true) {
+          this.contentShownAt = (this.options.clock ?? monotonicNow)();
+        }
         if (this.options.platform === 'facebook') {
           // 就地读停留地板：按读到的正文长度定目标，锚点取**就地读开始那一刻**（命令下发前记下的）。
           // 锚在开始而非读完，是为了让展开与轮询已经花掉的时间被计入、只补差额——与 dwell 的
