@@ -22,6 +22,7 @@ test('every declared Facebook owner has one capability runtime module with behav
     .map((match) => match[1]);
   assert.deepEqual(owners, [
     'Session',
+    'Auth',
     'Feed',
     'FeedLike',
     'Reels',
@@ -32,6 +33,7 @@ test('every declared Facebook owner has one capability runtime module with behav
 
   const modules = [
     ['session.rs', 'execute_facebook_identity'],
+    ['auth.rs', 'execute'],
     ['feed.rs', 'execute_facebook_initial_feed'],
     ['feed_like.rs', 'execute_facebook_like'],
     ['reels.rs', 'execute_facebook_follow'],

@@ -52,6 +52,7 @@ import {
   ProxyRuntimeObserver,
   requireActiveProxyEgressMatch,
 } from './cdp/index.js';
+import { createProcessFacebookTotpBroker } from './cdp/facebook-totp-broker.js';
 import { selectPlatformDriver, startupIdentityReadPolicy } from './platform/index.js';
 import { runWechatChannelsRuntime } from './wechat-channels/runtime.js';
 import { EdgeClient, CloudHandshakeRejectedError } from './client/edge-client.js';
@@ -63,6 +64,7 @@ import {
   parseCoreLifecycleCommand,
   type CoreLifecycleCommand,
 } from './client/core-lifecycle.js';
+import { LifecycleAuthInterruptTracker } from './client/lifecycle-auth-interrupt.js';
 import { deriveEdgeId } from './client/edge-id.js';
 import { EdgeTaskCoordinator } from './execution/edge-task-coordinator.js';
 import { CommitWindowGuard, combineCommitWindows } from './execution/commit-window.js';
@@ -85,6 +87,10 @@ import {
   nativeActionNameForCommand,
   readNativeFacebookIdentity,
 } from './native-page-engine/index.js';
+import {
+  reconcileFacebookStartupAuth,
+  type FacebookAuthCoordinatorResult,
+} from './native-page-engine/facebook-auth.js';
 import {
   applyWakeIdentityResettlement,
   automationResumeCallback,
@@ -124,6 +130,7 @@ async function main(): Promise<void> {
   // Electron 子进程 IPC 可能在浏览器/身份初始化完成前抵达；先窄解析并排队，待生命周期资源
   // 全部就绪后按原顺序交付。绝不把未知 IPC 当生命周期命令。
   const pendingLifecycleCommands: CoreLifecycleCommand[] = [];
+  const lifecycleAuthInterrupts = new LifecycleAuthInterruptTracker();
   let dispatchLifecycleCommand: ((command: CoreLifecycleCommand) => void) | undefined;
   type CloudRebindRequest = {
     type: 'lifecycle.cloud_rebind';
@@ -170,6 +177,7 @@ async function main(): Promise<void> {
     }
     const command = parseCoreLifecycleCommand(message);
     if (!command) return;
+    lifecycleAuthInterrupts.note(command);
     if (dispatchLifecycleCommand) dispatchLifecycleCommand(command);
     else pendingLifecycleCommands.push(command);
   });
@@ -254,11 +262,13 @@ async function main(): Promise<void> {
   let chrome: ChromeInstance | undefined;
   let endpoint = { host: cdpHost, port: cdpPort };
   let activeProxyTakeover: LaunchedBrowser['activeProxyTakeover'];
+  let firstLoginPolicyApplied = false;
   if (!startBrowserAbsent) {
     const launched = await provider.launch(launchOpts);
     chrome = launched.instance;
     endpoint = launched.endpoint;
     activeProxyTakeover = launched.activeProxyTakeover;
+    firstLoginPolicyApplied = launched.firstLoginPolicyApplied === true;
   } else {
     console.log(`[aidcp-edge] 浏览器槽位缺席：以控制面待机态启动（accountId=${controlAccountId}），暂不调用 provider.launch`);
   }
@@ -336,6 +346,25 @@ async function main(): Promise<void> {
       ? readNativeFacebookIdentity(nativePageRuntime, options)
       : platformDriver.readIdentity(session.cdp, options)
   );
+  const facebookTotpBroker = platformDriver.platform === 'facebook' && provider.kind === 'adspower'
+    ? createProcessFacebookTotpBroker()
+    : undefined;
+  const reconcileFacebookAuthIfNeeded = (
+    policyApplied: boolean,
+    timeoutMs: number,
+  ): Promise<FacebookAuthCoordinatorResult> => {
+    if (!facebookTotpBroker) {
+      return Promise.resolve({ kind: 'disabled', actionAttempts: 0 });
+    }
+    return reconcileFacebookStartupAuth({
+      runtime: nativePageRuntime,
+      totpBroker: facebookTotpBroker,
+      freshStartPolicyApplied: policyApplied,
+      timeoutMs,
+      logger: (message) => console.log(message),
+      pollInterrupt: () => lifecycleAuthInterrupts.current(),
+    });
+  };
 
   // 收口真退出端点（change adspower-first-login-wait-gate）：本进程带 IPC 通道 + stdin 控制读取器两个常驻句柄，
   // 仅置 process.exitCode 后 return 会钉死事件循环、挂成存活僵尸（看护的 child-exit 永不触发→有界重起不 engage；
@@ -357,6 +386,27 @@ async function main(): Promise<void> {
     accountId = controlAccountId;
     console.log(`[aidcp-edge] 控制面账号身份已确立: ${accountId} [source=cloud-bound-bootstrap; browser=absent]`);
   } else {
+    let remainingLoginWaitMs = loginWaitMs;
+    if (platformDriver.platform === 'facebook' && provider.kind === 'adspower') {
+      const authStartedAt = Date.now();
+      const authResult = await reconcileFacebookAuthIfNeeded(firstLoginPolicyApplied, loginWaitMs);
+      remainingLoginWaitMs = Math.max(0, loginWaitMs - (Date.now() - authStartedAt));
+      if (authResult.kind !== 'authenticated' && authResult.kind !== 'disabled') {
+        if (authResult.kind === 'timeout') {
+          console.error(
+            `[aidcp-edge] ✗ Facebook 首登辅助在 ${Math.round(loginWaitMs / 1000)}s 有界预算内未完成 → 干净停止。`,
+          );
+          terminateNow(0);
+        }
+        if (authResult.kind === 'interrupted') {
+          console.log(`[aidcp-edge] Facebook 首登辅助被中断（${authResult.reason}）→ 干净停止。`);
+          terminateNow(0);
+        }
+        const failureReason = authResult.kind === 'failed' ? authResult.reason : authResult.kind;
+        console.error(`[aidcp-edge] ✗ Facebook 首登辅助安全停手（${failureReason}）。`);
+        terminateNow(1);
+      }
+    }
     // Facebook AdsPower 可能刚附着在 about:blank：首读显式允许一次消费端首页 bootstrap，再有界等本人锚点；
     // XHS AdsPower 仍保持登录页纯就地读，绝不新增误导航。运行期复读另行显式 allowNavigate=false。
     const firstReadOpts: ReadSelfIdentityOptions = {
@@ -370,16 +420,16 @@ async function main(): Promise<void> {
       providerKind: provider.kind,
       initialDecision: decision,
       override: overrideAccountId,
-      loginWaitMs,
+      loginWaitMs: remainingLoginWaitMs,
       decideIdentity: (r, o) => platformDriver.decideIdentity(r, o),
       logger: (m) => console.log(m),
       waitForLogin: () => {
         console.log(
-          `[aidcp-edge] 请在浏览器里扫码登录目标账号（等待登录中，最长 ${Math.round(loginWaitMs / 1000)}s）…`,
+          `[aidcp-edge] 请在浏览器里完成登录并等待稳定身份（剩余最长 ${Math.round(remainingLoginWaitMs / 1000)}s）…`,
         );
         console.log('[browser-parking] awaiting-login'); // 外壳可识别的等待态状态行（task 1.4 / 4.1）
         return waitForLoginIdentity(session.cdp, {
-          timeoutMs: loginWaitMs,
+          timeoutMs: remainingLoginWaitMs,
           logger: (m) => console.log(m),
           // 平台无关就地重读（allowNavigate=false、单次扫描）：不 hammer CDP、不骚扰二维码页。
           readIdentity: () =>
@@ -387,8 +437,7 @@ async function main(): Promise<void> {
           // 中断：等待早窗唯一被搁置的中断路径是经 IPC 堆进 pendingLifecycleCommands 的暂停/关闭；非破坏性探测（find 不 splice），
           // 成功续跑后仍由下方 dispatchLifecycleCommand 一次性派发这些排队命令（不双派发）。
           pollInterrupt: () => {
-            const cmd = pendingLifecycleCommands.find((c) => c === 'pause' || c === 'close');
-            return cmd ?? null;
+            return lifecycleAuthInterrupts.current();
           },
         });
       },
@@ -397,7 +446,7 @@ async function main(): Promise<void> {
     if (action.kind === 'terminate') {
       if (action.reason === 'login_wait_timeout') {
         console.error(
-          `[aidcp-edge] ✗ 等待登录超时（${Math.round(loginWaitMs / 1000)}s 内未完成登录）→ 诚实停手（干净停止、不自动重起）。请在浏览器登录目标账号后点「启动」重试。`,
+          `[aidcp-edge] ✗ 等待登录超时（剩余 ${Math.round(remainingLoginWaitMs / 1000)}s 内未完成登录）→ 诚实停手（干净停止、不自动重起）。请在浏览器登录目标账号后点「启动」重试。`,
         );
       } else if (action.reason.startsWith('interrupted:')) {
         const cmd = action.reason.slice('interrupted:'.length);
@@ -1423,6 +1472,7 @@ async function main(): Promise<void> {
         chrome = relaunched.instance;
         endpoint = relaunched.endpoint;
         activeProxyTakeover = relaunched.activeProxyTakeover;
+        firstLoginPolicyApplied = relaunched.firstLoginPolicyApplied === true;
         attachOpts.host = endpoint.host;
         attachOpts.port = endpoint.port;
 
@@ -1444,24 +1494,41 @@ async function main(): Promise<void> {
           parkingControlInstalled = true;
         }
 
-        // 4) 重新确认登录态与身份（红线：新一代浏览器，绝不假设还登着）。
-        const idRes = await readPlatformIdentity({
-          ...startupIdentityReadPolicy(platformDriver.platform, provider.kind),
-          logger: (m) => console.log(m),
-        });
-        const decision = platformDriver.decideIdentity(idRes, overrideAccountId);
-        // 唤醒被身份闸拒绝的两条路共用同一个**真拆**收场（可注入实现，见 identity-guard.ts）：
+        // 唤醒被身份闸拒绝的所有路径共用同一个**真拆**收场（可注入实现，见 identity-guard.ts）：
         // 诚实回执在途发布 → 释放浏览器层 → 停代理世代 → 杀浏览器并把槽位还回去 → 如实回 false。
         // 只打一行告警就 return false 是不够的：半开的浏览器会一直占着内存槽位挡别的账号。
         const wakeRefusalDeps = {
           logger: (message: string) => console.error(message),
           failInFlightPublishesHonestly,
-          detachSession: () => session.detach(),
+          detachSession: async () => {
+            await nativePageRuntime.shutdown().catch(() => undefined);
+            session.detach();
+          },
           suspendProxyGeneration: (reason: string) => proxyRuntime?.suspendGeneration(reason),
           killBrowser: async () => {
             await chrome?.killAndConfirmDead().catch(() => undefined);
           },
         };
+
+        // 4) 与首次 attach 共用同一幂等首登协调器；它结束后仍须通过下面的只读稳定身份门。
+        const wakeAuthResult = await reconcileFacebookAuthIfNeeded(firstLoginPolicyApplied, loginWaitMs);
+        if (wakeAuthResult.kind !== 'authenticated' && wakeAuthResult.kind !== 'disabled') {
+          const reason = wakeAuthResult.kind === 'timeout'
+            ? 'timeout'
+            : wakeAuthResult.reason;
+          return await refuseWakeUnderIdentityGate(
+            `唤醒后 Facebook 首登辅助安全停手（${reason}）`,
+            'browser_wake_facebook_auth_failed',
+            wakeRefusalDeps,
+          );
+        }
+
+        // 5) 重新确认登录态与身份（红线：新一代浏览器，绝不假设还登着）。
+        const idRes = await readPlatformIdentity({
+          ...startupIdentityReadPolicy(platformDriver.platform, provider.kind),
+          logger: (m) => console.log(m),
+        });
+        const decision = platformDriver.decideIdentity(idRes, overrideAccountId);
         if (decision.kind === 'halt') {
           return await refuseWakeUnderIdentityGate(
             `唤醒后身份确认失败（${decision.reason}）：浏览器起来了但读不出登录身份，绝不以默认账号开跑`,
@@ -1524,6 +1591,7 @@ async function main(): Promise<void> {
         console.warn(`[aidcp-edge] ⚠ 唤醒失败：${(error as Error)?.message || String(error)}；留在待机态，可再次唤醒`);
         // 半开的浏览器绝不留着占内存槽位——它既不能干活、又挡着别的账号。
         try {
+          await nativePageRuntime.shutdown().catch(() => undefined);
           session.detach();
           proxyRuntime?.suspendGeneration('wake_failed');
           await chrome?.killAndConfirmDead().catch(() => undefined);
@@ -1570,9 +1638,13 @@ async function main(): Promise<void> {
   }, startBrowserAbsent ? 'standby' : startAutomationPaused ? 'paused' : 'active', startAutomationPaused);
 
   dispatchLifecycleCommand = (command) => {
-    void lifecycle.request(command).catch((error) => {
-      console.error(`[aidcp-edge] lifecycle.${command} 处理失败:`, error);
-    });
+    void lifecycle.request(command)
+      .catch((error) => {
+        console.error(`[aidcp-edge] lifecycle.${command} 处理失败:`, error);
+      })
+      .finally(() => {
+        lifecycleAuthInterrupts.release(command);
+      });
   };
   for (const command of pendingLifecycleCommands.splice(0)) dispatchLifecycleCommand(command);
   if (startBrowserAbsent) {

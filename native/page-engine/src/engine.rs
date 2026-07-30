@@ -11,10 +11,10 @@ use crate::input::{
     type_content_burst_humanized, type_text_humanized, typing_degradation_note,
 };
 use crate::model::{
-    ActionEvidence, ActionReceipt, CaptchaSnapshot, CaptchaTypeReport, FacebookIdentityReceipt,
-    IdentityObservation, IdentityObservationSource, IdentityPageEffect, NoteDetail,
-    NotificationHome, NotificationItems, ObservedActionReceipt, PageCards, PageMovement,
-    PlanResults, ProfileDetail, PublishReceipt,
+    ActionEvidence, ActionReceipt, CaptchaSnapshot, CaptchaTypeReport, FacebookAuthActionReceipt,
+    FacebookAuthProbeReceipt, FacebookIdentityReceipt, IdentityObservation,
+    IdentityObservationSource, IdentityPageEffect, NoteDetail, NotificationHome, NotificationItems,
+    ObservedActionReceipt, PageCards, PageMovement, PlanResults, ProfileDetail, PublishReceipt,
 };
 use crate::probe::PageKind;
 use crate::probe::ProbeResult;
@@ -129,6 +129,8 @@ pub enum CommandOutput {
     CaptchaSnapshot(CaptchaSnapshot),
     WechatSessionCandidate(Option<wechat::WechatSessionCandidate>),
     FacebookIdentity(FacebookIdentityReceipt),
+    FacebookAuthProbe(FacebookAuthProbeReceipt),
+    FacebookAuthAction(FacebookAuthActionReceipt),
     IdentityObservation(IdentityObservation),
 }
 
@@ -194,6 +196,7 @@ pub(crate) struct EngineSession {
 pub(crate) struct FacebookSessionState {
     pub(crate) active_list_url: String,
     pub(crate) seen_post_ids: HashSet<String>,
+    pub(crate) consumed_auth_signal_ids: HashSet<String>,
     pub(crate) last_refresh_reload_at_ms: u64,
 }
 
@@ -202,6 +205,7 @@ impl Default for FacebookSessionState {
         Self {
             active_list_url: facebook::shared::FACEBOOK_HOME_URL.to_owned(),
             seen_post_ids: HashSet::new(),
+            consumed_auth_signal_ids: HashSet::new(),
             last_refresh_reload_at_ms: 0,
         }
     }

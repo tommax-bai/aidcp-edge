@@ -10,17 +10,85 @@ const MAX_LIST_ITEMS: usize = 100;
 
 /// 可执行但**不进命令清单**的变体：每条必须写明理由。
 /// 这张表是词表一致性检查的唯一豁免通道——新增变体若既不进清单也不进这里，检查即失败。
-pub const MANIFEST_EXCLUDED_COMMAND_KINDS: &[(&str, &str)] = &[(
-    "page_probe",
-    "engine-internal page classification: never dispatched from a Cloud envelope, \
-     no route key and no Cloud-facing receipt",
-)];
+pub const MANIFEST_EXCLUDED_COMMAND_KINDS: &[(&str, &str)] = &[
+    (
+        "page_probe",
+        "engine-internal page classification: never dispatched from a Cloud envelope, \
+         no route key and no Cloud-facing receipt",
+    ),
+    (
+        "facebook_auth_probe",
+        "startup-only Facebook authentication observation: never dispatched from Cloud",
+    ),
+    (
+        "facebook_auth_submit_login",
+        "startup-only Facebook login stage: never dispatched from Cloud",
+    ),
+    (
+        "facebook_auth_enter_totp",
+        "startup-only Facebook TOTP entry stage: never dispatched from Cloud",
+    ),
+    (
+        "facebook_auth_submit_totp",
+        "startup-only Facebook TOTP submit stage: never dispatched from Cloud",
+    ),
+    (
+        "facebook_auth_clear_totp",
+        "startup-only Facebook stale-TOTP clearing stage: never dispatched from Cloud",
+    ),
+    (
+        "facebook_auth_dismiss_warning",
+        "startup-only Facebook warning dismissal stage: never dispatched from Cloud",
+    ),
+    (
+        "facebook_auth_close_push_blocker",
+        "startup-only Facebook push-blocker stage: never dispatched from Cloud",
+    ),
+    (
+        "facebook_auth_confirm_remember_password",
+        "startup-only Facebook remember-password stage: never dispatched from Cloud",
+    ),
+];
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct EmptyParams {}
 
 pub type PageProbeParams = EmptyParams;
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookAuthProbeParams {
+    #[serde(default)]
+    pub allow_auth_actions: bool,
+    #[serde(default)]
+    pub entered_totp_window_start_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub entered_totp_window_end_unix_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookAuthSignalParams {
+    pub signal_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookAuthTotpEntryParams {
+    pub signal_id: String,
+    pub totp_code: String,
+    pub totp_window_start_unix_ms: u64,
+    pub totp_window_end_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookAuthTotpWindowParams {
+    pub signal_id: String,
+    pub totp_window_start_unix_ms: u64,
+    pub totp_window_end_unix_ms: u64,
+}
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -440,6 +508,14 @@ macro_rules! native_commands {
 
 native_commands! {
     PageProbe(PageProbeParams) => "page_probe",
+    FacebookAuthProbe(FacebookAuthProbeParams) => "facebook_auth_probe",
+    FacebookAuthSubmitLogin(FacebookAuthSignalParams) => "facebook_auth_submit_login",
+    FacebookAuthEnterTotp(FacebookAuthTotpEntryParams) => "facebook_auth_enter_totp",
+    FacebookAuthSubmitTotp(FacebookAuthTotpWindowParams) => "facebook_auth_submit_totp",
+    FacebookAuthClearTotp(FacebookAuthTotpWindowParams) => "facebook_auth_clear_totp",
+    FacebookAuthDismissWarning(FacebookAuthSignalParams) => "facebook_auth_dismiss_warning",
+    FacebookAuthClosePushBlocker(FacebookAuthSignalParams) => "facebook_auth_close_push_blocker",
+    FacebookAuthConfirmRememberPassword(FacebookAuthSignalParams) => "facebook_auth_confirm_remember_password",
     PlanExecute(PlanExecuteParams) => "plan_execute",
     SessionStop(ReasonParams) => "session_stop",
     BrowseNext(ReasonParams) => "browse_next",
@@ -494,6 +570,14 @@ impl NativeCommand {
                     | WechatCaptureSession(_)
                     | IdentityBootstrap(_)
                     | IdentityReadCurrent(_)
+                    | FacebookAuthProbe(_)
+                    | FacebookAuthSubmitLogin(_)
+                    | FacebookAuthEnterTotp(_)
+                    | FacebookAuthSubmitTotp(_)
+                    | FacebookAuthClearTotp(_)
+                    | FacebookAuthDismissWarning(_)
+                    | FacebookAuthClosePushBlocker(_)
+                    | FacebookAuthConfirmRememberPassword(_)
             ),
             Platform::Facebook => crate::facebook::capability::owner(self).is_some(),
             Platform::WechatChannels => matches!(self, WechatCaptureSession(_)),
@@ -506,6 +590,7 @@ impl NativeCommand {
             command => !matches!(
                 command,
                 Self::PageProbe(_)
+                    | Self::FacebookAuthProbe(_)
                     | Self::PublishCapturePostId(_)
                     | Self::PublishCaptureScheduled(_)
                     | Self::PublishReconcileScheduled(_)
@@ -524,6 +609,44 @@ impl NativeCommand {
             | Self::PublishSubmit(_)
             | Self::WechatCaptureSession(_) => Ok(()),
             Self::IdentityBootstrap(_) => Ok(()),
+            Self::FacebookAuthProbe(params) => match (
+                params.entered_totp_window_start_unix_ms,
+                params.entered_totp_window_end_unix_ms,
+            ) {
+                (None, None) => Ok(()),
+                (Some(start), Some(end)) => validate_totp_window(start, end),
+                _ => Err(invalid(
+                    "Facebook entered TOTP window requires both start and end",
+                )),
+            },
+            Self::FacebookAuthSubmitLogin(params)
+            | Self::FacebookAuthDismissWarning(params)
+            | Self::FacebookAuthClosePushBlocker(params)
+            | Self::FacebookAuthConfirmRememberPassword(params) => {
+                validate_facebook_auth_signal_id(&params.signal_id)
+            }
+            Self::FacebookAuthEnterTotp(params) => {
+                validate_facebook_auth_signal_id(&params.signal_id)?;
+                if params.totp_code.len() != 6
+                    || !params
+                        .totp_code
+                        .bytes()
+                        .all(|character| character.is_ascii_digit())
+                {
+                    return Err(invalid("invalid Facebook TOTP code"));
+                }
+                validate_totp_window(
+                    params.totp_window_start_unix_ms,
+                    params.totp_window_end_unix_ms,
+                )
+            }
+            Self::FacebookAuthSubmitTotp(params) | Self::FacebookAuthClearTotp(params) => {
+                validate_facebook_auth_signal_id(&params.signal_id)?;
+                validate_totp_window(
+                    params.totp_window_start_unix_ms,
+                    params.totp_window_end_unix_ms,
+                )
+            }
             Self::IdentityReadCurrent(params) | Self::IdentityReadSelfProfile(params) => {
                 validate_required(
                     &params.capture_id,
@@ -868,6 +991,28 @@ fn validate_optional(
     }
 }
 
+fn validate_facebook_auth_signal_id(value: &str) -> Result<(), EngineError> {
+    const PREFIX: &str = "aidcp:facebook-auth:v1:";
+    let Some(digest) = value.strip_prefix(PREFIX) else {
+        return Err(invalid("invalid Facebook auth signal id"));
+    };
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+    {
+        return Err(invalid("invalid Facebook auth signal id"));
+    }
+    Ok(())
+}
+
+fn validate_totp_window(start: u64, end: u64) -> Result<(), EngineError> {
+    if !start.is_multiple_of(30_000) || end != start.saturating_add(30_000) {
+        return Err(invalid("invalid Facebook TOTP window"));
+    }
+    Ok(())
+}
+
 fn invalid(message: &'static str) -> EngineError {
     EngineError::new(ErrorCode::InvalidRequest, message)
 }
@@ -1111,7 +1256,17 @@ mod tests {
         }
         assert_eq!(
             excluded,
-            BTreeSet::from(["page_probe"]),
+            BTreeSet::from([
+                "page_probe",
+                "facebook_auth_probe",
+                "facebook_auth_submit_login",
+                "facebook_auth_enter_totp",
+                "facebook_auth_submit_totp",
+                "facebook_auth_clear_totp",
+                "facebook_auth_dismiss_warning",
+                "facebook_auth_close_push_blocker",
+                "facebook_auth_confirm_remember_password",
+            ]),
             "the exclusion table changed; record the reason and update this assertion"
         );
         assert_eq!(NATIVE_COMMAND_KINDS.len(), manifest.len() + excluded.len());
@@ -1240,6 +1395,23 @@ mod tests {
     /// `deny_unknown_fields`，所以这是一条恒真判据，不需要任何文本匹配或手抄名单）。
     fn sample_params(kind: &str) -> serde_json::Value {
         match kind {
+            "facebook_auth_submit_login"
+            | "facebook_auth_dismiss_warning"
+            | "facebook_auth_close_push_blocker"
+            | "facebook_auth_confirm_remember_password" => serde_json::json!({
+                "signalId": format!("aidcp:facebook-auth:v1:{}", "a".repeat(64))
+            }),
+            "facebook_auth_enter_totp" => serde_json::json!({
+                "signalId": format!("aidcp:facebook-auth:v1:{}", "a".repeat(64)),
+                "totpCode": "123456",
+                "totpWindowStartUnixMs": 1_800_000_000_000_u64,
+                "totpWindowEndUnixMs": 1_800_000_030_000_u64
+            }),
+            "facebook_auth_submit_totp" | "facebook_auth_clear_totp" => serde_json::json!({
+                "signalId": format!("aidcp:facebook-auth:v1:{}", "a".repeat(64)),
+                "totpWindowStartUnixMs": 1_800_000_000_000_u64,
+                "totpWindowEndUnixMs": 1_800_000_030_000_u64
+            }),
             "plan_execute" => serde_json::json!({"steps": []}),
             "note_browse_images" | "note_scroll_comments" => serde_json::json!({"noteId": "n1"}),
             "interaction_like" | "interaction_collect" => serde_json::json!({"noteId": "n1"}),

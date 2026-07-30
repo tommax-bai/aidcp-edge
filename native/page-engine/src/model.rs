@@ -554,6 +554,61 @@ impl FacebookIdentityReceipt {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FacebookAuthSignal {
+    Authenticated,
+    LoginSubmitReady,
+    TotpEntryReady,
+    TotpSubmitReady,
+    TotpRefreshRequired,
+    AutomationWarningDismiss,
+    PushBlockerClose,
+    RememberPasswordConfirm,
+    BlockedHumanVerification,
+    BlockedUnknown,
+    None,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookAuthProbeReceipt {
+    pub signal: FacebookAuthSignal,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_epoch_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl FacebookAuthProbeReceipt {
+    pub fn bounded(mut self) -> Self {
+        truncate_optional(&mut self.signal_id, MAX_ID_CHARS);
+        truncate_optional(&mut self.reason, MAX_REASON_CHARS);
+        self
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FacebookAuthActionReceipt {
+    pub action: String,
+    pub signal_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl FacebookAuthActionReceipt {
+    pub fn bounded(mut self) -> Self {
+        truncate(&mut self.action, 96);
+        truncate(&mut self.signal_id, MAX_ID_CHARS);
+        truncate_optional(&mut self.reason, MAX_REASON_CHARS);
+        self
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PlanActionResult {

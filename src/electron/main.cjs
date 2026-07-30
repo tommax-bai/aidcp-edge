@@ -1358,6 +1358,52 @@ async function handleAdsApiBrokerRequest(handle, child, message) {
   }
 }
 
+async function handleFacebookTotpRequest(handle, child, message) {
+  const requestId = typeof message.requestId === 'string' && /^facebook-totp-\d+-\d+$/.test(message.requestId)
+    ? message.requestId
+    : '';
+  if (!requestId) return;
+
+  const exactRequest = Object.keys(message).length === 3
+    && Object.keys(message).every((key) => ['type', 'requestId', 'serverEpochMs'].includes(key))
+    && message.type === 'facebook-totp.request'
+    && Number.isSafeInteger(message.serverEpochMs)
+    && message.serverEpochMs > 0;
+  let result;
+  if (!exactRequest || handle.kind !== 'adspower' || fleet.nicknameSourceForPlatform(handle.platform) !== 'facebook') {
+    result = { ok: false, reason: 'invalid_totp_request' };
+  } else {
+    result = await adsApi.getFacebookTotp({
+      ...resolveAdsOpts(),
+      // profile id 只来自当前 Electron handle；child 请求不能选择、暗示或覆盖其它 profile。
+      profileId: handle.profileId,
+      serverEpochMs: message.serverEpochMs,
+      isCancelled: () => handle.child !== child || child.connected === false,
+    });
+  }
+  if (handle.child !== child || child.connected === false) return;
+  const payload = result.ok
+    ? {
+        type: 'facebook-totp.response',
+        requestId,
+        ok: true,
+        code: result.code,
+        windowStartMs: result.windowStartMs,
+        windowEndMs: result.windowEndMs,
+      }
+    : {
+        type: 'facebook-totp.response',
+        requestId,
+        ok: false,
+        reason: result.reason || 'totp_broker_rejected',
+      };
+  try {
+    child.send(payload);
+  } catch {
+    // Child exit is authoritative cancellation; never retry or log request/profile contents.
+  }
+}
+
 // 环境名跟随真实昵称（change edge-adspower-name-follows-nickname）：某 adspower 环境登录读出真实平台昵称后，
 // 若其 AdsPower 环境名与昵称不一致，则经写客户端改名封装把 AdsPower 名改成昵称，让左栏 / 添加面板 / 直接打开
 // 指纹浏览器客户端三处显示名一致（存量环境随下次登录渐进改到位）。铁律：
@@ -4571,6 +4617,10 @@ async function spawnEdgeChild(handle, {
       || (message.type === 'lifecycle.paused' && handle.engineStopReason === 'user_pause')
     );
     if (!currentGeneration && !currentStopReply) return;
+    if (message.type === 'facebook-totp.request') {
+      void handleFacebookTotpRequest(handle, child, message);
+      return;
+    }
     if (message.type === 'lifecycle.cloud_rebound' || message.type === 'lifecycle.cloud_rebind_failed') {
       const pending = handle.cloudRebindPending;
       if (!pending || message.requestId !== pending.requestId || message.targetKey !== pending.targetKey) return;

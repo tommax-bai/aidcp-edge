@@ -1043,7 +1043,7 @@ export interface WakeRefusalDeps {
   /** 这条路要把浏览器杀回槽位，在途发布必然跟着死 ⇒ 先诚实回执，否则云端无限期挂起等一个不会来的结果。 */
   failInFlightPublishesHonestly: (reason: string) => void;
   /** 释放浏览器层（断 CDP）。MUST 在杀浏览器之前，否则被动断开会被当成意外掉线、触发有界重连留下僵尸。 */
-  detachSession: () => void;
+  detachSession: () => void | Promise<void>;
   suspendProxyGeneration: (reason: string) => void;
   /** 杀浏览器并确认。半开的浏览器绝不留着占内存槽位——它既不能干活、又挡着别的账号。 */
   killBrowser: () => Promise<void>;
@@ -1065,7 +1065,7 @@ export async function refuseWakeUnderIdentityGate(
 ): Promise<false> {
   deps.logger(`[aidcp-edge] ✗ ${reason}：如实判唤醒失败、留在待机态（可再次唤醒），绝不把一个身份未知的浏览器当就绪。`);
   deps.failInFlightPublishesHonestly(failureTag);
-  deps.detachSession();
+  await deps.detachSession();
   deps.suspendProxyGeneration(failureTag);
   await deps.killBrowser();
   return false;

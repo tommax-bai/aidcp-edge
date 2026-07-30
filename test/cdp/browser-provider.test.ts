@@ -150,14 +150,24 @@ test('AdsPowerProvider.launch 成功 → 端点带 debug_port、实例非 reused
   assert.equal(out.endpoint.host, '127.0.0.1');
   assert.equal(out.instance.reused, false);
   assert.equal(out.instance.pid, null);
+  assert.equal(out.firstLoginPolicyApplied, true);
   const startCall = calls.find((c) => c.url.includes('browser-profile/start'));
   assert.ok(startCall);
   assert.equal(startCall.method, 'POST');
-  const payload = JSON.parse(startCall.body || '{}') as { profile_id?: string; last_opened_tabs?: string; launch_args?: string[] };
+  const payload = JSON.parse(startCall.body || '{}') as {
+    profile_id?: string;
+    last_opened_tabs?: string;
+    password_filling?: string;
+    password_saving?: string;
+    launch_args?: string[];
+  };
   assert.equal(payload.profile_id, 'k1');
   assert.equal(payload.last_opened_tabs, '0');
+  assert.equal(payload.password_filling, '1');
+  assert.equal(payload.password_saving, '0');
   assert.ok(payload.launch_args?.includes('--window-size=1440,980'));
   assert.ok(payload.launch_args?.includes('--deny-permission-prompts'));
+  assert.ok(payload.launch_args?.includes('--disable-notifications'));
   assert.ok(payload.launch_args?.includes('--lang=en-US')); // C1: 界面语言钉英文（兜登出 chrome，见 facebook-locale-pin-en-us）
   assert.ok(!payload.launch_args?.includes('--start-maximized'), '有启动暂存坐标时不得先最大化造成主屏闪现');
   assert.ok(payload.launch_args?.includes('--window-position=1902,0'));
@@ -256,6 +266,11 @@ test('AdsPowerProvider managed broker 将 proxy update/readback 作为同一批�
   );
   const launched = await provider.launch({ host: '127.0.0.1', port: 9222 });
   assert.equal(launched.endpoint.port, 61332);
+  assert.equal(launched.firstLoginPolicyApplied, true);
+  const startOperation = batches.flat().find((operation) => operation.path === 'browser-profile/start');
+  assert.equal(startOperation?.body?.password_filling, '1');
+  assert.equal(startOperation?.body?.password_saving, '0');
+  assert.ok((startOperation?.body?.launch_args as string[] | undefined)?.includes('--disable-notifications'));
   assert.deepEqual(batches.map((batch) => batch.map((operation) => operation.path)), [
     ['browser-profile/active'],
     ['user/update', 'user/list'],
@@ -298,6 +313,7 @@ test('AdsPowerProvider.launch：V2 Active 返回有效端点时直接接管，�
   const out = await provider.launch({ host: '127.0.0.1', port: 9222 });
   assert.equal(out.endpoint.port, 59167);
   assert.equal(out.activeProxyTakeover, undefined, '未配置代理的 Active 环境不得进入代理接管闸');
+  assert.equal(out.firstLoginPolicyApplied, undefined, 'Active browser 没有本代 fresh-start 策略证据');
   assert.equal(calls.filter((call) => call.url.includes('browser-profile/start')).length, 0);
 });
 
@@ -317,6 +333,7 @@ test('AdsPowerProvider.launch：已配置代理权威的 Active 浏览器交付�
   );
   const out = await provider.launch({ host: '127.0.0.1', port: 9222 });
   assert.equal(out.endpoint.port, 59167);
+  assert.equal(out.firstLoginPolicyApplied, undefined, 'Active browser 不得宣称应用 fresh-start 策略');
   assert.deepEqual(out.activeProxyTakeover, {
     profileId: 'k1',
     expectedEgressIp: '203.0.113.7',
@@ -438,6 +455,7 @@ test('AdsPowerProvider.launch：V2 Inactive 但 profile marker 与 /json/version
   );
   const out = await provider.launch({ host: '127.0.0.1', port: 9222 });
   assert.equal(out.endpoint.port, 59167);
+  assert.equal(out.firstLoginPolicyApplied, undefined, 'orphan 接管没有 fresh-start 策略证据');
   assert.equal(calls.filter((call) => call.url.includes('browser-profile/start')).length, 0);
   assert.match(logs.join('\n'), /接管失联浏览器/);
 });

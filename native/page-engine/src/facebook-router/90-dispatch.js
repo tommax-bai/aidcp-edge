@@ -1,8 +1,12 @@
   const blocking=blockingProbe();
   const blocked=blocker(blocking);
-  if(!['identity_read','page_probe','consent_probe','feed_probe','identity_candidates','feed_home_target','feed_recovery_target','feed_like_target_probe','feed_like_commit','feed_like_verify','feed_like_picker_probe','feed_like_clear','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_action_probe','comment_editor_probe','comment_ack_probe','join_probe','join_click','first_post_group_root_probe','publish_home_probe','publish_entry_probe','publish_editor_probe','publish_bound_editor_probe','publish_upload_target_probe','publish_upload_preview_probe','publish_submit_probe','publish_submitted_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
+  if(!['identity_read','page_probe','auth_probe','auth_focus_guard','auth_totp_readback','auth_postcondition','consent_probe','feed_probe','identity_candidates','feed_home_target','feed_recovery_target','feed_like_target_probe','feed_like_commit','feed_like_verify','feed_like_picker_probe','feed_like_clear','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_action_probe','comment_editor_probe','comment_ack_probe','join_probe','join_click','first_post_group_root_probe','publish_home_probe','publish_entry_probe','publish_editor_probe','publish_bound_editor_probe','publish_upload_target_probe','publish_upload_preview_probe','publish_submit_probe','publish_submitted_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
     return fail(kind||'page',blocked);
   }
+  if(kind==='auth_probe')return done({kind:'facebook_auth_observation',value:await authProbeBase(true)});
+  if(kind==='auth_focus_guard')return done(await authFocusGuard());
+  if(kind==='auth_totp_readback')return done(await authTotpReadback());
+  if(kind==='auth_postcondition')return done(await authPostcondition());
   if(kind==='identity_read')return done(identity());
   if(kind==='consent_probe')return done({kind:'consent_probe',value:consentProbe()});
   if(kind==='feed_probe')return done(await feedProbe());

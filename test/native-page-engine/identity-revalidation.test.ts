@@ -1439,7 +1439,11 @@ test('T19 唤醒被拒：MUST 诚实回执在途发布 + 释放浏览器层 + �
   const result = await refuseWakeUnderIdentityGate('唤醒后仍读不出稳定账号 id', 'browser_wake_identity_unmeasured', {
     logger: (m) => void logs.push(m),
     failInFlightPublishesHonestly: (reason) => void seq.push(`fail:${reason}`),
-    detachSession: () => void seq.push('detach'),
+    detachSession: async () => {
+      seq.push('detach:start');
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      seq.push('detach:end');
+    },
     suspendProxyGeneration: (reason) => void seq.push(`proxy:${reason}`),
     killBrowser: async () => void seq.push('kill'),
   });
@@ -1447,7 +1451,8 @@ test('T19 唤醒被拒：MUST 诚实回执在途发布 + 释放浏览器层 + �
   assert.equal(result, false, '唤醒失败 MUST 如实回 false（＝留在待机态、可再次唤醒），绝不把身份未知的浏览器当就绪');
   assert.deepEqual(seq, [
     'fail:browser_wake_identity_unmeasured',
-    'detach',
+    'detach:start',
+    'detach:end',
     'proxy:browser_wake_identity_unmeasured',
     'kill',
   ], '四件副作用与顺序都是不变量：先诚实回执（否则云端无限期挂起）、再释放 CDP（否则被动断开会被当成意外掉线留僵尸）、最后才杀浏览器');
@@ -2278,12 +2283,13 @@ test('宿主装配契约（源码扫描）：闸的接线还在、且没有被�
   assert.doesNotMatch(wakeBlock, /identityGuard\?\.rebaseline\(wakeBaseline\)/,
     '基线 MUST NOT 再由宿主自己拼（曾经拼成 observedAccountId ?? accountId：读不出时会把覆盖值钉进校验体）');
 
-  // ⑧ 唤醒的两条身份拒绝路径都走**真拆**的可注入实现（行为覆盖见 T19 / T20⑦）。
+  // ⑧ 唤醒的首登辅助、身份读取与终局解除三条拒绝路径都走**真拆**的可注入实现
+  //    （行为覆盖见 T19 / T20⑦，首登辅助见 automate-facebook-first-login）。
   assert.match(wakeBlock, /reportPosture: publishRuntimePosture/);
   assert.equal(
     (wakeBlock.match(/refuseWakeUnderIdentityGate\(/g) ?? []).length,
-    2,
-    '「读不出身份」与「唤醒没能解除终局」两条路 MUST 共用同一个真拆收场，绝不各写一份',
+    3,
+    '「首登辅助失败」「读不出身份」「唤醒没能解除终局」三条路 MUST 共用同一个真拆收场，绝不各写一份',
   );
 
   // ⑨ S9 身份闸：重绑与三个命令入口都过闸（行为覆盖见 T18 / T20⑧ / T21①②③ / T24）。

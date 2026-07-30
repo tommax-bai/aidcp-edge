@@ -31,7 +31,7 @@ test('Electron engine child has IPC and pause disconnects it through lifecycle.p
 test('managed AdsPower child uses the parent FIFO without receiving the API key', () => {
   assert.match(main, /AIDCP_ADS_API_BROKER: 'ipc'/);
   assert.match(main, /delete spawnEnv\.AIDCP_ADS_API_KEY/);
-  const broker = functionSource('handleAdsApiBrokerRequest', 'maybeRenameEnvToNickname');
+  const broker = functionSource('handleAdsApiBrokerRequest', 'handleFacebookTotpRequest');
   assert.match(broker, /adsApi\.brokerBatch\(\{/);
   assert.match(broker, /profileId: handle\.profileId/);
   assert.match(broker, /\.\.\.resolveAdsOpts\(\)/);
@@ -42,6 +42,128 @@ test('managed AdsPower child uses the parent FIFO without receiving the API key'
   const staleGenerationGate = spawn.indexOf('if (!currentGeneration && !currentStopReply) return;');
   assert.ok(brokerBranch >= 0 && staleGenerationGate > brokerBranch,
     'the still-current child must retain broker access while close/restore advances lifecycle generation');
+});
+
+test('Facebook TOTP IPC is current-child/profile bound and projects no raw AdsPower material', () => {
+  const broker = functionSource('handleFacebookTotpRequest', 'maybeRenameEnvToNickname');
+  assert.match(broker, /adsApi\.getFacebookTotp\(\{/);
+  assert.match(broker, /profileId: handle\.profileId/);
+  assert.match(broker, /handle\.child !== child/);
+  assert.match(broker, /fleet\.nicknameSourceForPlatform\(handle\.platform\) !== 'facebook'/);
+  assert.match(broker, /Object\.keys\(message\)\.length === 3/);
+  assert.doesNotMatch(broker, /message\.(profileId|profile_id|apiKey|apiBase)/);
+  assert.doesNotMatch(broker, /console\.(log|warn|error)/);
+  assert.match(broker, /code: result\.code/);
+  assert.match(broker, /windowStartMs: result\.windowStartMs/);
+  assert.match(broker, /windowEndMs: result\.windowEndMs/);
+
+  const spawn = functionSource('spawnEdgeChild', 'stopLoginPoller');
+  const staleGenerationGate = spawn.indexOf('if (!currentGeneration && !currentStopReply) return;');
+  const totpBranch = spawn.indexOf("message.type === 'facebook-totp.request'");
+  assert.ok(totpBranch > staleGenerationGate,
+    'TOTP must not remain available to a stale lifecycle generation during teardown');
+});
+
+test('Facebook TOTP handler executes against the real fleet platform authority and sends only projected fields', async () => {
+  const source = `async ${functionSource('handleFacebookTotpRequest', 'maybeRenameEnvToNickname').replace(/async\s*$/, '')}`;
+  const calls: Record<string, unknown>[] = [];
+  const sent: Record<string, unknown>[] = [];
+  const adsApi = {
+    getFacebookTotp: async (input: Record<string, unknown>) => {
+      calls.push(input);
+      return {
+        ok: true,
+        code: '287082',
+        windowStartMs: 1_770_000_000_000,
+        windowEndMs: 1_770_000_030_000,
+      };
+    },
+  };
+  const resolveAdsOpts = () => ({ apiKey: 'parent-owned-key' });
+  const fleet = {
+    nicknameSourceForPlatform: (platform: unknown) => platform === 'facebook' ? 'facebook' : 'xhs',
+  };
+  const handler = new Function(
+    'adsApi',
+    'resolveAdsOpts',
+    'fleet',
+    `${source}; return handleFacebookTotpRequest;`,
+  )(adsApi, resolveAdsOpts, fleet) as (
+    handle: Record<string, unknown>,
+    child: Record<string, unknown>,
+    message: Record<string, unknown>,
+  ) => Promise<void>;
+  const child = {
+    connected: true,
+    send: (payload: Record<string, unknown>) => sent.push(payload),
+  };
+  const handle = {
+    kind: 'adspower',
+    platform: 'facebook',
+    profileId: 'bound-profile',
+    child,
+  };
+  await handler(handle, child, {
+    type: 'facebook-totp.request',
+    requestId: 'facebook-totp-123-1',
+    serverEpochMs: 1_770_000_001_000,
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].profileId, 'bound-profile');
+  assert.equal(calls[0].serverEpochMs, 1_770_000_001_000);
+  assert.equal(typeof calls[0].isCancelled, 'function');
+  assert.deepEqual(sent, [{
+    type: 'facebook-totp.response',
+    requestId: 'facebook-totp-123-1',
+    ok: true,
+    code: '287082',
+    windowStartMs: 1_770_000_000_000,
+    windowEndMs: 1_770_000_030_000,
+  }]);
+});
+
+test('Facebook TOTP handler rejects a child-supplied profile id before reading AdsPower', async () => {
+  let reads = 0;
+  const source = `async ${functionSource('handleFacebookTotpRequest', 'maybeRenameEnvToNickname').replace(/async\s*$/, '')}`;
+  const handler = new Function(
+    'adsApi',
+    'resolveAdsOpts',
+    'fleet',
+    `${source}; return handleFacebookTotpRequest;`,
+  )(
+    { getFacebookTotp: async () => { reads += 1; return { ok: false }; } },
+    () => ({}),
+    { nicknameSourceForPlatform: () => 'facebook' },
+  ) as (
+    handle: Record<string, unknown>,
+    child: Record<string, unknown>,
+    message: Record<string, unknown>,
+  ) => Promise<void>;
+  const sent: Record<string, unknown>[] = [];
+  const child = {
+    connected: true,
+    send: (payload: Record<string, unknown>) => sent.push(payload),
+  };
+  const handle = {
+    kind: 'adspower',
+    platform: 'facebook',
+    profileId: 'bound-profile',
+    child,
+  };
+  await handler(handle, child, {
+    type: 'facebook-totp.request',
+    requestId: 'facebook-totp-123-2',
+    serverEpochMs: 1_770_000_001_000,
+    profileId: 'other-profile',
+  });
+  assert.equal(reads, 0);
+  assert.deepEqual(sent, [{
+    type: 'facebook-totp.response',
+    requestId: 'facebook-totp-123-2',
+    ok: false,
+    reason: 'invalid_totp_request',
+  }]);
 });
 
 test('configured Active-browser egress rejection is terminal without touching no-proxy startup', () => {

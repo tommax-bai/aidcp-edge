@@ -3,6 +3,7 @@ use crate::protocol::NativeCommand;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FacebookCapability {
     Session,
+    Auth,
     Feed,
     FeedLike,
     Reels,
@@ -128,6 +129,7 @@ const fn unsupported(
 
 const fn focused_suite(owner: FacebookCapability) -> &'static str {
     match owner {
+        FacebookCapability::Auth => "test/native-page-engine/facebook-auth-router.test.ts",
         FacebookCapability::Session
         | FacebookCapability::Feed
         | FacebookCapability::Reels
@@ -139,6 +141,111 @@ const fn focused_suite(owner: FacebookCapability) -> &'static str {
 }
 
 pub const FACEBOOK_PARITY_LEDGER: &[FacebookParityEntry] = &[
+    entry!(
+        "facebook_auth_probe",
+        Auth,
+        "bounded first-login signal observer",
+        "bound target, document generation, and exact candidate",
+        "read-only structural classification",
+        "read",
+        0,
+        "exclusive typed authentication signal",
+        "confirmed read or typed failure",
+        30_000,
+        None
+    ),
+    entry!(
+        "facebook_auth_submit_login",
+        Auth,
+        "first-login submit stage",
+        "exact login form with AdsPower-filled fields",
+        "fresh signal id, uniqueness, visibility, and top hit",
+        "one trusted pointer stage",
+        1,
+        "login signal gone or bound document changed",
+        "confirmed, ambiguous after input, or not-started",
+        30_000,
+        None
+    ),
+    entry!(
+        "facebook_auth_enter_totp",
+        Auth,
+        "first-login TOTP entry stage",
+        "exact empty two-factor input",
+        "fresh signal id, server window, focus, and top hit",
+        "trusted pointer plus six-digit Native text input",
+        1,
+        "exact input readback without returning the code",
+        "confirmed, ambiguous after input, or not-started",
+        30_000,
+        None,
+        "exact six-digit input readback without returning the value"
+    ),
+    entry!(
+        "facebook_auth_submit_totp",
+        Auth,
+        "first-login TOTP submit stage",
+        "exact populated two-factor form and Continue control",
+        "fresh signal id, same TOTP window, validity floor, and top hit",
+        "one trusted pointer stage",
+        1,
+        "submit signal gone or bound document changed",
+        "confirmed, ambiguous after input, or not-started",
+        30_000,
+        None
+    ),
+    entry!(
+        "facebook_auth_clear_totp",
+        Auth,
+        "stale TOTP clear stage",
+        "exact stale populated two-factor input",
+        "fresh refresh-required signal id and top hit",
+        "trusted pointer plus bounded keyboard clearing",
+        1,
+        "empty input readback without returning the prior code",
+        "confirmed, ambiguous after input, or not-started",
+        30_000,
+        None
+    ),
+    entry!(
+        "facebook_auth_dismiss_warning",
+        Auth,
+        "observed automation-warning dismissal",
+        "exact checkpoint warning and unique Dismiss control",
+        "fresh signal id, visibility, uniqueness, and top hit",
+        "one trusted pointer stage",
+        1,
+        "warning signal gone or bound document changed",
+        "confirmed, ambiguous after input, or not-started",
+        30_000,
+        None
+    ),
+    entry!(
+        "facebook_auth_close_push_blocker",
+        Auth,
+        "Facebook page push-blocker close",
+        "exact push alertdialog and unique Close control",
+        "fresh signal id, visibility, uniqueness, and top hit",
+        "one trusted pointer stage",
+        1,
+        "push signal gone",
+        "confirmed, ambiguous after input, or not-started",
+        30_000,
+        None
+    ),
+    entry!(
+        "facebook_auth_confirm_remember_password",
+        Auth,
+        "Facebook Remember Password confirmation",
+        "exact page modal and unique OK control",
+        "fresh signal id, visibility, uniqueness, and top hit",
+        "one trusted pointer stage",
+        1,
+        "remember-password signal gone",
+        "confirmed, ambiguous after input, or not-started",
+        30_000,
+        None
+    ),
     entry!(
         "page_probe",
         Session,
@@ -488,6 +595,14 @@ pub const FACEBOOK_PARITY_LEDGER: &[FacebookParityEntry] = &[
 pub fn parity(command: &NativeCommand) -> Option<&'static FacebookParityEntry> {
     use NativeCommand::*;
     let kind = match command {
+        FacebookAuthProbe(_) => "facebook_auth_probe",
+        FacebookAuthSubmitLogin(_) => "facebook_auth_submit_login",
+        FacebookAuthEnterTotp(_) => "facebook_auth_enter_totp",
+        FacebookAuthSubmitTotp(_) => "facebook_auth_submit_totp",
+        FacebookAuthClearTotp(_) => "facebook_auth_clear_totp",
+        FacebookAuthDismissWarning(_) => "facebook_auth_dismiss_warning",
+        FacebookAuthClosePushBlocker(_) => "facebook_auth_close_push_blocker",
+        FacebookAuthConfirmRememberPassword(_) => "facebook_auth_confirm_remember_password",
         PageProbe(_) => "page_probe",
         SessionStop(_) => "session_stop",
         IdentityBootstrap(_) => "identity_bootstrap",
@@ -541,6 +656,7 @@ mod tests {
     /// 会把文本打进页面的写动作。它们的「文本接受谓词」不许缺，
     /// 谓词不同还不写理由的话，两条链路就会在同一个编辑器上给出两种「进去了」的判据。
     const TEXT_BEARING_WRITE_KINDS: &[&str] = &["interaction_comment", "publish_fill_field"];
+    const SENSITIVE_TEXT_BEARING_WRITE_KINDS: &[&str] = &["facebook_auth_enter_totp"];
 
     #[test]
     fn ledger_has_one_complete_entry_per_supported_kind() {
@@ -613,13 +729,22 @@ mod tests {
         );
 
         for entry in FACEBOOK_PARITY_LEDGER {
-            if !TEXT_BEARING_WRITE_KINDS.contains(&entry.command_kind) {
+            if !TEXT_BEARING_WRITE_KINDS.contains(&entry.command_kind)
+                && !SENSITIVE_TEXT_BEARING_WRITE_KINDS.contains(&entry.command_kind)
+            {
                 assert_eq!(
                     entry.text_acceptance, "none",
                     "{} 不打文本，不该声明文本接受谓词",
                     entry.command_kind
                 );
             }
+        }
+        for kind in SENSITIVE_TEXT_BEARING_WRITE_KINDS {
+            let entry = entry_for_kind(kind).unwrap_or_else(|| panic!("{kind} must be in ledger"));
+            assert_eq!(
+                entry.text_acceptance,
+                "exact six-digit input readback without returning the value"
+            );
         }
     }
 

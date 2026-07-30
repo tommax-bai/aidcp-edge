@@ -39,6 +39,13 @@ const { createAdsLocalApi, normalizeProfile } = require('../../src/electron/ads-
       reason?: string;
       responses?: Array<{ status: number; body: unknown }>;
     }>;
+    getFacebookTotp: (opts?: Record<string, unknown>) => Promise<{
+      ok: boolean;
+      reason?: string;
+      code?: string;
+      windowStartMs?: number;
+      windowEndMs?: number;
+    }>;
     enqueueRequest: (url: string, init?: Record<string, unknown>) => Promise<unknown>;
     ADS_MIN_INTERVAL_MS: number;
   };
@@ -234,6 +241,173 @@ test('getProfileProxyConfig: 精确环境未返回密码时如实投影空值', 
   assert.equal(result.proxy?.proxyPassword, '');
 });
 
+test('getFacebookTotp: POST V2 精确 profile，用 server epoch 生成 RFC 6 位码且仅投影窗口值', async () => {
+  const calls: Array<{ url: string; method?: string; headers?: Record<string, string>; body?: string }> = [];
+  const api = createAdsLocalApi({
+    nowImpl: () => 59_000,
+    sleepImpl: async () => undefined,
+    fetchImpl: stubFetch([['/api/v2/browser-profile/list', () => res(true, 200, {
+      code: 0,
+      data: {
+        list: [{
+          profile_id: 'profile-totp',
+          username: 'must-not-cross@example.test',
+          password: 'must-not-cross-password',
+          fakey: 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ',
+          cookie: 'must-not-cross-cookie',
+          user_proxy_config: { proxy_password: 'must-not-cross-proxy' },
+        }],
+      },
+    })]], calls),
+  });
+
+  const result = await api.getFacebookTotp({
+    profileId: 'profile-totp',
+    serverEpochMs: 59_000,
+    apiKey: 'parent-owned-key',
+  });
+  assert.deepEqual(result, {
+    ok: true,
+    code: '287082',
+    windowStartMs: 30_000,
+    windowEndMs: 60_000,
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(new URL(calls[0].url).pathname, '/api/v2/browser-profile/list');
+  assert.equal(calls[0].method, 'POST');
+  assert.deepEqual(JSON.parse(calls[0].body || '{}'), {
+    profile_id: ['profile-totp'],
+    page: 1,
+    limit: 1,
+  });
+  assert.equal(calls[0].headers?.Authorization, 'Bearer parent-owned-key');
+  assert.equal(calls[0].headers?.['Content-Type'], 'application/json');
+  const projected = JSON.stringify(result);
+  for (const forbidden of [
+    'must-not-cross@example.test',
+    'must-not-cross-password',
+    'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ',
+    'must-not-cross-cookie',
+    'must-not-cross-proxy',
+  ]) {
+    assert.equal(projected.includes(forbidden), false);
+  }
+});
+
+test('getFacebookTotp: 允许后续新窗口重新请求，不缓存旧 code/window', async () => {
+  const calls: Array<{ url: string }> = [];
+  const api = createAdsLocalApi({
+    nowImpl: () => 60_000,
+    sleepImpl: async () => undefined,
+    fetchImpl: stubFetch([['/api/v2/browser-profile/list', () => res(true, 200, {
+      code: 0,
+      data: { list: [{ profile_id: 'profile-totp', fakey: 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ' }] },
+    })]], calls),
+  });
+  const prior = await api.getFacebookTotp({ profileId: 'profile-totp', serverEpochMs: 59_000 });
+  const next = await api.getFacebookTotp({ profileId: 'profile-totp', serverEpochMs: 60_000 });
+  assert.equal(prior.ok, true);
+  assert.equal(next.ok, true);
+  assert.equal(prior.windowEndMs, 60_000);
+  assert.equal(next.windowStartMs, 60_000);
+  assert.notEqual(prior.code, next.code);
+  assert.equal(calls.length, 2);
+});
+
+test('getFacebookTotp: profile 不唯一/不匹配/无有效 fakey 均 fail closed 且不回显原始响应', async () => {
+  const makeApi = (body: unknown) => createAdsLocalApi({
+    nowImpl: () => 90_000,
+    sleepImpl: async () => undefined,
+    fetchImpl: stubFetch([['/api/v2/browser-profile/list', () => res(true, 200, body)]]),
+  });
+  const ambiguous = await makeApi({
+    code: 0,
+    data: {
+      list: [
+        { profile_id: 'profile-totp', fakey: 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ' },
+        { profile_id: 'other-profile', fakey: 'JBSWY3DPEHPK3PXP' },
+      ],
+    },
+  }).getFacebookTotp({ profileId: 'profile-totp', serverEpochMs: 90_000 });
+  assert.deepEqual(ambiguous, { ok: false, reason: 'profile_mismatch' });
+
+  const mismatch = await makeApi({
+    code: 0,
+    data: { list: [{ profile_id: 'other-profile', fakey: 'JBSWY3DPEHPK3PXP' }] },
+  }).getFacebookTotp({ profileId: 'profile-totp', serverEpochMs: 90_000 });
+  assert.deepEqual(mismatch, { ok: false, reason: 'profile_mismatch' });
+
+  const missing = await makeApi({
+    code: 0,
+    data: {
+      list: [{
+        profile_id: 'profile-totp',
+        fakey: 'not-base32 password=provider-echo',
+        cookie: 'raw-cookie-must-not-cross',
+      }],
+    },
+  }).getFacebookTotp({ profileId: 'profile-totp', serverEpochMs: 90_000 });
+  assert.deepEqual(missing, { ok: false, reason: 'totp_key_unavailable' });
+  assert.equal(JSON.stringify(missing).includes('provider-echo'), false);
+
+  const rejected = await makeApi({
+    code: -1,
+    msg: 'password=server-secret fakey=server-key',
+  }).getFacebookTotp({ profileId: 'profile-totp', serverEpochMs: 90_000 });
+  assert.deepEqual(rejected, { ok: false, reason: 'ads_api_rejected' });
+  assert.equal(JSON.stringify(rejected).includes('server-secret'), false);
+});
+
+test('getFacebookTotp: 非法/超偏差 server epoch 在 fetch 前拒绝', async () => {
+  const calls: Array<{ url: string }> = [];
+  const api = createAdsLocalApi({
+    nowImpl: () => 1_000_000,
+    sleepImpl: async () => undefined,
+    fetchImpl: stubFetch([], calls),
+  });
+  assert.deepEqual(
+    await api.getFacebookTotp({ profileId: 'profile-totp', serverEpochMs: Number.NaN }),
+    { ok: false, reason: 'invalid_totp_request' },
+  );
+  assert.deepEqual(
+    await api.getFacebookTotp({ profileId: 'profile-totp', serverEpochMs: 1_300_001 }),
+    { ok: false, reason: 'invalid_totp_request' },
+  );
+  assert.equal(calls.length, 0);
+});
+
+test('getFacebookTotp: cancellation/API 异常只返回稳定 reason，不回显异常敏感内容', async () => {
+  const cancelledCalls: Array<{ url: string }> = [];
+  const cancelled = createAdsLocalApi({
+    nowImpl: () => 120_000,
+    sleepImpl: async () => undefined,
+    fetchImpl: stubFetch([], cancelledCalls),
+  });
+  assert.deepEqual(
+    await cancelled.getFacebookTotp({
+      profileId: 'profile-totp',
+      serverEpochMs: 120_000,
+      isCancelled: () => true,
+    }),
+    { ok: false, reason: 'totp_request_cancelled' },
+  );
+  assert.equal(cancelledCalls.length, 0);
+
+  const unavailable = createAdsLocalApi({
+    nowImpl: () => 120_000,
+    sleepImpl: async () => undefined,
+    fetchImpl: stubFetch([['/api/v2/browser-profile/list', () => {
+      throw new Error('password=network-secret fakey=network-key');
+    }]]),
+  });
+  const result = await unavailable.getFacebookTotp({
+    profileId: 'profile-totp',
+    serverEpochMs: 120_000,
+  });
+  assert.deepEqual(result, { ok: false, reason: 'ads_api_unavailable' });
+  assert.equal(JSON.stringify(result).includes('network-secret'), false);
+});
+
 test('listProfiles: code≠0 → ok:false 诚实回报', async () => {
   const api = createAdsLocalApi({
     ...noThrottle,
@@ -393,9 +567,59 @@ test('managed child broker rejects other-profile and unapproved endpoint request
       { version: 'v1', method: 'POST', path: 'user/delete', body: { user_id: 'k1' } },
     ],
   });
+  const sensitiveV2List = await api.brokerBatch({
+    profileId: 'k1',
+    operations: [
+      {
+        version: 'v2',
+        method: 'POST',
+        path: 'browser-profile/list',
+        body: { profile_id: ['k1'], page: 1, limit: 1 },
+      },
+    ],
+  });
   assert.deepEqual(otherProfile, { ok: false, reason: 'invalid_broker_request' });
   assert.deepEqual(unapproved, { ok: false, reason: 'invalid_broker_request' });
+  assert.deepEqual(sensitiveV2List, { ok: false, reason: 'invalid_broker_request' });
   assert.equal(calls.length, 0);
+});
+
+test('managed child broker 只接受固定 fresh-start 密码/通知策略', async () => {
+  const calls: Array<{ url: string; method?: string; body?: string }> = [];
+  const api = createAdsLocalApi({
+    ...noThrottle,
+    fetchImpl: stubFetch([['/api/v2/browser-profile/start', () => res(true, 200, {
+      code: 0,
+      data: { debug_port: 61332 },
+    })]], calls),
+  });
+  const operation = {
+    version: 'v2',
+    method: 'POST',
+    path: 'browser-profile/start',
+    body: {
+      profile_id: 'k1',
+      last_opened_tabs: '0',
+      ip_tab: '0',
+      headless: '0',
+      password_filling: '1',
+      password_saving: '0',
+      launch_args: ['--deny-permission-prompts', '--disable-notifications', 'https://www.facebook.com/'],
+    },
+  };
+  const accepted = await api.brokerBatch({ profileId: 'k1', operations: [operation] });
+  assert.equal(accepted.ok, true);
+  assert.equal(calls.length, 1);
+
+  const rejected = await api.brokerBatch({
+    profileId: 'k1',
+    operations: [{
+      ...operation,
+      body: { ...operation.body, password_saving: '1' },
+    }],
+  });
+  assert.deepEqual(rejected, { ok: false, reason: 'invalid_broker_request' });
+  assert.equal(calls.length, 1, 'unsafe policy must be rejected before fetch');
 });
 
 test('主进程受限写客户端与只读请求共用同一 FIFO', async () => {

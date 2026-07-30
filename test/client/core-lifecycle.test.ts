@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CoreLifecycleController, parseCoreLifecycleCommand } from '../../src/client/core-lifecycle.js';
+import { LifecycleAuthInterruptTracker } from '../../src/client/lifecycle-auth-interrupt.js';
 
 function harness() {
   let deactivations = 0;
@@ -33,6 +34,49 @@ test('core lifecycle parser accepts only local lifecycle messages', () => {
   assert.equal(parseCoreLifecycleCommand({ type: 'lifecycle.standby' }), 'standby');
   assert.equal(parseCoreLifecycleCommand({ type: 'persona.generate' }), null);
   assert.equal(parseCoreLifecycleCommand('lifecycle.pause'), null);
+});
+
+test('auth interrupt tracker retains duplicate stop intents and prioritizes close', () => {
+  const tracker = new LifecycleAuthInterruptTracker();
+  tracker.note('pause');
+  tracker.note('pause');
+  tracker.note('close');
+  tracker.note('wake');
+  assert.equal(tracker.current(), 'close');
+  tracker.release('close');
+  assert.equal(tracker.current(), 'pause');
+  tracker.release('pause');
+  assert.equal(tracker.current(), 'pause');
+  tracker.release('pause');
+  assert.equal(tracker.current(), null);
+});
+
+test('close intent is observable while a serialized cold wake is still in flight', async () => {
+  let finishWake!: (ok: boolean) => void;
+  let browserCloses = 0;
+  const tracker = new LifecycleAuthInterruptTracker();
+  const controller = new CoreLifecycleController({
+    deactivate: async () => undefined,
+    closeOwnedBrowser: async () => { browserCloses += 1; return true; },
+    wakeFromStandby: () => new Promise<boolean>((resolve) => { finishWake = resolve; }),
+    exit: () => undefined,
+  }, 'standby');
+
+  const wake = controller.request('wake');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(controller.state, 'waking');
+
+  tracker.note('close');
+  const close = controller.request('close').finally(() => tracker.release('close'));
+  assert.equal(tracker.current(), 'close', 'auth coordinator can observe close before the serialized close transition runs');
+  assert.equal(browserCloses, 0);
+
+  finishWake(false);
+  await wake;
+  await close;
+  assert.equal(browserCloses, 1);
+  assert.equal(tracker.current(), null);
+  assert.equal(controller.state, 'finished');
 });
 
 test('pause-and-exit stops automation, closes browser, and disconnects the engine', async () => {

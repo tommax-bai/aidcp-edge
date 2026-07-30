@@ -127,10 +127,90 @@ export type NativePageCommandKind =
   | 'interaction_comment' | 'interaction_like_comment' | 'group_join'
   | 'wechat_capture_session' | 'identity_bootstrap' | 'identity_read_current'
   | 'identity_read_self_profile' | 'captcha_capture' | 'captcha_click'
+  | 'facebook_auth_probe' | 'facebook_auth_submit_login' | 'facebook_auth_enter_totp'
+  | 'facebook_auth_submit_totp' | 'facebook_auth_clear_totp'
+  | 'facebook_auth_dismiss_warning' | 'facebook_auth_close_push_blocker'
+  | 'facebook_auth_confirm_remember_password'
   | 'publish_navigate_entry' | 'publish_select_mode' | 'publish_upload_image'
   | 'publish_set_cover' | 'publish_fill_field' | 'publish_add_with_candidate' | 'publish_set_option'
   | 'publish_set_schedule' | 'publish_submit' | 'publish_capture_post_id'
   | 'publish_capture_scheduled' | 'publish_reconcile_scheduled';
+
+export const NATIVE_FACEBOOK_AUTH_SIGNALS = [
+  'authenticated',
+  'login_submit_ready',
+  'totp_entry_ready',
+  'totp_submit_ready',
+  'totp_refresh_required',
+  'automation_warning_dismiss',
+  'push_blocker_close',
+  'remember_password_confirm',
+  'blocked_human_verification',
+  'blocked_unknown',
+  'none',
+] as const;
+
+export type NativeFacebookAuthSignal = typeof NATIVE_FACEBOOK_AUTH_SIGNALS[number];
+
+export interface NativeFacebookAuthProbeReceipt {
+  signal: NativeFacebookAuthSignal;
+  signalId?: string;
+  serverEpochMs?: number;
+  reason?: string;
+}
+
+export type NativeFacebookAuthActionKind = Exclude<
+  Extract<NativePageCommandKind, `facebook_auth_${string}`>,
+  'facebook_auth_probe'
+>;
+
+const NATIVE_FACEBOOK_AUTH_ACTION_KIND_FLAGS = {
+  facebook_auth_submit_login: true,
+  facebook_auth_enter_totp: true,
+  facebook_auth_submit_totp: true,
+  facebook_auth_clear_totp: true,
+  facebook_auth_dismiss_warning: true,
+  facebook_auth_close_push_blocker: true,
+  facebook_auth_confirm_remember_password: true,
+} as const satisfies Record<NativeFacebookAuthActionKind, true>;
+
+export const NATIVE_FACEBOOK_AUTH_ACTION_KINDS = Object.freeze(
+  Object.keys(NATIVE_FACEBOOK_AUTH_ACTION_KIND_FLAGS) as NativeFacebookAuthActionKind[],
+);
+
+export interface NativeFacebookAuthActionReceipt {
+  action: NativeFacebookAuthActionKind;
+  signalId: string;
+  ok: boolean;
+  reason?: string;
+}
+
+export type NativeFacebookAuthOutput =
+  | { kind: 'facebook_auth_probe'; value: NativeFacebookAuthProbeReceipt }
+  | { kind: 'facebook_auth_action'; value: NativeFacebookAuthActionReceipt };
+
+const NATIVE_NON_AUTH_OUTPUT_KINDS = [
+  'page_probe',
+  'page_cards',
+  'note_detail',
+  'profile_detail',
+  'notification_items',
+  'notification_home',
+  'action_receipt',
+  'action_receipt_with_observation',
+  'plan_results',
+  'publish_receipt',
+  'captcha_snapshot',
+  'wechat_session_candidate',
+  'facebook_identity',
+  'identity_observation',
+] as const;
+
+type NativeNonAuthOutputKind = typeof NATIVE_NON_AUTH_OUTPUT_KINDS[number];
+
+export type NativePageCommandOutput =
+  | NativeFacebookAuthOutput
+  | { kind: NativeNonAuthOutputKind; value: unknown };
 
 export interface NativePageCommand {
   kind: NativePageCommandKind;
@@ -141,7 +221,7 @@ export interface NativePageCommandExecution {
   ok: boolean;
   effectPhase: NativeEffectPhase;
   reasonCode: string;
-  output?: { kind: string; value: unknown };
+  output?: NativePageCommandOutput;
 }
 
 export interface NativePageSessionInfo {
@@ -750,11 +830,7 @@ export class NativePageEngineSession {
     try { raw = await pending; } finally { signal?.removeEventListener('abort', abort); }
     const response = parseCommandResponse(raw, id, this.sessionId, this.taskId, commandId);
     if (response.error || (!response.result && !response.ok)) throw nativeResponseError(response);
-    const output = isRecord(response.result)
-      && typeof response.result.kind === 'string'
-      && 'value' in response.result
-      ? response.result as { kind: string; value: unknown }
-      : undefined;
+    const output = parseNativePageCommandOutput(response.result);
     if (!output) throw new NativePageEngineError('invalid_protocol', 'Native page command output is invalid');
     return { ok: response.ok, effectPhase: response.effectPhase, reasonCode: response.reasonCode, output };
   }
@@ -954,6 +1030,61 @@ function parseCommandResponse(
     throw new NativePageEngineError('invalid_protocol', 'Native Page Engine command response mismatch');
   }
   return value as unknown as CommandResponse;
+}
+
+function parseNativePageCommandOutput(value: unknown): NativePageCommandOutput | undefined {
+  if (!isRecord(value) || typeof value.kind !== 'string' || !('value' in value)) {
+    return undefined;
+  }
+  if (value.kind === 'facebook_auth_probe') {
+    const receipt = value.value;
+    if (
+      !isRecord(receipt)
+      || typeof receipt.signal !== 'string'
+      || !NATIVE_FACEBOOK_AUTH_SIGNALS.includes(receipt.signal as NativeFacebookAuthSignal)
+      || (receipt.signalId !== undefined && typeof receipt.signalId !== 'string')
+      || (receipt.serverEpochMs !== undefined && !Number.isSafeInteger(receipt.serverEpochMs))
+      || (receipt.reason !== undefined && typeof receipt.reason !== 'string')
+    ) {
+      return undefined;
+    }
+    return {
+      kind: value.kind,
+      value: {
+        signal: receipt.signal as NativeFacebookAuthSignal,
+        ...(receipt.signalId === undefined ? {} : { signalId: receipt.signalId }),
+        ...(receipt.serverEpochMs === undefined ? {} : { serverEpochMs: Number(receipt.serverEpochMs) }),
+        ...(receipt.reason === undefined ? {} : { reason: receipt.reason }),
+      },
+    };
+  }
+  if (value.kind === 'facebook_auth_action') {
+    const receipt = value.value;
+    if (
+      !isRecord(receipt)
+      || !NATIVE_FACEBOOK_AUTH_ACTION_KINDS.includes(
+        receipt.action as NativeFacebookAuthActionReceipt['action'],
+      )
+      || typeof receipt.signalId !== 'string'
+      || typeof receipt.ok !== 'boolean'
+      || (receipt.reason !== undefined && typeof receipt.reason !== 'string')
+    ) {
+      return undefined;
+    }
+    return {
+      kind: value.kind,
+      value: {
+        action: receipt.action as NativeFacebookAuthActionReceipt['action'],
+        signalId: receipt.signalId,
+        ok: receipt.ok,
+        ...(receipt.reason === undefined ? {} : { reason: receipt.reason }),
+      },
+    };
+  }
+  if (NATIVE_NON_AUTH_OUTPUT_KINDS.includes(value.kind as NativeNonAuthOutputKind)) {
+    return { kind: value.kind as NativeNonAuthOutputKind, value: value.value };
+  }
+  return undefined;
 }
 
 /**

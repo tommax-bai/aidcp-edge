@@ -12,6 +12,7 @@
 // 敏感值：apiKey 只用于本次请求的 Authorization 头，不落日志、不写文件。
 
 const { parseRemark, DEFAULT_PLATFORM } = require('./ads-create-flow.cjs');
+const { createHmac } = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -27,6 +28,9 @@ const PROFILE_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
 const DEVTOOLS_BROWSER_PATH_RE = /^\/devtools\/browser\/[A-Za-z0-9._-]+$/;
 const BROKER_MAX_BATCH_SIZE = 2;
 const BROKER_REQUEST_TIMEOUT_MS = 30_000;
+const FACEBOOK_TOTP_WINDOW_MS = 30_000;
+const FACEBOOK_TOTP_MAX_SERVER_SKEW_MS = 5 * 60_000;
+const FACEBOOK_TOTP_KEY_RE = /^[A-Z2-7]{16,64}$/;
 const BROKER_OPERATION_KEYS = new Set(['version', 'method', 'path', 'query', 'body']);
 const PROXY_CONFIG_KEYS = new Set([
   'proxy_soft',
@@ -134,12 +138,22 @@ function createAdsLocalApi(deps = {}) {
       if (Object.keys(query).length !== 1 || !exactProfile(query.profile_id, profileId)
         || Object.keys(body).length !== 0) return null;
     } else if (version === 'v2' && method === 'POST' && requestPath === 'browser-profile/start') {
-      const allowed = new Set(['profile_id', 'last_opened_tabs', 'ip_tab', 'headless', 'launch_args']);
+      const allowed = new Set([
+        'profile_id',
+        'last_opened_tabs',
+        'ip_tab',
+        'headless',
+        'password_filling',
+        'password_saving',
+        'launch_args',
+      ]);
       if (!hasOnlyKeys(body, allowed) || Object.keys(query).length !== 0
         || !exactProfile(body.profile_id, profileId)
         || !['0', '1'].includes(body.last_opened_tabs)
         || !['0', '1'].includes(body.ip_tab)
         || !['0', '1'].includes(body.headless)
+        || body.password_filling !== '1'
+        || body.password_saving !== '0'
         || !Array.isArray(body.launch_args) || body.launch_args.length > 32
         || body.launch_args.some((arg) => typeof arg !== 'string' || arg.length > 4096)) return null;
     } else if (version === 'v2' && method === 'POST' && requestPath === 'browser-profile/stop') {
@@ -223,6 +237,131 @@ function createAdsLocalApi(deps = {}) {
       });
       if (!responses) return { ok: false, reason: 'broker_cancelled' };
       return { ok: true, responses };
+    } catch {
+      return { ok: false, reason: 'ads_api_unavailable' };
+    }
+  }
+
+  function decodeFacebookTotpKey(raw) {
+    const normalized = String(raw || '').trim().toUpperCase();
+    if (!FACEBOOK_TOTP_KEY_RE.test(normalized)) return null;
+    const bytes = [];
+    let accumulator = 0;
+    let bitCount = 0;
+    for (const character of normalized) {
+      const value = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'.indexOf(character);
+      if (value < 0) return null;
+      accumulator = (accumulator << 5) | value;
+      bitCount += 5;
+      if (bitCount >= 8) {
+        bitCount -= 8;
+        bytes.push((accumulator >>> bitCount) & 0xff);
+        accumulator &= (1 << bitCount) - 1;
+      }
+    }
+    return bytes.length > 0 ? Buffer.from(bytes) : null;
+  }
+
+  function generateFacebookTotp(rawKey, serverEpochMs) {
+    const key = decodeFacebookTotpKey(rawKey);
+    if (!key) return null;
+    const counter = Buffer.alloc(8);
+    let digest;
+    try {
+      counter.writeBigUInt64BE(BigInt(Math.floor(serverEpochMs / FACEBOOK_TOTP_WINDOW_MS)));
+      digest = createHmac('sha1', key).update(counter).digest();
+      const offset = digest[digest.length - 1] & 0x0f;
+      const binary = (
+        ((digest[offset] & 0x7f) << 24)
+        | ((digest[offset + 1] & 0xff) << 16)
+        | ((digest[offset + 2] & 0xff) << 8)
+        | (digest[offset + 3] & 0xff)
+      ) >>> 0;
+      return String(binary % 1_000_000).padStart(6, '0');
+    } finally {
+      key.fill(0);
+      counter.fill(0);
+      if (digest) digest.fill(0);
+    }
+  }
+
+  /**
+   * 具名 Facebook 首登 TOTP 能力。它不进入 generic broker：V2 profile/list 原始项含密码、
+   * cookie、代理等无关敏感字段，只能在 Electron main 的闭包内精确匹配 profile 后生成短时值。
+   */
+  async function getFacebookTotp(opts = {}) {
+    const profileId = String(opts.profileId || '').trim();
+    const serverEpochMs = opts.serverEpochMs;
+    if (
+      !PROFILE_ID_RE.test(profileId)
+      || !Number.isSafeInteger(serverEpochMs)
+      || serverEpochMs <= 0
+      || Math.abs(serverEpochMs - now()) > FACEBOOK_TOTP_MAX_SERVER_SKEW_MS
+    ) {
+      return { ok: false, reason: 'invalid_totp_request' };
+    }
+
+    try {
+      return await throttledCore(async () => {
+        if (typeof opts.isCancelled === 'function' && opts.isCancelled()) {
+          return { ok: false, reason: 'totp_request_cancelled' };
+        }
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), BROKER_REQUEST_TIMEOUT_MS);
+        if (typeof timer.unref === 'function') timer.unref();
+        let response;
+        let body;
+        let rawKey = '';
+        try {
+          response = await fetchImpl(`${baseOf(opts)}/api/v2/browser-profile/list`, {
+            method: 'POST',
+            headers: {
+              ...authHeaders(opts),
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ profile_id: [profileId], page: 1, limit: 1 }),
+            signal: controller.signal,
+          });
+          if (!response || response.status < 200 || response.status >= 300) {
+            return { ok: false, reason: 'ads_api_rejected' };
+          }
+          try {
+            body = await response.json();
+          } catch {
+            return { ok: false, reason: 'ads_api_rejected' };
+          }
+          if (!isRecord(body) || body.code !== 0 || !isRecord(body.data) || !Array.isArray(body.data.list)) {
+            return { ok: false, reason: 'ads_api_rejected' };
+          }
+          const list = body.data.list;
+          if (
+            list.length !== 1
+            || !isRecord(list[0])
+            || list[0].profile_id !== profileId
+          ) {
+            return { ok: false, reason: 'profile_mismatch' };
+          }
+          if (typeof opts.isCancelled === 'function' && opts.isCancelled()) {
+            return { ok: false, reason: 'totp_request_cancelled' };
+          }
+          rawKey = typeof list[0].fakey === 'string' ? list[0].fakey : '';
+          const code = generateFacebookTotp(rawKey, serverEpochMs);
+          if (!code) return { ok: false, reason: 'totp_key_unavailable' };
+          const windowStartMs = Math.floor(serverEpochMs / FACEBOOK_TOTP_WINDOW_MS) * FACEBOOK_TOTP_WINDOW_MS;
+          return {
+            ok: true,
+            code,
+            windowStartMs,
+            windowEndMs: windowStartMs + FACEBOOK_TOTP_WINDOW_MS,
+          };
+        } finally {
+          clearTimeout(timer);
+          // JS 字符串无法保证物理擦除；至少立即断开本闭包对 raw response / key 的可达引用。
+          rawKey = '';
+          body = null;
+          response = null;
+        }
+      });
     } catch {
       return { ok: false, reason: 'ads_api_unavailable' };
     }
@@ -686,6 +825,7 @@ function createAdsLocalApi(deps = {}) {
     kernels,
     downloadKernel,
     brokerBatch,
+    getFacebookTotp,
     enqueueRequest: throttledRequest,
     ADS_MIN_INTERVAL_MS,
   };

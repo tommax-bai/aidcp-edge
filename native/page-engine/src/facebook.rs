@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use serde_path_to_error::{Path, Segment};
 use url::Url;
 
+pub mod auth;
 pub mod capability;
 pub mod comment;
 pub mod feed;
@@ -492,6 +493,68 @@ pub fn identity_expression(cookie_user_id: Option<&str>) -> Result<String, Engin
 
 pub fn page_probe_expression() -> Result<String, EngineError> {
     router_expression(json!({ "kind": "page_probe", "params": {} }))
+}
+
+pub fn auth_probe_expression(
+    target_id: &str,
+    authenticated: bool,
+    allow_auth_actions: bool,
+    entered_totp_window_start_unix_ms: Option<u64>,
+    entered_totp_window_end_unix_ms: Option<u64>,
+) -> Result<String, EngineError> {
+    internal_expression(
+        "auth_probe",
+        json!({
+            "targetId": target_id,
+            "authenticated": authenticated,
+            "allowAuthActions": allow_auth_actions,
+            "enteredTotpWindowStartUnixMs": entered_totp_window_start_unix_ms,
+            "enteredTotpWindowEndUnixMs": entered_totp_window_end_unix_ms,
+        }),
+    )
+}
+
+pub fn auth_focus_guard_expression(
+    document_generation: &str,
+    candidate_key: &str,
+) -> Result<String, EngineError> {
+    internal_expression(
+        "auth_focus_guard",
+        json!({
+            "documentGeneration": document_generation,
+            "candidateKey": candidate_key,
+        }),
+    )
+}
+
+pub fn auth_totp_readback_expression(
+    document_generation: &str,
+    candidate_key: &str,
+    expected_code: Option<&str>,
+) -> Result<String, EngineError> {
+    internal_expression(
+        "auth_totp_readback",
+        json!({
+            "documentGeneration": document_generation,
+            "candidateKey": candidate_key,
+            "expectedCode": expected_code,
+        }),
+    )
+}
+
+pub fn auth_postcondition_expression(
+    document_generation: &str,
+    expected_signal: &str,
+    candidate_key: &str,
+) -> Result<String, EngineError> {
+    internal_expression(
+        "auth_postcondition",
+        json!({
+            "documentGeneration": document_generation,
+            "expectedSignal": expected_signal,
+            "candidateKey": candidate_key,
+        }),
+    )
 }
 
 pub fn feed_probe_expression() -> Result<String, EngineError> {

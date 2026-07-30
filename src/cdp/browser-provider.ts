@@ -44,6 +44,11 @@ export interface LaunchedBrowser {
   instance: ChromeInstance;
   /** CDP 附着端点：self=传入端口；adspower=V2 active/start 返回或已验证失联 marker 的 debug_port。 */
   endpoint: { host: string; port: number };
+  /**
+   * 仅本次确实执行了 AdsPower V2 fresh start，并在 start body 中应用首登策略时存在。
+   * Active / orphan 接管没有本代启动证据，必须省略，调用方不得据此运行依赖 browser-chrome 抑制的首登辅助。
+   */
+  firstLoginPolicyApplied?: true;
   /** 已存在的配置代理浏览器；附着后必须完成一次精确出口匹配才可接管。 */
   activeProxyTakeover?: {
     profileId: string;
@@ -400,11 +405,12 @@ export class AdsPowerProvider implements BrowserProvider {
     //   --window-size 作兜底；仅在 Electron 未给启动暂存坐标时才用 --start-maximized 覆盖 AdsPower profile
     //   记忆的小窗口。给了坐标还最大化会让首帧先铺满主屏、再被 CDP 挪走，造成明显闪现。
     // + 关权限弹窗（--deny-permission-prompts：通知/定位/摄像头等一律拒绝而非弹窗，见 change browser-permission-prompt-defaults）
+    //   并固定禁用通知 UI（SunBrowser 实测仅 deny 仍可能显示原生通知提示；--disable-notifications 收口浏览器 chrome）
     // + 界面语言钉英文（--lang=en-US：只兜登出/未登录 chrome 的界面语言，belt-not-authority——登录态群面语言由 AdsPower 指纹
     //   语言 + FB 账号服务端语言主导，此参数改不动，见 change facebook-locale-pin-en-us）+ 起始页，均经 launch_args 传入。
     const launchArgs = ['--window-size=1440,980'];
     if (!opts.windowPosition) launchArgs.push('--start-maximized');
-    launchArgs.push('--deny-permission-prompts', '--lang=en-US');
+    launchArgs.push('--deny-permission-prompts', '--disable-notifications', '--lang=en-US');
     if (opts.windowPosition) {
       launchArgs.push(`--window-position=${Math.floor(opts.windowPosition.left)},${Math.floor(opts.windowPosition.top)}`);
     }
@@ -415,6 +421,7 @@ export class AdsPowerProvider implements BrowserProvider {
     });
     const activeStatus = String(active?.status ?? '').trim().toLowerCase();
     let port = 0;
+    let firstLoginPolicyApplied = false;
     let activeProxyTakeover: LaunchedBrowser['activeProxyTakeover'];
     if (activeStatus === 'active') {
       if (this.cfg.proxyAuthority) {
@@ -461,9 +468,12 @@ export class AdsPowerProvider implements BrowserProvider {
             last_opened_tabs: '0', // 不恢复历史标签，交付干净的自动化起始页
             ip_tab: '0', // 不弹 IP 检测页
             headless: opts.headless ? '1' : '0',
+            password_filling: '1', // 仅允许 AdsPower 填入已导入凭据；edge 不读取/输入密码
+            password_saving: '0', // 抑制浏览器 Save Password chrome；不影响 Facebook 页面内 Remember Password
             launch_args: launchArgs,
           },
         });
+        firstLoginPolicyApplied = true;
         port = Number(data?.debug_port);
         this.log(`[aidcp-edge] AdsPower V2 启动 profile=${this.cfg.userId} → debug_port=${port}`);
       }
@@ -503,6 +513,7 @@ export class AdsPowerProvider implements BrowserProvider {
     return {
       instance,
       endpoint: { host, port },
+      ...(firstLoginPolicyApplied ? { firstLoginPolicyApplied: true as const } : {}),
       ...(activeProxyTakeover ? { activeProxyTakeover } : {}),
     };
   }
