@@ -5,7 +5,7 @@ use crate::engine::{CommandOutput, EngineSession};
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
 use crate::input::{WheelInputFailure, dispatch_wheel_humanized};
-use crate::model::{PageCards, PageMovement};
+use crate::model::{PageCard, PageCards, PageMovement, PostIdentityKind};
 use crate::protocol::{EffectPhase, NativeCommand};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -355,7 +355,7 @@ pub(crate) async fn execute_facebook_feed_scroll(
     };
     let start_y = current.scroll_y;
     let mut saw_any_card = !current.cards.is_empty();
-    let mut canonical_card_witness = FacebookCanonicalCardWitness::from_probe(&current);
+    let mut validated_card_witness = FacebookValidatedFeedCardWitness::from_probe(&current);
 
     for _ in 0..FACEBOOK_FEED_SCROLL_ROUNDS {
         let before = current;
@@ -371,8 +371,8 @@ pub(crate) async fn execute_facebook_feed_scroll(
         )
         .await?;
         saw_any_card |= !after.cards.is_empty();
-        if let Some(witness) = FacebookCanonicalCardWitness::from_probe(&after) {
-            canonical_card_witness = Some(witness);
+        if let Some(witness) = FacebookValidatedFeedCardWitness::from_probe(&after) {
+            validated_card_witness = Some(witness);
         }
         let movement = PageMovement {
             before: start_y,
@@ -404,8 +404,8 @@ pub(crate) async fn execute_facebook_feed_scroll(
         )
         .await?;
         saw_any_card |= !confirmed.cards.is_empty();
-        if let Some(witness) = FacebookCanonicalCardWitness::from_probe(&confirmed) {
-            canonical_card_witness = Some(witness);
+        if let Some(witness) = FacebookValidatedFeedCardWitness::from_probe(&confirmed) {
+            validated_card_witness = Some(witness);
         }
         let movement = PageMovement {
             before: start_y,
@@ -417,12 +417,13 @@ pub(crate) async fn execute_facebook_feed_scroll(
         if !fresh.cards.is_empty() {
             return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(fresh)));
         }
-        let saw_card_on_confirmed_document = canonical_card_witness
+        let has_validated_card_on_confirmed_document = validated_card_witness
             .as_ref()
             .is_some_and(|witness| witness.matches(&confirmed));
-        if let Some(reason) =
-            facebook_bottom_completion_reason(confirmation, saw_card_on_confirmed_document)
-        {
+        if let Some(reason) = facebook_bottom_completion_reason(
+            confirmation,
+            has_validated_card_on_confirmed_document,
+        ) {
             return Ok(facebook_scroll_failure_on_surface(
                 EffectPhase::Confirmed,
                 reason,
@@ -647,10 +648,10 @@ enum FacebookBottomConfirmationState {
 
 fn facebook_bottom_completion_reason(
     state: FacebookBottomConfirmationState,
-    saw_any_canonical_card: bool,
+    has_validated_card_witness: bool,
 ) -> Option<&'static str> {
     match state {
-        FacebookBottomConfirmationState::ConfirmedEnd if saw_any_canonical_card => {
+        FacebookBottomConfirmationState::ConfirmedEnd if has_validated_card_witness => {
             Some("feed_exhausted")
         }
         FacebookBottomConfirmationState::ConfirmedEnd
@@ -661,22 +662,37 @@ fn facebook_bottom_completion_reason(
     }
 }
 
+/// Feed 卡身份的唯一分档入口。
+///
+/// 缺省 / `Permalink` 保留历史行为，只接受可 canonicalize 的 Facebook 内容 URL；
+/// `ContentRef` 必须显式分档且通过严格摘要格式校验，才可作为会话内身份。
+fn facebook_feed_card_identity(card: &PageCard) -> Option<String> {
+    let note_id = card.note_id.as_deref()?;
+    match card.note_id_kind {
+        Some(PostIdentityKind::ContentRef) if is_facebook_content_ref(note_id) => {
+            Some(note_id.to_owned())
+        }
+        Some(PostIdentityKind::ContentRef) => None,
+        Some(PostIdentityKind::Permalink) | None => canonical_facebook_post_id(note_id),
+    }
+}
+
 fn facebook_feed_card_identities(probe: &facebook::FacebookFeedProbe) -> Vec<String> {
     probe
         .cards
         .iter()
-        .filter_map(|card| card.note_id.as_deref().and_then(canonical_facebook_post_id))
+        .filter_map(facebook_feed_card_identity)
         .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct FacebookCanonicalCardWitness {
+struct FacebookValidatedFeedCardWitness {
     surface: String,
     url: String,
     document_time_origin_ms: u64,
 }
 
-impl FacebookCanonicalCardWitness {
+impl FacebookValidatedFeedCardWitness {
     fn from_probe(probe: &facebook::FacebookFeedProbe) -> Option<Self> {
         if probe.document_time_origin_ms == 0 || facebook_feed_card_identities(probe).is_empty() {
             return None;
@@ -1219,12 +1235,26 @@ fn facebook_page_cards(
     only_new: bool,
     movement: Option<PageMovement>,
 ) -> PageCards {
+    facebook_page_cards_with_seen_post_ids(
+        &mut session.facebook.seen_post_ids,
+        probe,
+        only_new,
+        movement,
+    )
+}
+
+fn facebook_page_cards_with_seen_post_ids(
+    seen_post_ids: &mut std::collections::HashSet<String>,
+    probe: facebook::FacebookFeedProbe,
+    only_new: bool,
+    movement: Option<PageMovement>,
+) -> PageCards {
     let mut cards = Vec::new();
     for mut card in probe.cards {
-        let Some(identity) = card.note_id.as_deref().and_then(canonical_facebook_post_id) else {
+        let Some(identity) = facebook_feed_card_identity(&card) else {
             continue;
         };
-        let is_new = session.facebook.seen_post_ids.insert(identity);
+        let is_new = seen_post_ids.insert(identity);
         if only_new && !is_new {
             continue;
         }
@@ -1356,6 +1386,17 @@ mod tests {
             note_id_kind: None,
             is_video: None,
         }];
+        probe
+    }
+
+    fn valid_content_ref(hex_pair: &str) -> String {
+        format!("{FACEBOOK_CONTENT_REF_PREFIX}{}", hex_pair.repeat(32))
+    }
+
+    fn probe_with_content_ref(hex_pair: &str) -> facebook::FacebookFeedProbe {
+        let mut probe = probe_with_one_card(false);
+        probe.cards[0].note_id = Some(valid_content_ref(hex_pair));
+        probe.cards[0].note_id_kind = Some(PostIdentityKind::ContentRef);
         probe
     }
 
@@ -1720,10 +1761,10 @@ mod tests {
     }
 
     #[test]
-    fn canonical_card_witness_is_bound_to_the_confirmed_surface_and_document() {
+    fn validated_feed_card_witness_is_bound_to_the_confirmed_surface_and_document() {
         let home = probe_with_one_card(false);
-        let witness =
-            FacebookCanonicalCardWitness::from_probe(&home).expect("canonical home card witness");
+        let witness = FacebookValidatedFeedCardWitness::from_probe(&home)
+            .expect("validated home card witness");
         assert!(witness.matches(&home));
 
         let mut later_empty_home = home.clone();
@@ -1754,6 +1795,178 @@ mod tests {
             !witness.matches(&refreshed_home),
             "a card observed before refresh must not authorize the replacement document"
         );
+    }
+
+    #[test]
+    fn content_ref_only_home_confirms_exhaustion_after_five_stable_samples() {
+        let initial = probe_with_content_ref("a1");
+        let expected_identity = valid_content_ref("a1");
+        assert_eq!(
+            facebook_feed_card_identities(&initial),
+            vec![expected_identity]
+        );
+        let witness = FacebookValidatedFeedCardWitness::from_probe(&initial)
+            .expect("valid content-ref witness");
+        let mut other_surface = initial.clone();
+        other_surface.surface = "group".to_owned();
+        assert!(
+            !witness.matches(&other_surface),
+            "a content-ref witness must remain bound to its issuing list surface"
+        );
+        let mut other_url = initial.clone();
+        other_url.url = "https://www.facebook.com/?sk=h_chr".to_owned();
+        assert!(
+            !witness.matches(&other_url),
+            "a content-ref witness must remain bound to its issuing list URL"
+        );
+        let mut refreshed_document = initial.clone();
+        refreshed_document.document_time_origin_ms += 1;
+        assert!(
+            !witness.matches(&refreshed_document),
+            "a content-ref witness must not survive a document replacement"
+        );
+
+        let mut previous_document_age_ms = initial.document_age_ms;
+        let mut state = FacebookBottomConfirmationState::Waiting;
+        for samples_seen in 1..=FACEBOOK_FEED_BOTTOM_SAMPLE_COUNT {
+            let mut sample = initial.clone();
+            sample.document_age_ms += samples_seen as u64;
+            state = classify_facebook_bottom_confirmation(
+                &initial,
+                &sample,
+                previous_document_age_ms,
+                samples_seen,
+                0,
+            );
+            if samples_seen < FACEBOOK_FEED_BOTTOM_SAMPLE_COUNT {
+                assert_eq!(state, FacebookBottomConfirmationState::Waiting);
+            }
+            previous_document_age_ms = sample.document_age_ms;
+        }
+
+        assert_eq!(state, FacebookBottomConfirmationState::ConfirmedEnd);
+        assert_eq!(
+            facebook_bottom_completion_reason(state, witness.matches(&initial)),
+            Some("feed_exhausted")
+        );
+    }
+
+    #[test]
+    fn a_changed_content_ref_invalidates_the_structural_window() {
+        let initial = probe_with_content_ref("a1");
+        let changed = probe_with_content_ref("b2");
+
+        assert_eq!(
+            classify_facebook_bottom_confirmation(
+                &initial,
+                &changed,
+                initial.document_age_ms,
+                2,
+                0,
+            ),
+            FacebookBottomConfirmationState::Invalidated
+        );
+    }
+
+    #[test]
+    fn malformed_or_misclassified_content_refs_never_become_witnesses() {
+        let valid_ref = valid_content_ref("a1");
+        let mut empty = probe_with_content_ref("a1");
+        empty.cards[0].note_id = None;
+        let mut malformed = probe_with_content_ref("a1");
+        malformed.cards[0].note_id = Some(format!("{FACEBOOK_CONTENT_REF_PREFIX}tooshort"));
+        let mut uppercase_digest = probe_with_content_ref("a1");
+        uppercase_digest.cards[0].note_id =
+            Some(format!("{FACEBOOK_CONTENT_REF_PREFIX}{}", "A1".repeat(32)));
+        let mut missing_kind = probe_with_content_ref("a1");
+        missing_kind.cards[0].note_id_kind = None;
+        let mut mislabeled_permalink = probe_with_content_ref("a1");
+        mislabeled_permalink.cards[0].note_id_kind = Some(PostIdentityKind::Permalink);
+        let mut mislabeled_content_ref = probe_with_one_card(false);
+        mislabeled_content_ref.cards[0].note_id_kind = Some(PostIdentityKind::ContentRef);
+
+        for (case, probe) in [
+            ("empty", empty),
+            ("malformed", malformed),
+            ("uppercase digest", uppercase_digest),
+            ("missing kind", missing_kind),
+            ("content ref labeled permalink", mislabeled_permalink),
+            ("permalink labeled content ref", mislabeled_content_ref),
+        ] {
+            assert!(
+                facebook_feed_card_identities(&probe).is_empty(),
+                "{case} must not have a trusted identity"
+            );
+            assert!(
+                FacebookValidatedFeedCardWitness::from_probe(&probe).is_none(),
+                "{case} must not become an exhaustion witness"
+            );
+        }
+        assert!(is_facebook_content_ref(&valid_ref));
+    }
+
+    #[test]
+    fn content_ref_page_cards_are_reported_and_session_deduplicated() {
+        let mut first_probe = probe_with_content_ref("a1");
+        let first_ref = valid_content_ref("a1");
+        let second_ref = valid_content_ref("b2");
+        let mut second_card = first_probe.cards[0].clone();
+        second_card.index = 1;
+        second_card.note_id = Some(second_ref.clone());
+        first_probe.cards.push(second_card);
+        let mut seen_post_ids = std::collections::HashSet::new();
+
+        let first = facebook_page_cards_with_seen_post_ids(
+            &mut seen_post_ids,
+            first_probe.clone(),
+            true,
+            None,
+        );
+        assert_eq!(first.cards.len(), 2);
+        assert_eq!(first.cards[0].note_id.as_deref(), Some(first_ref.as_str()));
+        assert_eq!(first.cards[1].note_id.as_deref(), Some(second_ref.as_str()));
+        assert_eq!(
+            first.cards[0].note_id_kind,
+            Some(PostIdentityKind::ContentRef)
+        );
+        assert!(seen_post_ids.contains(&first_ref));
+        assert!(seen_post_ids.contains(&second_ref));
+
+        let duplicate =
+            facebook_page_cards_with_seen_post_ids(&mut seen_post_ids, first_probe, true, None);
+        assert!(
+            duplicate.cards.is_empty(),
+            "both full content refs are independent session dedupe keys"
+        );
+    }
+
+    #[test]
+    fn legacy_and_explicit_permalink_cards_keep_canonical_deduplication() {
+        let legacy = probe_with_one_card(false);
+        assert_eq!(facebook_feed_card_identities(&legacy), vec!["1"]);
+        assert!(FacebookValidatedFeedCardWitness::from_probe(&legacy).is_some());
+
+        let mut seen_post_ids = std::collections::HashSet::new();
+        let first =
+            facebook_page_cards_with_seen_post_ids(&mut seen_post_ids, legacy.clone(), true, None);
+        assert_eq!(first.cards.len(), 1);
+        assert!(seen_post_ids.contains("1"));
+        let duplicate =
+            facebook_page_cards_with_seen_post_ids(&mut seen_post_ids, legacy, true, None);
+        assert!(duplicate.cards.is_empty());
+
+        let mut explicit = probe_with_one_card(false);
+        explicit.cards[0].note_id_kind = Some(PostIdentityKind::Permalink);
+        assert_eq!(facebook_feed_card_identities(&explicit), vec!["1"]);
+        assert!(FacebookValidatedFeedCardWitness::from_probe(&explicit).is_some());
+
+        let content_ref = probe_with_content_ref("a1");
+        let content_ref_key = valid_content_ref("a1");
+        let content_ref_cards =
+            facebook_page_cards_with_seen_post_ids(&mut seen_post_ids, content_ref, true, None);
+        assert_eq!(content_ref_cards.cards.len(), 1);
+        assert!(seen_post_ids.contains("1"));
+        assert!(seen_post_ids.contains(&content_ref_key));
     }
 
     #[test]
@@ -1853,11 +2066,11 @@ mod tests {
         let mut noncanonical = probe_with_one_card(false);
         noncanonical.cards[0].note_id = Some("content_ref:feed:0".to_owned());
         assert!(facebook_feed_card_identities(&noncanonical).is_empty());
-        assert!(FacebookCanonicalCardWitness::from_probe(&noncanonical).is_none());
+        assert!(FacebookValidatedFeedCardWitness::from_probe(&noncanonical).is_none());
         assert_eq!(
             facebook_unconfirmed_scroll_reason(!noncanonical.cards.is_empty(), &noncanonical),
             "feed_continuation_unconfirmed",
-            "已见物理卡仍是 continuation，但它不能成为 canonical exhaustion witness"
+            "已见物理卡仍是 continuation，但它不能成为 validated exhaustion witness"
         );
     }
 
