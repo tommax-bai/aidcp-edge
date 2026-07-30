@@ -308,9 +308,55 @@ async fn facebook_feed_scroll_dispatches_a_humanized_multi_frame_wheel_gesture()
     assert!(peak > 0 && peak + 1 < deltas.len());
 }
 
+/// 三条 feed-recovery 用例的恢复落点。**必须互不相同**，原因是进程级共享状态：
+///
+/// `src/input.rs` 的「上一次点击落点」（`LAST_POINTER_LANDING`）是 `static`，
+/// 而一个 `tests/*.rs` 文件 = 一个测试二进制 = 一个进程，同文件内的 `#[tokio::test]` 默认并行跑
+/// ⇒ 它们共享这个全局。点击起点取 `options.from` → 上一次落点 → 默认起点（`src/input.rs:993-996`）；
+/// feed-recovery 这条路径不传 `options.from`，所以**真的会读到别的用例留下的落点**。
+///
+/// 两条用例若共用落点：后跑的那条起点就已经在目标上 ⇒ 距离落进
+/// `POINTER_DEGENERATE_DISTANCE_PX`（2.0）⇒ 轨迹塌成单帧 ⇒ `assert_humanized_single_click`
+/// 的「不得瞬移到目标坐标」当场红。落点两端各带 ±3px 抖动，所以是**概率事件**、表现为抖动而非必红。
+///
+/// MUST NOT 让任意两条共用同一坐标，也 MUST NOT 把新用例的落点设到与这三条相近的位置 ——
+/// `feed_recovery_targets_stay_pairwise_distant` 会挡住前者。
+/// **生产语义无须改动**：一个引擎进程只驱动一个浏览器、命令串行，
+/// 「光标已经在那儿就不再移动」是对的行为（两步点赞的第二步正依赖它留在走廊内）。
+const FEED_RECOVERY_TARGET_TRUSTED_CLICK: (f64, f64) = (540.0, 330.0);
+const FEED_RECOVERY_TARGET_WATCHDOG: (f64, f64) = (386.0, 214.0);
+const FEED_RECOVERY_TARGET_UNCONFIRMED: (f64, f64) = (884.0, 262.0);
+
+/// 守卫上面那条不变量：把任意两个落点改成相同（或相近）值，这条用例立刻红。
+///
+/// 抖动本身只能用频率数据佐证、不能靠单条断言证伪，所以这里守的是**可确定性检验的那一半**：
+/// 「三条并行用例的落点两两远离」。门槛取 64px —— 远大于两端各 ±3px 抖动加取整的最坏情形，
+/// 也远大于 `POINTER_DEGENERATE_DISTANCE_PX`（2.0），留足后人微调坐标的余量。
+#[test]
+fn feed_recovery_targets_stay_pairwise_distant() {
+    const MIN_SEPARATION_PX: f64 = 64.0;
+    let targets = [
+        ("trusted_click", FEED_RECOVERY_TARGET_TRUSTED_CLICK),
+        ("watchdog", FEED_RECOVERY_TARGET_WATCHDOG),
+        ("unconfirmed", FEED_RECOVERY_TARGET_UNCONFIRMED),
+    ];
+    for (index, (left_name, left)) in targets.iter().enumerate() {
+        for (right_name, right) in targets.iter().skip(index + 1) {
+            let distance = (left.0 - right.0).hypot(left.1 - right.1);
+            assert!(
+                distance >= MIN_SEPARATION_PX,
+                "feed-recovery 落点 {left_name}{left:?} 与 {right_name}{right:?} 相距 {distance:.1}px，\
+                 小于 {MIN_SEPARATION_PX}px。并行用例共用进程级「上一次点击落点」，\
+                 落点太近会让后跑的那条轨迹塌成单帧、「不得瞬移」断言偶发变红。"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn facebook_feed_recovery_uses_one_trusted_cdp_click_before_returning_cards() {
-    let (port, server) = spawn_facebook_feed_recovery_cdp(true).await;
+    let (port, server) =
+        spawn_facebook_feed_recovery_cdp(true, FEED_RECOVERY_TARGET_TRUSTED_CLICK).await;
     let mut engine = Engine::default();
     let mut open = session_open(port);
     open.params.platform = Platform::Facebook;
@@ -361,12 +407,17 @@ async fn facebook_feed_recovery_uses_one_trusted_cdp_click_before_returning_card
     assert_humanized_single_click(&requests);
     // 落点判据从「所有鼠标事件都恰在目标坐标」改为「按下 / 抬起落在目标的有界抖动内且同点」：
     // 移动帧本来就沿轨迹分布，逐帧钉死目标坐标等于要求瞬移。抖动上限与原语的落点抖动同源。
-    assert_pointer_commit_near(&requests, 540.0, 330.0);
+    assert_pointer_commit_near(
+        &requests,
+        FEED_RECOVERY_TARGET_TRUSTED_CLICK.0,
+        FEED_RECOVERY_TARGET_TRUSTED_CLICK.1,
+    );
 }
 
 #[tokio::test]
 async fn facebook_watchdog_feed_recovery_foregrounds_once_without_duplicate_activation() {
-    let (port, server) = spawn_facebook_feed_recovery_cdp(true).await;
+    let (port, server) =
+        spawn_facebook_feed_recovery_cdp(true, FEED_RECOVERY_TARGET_WATCHDOG).await;
     let mut engine = Engine::default();
     let mut open = session_open(port);
     open.params.platform = Platform::Facebook;
@@ -405,12 +456,17 @@ async fn facebook_watchdog_feed_recovery_foregrounds_once_without_duplicate_acti
     assert_eq!(router_call_count(&requests, "feed_recovery_target"), 1);
     assert_eq!(pointer_event_count(&requests, "mousePressed"), 1);
     assert_eq!(pointer_event_count(&requests, "mouseReleased"), 1);
-    assert_pointer_commit_near(&requests, 540.0, 330.0);
+    assert_pointer_commit_near(
+        &requests,
+        FEED_RECOVERY_TARGET_WATCHDOG.0,
+        FEED_RECOVERY_TARGET_WATCHDOG.1,
+    );
 }
 
 #[tokio::test]
 async fn facebook_feed_recovery_click_without_home_postcondition_is_ambiguous() {
-    let (port, server) = spawn_facebook_feed_recovery_cdp(false).await;
+    let (port, server) =
+        spawn_facebook_feed_recovery_cdp(false, FEED_RECOVERY_TARGET_UNCONFIRMED).await;
     let mut engine = Engine::default();
     let mut open = session_open(port);
     open.params.platform = Platform::Facebook;
@@ -451,6 +507,13 @@ async fn facebook_feed_recovery_click_without_home_postcondition_is_ambiguous() 
         "unconfirmed Feed recovery must remain in the background"
     );
     assert_humanized_single_click(&requests);
+    // 本条原先只断言形状、不断言落点，于是「夹具收到的落点」无人校验：
+    // 传错常量（例如与另一条用例共用）不会有任何用例变红，撞车会悄悄回来。补上落点断言把这一环闭合。
+    assert_pointer_commit_near(
+        &requests,
+        FEED_RECOVERY_TARGET_UNCONFIRMED.0,
+        FEED_RECOVERY_TARGET_UNCONFIRMED.1,
+    );
 }
 
 #[tokio::test]
@@ -3568,6 +3631,7 @@ async fn spawn_facebook_feed_scroll_cdp() -> (u16, tokio::task::JoinHandle<Vec<V
 
 async fn spawn_facebook_feed_recovery_cdp(
     confirm_home: bool,
+    target: (f64, f64),
 ) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let port = listener.local_addr().expect("address").port();
@@ -3602,14 +3666,14 @@ async fn spawn_facebook_feed_recovery_cdp(
                 Some("page_probe") => facebook_feed_page_probe_cdp(),
                 Some("consent_probe") => facebook_consent_absent_cdp(),
                 Some("feed_probe") => {
-                    facebook_feed_recovery_probe_cdp(!clicked, clicked && confirm_home)
+                    facebook_feed_recovery_probe_cdp(!clicked, clicked && confirm_home, target)
                 }
                 Some("feed_recovery_target") => router_cdp(
                     "point_target",
                     json!({
                         "ok": true,
-                        "cx": 540.0,
-                        "cy": 330.0
+                        "cx": target.0,
+                        "cy": target.1
                     }),
                 ),
                 _ => json!({}),
@@ -3627,7 +3691,11 @@ async fn spawn_facebook_feed_recovery_cdp(
     (port, server)
 }
 
-fn facebook_feed_recovery_probe_cdp(prompt: bool, confirmed_home: bool) -> Value {
+fn facebook_feed_recovery_probe_cdp(
+    prompt: bool,
+    confirmed_home: bool,
+    target: (f64, f64),
+) -> Value {
     router_cdp(
         "feed_probe",
         json!({
@@ -3662,8 +3730,8 @@ fn facebook_feed_recovery_probe_cdp(prompt: bool, confirmed_home: bool) -> Value
             "feedRecoveryTarget": if prompt {
                 json!({
                     "ok": true,
-                    "cx": 540.0,
-                    "cy": 330.0
+                    "cx": target.0,
+                    "cy": target.1
                 })
             } else {
                 json!({
