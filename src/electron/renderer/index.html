@@ -466,12 +466,24 @@
           </div>
         </div>
         <div id="quota-windows" class="quota-windows hidden"></div>
-        <!-- 环境级慢启动脚注行（change environment-level-slow-start）：**静态节点**，JS 只切 hidden / checked /
-             disabled / textContent，绝不动态建元素（本 section 不在任何 innerHTML 重建范围内）。
-             落这里而非标题区，避免 Windows 窄窗挤爆昵称。配置跟随当前环境；非 Facebook 整行隐藏。 -->
+        <!-- Facebook 运行方式四选一：普通人设、冷启动、规则、消费。静态节点只由 Cloud unified
+             operation policy 投影驱动；radio 共用 name 保证语义互斥，renderer 仍会在每次 change 后
+             立即恢复最后确认态，直到 Cloud 写后回读成功。非 Facebook 时四行全部隐藏。 -->
+        <div id="facebook-persona-mode-row" class="slow-start-row rule-mode-row hidden">
+          <label class="switch inline-switch" id="facebook-persona-mode-toggle-wrap">
+            <input id="facebook-persona-mode-toggle" name="facebook-operation-mode" value="persona" type="radio" />
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+            <span class="switch-label">普通人设</span>
+          </label>
+          <span id="facebook-persona-mode-badge" class="acct-age rule-mode-badge hidden"></span>
+          <span id="facebook-persona-mode-reason" class="parking-hint hidden"></span>
+          <span class="parking-hint rule-mode-copy">选择后按普通人设与排期运行；四种运行方式始终互斥。</span>
+        </div>
+        <!-- 环境级慢启动脚注行（change environment-level-slow-start）：落这里而非标题区，
+             避免 Windows 窄窗挤爆昵称。配置跟随当前环境。 -->
         <div id="slow-start-row" class="slow-start-row hidden">
           <label class="switch inline-switch" id="slow-start-toggle-wrap">
-            <input id="slow-start-toggle" type="checkbox" />
+            <input id="slow-start-toggle" name="facebook-operation-mode" value="slow_start" type="radio" />
             <span class="switch-track"><span class="switch-thumb"></span></span>
             <span class="switch-label">慢启动</span>
           </label>
@@ -502,17 +514,27 @@
           <span id="slow-start-reason" class="parking-hint hidden"></span>
           <span class="parking-hint slow-start-copy">设置跟随当前环境。开启后头 7 天按曲线逐日放开量，7天后按当前账号档位运行。</span>
         </div>
-        <!-- Facebook 规则模式仍是 Cloud 账号级配置：客户端只按当前环境读写同一份权威事实，
-             不在本地选择模式、计数或触发动作。与慢启动相邻，便于看清慢启动优先关系。 -->
+        <!-- Facebook 规则/消费模式与慢启动共用 Cloud operation policy：客户端只按当前环境读写模式，
+             不在本地保存节奏数字、计数或触发动作。可见顺序不表达基础模式间的优先级。 -->
         <div id="facebook-rule-mode-row" class="slow-start-row rule-mode-row hidden">
           <label class="switch inline-switch" id="facebook-rule-mode-toggle-wrap">
-            <input id="facebook-rule-mode-toggle" type="checkbox" />
+            <input id="facebook-rule-mode-toggle" name="facebook-operation-mode" value="rule" type="radio" />
             <span class="switch-track"><span class="switch-thumb"></span></span>
             <span class="switch-label">规则模式</span>
           </label>
           <span id="facebook-rule-mode-badge" class="acct-age rule-mode-badge hidden"></span>
           <span id="facebook-rule-mode-reason" class="parking-hint hidden"></span>
-          <span class="parking-hint rule-mode-copy">开启后按 Cloud 固定规则配置运行；慢启动开启时由慢启动优先，规则模式暂停。</span>
+          <span class="parking-hint rule-mode-copy">选择后按 Cloud 的规则策略运行；冷启动优先于规则模式。</span>
+        </div>
+        <div id="facebook-consumption-mode-row" class="slow-start-row rule-mode-row consumption-mode-row hidden">
+          <label class="switch inline-switch" id="facebook-consumption-mode-toggle-wrap">
+            <input id="facebook-consumption-mode-toggle" name="facebook-operation-mode" value="consumption" type="radio" />
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+            <span class="switch-label">消费模式</span>
+          </label>
+          <span id="facebook-consumption-mode-badge" class="acct-age rule-mode-badge consumption-mode-badge hidden"></span>
+          <span id="facebook-consumption-mode-reason" class="parking-hint hidden"></span>
+          <span class="parking-hint rule-mode-copy">选择后按 Cloud 配置的浏览、点赞、加群与历史群评论节奏运行；不在客户端保存节奏数字。</span>
         </div>
         <!-- 当前 Facebook 环境受限恢复：保持一行、一个主动作，不扩成大卡片。真态来自 Cloud env-scoped 读。 -->
         <div id="risk-recovery-row" class="risk-recovery-row hidden">
@@ -1080,7 +1102,7 @@
                 <option value="batch">批量新建</option>
               </select>
             </label>
-            <!-- 运行方式三选一（change environment-level-rule-mode-and-approval）：下拉本身即互斥，
+            <!-- 运行方式四选一：下拉本身即互斥，
                  单个与批量共用同一控件，批量对全批一致生效。仅 Facebook 显示；主进程另有一层平台门禁。 -->
             <label id="ads-fb-run-mode-field" class="create-field hidden">
               <span>运行方式</span>
@@ -1088,6 +1110,7 @@
                 <option value="normal">普通</option>
                 <option value="cold_start">冷启动</option>
                 <option value="rule">规则</option>
+                <option value="consumption">消费</option>
               </select>
             </label>
             <label id="ads-template-field" class="create-field">
@@ -1097,7 +1120,7 @@
           </div>
 
           <div id="ads-fb-run-mode-wrap" class="ads-fb-run-mode hidden">
-            <span id="ads-fb-run-mode-help" class="subtle">三者互斥，对本次创建的全部环境一致生效。冷启动为该环境配置慢启动，只收紧每日操作额度，不改变操作速度；普通与规则不配置慢启动；规则另外为该环境开启规则模式配置。</span>
+            <span id="ads-fb-run-mode-help" class="subtle">四者互斥，并按普通、冷启动、规则、消费的顺序展示；对本次创建的全部环境一致生效。冷启动只收紧每日操作额度；规则与消费的节奏均由 Cloud 配置，客户端不保存数字。</span>
             <label id="ads-fb-approval-wrap" class="ads-manual-toggle">
               <input id="ads-fb-approval" type="checkbox" /> 全局免审（可选，默认关闭）
             </label>

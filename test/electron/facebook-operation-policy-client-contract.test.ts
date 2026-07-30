@@ -1,0 +1,128 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+
+const main = readFileSync(new URL('../../src/electron/main.cjs', import.meta.url), 'utf8');
+const preload = readFileSync(new URL('../../src/electron/preload.cjs', import.meta.url), 'utf8');
+const renderer = readFileSync(new URL('../../src/electron/renderer/renderer.js', import.meta.url), 'utf8');
+const html = readFileSync(new URL('../../src/electron/renderer/index.html', import.meta.url), 'utf8');
+
+test('统一运行策略只经具名 IPC 与固定 customer-auth 环境路径读写', () => {
+  for (const channel of ['facebook-operation-policy:get', 'facebook-operation-policy:set']) {
+    assert.match(main, new RegExp(`ipcMain\\.handle\\('${channel}'`));
+    assert.match(preload, new RegExp(`ipcRenderer\\.invoke\\('${channel}'`));
+  }
+  const start = main.indexOf("ipcMain.handle('facebook-operation-policy:set'");
+  const end = main.indexOf('// 旧规则模式 IPC', start);
+  const block = main.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.match(block, /new Set\(\['envKey', 'expectedRevision', 'mode'\]\)/);
+  assert.match(block, /new Set\(\['envKey'\]\)/);
+  assert.match(block, /Number\.isInteger\(args\.expectedRevision\)/);
+  assert.match(block, /\['persona', 'slow_start', 'rule', 'consumption'\]\.includes\(args\.mode\)/);
+  assert.match(block, /`\/environments\/\$\{encodeURIComponent\(envKey\)\}\/facebook-operation-policy`/);
+  assert.match(block, /body: \{ expectedRevision: args\.expectedRevision, mode: args\.mode \}/);
+  assert.doesNotMatch(
+    block,
+    /accountId|viewsPerLike|joinEveryNRounds|confirmedLikesPerJoin|confirmedJoinsPerComment/,
+    'Edge 不得提交账号选择器或复制 Cloud 节奏数字',
+  );
+  assert.doesNotMatch(
+    renderer,
+    /\/environments\/[^'"`]*\/facebook-operation-policy/,
+    'renderer 不得自行拼 customer-auth 路径',
+  );
+});
+
+test('已建环境模式区按普通、冷启动、规则、消费顺序展示，四项统一走 CAS 模式写', () => {
+  const persona = html.indexOf('id="facebook-persona-mode-row"');
+  const slow = html.indexOf('id="slow-start-row"');
+  const rule = html.indexOf('id="facebook-rule-mode-row"');
+  const consumption = html.indexOf('id="facebook-consumption-mode-row"');
+  const risk = html.indexOf('id="risk-recovery-row"');
+  assert.ok(
+    persona >= 0 && persona < slow && slow < rule && rule < consumption && consumption < risk,
+    '模式区顺序必须保持普通、冷启动、规则、消费，且位于解除受限之前',
+  );
+  const block = html.slice(persona, risk);
+  assert.match(block, /id="facebook-persona-mode-toggle"/);
+  assert.match(block, /id="facebook-consumption-mode-toggle"/);
+  assert.match(block, /不在客户端保存节奏数字/);
+  assert.doesNotMatch(block, /规则\s*>\s*消费|规则、消费、普通人设/);
+
+  const submitStart = renderer.indexOf('async function submitFacebookOperationMode');
+  const submitEnd = renderer.indexOf('// 旧慢启动/规则写函数', submitStart);
+  const submit = renderer.slice(submitStart, submitEnd);
+  assert.ok(submitStart >= 0 && submitEnd > submitStart);
+  assert.match(
+    submit,
+    /setFacebookOperationPolicy\(\{\s*envKey,\s*expectedRevision: http\.config\.policyRevision,\s*mode: requestedMode,/,
+  );
+  assert.match(submit, /normalizeFacebookOperationPolicyResponse\(res, envKey\)/);
+  assert.match(submit, /selectedModeFromFacebookOperationPolicy\(config\) !== requestedMode/);
+  assert.doesNotMatch(submit, /facebookOperationPolicyHttpByEnv\.delete\(envKey\)/);
+  assert.doesNotMatch(
+    submit,
+    /setSlowStart|setFacebookRuleMode|localStorage|sessionStorage|viewsPerLike|confirmedLikesPerJoin/,
+  );
+});
+
+test('已建环境写入期间只渲染最后确认态，目标模式只作为 pending 反馈', () => {
+  const applyStart = renderer.indexOf('function applyFacebookOperationPolicyView');
+  const applyEnd = renderer.indexOf('function renderFacebookOperationPolicy', applyStart);
+  const apply = renderer.slice(applyStart, applyEnd);
+  assert.ok(applyStart >= 0 && applyEnd > applyStart);
+  assert.match(apply, /const selectedMode = selectedModeFromFacebookOperationPolicy\(config\)/);
+  assert.doesNotMatch(apply, /pending\s*\?\s*pending\.mode/);
+  assert.match(apply, /pending\.mode === item\.mode/);
+
+  const fetchStart = renderer.indexOf('async function ensureFacebookOperationPolicyHttpFetch');
+  const fetchEnd = renderer.indexOf('function facebookRuleModeError', fetchStart);
+  const fetch = renderer.slice(fetchStart, fetchEnd);
+  assert.match(fetch, /preserveConfirmed/);
+  assert.match(fetch, /if \(next\.kind === 'ok' \|\| !retainExisting\)/);
+});
+
+test('创建环境四选一包含消费模式，并只提交 facebookOperationMode', () => {
+  const selectStart = html.indexOf('id="ads-fb-run-mode"');
+  const selectEnd = html.indexOf('</select>', selectStart);
+  const select = html.slice(selectStart, selectEnd);
+  const normal = select.indexOf('value="normal"');
+  const cold = select.indexOf('value="cold_start"');
+  const rule = select.indexOf('value="rule"');
+  const consumption = select.indexOf('value="consumption"');
+  assert.ok(normal >= 0 && normal < cold && cold < rule && rule < consumption);
+
+  const finalizeStart = main.indexOf('async function finalizeCreatedEnvironmentAssignment');
+  const finalizeEnd = main.indexOf('async function validateExistingClientSessionForStartup', finalizeStart);
+  const finalize = main.slice(finalizeStart, finalizeEnd);
+  assert.match(finalize, /facebookOperationMode: requestedOperationMode/);
+  assert.match(finalize, /provisioningFacebookOperationPolicy\(response, envKey\)/);
+  assert.match(finalize, /provisioningCommittedFacebookOperationPolicy\(response, envKey\)/);
+  assert.match(finalize, /provisioningOperationModeMatches\(operationPolicy, requestedOperationMode\)/);
+  assert.doesNotMatch(
+    finalize,
+    /\{ slowStartEnabled: true \}|\{ facebookRuleModeEnabled: true \}|viewsPerLike|confirmedJoinsPerComment/,
+  );
+});
+
+test('已提交 provisioning 的 current 真态恢复归属并加入本地 roster', () => {
+  const recoveryStart = main.indexOf('async function finalizeCreatedEnvironmentFromCommittedCurrent');
+  const finalizeStart = main.indexOf('async function finalizeCreatedEnvironmentAssignment');
+  const recovery = main.slice(recoveryStart, finalizeStart);
+  assert.ok(recoveryStart >= 0 && finalizeStart > recoveryStart);
+  assert.match(recovery, /await refreshAllowedEnvironments\(\)/);
+  assert.match(recovery, /allowedProfileIds\.add\(envKey\)/);
+  assert.match(recovery, /addProvisionedEnvironmentToRoster\(result\)/);
+  assert.match(recovery, /assignedToCurrentClient: true/);
+  assert.match(recovery, /requiresAdminAssignment: false/);
+  assert.match(recovery, /rosterJoinedByMain: true/);
+
+  const finalizeEnd = main.indexOf('async function validateExistingClientSessionForStartup', finalizeStart);
+  const finalize = main.slice(finalizeStart, finalizeEnd);
+  assert.match(finalize, /provisioningCommittedFacebookOperationPolicy\(response, envKey\)/);
+  assert.match(finalize, /intent_operation_mode_mismatch/);
+  assert.match(finalize, /operation_policy_refresh_unavailable|运行策略缓存刷新暂不可用/);
+  assert.match(finalize, /configuredFlags\(operationModeConfirmed, false\)/);
+  assert.match(finalize, /finalizeCreatedEnvironmentFromCommittedCurrent\(/);
+});

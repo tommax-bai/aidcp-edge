@@ -51,6 +51,12 @@ const {
 } = require('./facebook-batch-create.cjs');
 const { resolveFacebookCreationIntents } = require('./facebook-create-intents.cjs');
 const {
+  FACEBOOK_OPERATION_MODES,
+  provisioningFacebookOperationPolicy,
+  provisioningCommittedFacebookOperationPolicy,
+  provisioningOperationModeMatches,
+} = require('./facebook-provisioning-receipt.cjs');
+const {
   buildFacebookSelectedPersona,
   requestFacebookSelectedPersonaFill,
 } = require('./facebook-persona-auto-fill.cjs');
@@ -913,10 +919,59 @@ function addProvisionedEnvironmentToRoster(result) {
   return saved;
 }
 
+async function finalizeCreatedEnvironmentFromCommittedCurrent(
+  result,
+  proxyAuthority,
+  configuredResult,
+  warning,
+) {
+  const envKey = String(result.userId || '').trim();
+  if (proxyAuthority.noProxy) {
+    proxyAuthorityStore.remove(envKey);
+  } else {
+    proxyAuthorityStore.save(envKey, proxyAuthority.proxyConfig);
+  }
+
+  // 这两个具名失败只会在 provisioning 事务已经完成、且 Cloud 回了同 envKey 的持久化 current
+  // 时被调用。先尽力刷新整份可见清单；刷新暂不可用时，当前响应本身仍是该客户对这个环境的
+  // 精确归属证明，可安全补入本次 envKey，不能把已归属环境谎报成“请管理员分配”。
+  const scopeRefreshed = await refreshAllowedEnvironments();
+  if (!scopeRefreshed) onSessionInvalid();
+  if (scopeRefreshed && allowedProfileIds instanceof Set) {
+    allowedProfileIds.add(envKey);
+    allowedEnvironmentPlatforms.set(envKey, normalizePlatform(result.platform));
+  }
+
+  const saved = addProvisionedEnvironmentToRoster(result);
+  if (!saved.ok) {
+    return {
+      ...configuredResult,
+      createdLocally: true,
+      assignedToCurrentClient: true,
+      requiresAdminAssignment: false,
+      assignmentHandledByMain: true,
+      rosterJoinedByMain: false,
+      visibilityWarning: `Cloud 已确认当前环境归属，但本地运行花名册保存失败（${
+        saved.error || '未知错误'
+      }）。${warning}`,
+    };
+  }
+  return {
+    ...configuredResult,
+    createdLocally: true,
+    assignedToCurrentClient: true,
+    requiresAdminAssignment: false,
+    assignmentHandledByMain: true,
+    rosterJoinedByMain: true,
+    visibilityWarning: warning,
+  };
+}
+
 async function finalizeCreatedEnvironmentAssignment(
   result,
   intent,
   {
+    facebookOperationMode = null,
     slowStartEnabled = false,
     facebookRuleModeEnabled = false,
     commentApprovalMode = null,
@@ -925,15 +980,29 @@ async function finalizeCreatedEnvironmentAssignment(
 ) {
   if (!result || !result.ok) return result;
   const autoApproveComments = commentApprovalMode === 'auto_approve_all';
+  const requestedOperationMode = FACEBOOK_OPERATION_MODES.has(facebookOperationMode)
+    ? facebookOperationMode
+    : slowStartEnabled
+      ? 'slow_start'
+      : facebookRuleModeEnabled
+        ? 'rule'
+        : null;
   // 只为「本次真的提交了的意图」写确认位：没提交的项在回执里彻底缺席，回执因此说不出任何该项的成功声明。
-  const configuredFlags = (confirmed) => ({
-    ...(slowStartEnabled ? { slowStartConfigured: confirmed } : {}),
-    ...(facebookRuleModeEnabled ? { ruleModeConfigured: confirmed } : {}),
-    ...(autoApproveComments ? { commentApprovalConfigured: confirmed } : {}),
+  const configuredFlags = (operationConfirmed, approvalConfirmed = operationConfirmed) => ({
+    ...(requestedOperationMode ? { operationModeConfigured: operationConfirmed } : {}),
+    ...(requestedOperationMode === 'slow_start'
+      ? { slowStartConfigured: operationConfirmed }
+      : {}),
+    ...(requestedOperationMode === 'rule'
+      ? { ruleModeConfigured: operationConfirmed }
+      : {}),
+    ...(requestedOperationMode === 'consumption'
+      ? { consumptionModeConfigured: operationConfirmed }
+      : {}),
+    ...(autoApproveComments ? { commentApprovalConfigured: approvalConfirmed } : {}),
   });
   const submittedLabels = [
-    ...(slowStartEnabled ? ['慢启动'] : []),
-    ...(facebookRuleModeEnabled ? ['规则模式'] : []),
+    ...(requestedOperationMode ? ['运行方式'] : []),
     ...(autoApproveComments ? ['全局免审'] : []),
   ];
   const unconfirmedSuffix = submittedLabels.length > 0 ? `；${submittedLabels.join('、')}未确认` : '';
@@ -962,8 +1031,7 @@ async function finalizeCreatedEnvironmentAssignment(
         envKey: String(result.userId || '').trim(),
         label: String(result.name || '').trim() || null,
         platform: normalizePlatform(result.platform),
-        ...(slowStartEnabled ? { slowStartEnabled: true } : {}),
-        ...(facebookRuleModeEnabled ? { facebookRuleModeEnabled: true } : {}),
+        ...(requestedOperationMode ? { facebookOperationMode: requestedOperationMode } : {}),
         ...(autoApproveComments ? { commentApprovalMode: 'auto_approve_all' } : {}),
         proxyAuthority: proxyAuthority.authority,
       },
@@ -977,6 +1045,36 @@ async function finalizeCreatedEnvironmentAssignment(
       `客户端登录已失效${unconfirmedSuffix}`,
     );
   }
+  const envKey = String(result.userId || '').trim();
+  const committedCurrent = requestedOperationMode
+    ? provisioningCommittedFacebookOperationPolicy(response, envKey)
+    : null;
+  if (committedCurrent) {
+    const operationModeConfirmed = provisioningOperationModeMatches(
+      committedCurrent.policy,
+      requestedOperationMode,
+    );
+    const currentResult = {
+      ...result,
+      // current 只证明归属与 operation policy；评论免审批不在这个最小 DTO 中，不能顺带判成功。
+      ...configuredFlags(operationModeConfirmed, false),
+    };
+    const warning = committedCurrent.reason === 'intent_operation_mode_mismatch'
+      ? `Cloud 已确认环境归属，但当前运行方式与本次选择不一致（当前 revision ${
+        committedCurrent.policy.policyRevision
+      }）；已按当前持久化真态加入本地运行环境。`
+      : operationModeConfirmed
+        ? 'Cloud 已确认环境归属和运行方式已持久化，但运行策略缓存刷新暂不可用；已加入本地运行环境，Cloud 恢复前不会据此开始新工作。'
+        : `Cloud 已确认环境归属，但返回的持久化运行方式与本次选择不一致（当前 revision ${
+          committedCurrent.policy.policyRevision
+        }）；已加入本地运行环境且未声称运行方式配置成功。`;
+    return finalizeCreatedEnvironmentFromCommittedCurrent(
+      result,
+      proxyAuthority,
+      currentResult,
+      warning,
+    );
+  }
   if (!response || !response.ok) {
     const reason = response && response.data && response.data.error;
     return withAuthoritativeAssignmentNotice(
@@ -984,7 +1082,19 @@ async function finalizeCreatedEnvironmentAssignment(
       `${reason || '云端未确认归属'}${unconfirmedSuffix}`,
     );
   }
-  const confirmedResult = { ...result, ...configuredFlags(true) };
+  const operationPolicy = requestedOperationMode
+    ? provisioningFacebookOperationPolicy(response, envKey)
+    : null;
+  const operationModeConfirmed = requestedOperationMode
+    ? provisioningOperationModeMatches(operationPolicy, requestedOperationMode)
+    : true;
+  const confirmedResult = {
+    ...result,
+    ...configuredFlags(operationModeConfirmed, true),
+  };
+  const operationModeWarning = requestedOperationMode && !operationModeConfirmed
+    ? '环境归属已确认，但运行方式尚未获得 Cloud 写后回读确认。'
+    : '';
   if (proxyAuthority.noProxy) {
     proxyAuthorityStore.remove(result.userId);
   } else {
@@ -997,7 +1107,7 @@ async function finalizeCreatedEnvironmentAssignment(
       ...withAuthoritativeAssignmentNotice(confirmedResult, '权威环境清单尚未确认'),
       assignedToCurrentClient: true,
       requiresAdminAssignment: false,
-      visibilityWarning: '环境已分配到当前账号，但权威环境清单尚未刷新，因此本次未加入运行环境。请稍后刷新后加入。',
+      visibilityWarning: `环境已分配到当前账号，但权威环境清单尚未刷新，因此本次未加入运行环境。请稍后刷新后加入。${operationModeWarning}`,
     };
   }
   const saved = addProvisionedEnvironmentToRoster(result);
@@ -1009,7 +1119,7 @@ async function finalizeCreatedEnvironmentAssignment(
       requiresAdminAssignment: false,
       assignmentHandledByMain: true,
       rosterJoinedByMain: false,
-      visibilityWarning: `环境已分配到当前账号，但本地运行花名册保存失败（${saved.error || '未知错误'}）。请刷新后重新加入。`,
+      visibilityWarning: `环境已分配到当前账号，但本地运行花名册保存失败（${saved.error || '未知错误'}）。请刷新后重新加入。${operationModeWarning}`,
     };
   }
   return {
@@ -1019,6 +1129,7 @@ async function finalizeCreatedEnvironmentAssignment(
     requiresAdminAssignment: false,
     assignmentHandledByMain: true,
     rosterJoinedByMain: true,
+    ...(operationModeWarning ? { visibilityWarning: operationModeWarning } : {}),
   };
 }
 async function validateExistingClientSessionForStartup() {
@@ -3219,7 +3330,7 @@ function resetPersonaNoticeGrace(handle) {
 // 未绑人设的 Facebook 账号，如果它的环境已启用规则模式，那「没有人设」是它的正常运行态，不是待办：
 // 推「去设置人设」的横幅会让运营补一份规则模式根本不读的配置。
 //
-// 事实只能来自云端权威配置的现读（与规则模式开关行同一个 env-scoped 端点），MUST NOT 由本地状态推断。
+// 事实只能来自云端统一 operation policy 的现读（与新模式区同一个 env-scoped 端点），MUST NOT 由本地状态推断。
 // 按 envKey 缓存有限时长；读失败也记一笔「读过、读不到」，那一格按未启用处理（fail-closed 回既有横幅），
 // 避免读不到时反复重读，也避免因为读不到就永久静默。
 const FACEBOOK_RULE_MODE_FACT_TTL_MS = 60_000;
@@ -3241,6 +3352,17 @@ function rememberFacebookRuleModeFact(envKey, res) {
   facebookRuleModeFacts.set(envKey, { enabled, at: Date.now() });
 }
 
+/** 新客户端从统一 operation policy 投影规则基础模式；旧规则 IPC 仍单独保留给已发布客户端。 */
+function rememberFacebookOperationPolicyRuleFact(envKey, res) {
+  const payload = res && res.ok && res.data && res.data.data;
+  const policy = payload && payload.facebookOperationPolicy;
+  const enabled = payload && payload.envKey === envKey && policy && typeof policy === 'object'
+    && ['persona', 'rule', 'consumption'].includes(policy.baseMode)
+    ? policy.baseMode === 'rule'
+    : null;
+  facebookRuleModeFacts.set(envKey, { enabled, at: Date.now() });
+}
+
 /** 仍在有效期内的事实条目；没有（或已过期）返回 null = 这个环境此刻完全没有已知事实。 */
 function freshFacebookRuleModeFact(envKey) {
   const fact = envKey && facebookRuleModeFacts.get(envKey);
@@ -3256,10 +3378,10 @@ function readFacebookRuleModeFact(envKey) {
     try {
       const res = await interactionCustomerRequest({
         envKey,
-        pathname: `/environments/${encodeURIComponent(envKey)}/facebook-rule-mode`,
+        pathname: `/environments/${encodeURIComponent(envKey)}/facebook-operation-policy`,
         method: 'GET',
       });
-      rememberFacebookRuleModeFact(envKey, res);
+      rememberFacebookOperationPolicyRuleFact(envKey, res);
     } catch {
       facebookRuleModeFacts.set(envKey, { enabled: null, at: Date.now() }); // 读不到也是一次已知结论
     } finally {
@@ -6723,7 +6845,42 @@ ipcMain.handle('slow-start:get', (_event, raw) => handleInteractionIpc(async () 
   });
 }));
 
-// Facebook 规则模式是 Cloud 账号级配置；renderer 只交当前 envKey（以及写入时的 enabled）。
+// Facebook 统一运行策略：renderer 只交 envKey、CAS revision 与互斥模式。main 固定 customer-auth
+// 路径/方法，accountId、平台、慢启动生命周期与规则/消费节奏均由 Cloud 权威解析；Edge 不提交节奏数字。
+ipcMain.handle('facebook-operation-policy:set', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'expectedRevision', 'mode']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  if (!Number.isInteger(args.expectedRevision) || args.expectedRevision < 0) {
+    throw new Error('expectedRevision 不合法');
+  }
+  if (!['persona', 'slow_start', 'rule', 'consumption'].includes(args.mode)) {
+    throw new Error('mode 不合法');
+  }
+  const res = await interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/facebook-operation-policy`,
+    method: 'PUT',
+    body: { expectedRevision: args.expectedRevision, mode: args.mode },
+  });
+  rememberFacebookOperationPolicyRuleFact(envKey, res);
+  resyncPersonaNoticesForEnvKey(envKey);
+  return res;
+}));
+
+ipcMain.handle('facebook-operation-policy:get', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  const res = await interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/facebook-operation-policy`,
+    method: 'GET',
+  });
+  rememberFacebookOperationPolicyRuleFact(envKey, res);
+  resyncPersonaNoticesForEnvKey(envKey);
+  return res;
+}));
+
+// 旧规则模式 IPC 只为已发布客户端保留兼容；新 UI 不再以它作为运行方式权威。
 // main 固定 customer-auth 路径/方法，accountId、平台和绑定均由 Cloud 权威解析；不要求环境内核在线。
 ipcMain.handle('facebook-rule-mode:set', (_event, raw) => handleInteractionIpc(async () => {
   const args = interactionArgs(raw, new Set(['envKey', 'enabled']));
@@ -7766,6 +7923,12 @@ function safeCreatedEnvironment(finalized) {
     ...(typeof finalized.ruleModeConfigured === 'boolean'
       ? { ruleModeConfigured: finalized.ruleModeConfigured }
       : {}),
+    ...(typeof finalized.consumptionModeConfigured === 'boolean'
+      ? { consumptionModeConfigured: finalized.consumptionModeConfigured }
+      : {}),
+    ...(typeof finalized.operationModeConfigured === 'boolean'
+      ? { operationModeConfigured: finalized.operationModeConfigured }
+      : {}),
     ...(typeof finalized.commentApprovalConfigured === 'boolean'
       ? { commentApprovalConfigured: finalized.commentApprovalConfigured }
       : {}),
@@ -7784,19 +7947,25 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
     if (creationMode === 'batch' && platform !== 'facebook') {
       return { ok: false, error: '批量新建当前仅支持 Facebook 环境' };
     }
-    // 运行方式（普通/冷启动/规则）与全局免审都是 Facebook 专属概念，且慢启动与规则模式互斥。
+    // 运行方式（普通/冷启动/规则/消费）与全局免审都是 Facebook 专属概念；统一模式天然互斥。
     // 平台门禁与互斥门禁都在这里、在任何本地环境创建之前判定：渲染层的隐藏只是第一层，绕过界面
     // 直接提交的调用方必须在这里被诚实拒绝，绝不静默丢弃其中一项意图。
     const creationIntents = resolveFacebookCreationIntents({ platform, opts });
     if (!creationIntents.ok) return { ok: false, error: creationIntents.error };
     const {
       runMode,
+      facebookOperationMode,
       slowStartEnabled,
       facebookRuleModeEnabled,
       commentApprovalMode,
     } = creationIntents;
     // 本批全部环境共用同一份归一后的意图 → 批量对全批一致生效。
-    const provisioningConfig = { slowStartEnabled, facebookRuleModeEnabled, commentApprovalMode };
+    const provisioningConfig = {
+      facebookOperationMode,
+      slowStartEnabled,
+      facebookRuleModeEnabled,
+      commentApprovalMode,
+    };
     const runModeReceipt = platform === 'facebook' ? { runMode } : {};
     const importText = platform === 'facebook' ? (opts && opts.facebookAccountImport) : '';
     const parsedImport = parseFacebookAccountImport(importText);
@@ -7903,14 +8072,31 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
     const allConfirmed = (key) => created.length > 0 && created.every((item) => item[key] === true);
     const slowStartConfigured = slowStartEnabled ? allConfirmed('slowStartConfigured') : undefined;
     const ruleModeConfigured = facebookRuleModeEnabled ? allConfirmed('ruleModeConfigured') : undefined;
+    const consumptionModeConfigured = facebookOperationMode === 'consumption'
+      ? allConfirmed('consumptionModeConfigured')
+      : undefined;
+    const operationModeConfigured = facebookOperationMode
+      ? allConfirmed('operationModeConfigured')
+      : undefined;
     const commentApprovalConfigured = commentApprovalMode === 'auto_approve_all'
       ? allConfirmed('commentApprovalConfigured')
       : undefined;
     const unconfirmedConfigLabels = [
       ...(slowStartEnabled && !slowStartConfigured ? ['慢启动'] : []),
       ...(facebookRuleModeEnabled && !ruleModeConfigured ? ['规则模式'] : []),
+      ...(facebookOperationMode === 'consumption' && !consumptionModeConfigured ? ['消费模式'] : []),
+      ...(facebookOperationMode && !operationModeConfigured ? ['运行方式'] : []),
       ...(commentApprovalMode === 'auto_approve_all' && !commentApprovalConfigured ? ['全局免审'] : []),
     ];
+    const committedCurrentWarnings = Array.from(new Set(
+      created
+        .filter((item) => item.assignedToCurrentClient && item.rosterJoinedByMain)
+        .map((item) => String(item.visibilityWarning || '').trim())
+        .filter(Boolean),
+    ));
+    const committedCurrentWarningSuffix = committedCurrentWarnings.length > 0
+      ? ` ${committedCurrentWarnings.join(' ')}`
+      : '';
     const receipt = {
       ok: true,
       userId: creationMode === 'single' && created.length === 1 ? created[0].userId : undefined,
@@ -7929,13 +8115,19 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       ...runModeReceipt,
       ...(slowStartConfigured === undefined ? {} : { slowStartConfigured }),
       ...(ruleModeConfigured === undefined ? {} : { ruleModeConfigured }),
+      ...(consumptionModeConfigured === undefined ? {} : { consumptionModeConfigured }),
+      ...(operationModeConfigured === undefined ? {} : { operationModeConfigured }),
       ...(commentApprovalConfigured === undefined ? {} : { commentApprovalConfigured }),
       ...(unassigned.length > 0 ? {
         visibilityWarning: `${created.length - unassigned.length}/${created.length} 个环境已分配并加入运行环境；其余环境未完成权威确认，未加入运行环境${
           unconfirmedConfigLabels.length > 0 ? `且${unconfirmedConfigLabels.join('、')}未确认` : ''
         }。`,
       } : unconfirmedConfigLabels.length > 0 ? {
-        visibilityWarning: `环境已在本机创建，但${unconfirmedConfigLabels.join('、')}未全部完成 Cloud 权威确认。`,
+        visibilityWarning: `环境已在本机创建，但${unconfirmedConfigLabels.join('、')}未全部完成 Cloud 权威确认。${
+          committedCurrentWarningSuffix
+        }`,
+      } : committedCurrentWarnings.length > 0 ? {
+        visibilityWarning: committedCurrentWarnings.join(' '),
       } : {}),
     };
     return receipt;

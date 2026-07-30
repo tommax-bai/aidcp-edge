@@ -29,15 +29,15 @@ test('规则模式只经具名 IPC 和固定 customer-auth 环境路径读写', 
     'renderer 不得自行拼客户 API 路径');
 });
 
-test('规则模式静态行紧邻慢启动且文案不把配置开启冒充运行中', () => {
+test('规则模式静态行位于慢启动与消费模式之间，且文案不把配置选择冒充运行中', () => {
   const slow = html.indexOf('id="slow-start-row"');
   const rule = html.indexOf('id="facebook-rule-mode-row"');
-  const risk = html.indexOf('id="risk-recovery-row"');
-  assert.ok(slow >= 0 && slow < rule && rule < risk, '规则模式应在慢启动之后、解除受限之前');
-  const block = html.slice(rule, risk);
+  const consumption = html.indexOf('id="facebook-consumption-mode-row"');
+  assert.ok(slow >= 0 && slow < rule && rule < consumption, '规则模式应在慢启动之后、消费模式之前');
+  const block = html.slice(rule, consumption);
   assert.match(block, /id="facebook-rule-mode-toggle"/);
-  assert.match(block, /开启后按 Cloud 固定规则配置运行/);
-  assert.match(block, /慢启动开启时由慢启动优先，规则模式暂停/);
+  assert.match(block, /选择后按 Cloud 的规则策略运行/);
+  assert.match(block, /冷启动优先于规则模式/);
   assert.doesNotMatch(block, /规则模式正在运行|运行中/);
 });
 
@@ -61,9 +61,9 @@ test('受控页横幅的规则模式判据只来自云端权威现读，读不�
   const end = main.indexOf('function sendBrowserParkingCommand', start);
   const block = main.slice(start, end);
   assert.ok(start >= 0 && end > start, '规则模式横幅判据应与人设横幅同处一段');
-  // 事实只能来自与规则模式开关行同一条 env-scoped customer-auth 读；MUST NOT 由本地状态推断。
+  // 新客户端的事实只能来自统一 operation policy 的 env-scoped customer-auth 读；MUST NOT 由本地状态推断。
   assert.match(block, /interactionCustomerRequest\(\{/);
-  assert.match(block, /`\/environments\/\$\{encodeURIComponent\(envKey\)\}\/facebook-rule-mode`/);
+  assert.match(block, /`\/environments\/\$\{encodeURIComponent\(envKey\)\}\/facebook-operation-policy`/);
   assert.match(block, /method: 'GET'/);
   assert.doesNotMatch(block, /accountId|AIDCP_PLATFORM|process\.env/);
   // 缓存有限时长：规则模式关掉之后横幅必须能回来，不得永久静默。
@@ -114,7 +114,15 @@ function loadPersonaNoticeSync(cloudEnabled: boolean) {
     (_h: unknown, _type: string, payload: { active: boolean }) => { writes.push(payload.active); return { ok: true }; },
     async () => {
       state.reads += 1;
-      return { ok: true, data: { data: { envKey: 'env-1', facebookRuleMode: { enabled: state.enabled } } } };
+      return {
+        ok: true,
+        data: {
+          data: {
+            envKey: 'env-1',
+            facebookOperationPolicy: { baseMode: state.enabled ? 'rule' : 'persona' },
+          },
+        },
+      };
     },
     envs,
   );

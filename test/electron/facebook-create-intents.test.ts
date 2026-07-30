@@ -8,6 +8,7 @@ type Resolved = {
   ok: boolean;
   error?: string;
   runMode?: string | null;
+  facebookOperationMode?: string | null;
   slowStartEnabled?: boolean;
   facebookRuleModeEnabled?: boolean;
   commentApprovalMode?: string | null;
@@ -20,24 +21,37 @@ const { resolveFacebookCreationIntents } = require('../../src/electron/facebook-
   }) => Resolved;
 };
 
-test('运行方式三选一各自翻译成两个独立事实，且永不同时开启', () => {
+test('运行方式四选一翻译成一个 Cloud operation mode，且兼容布尔事实永不同时开启', () => {
   const normal = resolveFacebookCreationIntents({ platform: 'facebook', opts: { facebookRunMode: 'normal' } });
   assert.equal(normal.ok, true);
+  assert.equal(normal.facebookOperationMode, 'persona');
   assert.equal(normal.slowStartEnabled, false);
   assert.equal(normal.facebookRuleModeEnabled, false);
   assert.equal(normal.commentApprovalMode, null);
 
   const cold = resolveFacebookCreationIntents({ platform: 'facebook', opts: { facebookRunMode: 'cold_start' } });
   assert.equal(cold.ok, true);
+  assert.equal(cold.facebookOperationMode, 'slow_start');
   assert.equal(cold.slowStartEnabled, true);
   assert.equal(cold.facebookRuleModeEnabled, false);
 
   const rule = resolveFacebookCreationIntents({ platform: 'facebook', opts: { facebookRunMode: 'rule' } });
   assert.equal(rule.ok, true);
+  assert.equal(rule.facebookOperationMode, 'rule');
   assert.equal(rule.slowStartEnabled, false);
   assert.equal(rule.facebookRuleModeEnabled, true);
 
-  for (const resolved of [normal, cold, rule]) {
+  const consumption = resolveFacebookCreationIntents({
+    platform: 'facebook',
+    opts: { facebookRunMode: 'consumption' },
+  });
+  assert.equal(consumption.ok, true);
+  assert.equal(consumption.runMode, 'consumption');
+  assert.equal(consumption.facebookOperationMode, 'consumption');
+  assert.equal(consumption.slowStartEnabled, false);
+  assert.equal(consumption.facebookRuleModeEnabled, false);
+
+  for (const resolved of [normal, cold, rule, consumption]) {
     assert.equal(resolved.slowStartEnabled === true && resolved.facebookRuleModeEnabled === true, false);
   }
 });
@@ -46,6 +60,7 @@ test('Facebook 创建默认既不开慢启动也不开规则模式（旧的写�
   const resolved = resolveFacebookCreationIntents({ platform: 'facebook', opts: {} });
   assert.equal(resolved.ok, true);
   assert.equal(resolved.runMode, 'normal');
+  assert.equal(resolved.facebookOperationMode, 'persona');
   assert.equal(resolved.slowStartEnabled, false);
   assert.equal(resolved.facebookRuleModeEnabled, false);
   assert.equal(resolved.commentApprovalMode, null, '免审默认关闭：不下发该字段');
@@ -109,13 +124,14 @@ test('非 Facebook 平台不带这些键时照常放行，且不携带任何配�
   });
   assert.equal(resolved.ok, true);
   assert.equal(resolved.runMode, null);
+  assert.equal(resolved.facebookOperationMode, null);
   assert.equal(resolved.slowStartEnabled, false);
   assert.equal(resolved.facebookRuleModeEnabled, false);
   assert.equal(resolved.commentApprovalMode, null);
 });
 
 test('免审与运行方式相互独立：任一运行方式下都可勾选', () => {
-  for (const runMode of ['normal', 'cold_start', 'rule']) {
+  for (const runMode of ['normal', 'cold_start', 'rule', 'consumption']) {
     const resolved = resolveFacebookCreationIntents({
       platform: 'facebook',
       opts: { facebookRunMode: runMode, commentApprovalMode: 'auto_approve_all' },
@@ -145,7 +161,7 @@ test('免审取值只认既定两种；按来源规则等同于不下发；未�
 test('运行方式非法枚举与非布尔单项意图都整请求拒绝', () => {
   const badMode = resolveFacebookCreationIntents({ platform: 'facebook', opts: { facebookRunMode: 'turbo' } });
   assert.equal(badMode.ok, false);
-  assert.match(String(badMode.error), /普通、冷启动或规则/);
+  assert.match(String(badMode.error), /普通、冷启动、规则或消费/);
 
   const badBoolean = resolveFacebookCreationIntents({ platform: 'facebook', opts: { slowStartEnabled: 'true' } });
   assert.equal(badBoolean.ok, false);

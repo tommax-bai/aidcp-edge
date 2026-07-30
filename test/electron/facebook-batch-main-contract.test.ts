@@ -31,11 +31,20 @@ test('ads:createEnv: 运行方式与免审意图由归一门禁翻译，单建�
   assert.equal((createBlock.match(
     /finalizeCreatedEnvironmentAssignment\(result, intent, \{\s*\.\.\.provisioningConfig,\s*proxyInput:/g,
   ) ?? []).length, 2, '无账号资料单建分支与账号导入/批量分支必须共用同一份归一意图');
-  assert.match(mainSource, /\.\.\.\(slowStartEnabled \? \{ slowStartEnabled: true \} : \{\}\)/);
-  assert.match(mainSource, /\.\.\.\(facebookRuleModeEnabled \? \{ facebookRuleModeEnabled: true \} : \{\}\)/);
+  assert.match(mainSource, /\.\.\.\(requestedOperationMode \? \{ facebookOperationMode: requestedOperationMode \} : \{\}\)/);
+  assert.doesNotMatch(
+    mainSource.slice(
+      mainSource.indexOf('async function finalizeCreatedEnvironmentAssignment'),
+      mainSource.indexOf('async function validateExistingClientSessionForStartup'),
+    ),
+    /\{ slowStartEnabled: true \}|\{ facebookRuleModeEnabled: true \}/,
+    '新创建链只能提交 unified operation mode，不能与旧布尔字段并写',
+  );
   assert.match(mainSource, /\.\.\.\(autoApproveComments \? \{ commentApprovalMode: 'auto_approve_all' \} : \{\}\)/);
+  assert.match(mainSource, /operationModeConfigured: finalized\.operationModeConfigured/);
   assert.match(mainSource, /slowStartConfigured: finalized\.slowStartConfigured/);
   assert.match(mainSource, /ruleModeConfigured: finalized\.ruleModeConfigured/);
+  assert.match(mainSource, /consumptionModeConfigured: finalized\.consumptionModeConfigured/);
   assert.match(mainSource, /commentApprovalConfigured: finalized\.commentApprovalConfigured/);
   assert.match(createBlock, /created\.every\(\(item\) => item\[key\] === true\)/);
 });

@@ -5489,10 +5489,11 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
    所以这里表达的是「可能已过期」，不是「已关闭」。 */
 .slow-start-row.is-stale { opacity: 0.55; }
 
-/* Facebook 规则模式与慢启动共用紧凑行和非乐观 pending 反馈；徽章只说配置事实，不冒充运行态。 */
+/* Facebook 四种运行方式共用紧凑行和非乐观 pending 反馈；徽章只说配置事实，不冒充运行态。 */
 .rule-mode-row { min-height: 30px; }
 .rule-mode-badge { background: var(--mute); }
 .rule-mode-badge.is-enabled { background: var(--accent); }
+.consumption-mode-badge.is-enabled { background: #7c3aed; }
 
 /* 当前环境解除受限：与慢启动同属「今日进展」脚注区，只占一行，不升级成独立卡片。 */
 .risk-recovery-row {

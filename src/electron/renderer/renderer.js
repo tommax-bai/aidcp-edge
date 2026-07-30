@@ -11,11 +11,21 @@ const fields = {
   slowStartToggle: document.querySelector('#slow-start-toggle'),
   slowStartBadge: document.querySelector('#slow-start-badge'),
   slowStartReason: document.querySelector('#slow-start-reason'),
+  facebookPersonaModeRow: document.querySelector('#facebook-persona-mode-row'),
+  facebookPersonaModeToggleWrap: document.querySelector('#facebook-persona-mode-toggle-wrap'),
+  facebookPersonaModeToggle: document.querySelector('#facebook-persona-mode-toggle'),
+  facebookPersonaModeBadge: document.querySelector('#facebook-persona-mode-badge'),
+  facebookPersonaModeReason: document.querySelector('#facebook-persona-mode-reason'),
   facebookRuleModeRow: document.querySelector('#facebook-rule-mode-row'),
   facebookRuleModeToggleWrap: document.querySelector('#facebook-rule-mode-toggle-wrap'),
   facebookRuleModeToggle: document.querySelector('#facebook-rule-mode-toggle'),
   facebookRuleModeBadge: document.querySelector('#facebook-rule-mode-badge'),
   facebookRuleModeReason: document.querySelector('#facebook-rule-mode-reason'),
+  facebookConsumptionModeRow: document.querySelector('#facebook-consumption-mode-row'),
+  facebookConsumptionModeToggleWrap: document.querySelector('#facebook-consumption-mode-toggle-wrap'),
+  facebookConsumptionModeToggle: document.querySelector('#facebook-consumption-mode-toggle'),
+  facebookConsumptionModeBadge: document.querySelector('#facebook-consumption-mode-badge'),
+  facebookConsumptionModeReason: document.querySelector('#facebook-consumption-mode-reason'),
   riskRecoveryRow: document.querySelector('#risk-recovery-row'),
   riskRecoveryButton: document.querySelector('#risk-recovery-button'),
   riskRecoveryFeedback: document.querySelector('#risk-recovery-feedback'),
@@ -413,7 +423,7 @@ const settingsUi = {
   adsPlatformButtons: Array.from(document.querySelectorAll('[data-create-platform]')),
   adsFbCreateMode: document.querySelector('#ads-fb-create-mode'),
   adsFbCreateModeField: document.querySelector('#ads-fb-create-mode-field'),
-  // 运行方式三选一 + 全局免审（change environment-level-rule-mode-and-approval）：仅 Facebook 展示。
+  // 运行方式四选一 + 全局免审：仅 Facebook 展示。
   adsFbRunMode: document.querySelector('#ads-fb-run-mode'),
   adsFbRunModeField: document.querySelector('#ads-fb-run-mode-field'),
   adsFbRunModeWrap: document.querySelector('#ads-fb-run-mode-wrap'),
@@ -715,8 +725,13 @@ const slowStartFeedbackByEnv = new Map();
  */
 const slowStartHttpByEnv = new Map();
 
+// 新 UI 的运行方式只认 Cloud unified operation policy。缓存只保存 readback 投影和请求反馈，
+// 不落 localStorage/settings，也不复制规则/消费节奏数字。
+const facebookOperationPolicyHttpByEnv = new Map();
+const facebookOperationPolicyFeedbackByEnv = new Map();
+
 // Facebook 规则模式配置只由 customer-auth HTTP 读写。按 envKey 隔离读真态与写反馈，
-// checkbox 不落本地持久化，也不参与任何规则计数/动作调度。
+// 下面两份旧缓存仅供已发布规则模式兼容与“规则模式免人设”呈现；新模式 UI 不再使用它们。
 const facebookRuleModeHttpByEnv = new Map();
 const facebookRuleModeFeedbackByEnv = new Map();
 
@@ -867,7 +882,121 @@ async function ensureSlowStartHttpFetch(envKey) {
   }
   slowStartHttpByEnv.set(envKey, next);
   const context = selectedSlowStartContext();
-  if (context && context.envKey === envKey) renderSlowStart((context.env && context.env.status) || currentStatus);
+  if (context && context.envKey === envKey) {
+    if (next.kind === 'ok' && context.env?.status?.dailyUsage) {
+      const dailyUsage = {
+        ...context.env.status.dailyUsage,
+        slowStart: next.slowStart,
+        ...(next.dayQuotas ? { quotas: { ...next.dayQuotas } } : {}),
+      };
+      if (next.dayQuotas && dailyUsage.windows && typeof dailyUsage.windows === 'object') {
+        dailyUsage.windows = {
+          ...dailyUsage.windows,
+          day: {
+            ...(dailyUsage.windows.day && typeof dailyUsage.windows.day === 'object'
+              ? dailyUsage.windows.day
+              : {}),
+            quotas: { ...next.dayQuotas },
+          },
+        };
+      }
+      context.env.status = { ...context.env.status, dailyUsage };
+      render(context.env.status);
+    } else {
+      renderSlowStart((context.env && context.env.status) || currentStatus);
+      renderFacebookOperationPolicy();
+    }
+  }
+}
+
+const FACEBOOK_OPERATION_BASE_MODES = new Set(['persona', 'rule', 'consumption']);
+const FACEBOOK_OPERATION_EFFECTIVE_MODES = new Set([
+  'persona', 'slow_start', 'rule', 'consumption', 'blocked',
+]);
+const FACEBOOK_SLOW_START_STATES = new Set(['active', 'off', 'graduated', 'unknown']);
+
+function hasExactObjectKeys(value, keys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length
+    && actual.every((key, index) => key === expected[index]);
+}
+
+function facebookOperationPolicyError(res, fallback = '暂时无法读取运行方式') {
+  const rawError = res && res.data && res.data.error;
+  return String((res && res.data && res.data.message)
+    || (rawError && typeof rawError === 'object' && (rawError.message || rawError.code))
+    || (typeof rawError === 'string' && rawError)
+    || (res && res.error)
+    || fallback);
+}
+
+function normalizeFacebookOperationPolicyResponse(res, expectedEnvKey) {
+  const payload = res && res.ok && res.data && res.data.data;
+  const policy = payload && payload.facebookOperationPolicy;
+  if (!hasExactObjectKeys(payload, ['envKey', 'facebookOperationPolicy'])
+      || payload.envKey !== expectedEnvKey
+      || !hasExactObjectKeys(policy, [
+        'baseMode', 'effectiveMode', 'policyRevision', 'slowStart', 'blocker',
+      ])
+      || !FACEBOOK_OPERATION_BASE_MODES.has(policy.baseMode)
+      || !Number.isSafeInteger(policy.policyRevision) || policy.policyRevision < 1
+      || (policy.effectiveMode !== null
+        && !FACEBOOK_OPERATION_EFFECTIVE_MODES.has(policy.effectiveMode))
+      || !hasExactObjectKeys(policy.slowStart, ['state'])
+      || !FACEBOOK_SLOW_START_STATES.has(policy.slowStart.state)
+      || (policy.blocker !== null && typeof policy.blocker !== 'string')) return null;
+  return {
+    baseMode: policy.baseMode,
+    effectiveMode: policy.effectiveMode,
+    policyRevision: policy.policyRevision,
+    slowStart: { state: policy.slowStart.state },
+    blocker: policy.blocker,
+  };
+}
+
+function selectedFacebookOperationPolicyContext() {
+  const context = selectedSlowStartContext();
+  return context && selectedEnvPlatform() === 'facebook' ? context : null;
+}
+
+function selectedModeFromFacebookOperationPolicy(policy) {
+  if (!policy) return null;
+  if (policy.slowStart.state === 'active' || policy.effectiveMode === 'slow_start') {
+    return 'slow_start';
+  }
+  return policy.baseMode;
+}
+
+async function ensureFacebookOperationPolicyHttpFetch(
+  envKey,
+  { force = false, preserveConfirmed = false } = {},
+) {
+  if (!envKey || !window.aidcpEdge
+      || typeof window.aidcpEdge.getFacebookOperationPolicy !== 'function') return;
+  const existing = facebookOperationPolicyHttpByEnv.get(envKey);
+  if (!force && existing && (existing.kind === 'loading' || existing.kind === 'ok')) return;
+  const retainExisting = preserveConfirmed && existing?.kind === 'ok';
+  if (!retainExisting) facebookOperationPolicyHttpByEnv.set(envKey, { kind: 'loading' });
+  let next;
+  try {
+    const res = await window.aidcpEdge.getFacebookOperationPolicy({ envKey });
+    const config = normalizeFacebookOperationPolicyResponse(res, envKey);
+    next = config
+      ? { kind: 'ok', config }
+      : { kind: 'error', message: facebookOperationPolicyError(res) };
+  } catch (err) {
+    next = { kind: 'error', message: `读取失败：${(err && err.message) || err}` };
+  }
+  // 写失败后的后台复读不能先抹掉最后确认态。GET 成功时再原子替换；GET 也失败则继续保留
+  // 已确认 revision，并由写反馈显示本次失败，避免把短暂不可达冒充“模式未知”。
+  if (next.kind === 'ok' || !retainExisting) {
+    facebookOperationPolicyHttpByEnv.set(envKey, next);
+  }
+  const context = selectedFacebookOperationPolicyContext();
+  if (context && context.envKey === envKey) renderFacebookOperationPolicy();
+  syncPersonaPresentationForRuleMode(envKey);
 }
 
 function facebookRuleModeError(res, fallback = '暂时无法读取规则模式配置') {
@@ -934,6 +1063,10 @@ function syncPersonaPresentationForRuleMode(envKey) {
  * 未知交给纯逻辑按「未启用」处理——绝不把「还没读到」当成「已启用」。
  */
 function authoritativeFacebookRuleMode(envKey) {
+  const operationPolicy = envKey && facebookOperationPolicyHttpByEnv.get(envKey);
+  if (operationPolicy && operationPolicy.kind === 'ok') {
+    return { enabled: operationPolicy.config.baseMode === 'rule' };
+  }
   const http = envKey && facebookRuleModeHttpByEnv.get(envKey);
   return http && http.kind === 'ok' ? http.config : null;
 }
@@ -957,6 +1090,16 @@ function personaRuleModeWithoutPersona(env, status) {
  */
 function facebookRuleModePendingForPersona(env) {
   if (!env || normPlatform(env.platform) !== 'facebook') return false;
+  if (window.aidcpEdge && typeof window.aidcpEdge.getFacebookOperationPolicy === 'function') {
+    const envKey = slowStartEnvKey(env);
+    if (!envKey) return false;
+    const operationPolicy = facebookOperationPolicyHttpByEnv.get(envKey);
+    if (operationPolicy && (operationPolicy.kind === 'ok' || operationPolicy.kind === 'error')) {
+      return false;
+    }
+    void ensureFacebookOperationPolicyHttpFetch(envKey);
+    return true;
+  }
   if (!window.aidcpEdge || typeof window.aidcpEdge.getFacebookRuleMode !== 'function') return false;
   const envKey = slowStartEnvKey(env);
   if (!envKey) return false;
@@ -1524,7 +1667,7 @@ function renderUsageSummary(status) {
   for (const item of USAGE_ITEMS) renderUsageItem(item, usage);
   renderQuotaWindows(usage);
   renderSlowStart(status);
-  renderFacebookRuleMode();
+  renderFacebookOperationPolicy();
   renderEnvironmentRiskRecovery(status);
   fields.updatedAt.textContent = usage.managedByOverview && !usage.confirmed
     ? '—'
@@ -1683,6 +1826,14 @@ function applySlowStartView(view, context) {
   }
 }
 
+function hideFacebookPersonaModeRow() {
+  if (!fields.facebookPersonaModeRow) return;
+  fields.facebookPersonaModeRow.classList.add('hidden');
+  fields.facebookPersonaModeRow.classList.remove('is-pending');
+  fields.facebookPersonaModeRow.removeAttribute('aria-busy');
+  if (fields.facebookPersonaModeToggle) fields.facebookPersonaModeToggle.indeterminate = false;
+}
+
 function hideFacebookRuleModeRow() {
   if (!fields.facebookRuleModeRow) return;
   fields.facebookRuleModeRow.classList.add('hidden');
@@ -1763,6 +1914,244 @@ function renderFacebookRuleMode() {
   }
   void ensureFacebookRuleModeHttpFetch(context.envKey);
   renderFacebookRuleModeUnknown('正在读取规则模式配置…');
+}
+
+function hideFacebookConsumptionModeRow() {
+  if (!fields.facebookConsumptionModeRow) return;
+  fields.facebookConsumptionModeRow.classList.add('hidden');
+  fields.facebookConsumptionModeRow.classList.remove('is-pending');
+  fields.facebookConsumptionModeRow.removeAttribute('aria-busy');
+  if (fields.facebookConsumptionModeToggle) {
+    fields.facebookConsumptionModeToggle.checked = false;
+    fields.facebookConsumptionModeToggle.indeterminate = false;
+  }
+}
+
+function setOperationModeUnknown(message, error = false) {
+  const context = selectedFacebookOperationPolicyContext();
+  const slowStartHttp = context && slowStartHttpByEnv.get(context.envKey);
+  if (context && slowStartHttp?.kind === 'ok') {
+    applySlowStartView(
+      window.uiLogic.slowStartLine({ slowStart: slowStartHttp.slowStart }, 'offline', 'http'),
+      context,
+    );
+  }
+  const rows = [
+    {
+      mode: 'persona',
+      row: fields.facebookPersonaModeRow,
+      toggle: fields.facebookPersonaModeToggle,
+      badge: fields.facebookPersonaModeBadge,
+      reason: fields.facebookPersonaModeReason,
+      badgeClass: 'acct-age rule-mode-badge',
+    },
+    {
+      mode: 'slow_start',
+      row: fields.slowStartRow,
+      toggle: fields.slowStartToggle,
+      badge: fields.slowStartBadge,
+      reason: fields.slowStartReason,
+      badgeClass: 'acct-age',
+    },
+    {
+      mode: 'rule',
+      row: fields.facebookRuleModeRow,
+      toggle: fields.facebookRuleModeToggle,
+      badge: fields.facebookRuleModeBadge,
+      reason: fields.facebookRuleModeReason,
+      badgeClass: 'acct-age rule-mode-badge',
+    },
+    {
+      mode: 'consumption',
+      row: fields.facebookConsumptionModeRow,
+      toggle: fields.facebookConsumptionModeToggle,
+      badge: fields.facebookConsumptionModeBadge,
+      reason: fields.facebookConsumptionModeReason,
+      badgeClass: 'acct-age rule-mode-badge consumption-mode-badge',
+    },
+  ];
+  for (const item of rows) {
+    if (!item.row) continue;
+    const preserveSlowStartDetail = item.mode === 'slow_start'
+      && slowStartHttp?.kind === 'ok';
+    item.row.classList.remove('hidden', 'is-pending');
+    item.row.removeAttribute('aria-busy');
+    if (item.toggle) {
+      if (!preserveSlowStartDetail) {
+        item.toggle.checked = false;
+        item.toggle.indeterminate = true;
+      }
+      item.toggle.disabled = true;
+    }
+    if (item.badge && !preserveSlowStartDetail) {
+      item.badge.textContent = '';
+      item.badge.className = `${item.badgeClass} hidden`;
+    }
+    if (item.reason) {
+      const detailReason = preserveSlowStartDetail
+        ? String(item.reason.textContent || '').trim()
+        : '';
+      item.reason.textContent = error && detailReason
+        ? `${detailReason} · ${message}`
+        : detailReason || message;
+      item.reason.className = `parking-hint${error ? ' is-error' : ''}`;
+    }
+  }
+}
+
+function operationModeBadgeText({ mode, selectedMode, config, pending }) {
+  const label = mode === 'persona'
+    ? '普通人设'
+    : mode === 'slow_start'
+      ? '冷启动'
+      : mode === 'rule'
+        ? '规则模式'
+        : '消费模式';
+  if (pending && pending.mode === mode) return `${label} · 等待 Cloud 确认…`;
+  if (selectedMode === mode) return `${label} · ${pending ? '当前已选择' : '已选择'}`;
+  if (mode !== 'slow_start' && selectedMode === 'slow_start' && config.baseMode === mode) {
+    return `${label} · 冷启动优先（暂停）`;
+  }
+  return `${label} · 未选择`;
+}
+
+function applyFacebookOperationPolicyView(config, context) {
+  const feedback = facebookOperationPolicyFeedbackByEnv.get(context.envKey);
+  const pending = feedback && feedback.kind === 'pending' ? feedback : null;
+  // radio 的 change 事件触发前浏览器会先切换 DOM；这里始终用最后一份 Cloud 确认真态把它恢复。
+  // 目标模式只进入 pending 文案，绝不在写后回读前成为选中态。
+  const selectedMode = selectedModeFromFacebookOperationPolicy(config);
+  const writerUnavailable = !window.aidcpEdge
+    || typeof window.aidcpEdge.setFacebookOperationPolicy !== 'function';
+  const slowStartHttp = slowStartHttpByEnv.get(context.envKey);
+  const slowStartDetailAvailable = slowStartHttp?.kind === 'ok';
+  const slowStartDetailMatchesPolicy = slowStartDetailAvailable
+    && slowStartHttp.slowStart?.state === config.slowStart.state;
+  const slowStartDetailView = slowStartDetailAvailable
+    ? window.uiLogic.slowStartLine({ slowStart: slowStartHttp.slowStart }, 'offline', 'http')
+    : null;
+  if (slowStartDetailView) applySlowStartView(slowStartDetailView, context);
+  const rowItems = [
+    {
+      mode: 'persona',
+      row: fields.facebookPersonaModeRow,
+      toggle: fields.facebookPersonaModeToggle,
+      badge: fields.facebookPersonaModeBadge,
+      reason: fields.facebookPersonaModeReason,
+      badgeClass: 'acct-age rule-mode-badge',
+    },
+    {
+      mode: 'slow_start',
+      row: fields.slowStartRow,
+      toggle: fields.slowStartToggle,
+      badge: fields.slowStartBadge,
+      reason: fields.slowStartReason,
+      badgeClass: 'acct-age',
+    },
+    {
+      mode: 'rule',
+      row: fields.facebookRuleModeRow,
+      toggle: fields.facebookRuleModeToggle,
+      badge: fields.facebookRuleModeBadge,
+      reason: fields.facebookRuleModeReason,
+      badgeClass: 'acct-age rule-mode-badge',
+    },
+    {
+      mode: 'consumption',
+      row: fields.facebookConsumptionModeRow,
+      toggle: fields.facebookConsumptionModeToggle,
+      badge: fields.facebookConsumptionModeBadge,
+      reason: fields.facebookConsumptionModeReason,
+      badgeClass: 'acct-age rule-mode-badge consumption-mode-badge',
+    },
+  ];
+
+  for (const item of rowItems) {
+    if (!item.row) continue;
+    const isSlowStart = item.mode === 'slow_start';
+    // renderSlowStart 已先根据详细 Cloud 回包计算资格闸；统一模式层只负责互斥选择，
+    // 不能把 platform_unsupported 等真实禁用条件重新放开。
+    const slowStartSafetyDisabled = isSlowStart
+      && (!slowStartDetailView || Boolean(slowStartDetailView.disabled));
+    item.row.classList.remove('hidden');
+    item.row.classList.toggle('is-pending', Boolean(pending));
+    if (pending) item.row.setAttribute('aria-busy', 'true');
+    else item.row.removeAttribute('aria-busy');
+    if (item.toggle) {
+      item.toggle.checked = selectedMode === item.mode;
+      item.toggle.indeterminate = false;
+      item.toggle.disabled = Boolean(pending) || writerUnavailable || slowStartSafetyDisabled;
+    }
+
+    // operation policy 决定互斥选择；状态一致时保留慢启动详情读的“第几天/已毕业/资格”等丰富真态。
+    const preserveSlowStartBadge = isSlowStart
+      && !pending
+      && slowStartDetailMatchesPolicy;
+    if (item.badge && !preserveSlowStartBadge) {
+      const enabled = selectedMode === item.mode;
+      const pendingTarget = Boolean(pending && pending.mode === item.mode);
+      item.badge.textContent = operationModeBadgeText({
+        mode: item.mode,
+        selectedMode,
+        config,
+        pending,
+      });
+      item.badge.className = pendingTarget
+        ? `${item.badgeClass} is-pending`
+        : `${item.badgeClass}${enabled ? ' is-enabled' : ''}`;
+    }
+
+    const writeError = feedback && feedback.kind === 'error'
+      ? String(feedback.message || '')
+      : '';
+    const preserveSlowStartReason = preserveSlowStartBadge
+      && !writeError
+      && !config.blocker
+      && !writerUnavailable;
+    if (item.reason && !preserveSlowStartReason) {
+      const paused = item.mode !== 'slow_start'
+        && selectedMode === 'slow_start'
+        && config.baseMode === item.mode
+        ? `冷启动当前优先，${
+          item.mode === 'persona' ? '普通人设' : item.mode === 'rule' ? '规则' : '消费'
+        }基础模式暂停`
+        : '';
+      const text = pending
+        ? (pending.mode === item.mode ? '正在等待 Cloud 回读确认，请稍候' : '')
+        : writeError || config.blocker || paused
+          || (writerUnavailable ? '当前客户端无法修改运行方式' : '');
+      item.reason.textContent = text;
+      item.reason.className = text
+        ? `parking-hint${writeError || config.blocker || writerUnavailable ? ' is-error' : ' slow-start-feedback'}`
+        : 'parking-hint hidden';
+    }
+  }
+}
+
+function renderFacebookOperationPolicy() {
+  const context = selectedFacebookOperationPolicyContext();
+  if (!context) {
+    hideFacebookPersonaModeRow();
+    hideFacebookRuleModeRow();
+    hideFacebookConsumptionModeRow();
+    return;
+  }
+  if (!window.aidcpEdge
+      || typeof window.aidcpEdge.getFacebookOperationPolicy !== 'function') {
+    setOperationModeUnknown('请登录客户端后读取 Cloud 运行方式');
+    return;
+  }
+  const http = facebookOperationPolicyHttpByEnv.get(context.envKey);
+  if (http && http.kind === 'ok') {
+    applyFacebookOperationPolicyView(http.config, context);
+    return;
+  }
+  if (http && http.kind === 'error') {
+    setOperationModeUnknown(http.message || '暂时无法读取运行方式，请稍后重试', true);
+    return;
+  }
+  void ensureFacebookOperationPolicyHttpFetch(context.envKey);
+  setOperationModeUnknown('正在读取 Cloud 运行方式…');
 }
 
 // ─── 开发者详情：原始日志（滚动保留 + 连续去重；按 envId 分桶，绝不跨环境串号/相邻误吞）───
@@ -4415,16 +4804,30 @@ fields.dailySummary?.addEventListener('click', (event) => {
 fields.slowStartToggleWrap?.addEventListener('click', (event) => {
   event.stopPropagation();
 });
+fields.facebookPersonaModeToggleWrap?.addEventListener('click', (event) => {
+  event.stopPropagation();
+});
+fields.facebookPersonaModeToggle?.addEventListener('change', (event) => {
+  event.stopPropagation();
+  void submitFacebookOperationMode('persona', Boolean(event.target.checked));
+});
 fields.slowStartToggle?.addEventListener('change', (event) => {
   event.stopPropagation();
-  void submitSlowStart(Boolean(event.target.checked));
+  void submitFacebookOperationMode('slow_start', Boolean(event.target.checked));
 });
 fields.facebookRuleModeToggleWrap?.addEventListener('click', (event) => {
   event.stopPropagation();
 });
 fields.facebookRuleModeToggle?.addEventListener('change', (event) => {
   event.stopPropagation();
-  void submitFacebookRuleMode(Boolean(event.target.checked));
+  void submitFacebookOperationMode('rule', Boolean(event.target.checked));
+});
+fields.facebookConsumptionModeToggleWrap?.addEventListener('click', (event) => {
+  event.stopPropagation();
+});
+fields.facebookConsumptionModeToggle?.addEventListener('change', (event) => {
+  event.stopPropagation();
+  void submitFacebookOperationMode('consumption', Boolean(event.target.checked));
 });
 
 fields.riskRecoveryButton?.addEventListener('click', (event) => {
@@ -4563,10 +4966,84 @@ async function submitEnvironmentRiskRecovery(expected) {
 }
 
 /**
- * 提交环境级慢启动开关：只传 envKey + enabled，客户端不提交 accountId。
- * 失败**必须把开关拨回去 + 如实说明**——留在「已勾」而库里没写，就是用界面撒谎；
- * 而这个谎的代价是运营以为号在被养、实际在按满额度跑。
+ * 提交 Facebook 统一运行方式：只传 envKey + expectedRevision + mode。
+ * 规则/消费节奏与账号选择留在 Cloud；失败必须回读权威真态，不能把本地目标态冒充已生效。
  */
+async function submitFacebookOperationMode(mode, enabled) {
+  const context = selectedFacebookOperationPolicyContext();
+  if (!context || !window.aidcpEdge
+      || typeof window.aidcpEdge.setFacebookOperationPolicy !== 'function') return;
+  const { envKey } = context;
+  const http = facebookOperationPolicyHttpByEnv.get(envKey);
+  if (!http || http.kind !== 'ok') return;
+  const existing = facebookOperationPolicyFeedbackByEnv.get(envKey);
+  if (existing && existing.kind === 'pending') return;
+  const currentMode = selectedModeFromFacebookOperationPolicy(http.config);
+  if (!enabled && currentMode !== mode) {
+    renderFacebookOperationPolicy();
+    return;
+  }
+  const requestedMode = enabled ? mode : 'persona';
+  if (requestedMode === currentMode) {
+    renderFacebookOperationPolicy();
+    return;
+  }
+
+  facebookOperationPolicyFeedbackByEnv.set(envKey, {
+    kind: 'pending',
+    mode: requestedMode,
+  });
+  renderFacebookOperationPolicy();
+
+  const settleError = (message) => {
+    facebookOperationPolicyFeedbackByEnv.set(envKey, {
+      kind: 'error',
+      message: String(message || '设置失败'),
+    });
+    // CAS 冲突或异常回包后在后台复读，但 UI 始终保留最后确认 revision；新 GET 成功前不得
+    // 把旧选择抹成 unknown，更不能把本次目标态冒充已经生效。
+    const current = selectedFacebookOperationPolicyContext();
+    if (current && current.envKey === envKey) renderFacebookOperationPolicy();
+    void ensureFacebookOperationPolicyHttpFetch(envKey, {
+      force: true,
+      preserveConfirmed: true,
+    });
+  };
+
+  try {
+    const res = await window.aidcpEdge.setFacebookOperationPolicy({
+      envKey,
+      expectedRevision: http.config.policyRevision,
+      mode: requestedMode,
+    });
+    const config = normalizeFacebookOperationPolicyResponse(res, envKey);
+    if (!config || selectedModeFromFacebookOperationPolicy(config) !== requestedMode) {
+      settleError(facebookOperationPolicyError(
+        res,
+        res && res.ok
+          ? 'Cloud 已返回，但运行方式回读与本次选择不一致，请稍后重试'
+          : '设置失败',
+      ));
+      return;
+    }
+    facebookOperationPolicyFeedbackByEnv.delete(envKey);
+    facebookOperationPolicyHttpByEnv.set(envKey, { kind: 'ok', config });
+    // 慢启动详情与旧规则兼容呈现都必须重读，不能把切换前缓存继续当作新模式真态。
+    slowStartHttpByEnv.delete(envKey);
+    facebookRuleModeHttpByEnv.delete(envKey);
+    void ensureSlowStartHttpFetch(envKey);
+    syncPersonaPresentationForRuleMode(envKey);
+    const current = selectedFacebookOperationPolicyContext();
+    if (current && current.envKey === envKey) {
+      renderSlowStart((current.env && current.env.status) || currentStatus);
+      renderFacebookOperationPolicy();
+    }
+  } catch (err) {
+    settleError(`设置失败：${(err && err.message) || err}`);
+  }
+}
+
+// 旧慢启动/规则写函数仅保留给历史行为测试与兼容路径；当前模式区事件统一走 submitFacebookOperationMode。
 async function submitSlowStart(enabled) {
   const context = selectedSlowStartContext();
   if (!context) return;
@@ -5141,6 +5618,8 @@ function applyFleetSnapshot(snap) {
     const goneEnvKey = slowStartEnvKey(fleetView.envs.get(key));
     slowStartFeedbackByEnv.delete(goneEnvKey);
     slowStartHttpByEnv.delete(goneEnvKey); // change slow-start-offline-toggle：连同慢启动 HTTP/回执缓存一并清
+    facebookOperationPolicyFeedbackByEnv.delete(goneEnvKey);
+    facebookOperationPolicyHttpByEnv.delete(goneEnvKey);
     facebookRuleModeFeedbackByEnv.delete(goneEnvKey);
     facebookRuleModeHttpByEnv.delete(goneEnvKey);
     environmentRiskHttpByEnv.delete(goneEnvKey);
@@ -7509,9 +7988,9 @@ settingsUi.adsProxyType?.addEventListener('change', () => {
   updateFacebookImportVisibility();
 });
 
-// 运行方式三选一 + 全局免审（change environment-level-rule-mode-and-approval）。
+// 运行方式四选一 + 全局免审。Edge 只提交模式，规则/消费节奏始终由 Cloud 保存和解释。
 // 只在 Facebook 时组装这些意图；其它平台一个键都不带 —— 主进程对非 Facebook 的携带一律整请求拒绝。
-const CREATE_RUN_MODES = ['normal', 'cold_start', 'rule'];
+const CREATE_RUN_MODES = ['normal', 'cold_start', 'rule', 'consumption'];
 function readFacebookCreationIntents(platform) {
   if (platform !== 'facebook') return {};
   const raw = settingsUi.adsFbRunMode ? String(settingsUi.adsFbRunMode.value || '') : '';
@@ -7531,6 +8010,9 @@ function facebookCreateConfigHint(receipt) {
   const mode = receipt && receipt.runMode;
   if (!CREATE_RUN_MODES.includes(mode)) return '';
   const parts = [];
+  if (receipt.operationModeConfigured !== true) {
+    parts.push('运行方式尚未获得 Cloud 回读确认。');
+  }
   if (mode === 'cold_start') {
     parts.push(receipt.slowStartConfigured === true
       ? '已按冷启动为该环境配置慢启动（只收紧每日操作额度，不改变操作速度）。'
@@ -7541,6 +8023,10 @@ function facebookCreateConfigHint(receipt) {
       parts.push(receipt.ruleModeConfigured === true
         ? '已按规则运行方式为该环境配置规则模式。'
         : '规则模式尚未获得云端确认。');
+    } else if (mode === 'consumption') {
+      parts.push(receipt.consumptionModeConfigured === true
+        ? '已按消费运行方式为该环境配置消费模式；节奏由 Cloud 管理。'
+        : '消费模式尚未获得云端确认。');
     }
   }
   if (receipt.commentApprovalConfigured === true) {

@@ -83,13 +83,19 @@ interface Stub {
   adsUpdateEnvProxies: (opts?: unknown) => Promise<unknown>;
   adsOpenCreate: () => { launched: boolean } | Promise<{ launched: boolean }>;
   adsTemplates: () => Promise<Array<{ key: string; label: string }>>;
-  adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; name?: string; template?: string; osFamily?: string; error?: string; createdCount?: number; created?: unknown[]; platform?: string; visibilityWarning?: string; requiresAdminAssignment?: boolean; assignmentHandledByMain?: boolean; rosterJoinedByMain?: boolean; runMode?: string; slowStartConfigured?: boolean; ruleModeConfigured?: boolean; commentApprovalConfigured?: boolean }>;
+  adsCreateEnv: (opts?: unknown) => Promise<{ ok: boolean; userId?: string; name?: string; template?: string; osFamily?: string; error?: string; createdCount?: number; created?: unknown[]; platform?: string; visibilityWarning?: string; requiresAdminAssignment?: boolean; assignmentHandledByMain?: boolean; rosterJoinedByMain?: boolean; runMode?: string; operationModeConfigured?: boolean; slowStartConfigured?: boolean; ruleModeConfigured?: boolean; consumptionModeConfigured?: boolean; commentApprovalConfigured?: boolean }>;
   adsDeleteEnv: (opts?: unknown) => Promise<{ ok: boolean; error?: string; cleanupPending?: boolean; message?: string }>;
   adsGetEnvProxy: (opts?: unknown) => Promise<{ ok: boolean; noProxy?: boolean; proxy?: Record<string, unknown>; error?: string }>;
   adsUpdateEnvProxy: (opts?: unknown) => Promise<{ ok: boolean; error?: string }>;
   setSlowStart: (opts: { envKey: string; enabled: boolean }) => Promise<unknown>;
   // 不依赖边缘的慢启动读（change slow-start-offline-toggle）：可选——不提供即模拟老客户端退化路径。
   getSlowStart?: (opts: { envKey: string }) => Promise<unknown>;
+  setFacebookOperationPolicy?: (opts: {
+    envKey: string;
+    expectedRevision: number;
+    mode: 'persona' | 'slow_start' | 'rule' | 'consumption';
+  }) => Promise<unknown>;
+  getFacebookOperationPolicy?: (opts: { envKey: string }) => Promise<unknown>;
   setFacebookRuleMode?: (opts: { envKey: string; enabled: boolean }) => Promise<unknown>;
   getFacebookRuleMode?: (opts: { envKey: string }) => Promise<unknown>;
   getEnvironmentRisk?: (opts: { envKey: string }) => Promise<unknown>;
@@ -875,6 +881,7 @@ test('Facebook 批量新建：显式模式、隐藏操作系统下拉、多行�
         platform: 'facebook',
         creationMode: 'batch',
         runMode: 'cold_start',
+        operationModeConfigured: true,
         slowStartConfigured: true,
       };
     },
@@ -977,7 +984,7 @@ test('Facebook 批量部分失败：刷新已建环境并保留一次性输入�
   assert.ok(listCalls > initialListCalls, '部分成功后刷新环境列表');
 });
 
-// ── 运行方式三选一 + 全局免审（change environment-level-rule-mode-and-approval） ──
+// ── 运行方式四选一 + 全局免审 ──
 
 async function bootFacebookCreate(stub: Stub): Promise<DOMWindow> {
   const w = await boot(stub);
@@ -988,7 +995,7 @@ async function bootFacebookCreate(stub: Stub): Promise<DOMWindow> {
   return w;
 }
 
-test('运行方式：三选一互斥且只在 Facebook 出现，默认普通、免审默认关闭', async () => {
+test('运行方式：四选一互斥且只在 Facebook 出现，默认普通、免审默认关闭', async () => {
   const w = await boot(makeStub());
   for (let i = 0; i < 3; i++) await tick();
   assert.ok($(w, '#ads-fb-run-mode-field').classList.contains('hidden'), '小红书不展示运行方式');
@@ -1001,15 +1008,21 @@ test('运行方式：三选一互斥且只在 Facebook 出现，默认普通、�
   assert.ok(!$(w, '#ads-fb-run-mode-wrap').classList.contains('hidden'), 'Facebook 展示免审入口');
 
   const runMode = $(w, '#ads-fb-run-mode') as HTMLSelectElement;
-  assert.deepEqual(Array.from(runMode.options).map((option) => option.value), ['normal', 'cold_start', 'rule']);
-  assert.deepEqual(Array.from(runMode.options).map((option) => option.textContent), ['普通', '冷启动', '规则']);
+  assert.deepEqual(
+    Array.from(runMode.options).map((option) => option.value),
+    ['normal', 'cold_start', 'rule', 'consumption'],
+  );
+  assert.deepEqual(
+    Array.from(runMode.options).map((option) => option.textContent),
+    ['普通', '冷启动', '规则', '消费'],
+  );
   assert.equal(runMode.multiple, false, '同一时刻只能选中一种运行方式');
   assert.equal(runMode.value, 'normal', '默认普通：不再写死慢启动');
   assert.equal(($(w, '#ads-fb-approval') as HTMLInputElement).checked, false, '全局免审默认关闭');
 
   // 未选冷启动不得追加解释性告警或 Tooltip：说明文字与选择无关，控件也不带 title。
   const helpBefore = $(w, '#ads-fb-run-mode-help').textContent;
-  for (const value of ['rule', 'normal']) {
+  for (const value of ['rule', 'consumption', 'normal']) {
     runMode.value = value;
     runMode.dispatchEvent(new w.Event('change'));
     assert.equal($(w, '#ads-fb-run-mode-help').textContent, helpBefore, '运行方式说明不随选择变化');
@@ -1029,6 +1042,7 @@ test('运行方式：默认普通提交不带任何开启意图，回执如实�
         osFamily: 'windows',
         platform: 'facebook',
         runMode: 'normal',
+        operationModeConfigured: true,
         assignmentHandledByMain: true,
         rosterJoinedByMain: true,
       };
@@ -1058,6 +1072,7 @@ test('运行方式：选规则提交规则模式意图且不提交慢启动，�
         osFamily: 'windows',
         platform: 'facebook',
         runMode: 'rule',
+        operationModeConfigured: true,
         ruleModeConfigured: true,
         assignmentHandledByMain: true,
         rosterJoinedByMain: true,
@@ -1076,6 +1091,39 @@ test('运行方式：选规则提交规则模式意图且不提交慢启动，�
   assert.match(msg, /已按规则运行方式为该环境配置规则模式。/);
 });
 
+test('运行方式：选消费只提交消费模式意图，回执不在 Edge 展示或保存节奏数字', async () => {
+  let sent: Record<string, unknown> = {};
+  const w = await bootFacebookCreate(makeStub({
+    adsCreateEnv: async (opts) => {
+      sent = opts as Record<string, unknown>;
+      return {
+        ok: true,
+        userId: 'u_consumption',
+        osFamily: 'windows',
+        platform: 'facebook',
+        runMode: 'consumption',
+        operationModeConfigured: true,
+        consumptionModeConfigured: true,
+        assignmentHandledByMain: true,
+        rosterJoinedByMain: true,
+      };
+    },
+  }));
+  const runMode = $(w, '#ads-fb-run-mode') as HTMLSelectElement;
+  runMode.value = 'consumption';
+  runMode.dispatchEvent(new w.Event('change'));
+  $(w, '#ads-create').dispatchEvent(new w.Event('click'));
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(sent.facebookRunMode, 'consumption');
+  assert.equal('slowStartEnabled' in sent, false);
+  assert.equal('facebookRuleModeEnabled' in sent, false);
+  assert.equal('viewsPerLike' in sent, false);
+  const msg = $(w, '#ads-create-msg').textContent ?? '';
+  assert.match(msg, /已按消费运行方式为该环境配置消费模式/);
+  assert.match(msg, /节奏由 Cloud 管理/);
+  assert.doesNotMatch(msg, /每浏览|每.*点赞|5|2/);
+});
+
 test('全局免审：批量勾选一次对全批一致生效，云端确认后才标记已配置', async () => {
   let sent: Record<string, unknown> = {};
   const w = await bootFacebookCreate(makeStub({
@@ -1087,6 +1135,7 @@ test('全局免审：批量勾选一次对全批一致生效，云端确认后�
         created: [{ userId: 'u1' }, { userId: 'u2' }, { userId: 'u3' }],
         platform: 'facebook',
         runMode: 'normal',
+        operationModeConfigured: true,
         commentApprovalConfigured: true,
       };
     },
@@ -1611,22 +1660,63 @@ test('拉列表回填：截断结果绝不回填（不因缺数据误改在用�
 
 function slowStartStub(overrides: Partial<Stub> = {}, platform = 'facebook'): Stub {
   const getStatus = overrides.getStatus || (async () => makeStatus());
-  const getSlowStart = overrides.getSlowStart || (async ({ envKey }: { envKey: string }) => {
+  const baseGetSlowStart = overrides.getSlowStart || (async ({ envKey }: { envKey: string }) => {
     const status = await getStatus() as { dailyUsage?: { slowStart?: unknown; quotas?: unknown } | null };
     const slowStart = status.dailyUsage?.slowStart;
     return slowStart && typeof slowStart === 'object'
       ? { ok: true, data: { data: { envKey, slowStart, dayQuotas: status.dailyUsage?.quotas || null } } }
       : { ok: false, data: { message: '云端未返回慢启动状态' } };
   });
-  return makeStub({
-    getSettings: async () => ({
+  const latestSlowStartResponses = new Map<string, unknown>();
+  let policyRevision = 3;
+  const getSlowStart = async (args: { envKey: string }) => {
+    if (latestSlowStartResponses.has(args.envKey)) {
+      return latestSlowStartResponses.get(args.envKey);
+    }
+    const response = await baseGetSlowStart(args);
+    latestSlowStartResponses.set(args.envKey, response);
+    return response;
+  };
+  const getFacebookOperationPolicy = overrides.getFacebookOperationPolicy
+    || (async ({ envKey }: { envKey: string }) => {
+      const slow = await getSlowStart({ envKey }) as {
+        ok?: boolean;
+        data?: { data?: { slowStart?: { state?: string } } };
+      };
+      if (!slow?.ok || !slow.data?.data?.slowStart) return slow;
+      const mode = slow.data.data.slowStart.state === 'active' ? 'slow_start' : 'persona';
+      return facebookOperationPolicyReceipt(envKey, mode, policyRevision);
+    });
+  let stub: Stub;
+  const setFacebookOperationPolicy = overrides.setFacebookOperationPolicy
+    || (async (args: {
+      envKey: string;
+      expectedRevision: number;
+      mode: 'persona' | 'slow_start' | 'rule' | 'consumption';
+    }) => {
+      if (args.mode === 'slow_start' || args.mode === 'persona') {
+        const result = await stub.setSlowStart({
+          envKey: args.envKey,
+          enabled: args.mode === 'slow_start',
+        });
+        if (!(result as { ok?: boolean })?.ok) return result;
+        latestSlowStartResponses.set(args.envKey, result);
+      }
+      policyRevision = args.expectedRevision + 1;
+      return facebookOperationPolicyReceipt(args.envKey, args.mode, policyRevision);
+    });
+  stub = makeStub({
+    ...overrides,
+    getSettings: overrides.getSettings || (async () => ({
       provider: 'adspower', adsProfileId: '', adsApiKey: '', adsApiBase: '',
       browserParkingMode: 'edge-strip', adsDownloadUrl: 'https://x', platform,
-    }),
+    })),
     getStatus,
     getSlowStart,
-    ...overrides,
+    getFacebookOperationPolicy,
+    setFacebookOperationPolicy,
   });
+  return stub;
 }
 
 test('慢启动行：静态节点在 #daily-summary 内、#quota-windows 之后', () => {
@@ -1759,12 +1849,12 @@ test('慢启动行：Facebook 环境未启动 + 无 env-scoped 读能力（老�
   const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
   assert.equal(toggle.disabled, true);
   assert.equal(toggle.indeterminate, true, '未知态必须用 indeterminate，不能显示成已关闭');
-  assert.match($(w, '#slow-start-reason').textContent || '', /登录客户端后读取 Cloud 慢启动状态/);
+  assert.match($(w, '#slow-start-reason').textContent || '', /登录客户端后读取 Cloud 运行方式/);
 });
 
 // 停止的环境（内核未运行、无云链路，dailyUsage=null）+ 有绑定 → 经不依赖边缘的 env-scoped 读渲染真态，
 // **开关可点**（离线可改）。**验收必须用已停止的环境**——冷待机（cloud=connected）本来就能点，用它测会假绿（task 7.1）。
-function stoppedFbEnv(getSlowStart: Stub['getSlowStart']): Stub {
+function stoppedFbEnv(getSlowStart: Stub['getSlowStart'], overrides: Partial<Stub> = {}): Stub {
   return slowStartStub({
     getSettings: async () => ({
       provider: 'adspower', adsProfileId: 'fb_env', adsProfileName: 'FB 环境', adsApiKey: '', adsApiBase: '',
@@ -1773,6 +1863,7 @@ function stoppedFbEnv(getSlowStart: Stub['getSlowStart']): Stub {
     }),
     getStatus: async () => makeStatus({ envId: 'fb_env', edge: 'stopped', session: 'idle', cloud: 'disconnected', dailyUsage: null }),
     getSlowStart,
+    ...overrides,
   });
 }
 
@@ -2198,18 +2289,16 @@ test('慢启动行：env-scoped 读够不到云端 → 就地如实展示失败�
 });
 
 test('慢启动行：停止的环境离线写入成功 → 呈现为已生效，不显示「已保存/待应用」', async () => {
-  const base = stoppedFbEnv(async () => ({
+  const w = await boot(stoppedFbEnv(async () => ({
     ok: true,
     data: { data: { envKey: 'fb_env', slowStart: { state: 'off', totalDays: 7, eligible: true }, dayQuotas: { view: 70 } } },
-  }));
-  const w = await boot({
-    ...base,
+  }), {
     // 离线写入成功：回执带回 active 真态。
     setSlowStart: async () => ({
       ok: true,
       data: { data: { envKey: 'fb_env', slowStart: { state: 'active', day: 1, totalDays: 7, since: Date.now(), binding: true, eligible: true }, dayQuotas: { view: 20 } } },
     }),
-  });
+  }));
   for (let i = 0; i < 4; i++) await tick();
   const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
   assert.equal(toggle.checked, false, '读到 off 真态');
@@ -2270,7 +2359,7 @@ test('慢启动行：eligible=false → 勾选禁用 + 如实说明', async () =
   assert.match($(w, '#slow-start-reason').textContent || '', /该平台暂不支持/);
 });
 
-test('慢启动行：开启后立即显示等待态，旧快照不回拨，成功回执当场对齐真态与今日计划', async () => {
+test('慢启动行：开启等待期间保留普通人设，成功回执才对齐真态与今日计划', async () => {
   const write = deferred<unknown>();
   let pushStatus: ((status: unknown) => void) | undefined;
   const initial = makeStatus({
@@ -2288,22 +2377,24 @@ test('慢启动行：开启后立即显示等待态，旧快照不回拨，成�
     getStatus: async () => initial,
     setSlowStart: async () => write.promise,
   }));
+  const persona = $(w, '#facebook-persona-mode-toggle') as unknown as HTMLInputElement;
   const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
   const row = $(w, '#slow-start-row');
 
   toggle.checked = true;
   toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
-  assert.equal(toggle.checked, true);
+  assert.equal(persona.checked, true);
+  assert.equal(toggle.checked, false, 'pending 时不得乐观选中冷启动');
   assert.equal(toggle.disabled, true);
   assert.equal(row.getAttribute('aria-busy'), 'true');
   assert.ok(row.classList.contains('is-pending'));
-  assert.match($(w, '#slow-start-badge').textContent || '', /正在开启/);
+  assert.match($(w, '#slow-start-badge').textContent || '', /等待 Cloud 确认/);
   assert.doesNotMatch($(w, '#slow-start-badge').textContent || '', /第 1\/7 天/, 'pending 不得本地冒充 D1');
-  assert.match($(w, '#slow-start-reason').textContent || '', /等待云端确认/);
+  assert.match($(w, '#slow-start-reason').textContent || '', /等待 Cloud 回读确认/);
 
   pushStatus?.(initial); // PUT 仍在途时到达写前旧快照
   await tick();
-  assert.equal(toggle.checked, true, '旧快照不得把目标开关拨回 off');
+  assert.equal(toggle.checked, false, '写入在途必须持续显示旧 Cloud 确认态');
   assert.ok(row.classList.contains('is-pending'), '旧快照不得清掉等待态');
 
   write.resolve({
@@ -2316,16 +2407,17 @@ test('慢启动行：开启后立即显示等待态，旧快照不回拨，成�
       },
     },
   });
-  await tick();
+  for (let i = 0; i < 3; i++) await tick();
   assert.equal(row.hasAttribute('aria-busy'), false);
   assert.equal(row.classList.contains('is-pending'), false);
+  assert.equal(persona.checked, false);
   assert.equal(toggle.checked, true);
   assert.equal(toggle.disabled, false);
   assert.match($(w, '#slow-start-badge').textContent || '', /慢启动 · 第 1\/7 天/);
   assert.equal($(w, '#views-cap').textContent, '/20', '成功回执的 dayQuotas 应当场更新，不等下一次快照');
 });
 
-test('慢启动行：关闭失败后回到权威开启态，并保留云端失败原因', async () => {
+test('慢启动行：选择普通人设失败后保留权威开启态，并保留云端失败原因', async () => {
   const w = await boot(slowStartStub({
     getStatus: async () => makeStatus({
       cloud: 'connected',
@@ -2338,12 +2430,15 @@ test('慢启动行：关闭失败后回到权威开启态，并保留云端失�
     }),
     setSlowStart: async () => ({ ok: false, data: { error: { code: 'EDGE_OFFLINE', message: '该环境当前未连接，暂时无法更改。' } } }),
   }));
+  const persona = $(w, '#facebook-persona-mode-toggle') as unknown as HTMLInputElement;
   const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
-  toggle.checked = false;
-  toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
-  assert.match($(w, '#slow-start-badge').textContent || '', /正在关闭/);
+  persona.checked = true;
+  persona.dispatchEvent(new w.Event('change', { bubbles: true }));
+  assert.equal(persona.checked, false);
+  assert.equal(toggle.checked, true, 'pending 时仍显示权威 slow_start');
+  assert.match($(w, '#facebook-persona-mode-badge').textContent || '', /等待 Cloud 确认/);
 
-  await tick();
+  for (let i = 0; i < 3; i++) await tick();
   assert.equal(toggle.checked, true, '失败后必须回到未被篡改的权威 active 状态');
   assert.equal(toggle.disabled, false);
   assert.equal($(w, '#slow-start-row').classList.contains('is-pending'), false);
@@ -2379,7 +2474,8 @@ test('慢启动行：A 环境写入反馈不串到 B，A 回执也不改写当�
   const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
   toggle.checked = true;
   toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
-  assert.match($(w, '#slow-start-badge').textContent || '', /正在开启/);
+  assert.equal(toggle.checked, false, 'A 写入在途仍显示 A 的确认态');
+  assert.match($(w, '#slow-start-badge').textContent || '', /等待 Cloud 确认/);
 
   pushStatus?.(statusFor('B', 'off'));
   await tick();
@@ -2427,24 +2523,24 @@ test('慢启动行：点勾选框 MUST NOT 连带展开/收起「今日节奏」
   assert.equal(summary.classList.contains('expanded'), before, '点慢启动开关不得改变今日节奏的展开态');
 });
 
-// ── client-facebook-rule-mode-toggle：规则模式客户开关 ──
+// ── unified Facebook operation policy：冷启动 > 规则 > 消费 > 人设 ──
 
-// 定义号/版本对客户端是**不透明值**：只被校验成非空字符串 + 整数，从不被解释成节奏。
-// 这里**故意不写云端当下的真定义号**：节奏归云端权威定义，客户端不得内置或推断任何节奏数字，
-// 云端改节奏时也不该有任何 edge 用例跟着改（spec `client-facebook-rule-mode-toggle`：客户端不内置节奏数字）。
-function facebookRuleModeReceipt(envKey: string, enabled: boolean) {
+function facebookOperationPolicyReceipt(
+  envKey: string,
+  mode: 'persona' | 'slow_start' | 'rule' | 'consumption',
+  policyRevision = 3,
+) {
   return {
     ok: true,
     data: {
       data: {
         envKey,
-        // 规则定义的身份与节奏是 Cloud 权威，客户端只做形状校验、不解释它；
-        // 这里跟随 Cloud 当前定义只为让桩不谎报一个已经不存在的版本。
-        facebookRuleMode: {
-          enabled,
-          definitionId: 'cloud-authoritative-rule-definition',
-          definitionVersion: 7,
-          updatedAt: enabled ? '2026-07-28T08:00:00.000Z' : null,
+        facebookOperationPolicy: {
+          baseMode: mode === 'slow_start' ? 'persona' : mode,
+          effectiveMode: mode,
+          policyRevision,
+          slowStart: { state: mode === 'slow_start' ? 'active' : 'off' },
+          blocker: null,
         },
       },
     },
@@ -2453,8 +2549,10 @@ function facebookRuleModeReceipt(envKey: string, enabled: boolean) {
 
 function facebookRuleModeStub(overrides: Partial<Stub> = {}, platform = 'facebook'): Stub {
   return slowStartStub({
-    getFacebookRuleMode: async ({ envKey }) => facebookRuleModeReceipt(envKey, false),
-    setFacebookRuleMode: async ({ envKey, enabled }) => facebookRuleModeReceipt(envKey, enabled),
+    getFacebookOperationPolicy: async ({ envKey }) =>
+      facebookOperationPolicyReceipt(envKey, 'persona'),
+    setFacebookOperationPolicy: async ({ envKey, expectedRevision, mode }) =>
+      facebookOperationPolicyReceipt(envKey, mode, expectedRevision + 1),
     ...overrides,
   }, platform);
 }
@@ -2468,9 +2566,9 @@ test('规则模式行：停止的 Facebook 环境仍读取 Cloud 配置，非 Fa
       session: 'idle',
       browserState: 'closed',
     }),
-    getFacebookRuleMode: async ({ envKey }) => {
+    getFacebookOperationPolicy: async ({ envKey }) => {
       calls.push(envKey);
-      return facebookRuleModeReceipt(envKey, true);
+      return facebookOperationPolicyReceipt(envKey, 'rule');
     },
   }));
   const row = $(w, '#facebook-rule-mode-row');
@@ -2478,15 +2576,15 @@ test('规则模式行：停止的 Facebook 环境仍读取 Cloud 配置，非 Fa
   assert.ok(!hidden(row));
   assert.equal(toggle.checked, true);
   assert.equal(toggle.disabled, false);
-  assert.match($(w, '#facebook-rule-mode-badge').textContent || '', /配置已开启/);
+  assert.match($(w, '#facebook-rule-mode-badge').textContent || '', /已选择/);
   assert.doesNotMatch($(w, '#facebook-rule-mode-badge').textContent || '', /运行中/);
   assert.equal(calls.length, 1, '停止环境仍只需一次 env-scoped HTTP 读');
 
   let nonFacebookReads = 0;
   const xhs = await boot(facebookRuleModeStub({
-    getFacebookRuleMode: async ({ envKey }) => {
+    getFacebookOperationPolicy: async ({ envKey }) => {
       nonFacebookReads += 1;
-      return facebookRuleModeReceipt(envKey, true);
+      return facebookOperationPolicyReceipt(envKey, 'rule');
     },
   }, 'xiaohongshu'));
   assert.ok(hidden($(xhs, '#facebook-rule-mode-row')));
@@ -2495,7 +2593,7 @@ test('规则模式行：停止的 Facebook 环境仍读取 Cloud 配置，非 Fa
 
 test('规则模式行：读取失败或不完整回包保持 unknown，绝不默认成关闭', async () => {
   const failed = await boot(facebookRuleModeStub({
-    getFacebookRuleMode: async () => ({ ok: false, data: { error: 'binding_unknown' } }),
+    getFacebookOperationPolicy: async () => ({ ok: false, data: { error: 'binding_unknown' } }),
   }));
   const failedToggle = $(failed, '#facebook-rule-mode-toggle') as unknown as HTMLInputElement;
   assert.equal(failedToggle.indeterminate, true);
@@ -2503,64 +2601,158 @@ test('规则模式行：读取失败或不完整回包保持 unknown，绝不默
   assert.match($(failed, '#facebook-rule-mode-reason').textContent || '', /binding_unknown/);
 
   const incomplete = await boot(facebookRuleModeStub({
-    getFacebookRuleMode: async ({ envKey }) => ({
+    getFacebookOperationPolicy: async ({ envKey }) => ({
       ok: true,
-      data: { data: { envKey, facebookRuleMode: { enabled: false } } },
+      data: { data: { envKey, facebookOperationPolicy: { baseMode: 'persona' } } },
     }),
   }));
   const incompleteToggle = $(incomplete, '#facebook-rule-mode-toggle') as unknown as HTMLInputElement;
   assert.equal(incompleteToggle.indeterminate, true);
   assert.equal(incompleteToggle.disabled, true);
   assert.match($(incomplete, '#facebook-rule-mode-reason').textContent || '', /暂时无法读取/);
+
+  const cadenceLeaked: any = facebookOperationPolicyReceipt('__local__', 'consumption');
+  cadenceLeaked.data.data.facebookOperationPolicy.viewsPerLike = 5;
+  const nonCadenceFree = await boot(facebookRuleModeStub({
+    getFacebookOperationPolicy: async () => cadenceLeaked,
+  }));
+  const consumptionToggle = $(nonCadenceFree, '#facebook-consumption-mode-toggle') as unknown as HTMLInputElement;
+  assert.equal(consumptionToggle.indeterminate, true);
+  assert.equal(consumptionToggle.disabled, true);
+  assert.match($(nonCadenceFree, '#facebook-consumption-mode-reason').textContent || '', /暂时无法读取/);
 });
 
-test('规则模式行：写入中只显示目标意图，完整 Cloud 回执后才收敛', async () => {
+test('运行方式：写入中保留最后确认的普通人设，完整 Cloud 回执后才切到规则', async () => {
   const write = deferred<unknown>();
   let writtenEnvKey = '';
   const w = await boot(facebookRuleModeStub({
-    setFacebookRuleMode: async (args) => {
+    setFacebookOperationPolicy: async (args) => {
       writtenEnvKey = args.envKey;
       return write.promise;
     },
   }));
+  const persona = $(w, '#facebook-persona-mode-toggle') as unknown as HTMLInputElement;
   const toggle = $(w, '#facebook-rule-mode-toggle') as unknown as HTMLInputElement;
   const row = $(w, '#facebook-rule-mode-row');
+  assert.equal(persona.checked, true);
   assert.equal(toggle.checked, false);
 
   toggle.checked = true;
   toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
-  assert.equal(toggle.checked, true);
+  assert.equal(persona.checked, true, 'pending 时必须恢复最后一份 Cloud 确认态');
+  assert.equal(toggle.checked, false, '目标模式不得在写后回读前乐观选中');
   assert.equal(toggle.disabled, true);
   assert.equal(row.getAttribute('aria-busy'), 'true');
-  assert.match($(w, '#facebook-rule-mode-badge').textContent || '', /正在开启/);
-  assert.match($(w, '#facebook-rule-mode-reason').textContent || '', /等待 Cloud 确认/);
+  assert.match($(w, '#facebook-rule-mode-badge').textContent || '', /等待 Cloud 确认/);
+  assert.match($(w, '#facebook-rule-mode-reason').textContent || '', /等待 Cloud 回读确认/);
   assert.ok(writtenEnvKey);
 
-  write.resolve(facebookRuleModeReceipt(writtenEnvKey, true));
+  write.resolve(facebookOperationPolicyReceipt(writtenEnvKey, 'rule', 4));
   await tick();
+  assert.equal(persona.checked, false);
   assert.equal(toggle.checked, true);
   assert.equal(toggle.disabled, false);
   assert.equal(row.hasAttribute('aria-busy'), false);
-  assert.match($(w, '#facebook-rule-mode-badge').textContent || '', /配置已开启/);
-  assert.match($(w, '.rule-mode-copy').textContent || '', /慢启动开启时由慢启动优先，规则模式暂停/);
+  assert.match($(w, '#facebook-rule-mode-badge').textContent || '', /已选择/);
+  assert.match($(w, '#facebook-rule-mode-row .rule-mode-copy').textContent || '', /冷启动优先于规则模式/);
 });
 
-test('规则模式行：写失败或成功回执不完整都回到最近 Cloud 真态', async () => {
+test('消费模式行：与冷启动/规则互斥，写入只带 envKey、revision、mode 并以 Cloud 回读收敛', async () => {
+  const writes: Array<Record<string, unknown>> = [];
+  const w = await boot(facebookRuleModeStub({
+    setFacebookOperationPolicy: async (args) => {
+      writes.push(args);
+      return facebookOperationPolicyReceipt(args.envKey, args.mode, args.expectedRevision + 1);
+    },
+  }));
+  const persona = $(w, '#facebook-persona-mode-toggle') as unknown as HTMLInputElement;
+  const slow = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
+  const rule = $(w, '#facebook-rule-mode-toggle') as unknown as HTMLInputElement;
+  const consumption = $(w, '#facebook-consumption-mode-toggle') as unknown as HTMLInputElement;
+  assert.equal(persona.checked, true);
+  assert.equal(slow.checked, false);
+  assert.equal(rule.checked, false);
+  assert.equal(consumption.checked, false);
+
+  consumption.checked = true;
+  consumption.dispatchEvent(new w.Event('change', { bubbles: true }));
+  for (let i = 0; i < 3; i++) await tick();
+  assert.equal(writes[0]?.envKey, '__local__');
+  assert.equal(writes[0]?.expectedRevision, 3);
+  assert.equal(writes[0]?.mode, 'consumption');
+  assert.deepEqual(Object.keys(writes[0] || {}).sort(), ['envKey', 'expectedRevision', 'mode']);
+  assert.equal(slow.checked, false);
+  assert.equal(rule.checked, false);
+  assert.equal(consumption.checked, true);
+  assert.match($(w, '#facebook-consumption-mode-badge').textContent || '', /已选择/);
+  assert.match($(w, '.consumption-mode-row .rule-mode-copy').textContent || '', /不在客户端保存节奏数字/);
+
+  persona.checked = true;
+  persona.dispatchEvent(new w.Event('change', { bubbles: true }));
+  for (let i = 0; i < 3; i++) await tick();
+  assert.equal(writes[1]?.expectedRevision, 4);
+  assert.equal(writes[1]?.mode, 'persona');
+  assert.equal(persona.checked, true);
+  assert.equal(consumption.checked, false);
+});
+
+test('运行方式：Cloud 的 active slow-start 胜出，同时单独展示被暂停的规则基础模式', async () => {
+  const w = await boot(facebookRuleModeStub({
+    getFacebookOperationPolicy: async ({ envKey }) => ({
+      ok: true,
+      data: {
+        data: {
+          envKey,
+          facebookOperationPolicy: {
+            baseMode: 'rule',
+            effectiveMode: 'slow_start',
+            policyRevision: 9,
+            slowStart: { state: 'active' },
+            blocker: null,
+          },
+        },
+      },
+    }),
+  }));
+  const persona = $(w, '#facebook-persona-mode-toggle') as unknown as HTMLInputElement;
+  const slow = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
+  const rule = $(w, '#facebook-rule-mode-toggle') as unknown as HTMLInputElement;
+  const consumption = $(w, '#facebook-consumption-mode-toggle') as unknown as HTMLInputElement;
+  assert.equal(persona.checked, false);
+  assert.equal(slow.checked, true);
+  assert.equal(rule.checked, false, '基础 rule 不得伪装成第二个同时启用的模式');
+  assert.equal(consumption.checked, false);
+  assert.match($(w, '#facebook-rule-mode-badge').textContent || '', /冷启动优先（暂停）/);
+});
+
+test('运行方式：写失败或成功回执不完整时保留最近 Cloud 真态并后台复读', async () => {
   for (const response of [
     { ok: false, data: { error: { code: 'binding_conflict', message: '环境绑定冲突' } } },
-    { ok: true, data: { data: { envKey: '__local__', facebookRuleMode: { enabled: true } } } },
+    { ok: true, data: { data: { envKey: '__local__', facebookOperationPolicy: { baseMode: 'rule' } } } },
   ]) {
+    const refresh = deferred<unknown>();
+    let reads = 0;
     const w = await boot(facebookRuleModeStub({
-      setFacebookRuleMode: async () => response,
+      getFacebookOperationPolicy: async ({ envKey }) => {
+        reads += 1;
+        return reads === 1
+          ? facebookOperationPolicyReceipt(envKey, 'persona')
+          : refresh.promise;
+      },
+      setFacebookOperationPolicy: async () => response,
     }));
+    const persona = $(w, '#facebook-persona-mode-toggle') as unknown as HTMLInputElement;
     const toggle = $(w, '#facebook-rule-mode-toggle') as unknown as HTMLInputElement;
     toggle.checked = true;
     toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
     await tick();
+    assert.equal(persona.checked, true, '失败后的后台 GET 在途时仍保留最后确认态');
     assert.equal(toggle.checked, false, '失败不得保留乐观开启态');
     assert.equal(toggle.disabled, false);
     assert.equal($(w, '#facebook-rule-mode-row').hasAttribute('aria-busy'), false);
     assert.ok($(w, '#facebook-rule-mode-reason').classList.contains('is-error'));
+    refresh.resolve(facebookOperationPolicyReceipt('__local__', 'persona'));
+    await tick();
   }
 });
 
@@ -2579,17 +2771,18 @@ test('规则模式行：A 写入期间切到 B，A 晚到回执不改写 B', asy
   const w = await boot(facebookRuleModeStub({
     onStatusUpdate: (cb) => { pushStatus = cb; },
     getStatus: async () => statusFor('A'),
-    getFacebookRuleMode: async ({ envKey }) => facebookRuleModeReceipt(envKey, configs.get(envKey) ?? false),
-    setFacebookRuleMode: async ({ envKey, enabled }) => {
+    getFacebookOperationPolicy: async ({ envKey }) =>
+      facebookOperationPolicyReceipt(envKey, configs.get(envKey) ? 'rule' : 'persona'),
+    setFacebookOperationPolicy: async ({ envKey, mode, expectedRevision }) => {
       if (envKey === 'A') return writeA.promise;
-      configs.set(envKey, enabled);
-      return facebookRuleModeReceipt(envKey, enabled);
+      configs.set(envKey, mode === 'rule');
+      return facebookOperationPolicyReceipt(envKey, mode, expectedRevision + 1);
     },
   }));
   const toggle = $(w, '#facebook-rule-mode-toggle') as unknown as HTMLInputElement;
   toggle.checked = true;
   toggle.dispatchEvent(new w.Event('change', { bubbles: true }));
-  assert.match($(w, '#facebook-rule-mode-badge').textContent || '', /正在开启/);
+  assert.match($(w, '#facebook-rule-mode-badge').textContent || '', /等待 Cloud 确认/);
 
   pushStatus?.(statusFor('B'));
   await tick();
@@ -2601,7 +2794,7 @@ test('规则模式行：A 写入期间切到 B，A 晚到回执不改写 B', asy
   assert.equal($(w, '#facebook-rule-mode-row').classList.contains('is-pending'), false);
 
   configs.set('A', true);
-  writeA.resolve(facebookRuleModeReceipt('A', true));
+  writeA.resolve(facebookOperationPolicyReceipt('A', 'rule', 4));
   await tick();
   assert.equal(toggle.checked, false, 'A 晚到回执不得改写当前 B');
 
