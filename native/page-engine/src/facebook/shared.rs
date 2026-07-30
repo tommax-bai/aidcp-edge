@@ -125,23 +125,12 @@ pub(crate) async fn wait_for_facebook_reel_like(
     }
 }
 
-pub(crate) async fn wait_for_facebook_like(
-    session: &mut EngineSession,
-    note_id: &str,
-    timeout: Duration,
-) -> Result<bool, EngineError> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let probe = probe_facebook_like(session, note_id).await?;
-        if probe.ok && probe.already {
-            return Ok(true);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Ok(false);
-        }
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    }
-}
+// `wait_for_facebook_like` 曾在此处，已删除。它返回 `bool`：把「探针读不到」与
+// 「读到了、确实没点上」压成同一个 `false`，调用方因此只能一律回报 `like_unconfirmed` ——
+// 正是「『读不到』与『没有』不得压成一态」这条红线的违规。
+// 它唯二的调用点在 `feed_like.rs` 的 Reels 面点赞分支，现已改走三道闸编排：
+// 后置校验落在 `ReelSurfaceLikeSteps::validate`，按三态（Confirmed / Unchanged / Indeterminate）回报。
+// 同族的三态版本 `wait_for_facebook_reel_like`（就在上面）保留，供 `/reel/` 分支继续使用。
 
 pub(crate) async fn probe_facebook_follow(
     session: &mut EngineSession,

@@ -7,7 +7,7 @@ use aidcp_page_engine::command::{
 use aidcp_page_engine::commit_window::CommitWindowRequester;
 use aidcp_page_engine::engine::{CommandOutput, Engine};
 use aidcp_page_engine::error::{CdpExceptionClass, CdpExceptionReason, ErrorCode};
-use aidcp_page_engine::model::FacebookListKind;
+use aidcp_page_engine::model::{ActionReceipt, FacebookListKind};
 use aidcp_page_engine::protocol::{
     CommandRecord, EffectPhase, NativeCommand, PageProbeParams, Platform, SessionCloseRecord,
     SessionOpenParams, SessionOpenRecord,
@@ -1055,6 +1055,171 @@ async fn facebook_reel_like_picker_commit_is_bounded_to_one_trusted_pointer_writ
     assert_eq!(pointer_event_count(&requests, "mousePressed"), 1);
     assert_eq!(pointer_event_count(&requests, "mouseReleased"), 1);
     assert!(mouse_dispatch_count(&requests) > 3, "点击必须逐帧移动");
+}
+
+/// 点击之后 `like_probe` 怎么答。这三档正是本组用例要分开的三态。
+#[derive(Clone, Copy)]
+enum ReelSurfaceLikeAfterClick {
+    /// 读得到、且确实已经点上。
+    Liked,
+    /// **探针读不到**（目标丢了 / 身份读不出）。MUST NOT 被回报成「确实没点上」。
+    Unreadable,
+    /// 读得到、且确实没点上。
+    Unchanged,
+}
+
+/// Reels 面 + **身份退化**（`note_id` 不是 `/reel/` 地址）那条点赞分支的假 CDP。
+///
+/// 这条分支在接线前没有任何 Rust 用例，所以它的两态塌陷缺陷一直没有任何测试会喊。
+async fn spawn_facebook_reel_surface_like_cdp(
+    after_click: ReelSurfaceLikeAfterClick,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/reels/tab").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        let mut clicked = false;
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            if request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseReleased"
+            {
+                clicked = true;
+            }
+            let result = match router_kind(&request).as_deref() {
+                Some("page_probe") => facebook_ready_cdp("/reels/tab"),
+                Some("consent_probe") => facebook_consent_absent_cdp(),
+                // 匿名 reel 探针：是 Reels 面，但读不出帖子身份 —— 这正是本分支的触发前提。
+                Some("reel_probe") => anonymous_reel_probe_cdp("video-9001@element:1"),
+                Some("like_probe") => {
+                    if !clicked {
+                        router_cdp(
+                            "like_probe",
+                            json!({"ok": true, "already": false, "cx": 612.0, "cy": 408.0}),
+                        )
+                    } else {
+                        match after_click {
+                            ReelSurfaceLikeAfterClick::Liked => router_cdp(
+                                "like_probe",
+                                json!({"ok": true, "already": true, "cx": 612.0, "cy": 408.0}),
+                            ),
+                            ReelSurfaceLikeAfterClick::Unreadable => router_cdp(
+                                "like_probe",
+                                json!({"ok": false, "reason": "target_not_found"}),
+                            ),
+                            ReelSurfaceLikeAfterClick::Unchanged => router_cdp(
+                                "like_probe",
+                                json!({"ok": true, "already": false, "cx": 612.0, "cy": 408.0}),
+                            ),
+                        }
+                    }
+                }
+                Some("like_picker_probe") => router_cdp(
+                    "point_target",
+                    json!({"ok": true, "cx": 744.0, "cy": 296.0}),
+                ),
+                _ => json!({}),
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
+        requests
+    });
+    (port, server)
+}
+
+fn reel_surface_like_command(command_id: u64) -> CommandRecord {
+    CommandRecord {
+        protocol_version: 2,
+        id: format!("facebook-reel-surface-like-{command_id}"),
+        session_id: "session-1".to_owned(),
+        task_id: "browse-1".to_owned(),
+        command_id,
+        // 两轮后置校验最坏 2s + 3s，另加探针往返。取 30s 让判定与机器负载无关
+        // （与本文件其它长流程用例同口径；短预算会把负载抖动读成行为缺陷）。
+        deadline_unix_ms: unix_time_ms() + 30_000,
+        command: NativeCommand::InteractionLike(NoteInteractionParams {
+            // 关键：**不是** `/reel/` 地址，于是走 `feed_like.rs` 的 Reels 面身份退化分支。
+            note_id: "https://www.facebook.com/watch/?v=9001".to_owned(),
+            reason: None,
+            think_ms: None,
+        }),
+    }
+}
+
+async fn run_reel_surface_like(
+    after_click: ReelSurfaceLikeAfterClick,
+) -> (EffectPhase, ActionReceipt, Vec<Value>) {
+    let (port, server) = spawn_facebook_reel_surface_like_cdp(after_click).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 30_000;
+    engine.open(&open).await.expect("open Facebook session");
+    let outcome = engine
+        .execute(&reel_surface_like_command(1))
+        .await
+        .expect("Reels surface like");
+    engine.shutdown().await;
+    let requests = server.await.expect("Reels surface like fake CDP");
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("like receipt") else {
+        panic!("expected action receipt")
+    };
+    (outcome.effect_phase, *receipt, requests)
+}
+
+#[tokio::test]
+async fn reel_surface_like_confirms_when_the_reread_shows_the_like_landed() {
+    let (phase, receipt, requests) = run_reel_surface_like(ReelSurfaceLikeAfterClick::Liked).await;
+    assert_eq!(phase, EffectPhase::Confirmed);
+    assert!(receipt.ok);
+    // 一次确认就收工：不得再去点反应浮层。
+    assert_eq!(router_call_count(&requests, "like_picker_probe"), 0);
+    assert_eq!(pointer_event_count(&requests, "mousePressed"), 1);
+}
+
+/// 🔴 本次接线要钉死的红线：**「探针读不到」不是「确实没点上」**。
+///
+/// 接线前这条路径的后置校验返回 `bool`（`shared.rs` 已删除的 `wait_for_facebook_like`），
+/// 两态被压成同一个 `false`，于是目标丢了 / 身份读不出也一律回报 `like_unconfirmed`
+/// ——即「读到了、确实没点上」。把 `validate` 里 `!probe.ok` 那一档改回 `Unchanged`，这条用例立刻红。
+#[tokio::test]
+async fn reel_surface_like_reports_an_unreadable_reread_as_indeterminate_never_as_unchanged() {
+    let (phase, receipt, _) = run_reel_surface_like(ReelSurfaceLikeAfterClick::Unreadable).await;
+    assert_eq!(phase, EffectPhase::Ambiguous);
+    assert!(!receipt.ok);
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("verify_indeterminate"),
+        "探针读不到必须回 verify_indeterminate；回 like_unconfirmed 等于把「读不到」谎报成「确实没点上」"
+    );
+}
+
+/// 与上一条成对：真的读到了、真的没点上，才可以回 `like_unconfirmed`。
+/// 两条一起才能证明这两态**没有**被压回一态（只测其中一条会被一个恒定返回值骗过）。
+#[tokio::test]
+async fn reel_surface_like_reports_a_readable_miss_as_unconfirmed() {
+    let (phase, receipt, requests) =
+        run_reel_surface_like(ReelSurfaceLikeAfterClick::Unchanged).await;
+    assert_eq!(phase, EffectPhase::Ambiguous);
+    assert!(!receipt.ok);
+    assert_eq!(receipt.reason.as_deref(), Some("like_unconfirmed"));
+    // 闸②的派发上限：两轮＝两次派发，与 `capability.rs` 的 `max_dispatch_count = 2` 对齐，
+    // 且**两次点的是不同目标**（帖级主控件 → 反应浮层），绝不是对同一控件重试。
+    assert_eq!(router_call_count(&requests, "like_picker_probe"), 1);
+    assert_eq!(pointer_event_count(&requests, "mousePressed"), 2);
 }
 
 #[tokio::test]
