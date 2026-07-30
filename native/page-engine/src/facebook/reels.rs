@@ -379,8 +379,16 @@ fn reel_navigation_target_matches(
     target: &facebook::FacebookReelNextTarget,
     previous: &facebook::FacebookReelProbe,
 ) -> bool {
+    // A proven axis may be keyboard-only when its overlay is unsafe to click. Every other
+    // `found:false` reason remains pre-dispatch so a disabled forward control cannot emit a key.
+    let input_eligible = if target.found {
+        target.reason.is_none()
+    } else {
+        target.reason.as_deref() == Some("next_control_not_click_safe")
+    };
     target.ok
         && !target.ambiguous
+        && input_eligible
         && target.video_key == previous.video_key
         && (previous.note_id.is_none() || target.note_id == previous.note_id)
 }

@@ -455,48 +455,95 @@ async function(input){
   const reelNextTarget=()=>{
     const active=activeReel();
     if(!active.ok)return {...reelProbeValue(active),found:false,ambiguous:active.reason==='ambiguous_target'};
-    const rect=active.videoRect;
-    const next=/(next|ti[eế]p theo|下一|下一个|下一張|下一张|往下)/i;
-    const previous=/(previous|trước|上一|上一个|上一張|上一张|往上)/i;
+    const viewportWidth=Math.max(1,Number(window.innerWidth)||1);
+    const viewportHeight=Math.max(1,Number(window.innerHeight)||1);
+    const clipRect=(target)=>{
+      const left=Math.max(0,Math.min(viewportWidth,target.left));
+      const top=Math.max(0,Math.min(viewportHeight,target.top));
+      const right=Math.max(left,Math.min(viewportWidth,target.right));
+      const bottom=Math.max(top,Math.min(viewportHeight,target.bottom));
+      return {left,top,right,bottom,width:right-left,height:bottom-top};
+    };
+    const rect=clipRect(active.videoRect);
+    const videoWidth=Math.max(1,rect.width);
+    const videoHeight=Math.max(1,rect.height);
+    const next=/(next|tiep theo|suivant(?:e)?|下一|下一个|下一張|下一张|往下)/i;
+    const previous=/(previous|truoc|precedent(?:e)?|上一|上一个|上一張|上一张|往上)/i;
     const down=/(arrow down|scroll down|move down|往下|向下)/i;
     const right=/(arrow right|scroll right|move right|往右|向右)/i;
+    const reactionOrMedia=/(like|unlike|j[’']?aime|comment|share|partager|reaction|menu|more|play|pause|mute|thich|binh luan|chia se|赞|讚|评论|評論|分享|播放|暂停|暫停)/i;
     const buttons=all('[role="button"],button').filter(visible).map((button)=>({
       button,
-      rect:button.getBoundingClientRect(),
+      rawRect:button.getBoundingClientRect(),
       label:label(button),
       disabled:button.getAttribute('aria-disabled')==='true'||Boolean(button.disabled),
-    })).filter((candidate)=>{
-      const target=candidate.rect;
-      return target.width>=36&&target.width<=68
-        &&target.height>=36&&target.height<=68
-        &&target.left>=-2
-        &&target.right<=(window.innerWidth||0)+2
-        &&target.top>=64
-        &&target.bottom<=(window.innerHeight||0)+2;
-    }).map((candidate)=>({
+    })).map((candidate)=>({...candidate,rect:clipRect(candidate.rawRect)}))
+      .map((candidate)=>({
+        ...candidate,
+        visibleFraction:(candidate.rect.width*candidate.rect.height)/Math.max(
+          1,
+          candidate.rawRect.width*candidate.rawRect.height,
+        ),
+      }))
+      .filter((candidate)=>
+        candidate.visibleFraction>=0.2
+        &&candidate.rect.width/viewportWidth>=0.005
+        &&candidate.rect.height/viewportHeight>=0.01
+      )
+      .map((candidate)=>({
       ...candidate,
       cx:candidate.rect.left+candidate.rect.width/2,
       cy:candidate.rect.top+candidate.rect.height/2,
-      role:next.test(candidate.label)&&!previous.test(candidate.label)
+      directionLabel:fold(candidate.label).toLowerCase(),
+    })).map((candidate)=>({
+      ...candidate,
+      role:reactionOrMedia.test(candidate.directionLabel)
+        ?'action'
+        :next.test(candidate.directionLabel)&&!previous.test(candidate.directionLabel)
         ?'next'
-        :previous.test(candidate.label)&&!next.test(candidate.label)?'previous':'unknown',
+        :previous.test(candidate.directionLabel)&&!next.test(candidate.directionLabel)?'previous':'unknown',
     }));
+    const verticalOverlapPx=(candidate)=>
+      Math.max(0,Math.min(candidate.rect.bottom,rect.bottom)-Math.max(candidate.rect.top,rect.top));
+    const verticalOverlap=(candidate)=>
+      verticalOverlapPx(candidate)/Math.max(1,Math.min(candidate.rect.height,videoHeight));
+    const inVideoYBand=(candidate)=>
+      candidate.cy>=rect.top+videoHeight*0.1&&candidate.cy<=rect.bottom-videoHeight*0.1;
+    const rightGutter=Math.max(0,viewportWidth-rect.right);
     const verticalMember=(candidate)=>
-      candidate.rect.left>Math.max((window.innerWidth||0)*0.8,rect.right+120)
-      &&candidate.rect.top>=Math.max(64,rect.top+(rect.bottom-rect.top)*0.2)
-      &&candidate.rect.bottom<=Math.min(window.innerHeight||0,rect.bottom-(rect.bottom-rect.top)*0.08);
+      rightGutter>0
+      &&candidate.rect.left>=rect.right-videoWidth*0.01
+      &&candidate.cx>=rect.right+rightGutter*0.5
+      &&candidate.rect.width<=videoWidth*0.18
+      &&candidate.rect.height<=videoHeight*0.22
+      &&candidate.cy>=rect.top+videoHeight*0.12
+      &&candidate.cy<=rect.bottom-videoHeight*0.12;
     const horizontalPrevious=(candidate)=>
-      candidate.rect.right<rect.left-24
-      &&candidate.cy>=rect.top+(rect.bottom-rect.top)*0.2
-      &&candidate.cy<=rect.bottom-(rect.bottom-rect.top)*0.2;
+      candidate.rect.left<rect.left
+      &&candidate.rect.right<=rect.left+videoWidth*0.04
+      &&verticalOverlap(candidate)>=0.5
+      &&inVideoYBand(candidate);
     const horizontalNext=(candidate)=>
-      candidate.rect.left>rect.right+24
-      &&candidate.cy>=rect.top+(rect.bottom-rect.top)*0.2
-      &&candidate.cy<=rect.bottom-(rect.bottom-rect.top)*0.2;
+      candidate.rect.right>rect.right
+      &&candidate.rect.left>=rect.right-videoWidth*0.04
+      &&verticalOverlap(candidate)>=0.5
+      &&inVideoYBand(candidate);
+    const horizontalOverlayNext=(candidate)=>
+      rightGutter>0
+      &&horizontalNext(candidate)
+      &&candidate.rect.left<=rect.right+videoWidth*0.04
+      &&candidate.rect.right>=viewportWidth-rightGutter*0.1
+      &&candidate.rect.width/rightGutter>=0.7
+      &&candidate.rect.width/viewportWidth>=0.2
+      &&candidate.rect.height/viewportHeight>=0.6
+      &&verticalOverlapPx(candidate)/videoHeight>=0.7;
     const axisOf=(back,forward)=>{
-      const horizontal=horizontalPrevious(back)&&horizontalNext(forward)&&Math.abs(back.cy-forward.cy)<=80;
+      const horizontal=horizontalPrevious(back)&&horizontalNext(forward)
+        &&Math.abs(back.cy-forward.cy)<=videoHeight*0.12;
       const vertical=verticalMember(back)&&verticalMember(forward)
-        &&Math.abs(back.cx-forward.cx)<=40&&forward.cy>back.cy+16;
+        &&Math.abs(back.cx-forward.cx)<=videoWidth*0.06
+        &&forward.cy>back.cy+videoHeight*0.03
+        &&forward.cy<=back.cy+videoHeight*0.3;
       return horizontal===vertical?'':horizontal?'horizontal':'vertical';
     };
     const previousButtons=buttons.filter((candidate)=>candidate.role==='previous');
@@ -511,38 +558,59 @@ async function(input){
     const uniquePairs=semanticPairs.filter((pair,index,list)=>
       list.findIndex((candidate)=>candidate.axis===pair.axis&&candidate.target.button===pair.target.button)===index
     );
-    let choice=uniquePairs.length===1?uniquePairs[0]:null;
-    if(uniquePairs.length>1){
-      return {...reelProbeValue(active),found:false,ambiguous:true};
-    }
-    if(!choice&&nextButtons.length===1){
+    const hypotheses=[...uniquePairs];
+    if(nextButtons.length===1){
       const target=nextButtons[0];
-      if(down.test(target.label)&&verticalMember(target))choice={axis:'vertical',target};
-      else if(right.test(target.label)&&horizontalNext(target))choice={axis:'horizontal',target};
+      if(horizontalOverlayNext(target))hypotheses.push({axis:'horizontal',target});
+      if(down.test(target.directionLabel)&&verticalMember(target))hypotheses.push({axis:'vertical',target});
+      else if(right.test(target.directionLabel)&&horizontalNext(target))hypotheses.push({axis:'horizontal',target});
     }
-    if(!choice){
-      const unknown=buttons.filter((candidate)=>candidate.role==='unknown');
-      const vertical=unknown.filter(verticalMember).sort((left,right)=>left.cy-right.cy);
-      const horizontalLeft=unknown.filter(horizontalPrevious);
-      const horizontalRight=unknown.filter(horizontalNext);
-      const structural=[];
-      if(vertical.length===2&&Math.abs(vertical[0].cx-vertical[1].cx)<=40){
-        structural.push({axis:'vertical',target:vertical[1]});
-      }
-      if(horizontalLeft.length===1&&horizontalRight.length===1
-        &&Math.abs(horizontalLeft[0].cy-horizontalRight[0].cy)<=80){
-        structural.push({axis:'horizontal',target:horizontalRight[0]});
-      }
-      if(structural.length===1)choice=structural[0];
-      else return {...reelProbeValue(active),found:false,ambiguous:structural.length>1};
+    const unknown=buttons.filter((candidate)=>candidate.role==='unknown');
+    const horizontalLeft=unknown.filter(horizontalPrevious);
+    const horizontalRight=unknown.filter(horizontalNext);
+    if(horizontalLeft.length===1&&horizontalRight.length===1
+      &&Math.abs(horizontalLeft[0].cy-horizontalRight[0].cy)<=videoHeight*0.12){
+      hypotheses.push({axis:'horizontal',target:horizontalRight[0]});
     }
+    const choices=hypotheses.filter((pair,index,list)=>
+      list.findIndex((candidate)=>candidate.axis===pair.axis&&candidate.target.button===pair.target.button)===index
+    );
+    if(choices.length!==1){
+      return {...reelProbeValue(active),found:false,ambiguous:choices.length>1};
+    }
+    const choice=choices[0];
     const target=choice.target;
     if(target.disabled)return {
+      ...reelProbeValue(active),
+      found:false,
+      ambiguous:false,
+      reason:'next_control_disabled',
+    };
+    const targetFullyVisible=target.rawRect.left>=0
+      &&target.rawRect.top>=0
+      &&target.rawRect.right<=viewportWidth
+      &&target.rawRect.bottom<=viewportHeight;
+    const topmost=typeof document.elementFromPoint==='function'
+      ?document.elementFromPoint(target.cx,target.cy)
+      :null;
+    const targetAtPoint=Boolean(topmost&&(topmost===target.button||target.button.contains(topmost)));
+    if(!targetAtPoint)return {
+      ...reelProbeValue(active),
+      found:false,
+      ambiguous:false,
+      reason:'next_control_occluded',
+    };
+    const pointerSafe=targetFullyVisible
+      &&target.rect.width/viewportWidth>=0.015
+      &&target.rect.width/viewportWidth<=0.12
+      &&target.rect.height/viewportHeight>=0.025
+      &&target.rect.height/viewportHeight<=0.18;
+    if(!pointerSafe)return {
       ...reelProbeValue(active),
       axis:choice.axis,
       found:false,
       ambiguous:false,
-      reason:'next_control_disabled',
+      reason:'next_control_not_click_safe',
     };
     return {
       ...reelProbeValue(active),

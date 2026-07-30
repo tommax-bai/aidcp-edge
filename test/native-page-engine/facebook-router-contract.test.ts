@@ -34,6 +34,15 @@ function install(html: string, url = 'https://www.facebook.com/'): JSDOM {
   Object.defineProperty(dom.window.HTMLElement.prototype, 'getBoundingClientRect', {
     value: () => ({ x: 0, y: 0, top: 0, left: 0, right: 100, bottom: 40, width: 100, height: 40 }),
   });
+  Object.defineProperty(dom.window.document, 'elementFromPoint', {
+    configurable: true,
+    value: (x: number, y: number) => Array.from(dom.window.document.querySelectorAll('*'))
+      .filter((element) => {
+        const rect = element.getBoundingClientRect();
+        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+      })
+      .at(-1) ?? null,
+  });
   Object.defineProperty(dom.window.HTMLElement.prototype, 'scrollIntoView', { value: () => undefined });
   Object.defineProperty(dom.window, 'scrollBy', { value: () => undefined });
   return dom;
@@ -55,6 +64,12 @@ function setRect(element: Element, rect: {
       height: rect.bottom - rect.top,
     }),
   });
+}
+
+function setViewport(dom: JSDOM, width: number, height: number): void {
+  Object.defineProperty(dom.window, 'innerWidth', { configurable: true, value: width });
+  Object.defineProperty(dom.window, 'innerHeight', { configurable: true, value: height });
+  Object.assign(globalThis, { innerWidth: width, innerHeight: height });
 }
 
 test('Facebook Group Join probe returns bounded not-ready data while navigation has no body', async () => {
@@ -759,14 +774,338 @@ test('Facebook Reels next target resolves a horizontal rail around the active vi
   assert.equal(target.output.value.cy, 400);
 });
 
+test('Facebook Reels next target resolves one viewport-scale horizontal overlay without clicking it', async () => {
+  for (const [width, height] of [[1_440, 893], [1_024, 640]]) {
+    const dom = install(`
+      <main>
+        <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
+        <button id="next" aria-label="Thẻ tiếp theo"></button>
+        <button id="media-left" aria-label="Play"></button>
+        <button id="media-right" aria-label="More"></button>
+      </main>
+    `, 'https://www.facebook.com/reel/777');
+    setViewport(dom, width, height);
+    const videoLeft = width * 0.344;
+    const videoRight = width * 0.657;
+    const videoTop = height * 0.083;
+    const videoBottom = height * 0.98;
+    setRect(dom.window.document.querySelector('video')!, {
+      left: videoLeft,
+      top: videoTop,
+      right: videoRight,
+      bottom: videoBottom,
+    });
+    setRect(dom.window.document.querySelector('#next')!, {
+      left: videoRight,
+      top: height * 0.043,
+      right: width * 1.157,
+      bottom: videoBottom,
+    });
+    setRect(dom.window.document.querySelector('#media-left')!, {
+      left: videoLeft + (videoRight - videoLeft) * 0.4,
+      top: videoBottom - height * 0.05,
+      right: videoLeft + (videoRight - videoLeft) * 0.44,
+      bottom: videoBottom - height * 0.01,
+    });
+    setRect(dom.window.document.querySelector('#media-right')!, {
+      left: videoLeft + (videoRight - videoLeft) * 0.56,
+      top: videoBottom - height * 0.05,
+      right: videoLeft + (videoRight - videoLeft) * 0.6,
+      bottom: videoBottom - height * 0.01,
+    });
+
+    const target = await run({ kind: 'reel_next_target', params: {} });
+
+    assert.equal(target.output.value.ok, true);
+    assert.equal(target.output.value.axis, 'horizontal');
+    assert.equal(target.output.value.found, false);
+    assert.equal(target.output.value.ambiguous, false);
+    assert.equal(target.output.value.cx, undefined);
+    assert.equal(target.output.value.cy, undefined);
+    assert.equal(target.output.value.reason, 'next_control_not_click_safe');
+  }
+});
+
+test('Facebook Reels next target does not infer an axis from one compact generic Next control', async () => {
+  const dom = install(`
+    <main>
+      <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
+      <button id="next" aria-label="Next"></button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setViewport(dom, 1_440, 803);
+  setRect(dom.window.document.querySelector('video')!, {
+    left: 220,
+    top: 127,
+    right: 1_296,
+    bottom: 732,
+  });
+  setRect(dom.window.document.querySelector('#next')!, {
+    left: 1_380,
+    top: 438,
+    right: 1_428,
+    bottom: 486,
+  });
+
+  const target = await run({ kind: 'reel_next_target', params: {} });
+
+  assert.equal(target.output.value.ok, true);
+  assert.equal(target.output.value.found, false);
+  assert.equal(target.output.value.ambiguous, false);
+  assert.equal(target.output.value.axis, undefined);
+});
+
+test('Facebook Reels next target does not treat a small-video gutter control as an overlay', async () => {
+  const dom = install(`
+    <main>
+      <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
+      <button id="next" aria-label="Next"></button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setRect(dom.window.document.querySelector('video')!, {
+    left: 1_280,
+    top: 100,
+    right: 1_360,
+    bottom: 160,
+  });
+  setRect(dom.window.document.querySelector('#next')!, {
+    left: 1_360,
+    top: 106,
+    right: 1_440,
+    bottom: 154,
+  });
+
+  const target = await run({ kind: 'reel_next_target', params: {} });
+
+  assert.equal(target.output.value.ok, true);
+  assert.equal(target.output.value.found, false);
+  assert.equal(target.output.value.ambiguous, false);
+  assert.equal(target.output.value.axis, undefined);
+});
+
+test('Facebook Reels next target resolves the outer vertical rail beside a wide video', async () => {
+  const dom = install(`
+    <main>
+      <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
+      <button id="like" aria-label="J’aime"></button>
+      <button id="comment" aria-label="Commenter"></button>
+      <button id="share" aria-label="Partager"></button>
+      <button id="previous" aria-label="Carte précédente"></button>
+      <button id="next" aria-label="Carte suivante"></button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setViewport(dom, 1_440, 803);
+  setRect(dom.window.document.querySelector('video')!, {
+    left: 220,
+    top: 127,
+    right: 1_296,
+    bottom: 732,
+  });
+  setRect(dom.window.document.querySelector('#like')!, {
+    left: 1_308,
+    top: 330,
+    right: 1_373,
+    bottom: 395,
+  });
+  setRect(dom.window.document.querySelector('#comment')!, {
+    left: 1_308,
+    top: 410,
+    right: 1_373,
+    bottom: 475,
+  });
+  setRect(dom.window.document.querySelector('#share')!, {
+    left: 1_308,
+    top: 490,
+    right: 1_373,
+    bottom: 555,
+  });
+  setRect(dom.window.document.querySelector('#previous')!, {
+    left: 1_380,
+    top: 374,
+    right: 1_428,
+    bottom: 422,
+  });
+  setRect(dom.window.document.querySelector('#next')!, {
+    left: 1_380,
+    top: 438,
+    right: 1_428,
+    bottom: 486,
+  });
+
+  const target = await run({ kind: 'reel_next_target', params: {} });
+
+  assert.equal(target.output.value.ok, true);
+  assert.equal(target.output.value.found, true);
+  assert.equal(target.output.value.ambiguous, false);
+  assert.equal(target.output.value.axis, 'vertical');
+  assert.equal(target.output.value.label, 'Carte suivante');
+  assert.equal(target.output.value.cx, 1_404);
+  assert.equal(target.output.value.cy, 462);
+});
+
+test('Facebook Reels next target excludes an outer pair of reaction controls', async () => {
+  const dom = install(`
+    <main>
+      <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
+      <button id="like" aria-label="Me gusta"></button>
+      <button id="comment" aria-label="Comentar"></button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setViewport(dom, 1_440, 803);
+  setRect(dom.window.document.querySelector('video')!, {
+    left: 220,
+    top: 127,
+    right: 1_296,
+    bottom: 732,
+  });
+  setRect(dom.window.document.querySelector('#like')!, {
+    left: 1_380,
+    top: 374,
+    right: 1_428,
+    bottom: 422,
+  });
+  setRect(dom.window.document.querySelector('#comment')!, {
+    left: 1_380,
+    top: 438,
+    right: 1_428,
+    bottom: 486,
+  });
+
+  const target = await run({ kind: 'reel_next_target', params: {} });
+
+  assert.equal(target.output.value.ok, true);
+  assert.equal(target.output.value.found, false);
+  assert.equal(target.output.value.ambiguous, false);
+  assert.equal(target.output.value.axis, undefined);
+  assert.equal(target.output.value.cx, undefined);
+  assert.equal(target.output.value.cy, undefined);
+});
+
+test('Facebook Reels next target refuses a disabled forward control before keyboard input', async () => {
+  const dom = install(`
+    <main>
+      <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
+      <button id="previous" aria-label="Carte précédente"></button>
+      <button id="next" aria-label="Carte suivante" aria-disabled="true"></button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setViewport(dom, 1_440, 803);
+  setRect(dom.window.document.querySelector('video')!, {
+    left: 220,
+    top: 127,
+    right: 1_296,
+    bottom: 732,
+  });
+  setRect(dom.window.document.querySelector('#previous')!, {
+    left: 1_380,
+    top: 374,
+    right: 1_428,
+    bottom: 422,
+  });
+  setRect(dom.window.document.querySelector('#next')!, {
+    left: 1_380,
+    top: 438,
+    right: 1_428,
+    bottom: 486,
+  });
+
+  const target = await run({ kind: 'reel_next_target', params: {} });
+
+  assert.equal(target.output.value.ok, true);
+  assert.equal(target.output.value.found, false);
+  assert.equal(target.output.value.ambiguous, false);
+  assert.equal(target.output.value.axis, undefined);
+  assert.equal(target.output.value.reason, 'next_control_disabled');
+});
+
+test('Facebook Reels next target ignores almost entirely offscreen rail remnants', async () => {
+  const dom = install(`
+    <main>
+      <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
+      <button id="previous" aria-label="Previous"></button>
+      <button id="next" aria-label="Next"></button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setRect(dom.window.document.querySelector('video')!, {
+    left: 400,
+    top: 80,
+    right: 1_040,
+    bottom: 760,
+  });
+  setRect(dom.window.document.querySelector('#previous')!, {
+    left: -47,
+    top: 376,
+    right: 1,
+    bottom: 424,
+  });
+  setRect(dom.window.document.querySelector('#next')!, {
+    left: 1_439,
+    top: 376,
+    right: 1_487,
+    bottom: 424,
+  });
+
+  const target = await run({ kind: 'reel_next_target', params: {} });
+
+  assert.equal(target.output.value.ok, true);
+  assert.equal(target.output.value.found, false);
+  assert.equal(target.output.value.ambiguous, false);
+  assert.equal(target.output.value.axis, undefined);
+});
+
+test('Facebook Reels next target refuses all input when the forward control is occluded', async () => {
+  const dom = install(`
+    <main>
+      <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
+      <button id="previous" aria-label="Previous"></button>
+      <button id="next" aria-label="Next"></button>
+      <div id="blocker"></div>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setRect(dom.window.document.querySelector('video')!, {
+    left: 400,
+    top: 80,
+    right: 1_040,
+    bottom: 760,
+  });
+  setRect(dom.window.document.querySelector('#previous')!, {
+    left: 280,
+    top: 376,
+    right: 328,
+    bottom: 424,
+  });
+  setRect(dom.window.document.querySelector('#next')!, {
+    left: 1_112,
+    top: 376,
+    right: 1_160,
+    bottom: 424,
+  });
+  setRect(dom.window.document.querySelector('#blocker')!, {
+    left: 1_112,
+    top: 376,
+    right: 1_160,
+    bottom: 424,
+  });
+
+  const target = await run({ kind: 'reel_next_target', params: {} });
+
+  assert.equal(target.output.value.ok, true);
+  assert.equal(target.output.value.axis, undefined);
+  assert.equal(target.output.value.found, false);
+  assert.equal(target.output.value.ambiguous, false);
+  assert.equal(target.output.value.reason, 'next_control_occluded');
+  assert.equal(target.output.value.cx, undefined);
+  assert.equal(target.output.value.cy, undefined);
+});
+
 test('Facebook Reels next target rejects competing vertical and horizontal rails', async () => {
   const dom = install(`
     <main>
       <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
       <button id="vertical-previous" aria-label="Previous"></button>
       <button id="vertical-next" aria-label="Next"></button>
-      <button id="horizontal-previous" aria-label="Previous"></button>
-      <button id="horizontal-next" aria-label="Next"></button>
+      <button id="horizontal-previous" aria-label="Back card"></button>
+      <button id="horizontal-next" aria-label="Forward card"></button>
     </main>
   `, 'https://www.facebook.com/reel/777');
   setRect(dom.window.document.querySelector('video')!, { left: 400, top: 80, right: 1_040, bottom: 760 });
@@ -781,6 +1120,8 @@ test('Facebook Reels next target rejects competing vertical and horizontal rails
   assert.equal(target.output.value.found, false);
   assert.equal(target.output.value.ambiguous, true);
   assert.equal(target.output.value.axis, undefined);
+  assert.equal(target.output.value.cx, undefined);
+  assert.equal(target.output.value.cy, undefined);
 });
 
 test('Facebook Reels page.scroll refuses the document-scroll fallback', async () => {

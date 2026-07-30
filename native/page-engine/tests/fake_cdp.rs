@@ -585,8 +585,7 @@ async fn facebook_watchdog_reel_scroll_foregrounds_once_before_trusted_arrow() {
 }
 
 #[tokio::test]
-async fn facebook_anonymous_reel_scroll_uses_horizontal_arrow_and_requires_canonical_next_identity()
-{
+async fn facebook_anonymous_reel_axis_only_navigation_uses_horizontal_arrow() {
     let (port, server) = spawn_facebook_reel_anonymous_horizontal_cdp().await;
     let mut engine = Engine::default();
     let mut open = session_open(port);
@@ -639,6 +638,40 @@ async fn facebook_anonymous_reel_scroll_uses_horizontal_arrow_and_requires_canon
             .iter()
             .all(|request| request["method"] != "Input.dispatchMouseEvent")
     );
+}
+
+#[tokio::test]
+async fn facebook_reel_disabled_forward_control_dispatches_no_input() {
+    let (port, server) = spawn_facebook_reel_disabled_forward_cdp().await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "reel-scroll-disabled-forward-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 5_000,
+            command: NativeCommand::PageScroll(PageScrollParams {
+                reason: Some("feed_scroll".to_owned()),
+                dwell_ms: None,
+            }),
+        })
+        .await
+        .expect("disabled forward Reel scroll");
+
+    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+    engine.shutdown().await;
+    let requests = server.await.expect("disabled forward Reel fake CDP");
+    assert!(requests.iter().all(|request| {
+        !request["method"]
+            .as_str()
+            .is_some_and(|method| method.starts_with("Input."))
+    }));
 }
 
 #[tokio::test]
@@ -4773,6 +4806,42 @@ async fn spawn_facebook_reel_anonymous_horizontal_cdp() -> (u16, tokio::task::Jo
     (port, server)
 }
 
+async fn spawn_facebook_reel_disabled_forward_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/reel/1").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
+            )
+            .await,
+        );
+        requests.push(
+            respond_to_call_capture(
+                &mut websocket,
+                reel_axis_only_target_cdp(
+                    Some("https://www.facebook.com/reel/1"),
+                    "video-1@element:1",
+                    "horizontal",
+                    "next_control_disabled",
+                ),
+            )
+            .await,
+        );
+        let _ = websocket.close(None).await;
+        requests
+    });
+    (port, server)
+}
+
 async fn spawn_facebook_reel_wheel_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let port = listener.local_addr().expect("address").port();
@@ -4968,17 +5037,26 @@ fn anonymous_reel_probe_cdp(video_key: &str) -> Value {
 }
 
 fn anonymous_reel_next_target_cdp(video_key: &str, axis: &str) -> Value {
+    reel_axis_only_target_cdp(None, video_key, axis, "next_control_not_click_safe")
+}
+
+fn reel_axis_only_target_cdp(
+    note_id: Option<&str>,
+    video_key: &str,
+    axis: &str,
+    reason: &str,
+) -> Value {
     json!({"result":{"value":router_result(
         "reel_next_target",
         json!({
             "ok": true,
+            "noteId": note_id,
             "videoKey": video_key,
             "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
-            "found": true,
+            "found": false,
             "ambiguous": false,
             "axis": axis,
-            "cx": 1_230.0,
-            "cy": 400.0
+            "reason": reason
         })
     )}})
 }
