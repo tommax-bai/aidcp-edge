@@ -77,12 +77,33 @@ pub(crate) async fn execute_facebook_identity(
     }
     session.cdp.enable_network().await?;
     let cookies = session.cdp.all_cookies().await?;
-    let cookie_user_id = cookies
+    let cookie_user_id = facebook_cookie_values(&cookies, "c_user")
+        .find(|value| valid_facebook_cookie_user_id(value));
+    let expression = facebook::identity_expression(cookie_user_id)?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    let result = facebook::result_from_cdp(&raw)?;
+    let command = NativeCommand::IdentityBootstrap(crate::command::EmptyParams::default());
+    let output = facebook::typed_output(&command, result.output, session.cdp.target_id())?;
+    Ok((result.effect_phase, output))
+}
+
+pub(crate) fn facebook_auth_cookie_pair_is_valid(cookies: &serde_json::Value) -> bool {
+    facebook_cookie_values(cookies, "c_user").any(valid_facebook_cookie_user_id)
+        && facebook_cookie_values(cookies, "xs").any(|value| !value.is_empty())
+}
+
+fn facebook_cookie_values<'a>(
+    cookies: &'a serde_json::Value,
+    expected_name: &'a str,
+) -> impl Iterator<Item = &'a str> + 'a {
+    cookies
         .get("cookies")
         .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|cookie| cookie.get("name").and_then(serde_json::Value::as_str) == Some("c_user"))
+        .filter(move |cookie| {
+            cookie.get("name").and_then(serde_json::Value::as_str) == Some(expected_name)
+        })
         .filter(|cookie| {
             cookie
                 .get("domain")
@@ -94,15 +115,10 @@ pub(crate) async fn execute_facebook_identity(
                 .unwrap_or(false)
         })
         .filter_map(|cookie| cookie.get("value").and_then(serde_json::Value::as_str))
-        .find(|value| {
-            value.len() >= 5 && value.chars().all(|character| character.is_ascii_digit())
-        });
-    let expression = facebook::identity_expression(cookie_user_id)?;
-    let raw = session.cdp.evaluate(&expression, true).await?;
-    let result = facebook::result_from_cdp(&raw)?;
-    let command = NativeCommand::IdentityBootstrap(crate::command::EmptyParams::default());
-    let output = facebook::typed_output(&command, result.output, session.cdp.target_id())?;
-    Ok((result.effect_phase, output))
+}
+
+fn valid_facebook_cookie_user_id(value: &str) -> bool {
+    value.len() >= 5 && value.chars().all(|character| character.is_ascii_digit())
 }
 
 pub(crate) fn invalid_facebook_identity_output() -> EngineError {
@@ -110,4 +126,40 @@ pub(crate) fn invalid_facebook_identity_output() -> EngineError {
         ErrorCode::CdpError,
         "native Facebook identity command returned an invalid output",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn auth_cookie_pair_requires_the_same_numeric_user_id_as_identity() {
+        for cookies in [
+            json!({"cookies":[
+                {"name":"c_user","value":"","domain":".facebook.com"},
+                {"name":"xs","value":"session-token","domain":".facebook.com"}
+            ]}),
+            json!({"cookies":[
+                {"name":"c_user","value":"not-numeric","domain":".facebook.com"},
+                {"name":"xs","value":"session-token","domain":".facebook.com"}
+            ]}),
+            json!({"cookies":[
+                {"name":"c_user","value":"12345","domain":".facebook.example"},
+                {"name":"xs","value":"session-token","domain":".facebook.example"}
+            ]}),
+            json!({"cookies":[
+                {"name":"c_user","value":"12345","domain":".facebook.com"},
+                {"name":"xs","value":"","domain":".facebook.com"}
+            ]}),
+        ] {
+            assert!(!facebook_auth_cookie_pair_is_valid(&cookies));
+        }
+
+        assert!(facebook_auth_cookie_pair_is_valid(&json!({"cookies":[
+            {"name":"c_user","value":"","domain":".facebook.com"},
+            {"name":"c_user","value":"12345","domain":"www.facebook.com"},
+            {"name":"xs","value":"session-token","domain":".facebook.com"}
+        ]})));
+    }
 }

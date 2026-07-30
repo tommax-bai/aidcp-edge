@@ -673,32 +673,9 @@ async fn probe(
 async fn has_facebook_auth_cookies(session: &mut EngineSession) -> Result<bool, EngineError> {
     session.cdp.enable_network().await?;
     let cookies = session.cdp.all_cookies().await?;
-    let mut c_user = false;
-    let mut xs = false;
-    for cookie in cookies
-        .get("cookies")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        let domain_matches = cookie
-            .get("domain")
-            .and_then(Value::as_str)
-            .map(|domain| {
-                let host = domain.trim_start_matches('.').to_ascii_lowercase();
-                host == "facebook.com" || host.ends_with(".facebook.com")
-            })
-            .unwrap_or(false);
-        if !domain_matches {
-            continue;
-        }
-        match cookie.get("name").and_then(Value::as_str) {
-            Some("c_user") => c_user = true,
-            Some("xs") => xs = true,
-            _ => {}
-        }
-    }
-    Ok(c_user && xs)
+    Ok(facebook::session::facebook_auth_cookie_pair_is_valid(
+        &cookies,
+    ))
 }
 
 fn action_probe_params() -> FacebookAuthProbeParams {
