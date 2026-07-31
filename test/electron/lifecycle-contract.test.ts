@@ -166,22 +166,13 @@ test('Facebook TOTP handler rejects a child-supplied profile id before reading A
   }]);
 });
 
-test('configured Active-browser egress rejection is terminal without touching no-proxy startup', () => {
+test('Active browser bypasses proxy preparation and is handed to an active-only core', () => {
   const spawn = functionSource('spawnEdgeChild', 'stopLoginPoller');
-  assert.match(spawn, /expectedProxyEgressIp = network\.expectedEgressIp/);
-  assert.match(spawn, /expectedEgressIp: expectedProxyEgressIp/);
-  assert.match(spawn, /if \(proxyAuthorityPayload\) spawnEnv\.AIDCP_ADS_PROXY_AUTHORITY_FD = '4'/,
-    'only configured-proxy payloads opt into the Active egress gate');
-
-  const start = functionSource('startEdge', 'stopLoginPoller');
-  assert.match(start, /activeProxyTakeoverRejectedThisRun = false/);
-  assert.match(start, /const decision = envInUse \|\| activeProxyTakeoverRejected[\s\S]{0,80}?\{ action: 'stop', streak: 0 \}/);
-  assert.match(start, /已停止本次启动且未关闭现有浏览器/);
-  assert.doesNotMatch(start, /activeProxyTakeoverRejected[\s\S]{0,200}?confirmOwnedProfileClosedFromShell/,
-    'terminal classification must not stop the pre-existing Active browser');
-
-  assert.match(edgeMain, /if \(activeProxyTakeover\) await verifyActiveProxyTakeover\(activeProxyTakeover\)/);
-  assert.match(edgeMain, /requireActiveProxyEgressMatch\(/);
+  assert.match(spawn, /activeBrowserTakeover = await adsBrowserStartupState\(handle\) === 'active'/);
+  assert.match(spawn, /if \(activeBrowserTakeover\) \{[\s\S]*?proxyPreflight\.invalidate\(handle\.envId\);[\s\S]*?\} else \{[\s\S]*?ensureNetworkPreparation\(handle\)/);
+  assert.match(spawn, /if \(activeBrowserTakeover\) \{\s*spawnEnv\.AIDCP_ADS_ACTIVE_ONLY = '1';/);
+  assert.doesNotMatch(spawn, /expectedEgressIp|AIDCP_EGRESS_PROBE_URL/);
+  assert.doesNotMatch(edgeMain, /requireActiveProxyEgressMatch|verifyActiveProxyTakeover|expectedEgressIp/);
 });
 
 test('every Electron AdsPower write client uses the same parent FIFO', () => {

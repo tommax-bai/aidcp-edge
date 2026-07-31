@@ -114,8 +114,6 @@ const fields = {
   proxyRuntimePop: document.querySelector('#proxy-runtime-pop'),
   proxyRuntimeState: document.querySelector('#proxy-runtime-state'),
   proxyRuntimeConfig: document.querySelector('#proxy-runtime-config'),
-  proxyRuntimeBrowserIp: document.querySelector('#proxy-runtime-browser-ip'),
-  proxyRuntimeDirectIp: document.querySelector('#proxy-runtime-direct-ip'),
   proxyRuntimeCheckedAt: document.querySelector('#proxy-runtime-checked-at'),
   proxyRuntimeBytes: document.querySelector('#proxy-runtime-bytes'),
   authLabel: document.querySelector('#auth-label'),
@@ -2665,8 +2663,6 @@ function renderProxyRuntime(status, facebook) {
   fields.proxyRuntimeChip.title = `${view.label}；本次会话接收流量 ${view.bytes}`;
   fields.proxyRuntimeState.textContent = view.label;
   fields.proxyRuntimeConfig.textContent = view.configuration;
-  fields.proxyRuntimeBrowserIp.textContent = view.browserIp;
-  fields.proxyRuntimeDirectIp.textContent = view.directIp;
   fields.proxyRuntimeCheckedAt.textContent = view.checkedAt
     ? new Date(view.checkedAt).toLocaleString('zh-CN', { hour12: false })
     : '尚未检测';

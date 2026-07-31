@@ -1,22 +1,6 @@
 'use strict';
 
-const { isIP } = require('node:net');
-
-const STATES = new Set(['pending', 'verified', 'same_as_host', 'unavailable', 'stale']);
-
-function normalizeIp(value) {
-  let candidate = String(value || '').trim();
-  if (!candidate) return '';
-  if (candidate.startsWith('[')) {
-    const closing = candidate.indexOf(']');
-    if (closing > 0) candidate = candidate.slice(1, closing);
-  }
-  if (candidate.toLowerCase().startsWith('::ffff:')) {
-    const mapped = candidate.slice(7);
-    if (isIP(mapped) === 4) candidate = mapped;
-  }
-  return isIP(candidate) ? candidate.toLowerCase() : '';
-}
+const STATES = new Set(['active', 'stale']);
 
 /** 核心 stdout → fleet 的最小 allowlist；拒绝把任意结构化字段带进渲染层。 */
 function normalizeProxyRuntime(value) {
@@ -33,16 +17,10 @@ function normalizeProxyRuntime(value) {
       sessionReceivedBytes: 0,
     };
   }
-  const checkedAtMs = typeof value.checkedAt === 'string' ? Date.parse(value.checkedAt) : NaN;
-  const browserIp = normalizeIp(value.browserIp);
-  const directIp = normalizeIp(value.directIp);
   return {
     state,
     generation: normalizedGeneration,
     sessionReceivedBytes: Number.isFinite(bytes) && bytes >= 0 ? Math.floor(bytes) : 0,
-    ...(browserIp ? { browserIp } : {}),
-    ...(directIp ? { directIp } : {}),
-    ...(Number.isFinite(checkedAtMs) ? { checkedAt: new Date(checkedAtMs).toISOString() } : {}),
   };
 }
 

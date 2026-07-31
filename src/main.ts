@@ -47,10 +47,8 @@ import {
   resolveStartupIdentity,
   type BrowserLaunchOptions,
   type ChromeInstance,
-  type LaunchedBrowser,
   type ReadSelfIdentityOptions,
   ProxyRuntimeObserver,
-  requireActiveProxyEgressMatch,
 } from './cdp/index.js';
 import { createProcessFacebookTotpBroker } from './cdp/facebook-totp-broker.js';
 import { selectPlatformDriver, startupIdentityReadPolicy } from './platform/index.js';
@@ -261,14 +259,14 @@ async function main(): Promise<void> {
   // AdsPower 每次启动的 debug_port 都不同，留着旧的会让后续所有生命周期闭包对着一个死端口操作。
   let chrome: ChromeInstance | undefined;
   let endpoint = { host: cdpHost, port: cdpPort };
-  let activeProxyTakeover: LaunchedBrowser['activeProxyTakeover'];
   let firstLoginPolicyApplied = false;
+  let browserWasAlreadyActive = false;
   if (!startBrowserAbsent) {
     const launched = await provider.launch(launchOpts);
     chrome = launched.instance;
     endpoint = launched.endpoint;
-    activeProxyTakeover = launched.activeProxyTakeover;
     firstLoginPolicyApplied = launched.firstLoginPolicyApplied === true;
+    browserWasAlreadyActive = launched.wasAlreadyActive === true;
   } else {
     console.log(`[aidcp-edge] 浏览器槽位缺席：以控制面待机态启动（accountId=${controlAccountId}），暂不调用 provider.launch`);
   }
@@ -298,28 +296,11 @@ async function main(): Promise<void> {
   const proxyRuntime = observesProxyRuntime
     ? new ProxyRuntimeObserver({
         cdp: session.cdp,
-        probeUrl: process.env.AIDCP_EGRESS_PROBE_URL ?? '',
         emit: (event) => console.log(`[ui-event] ${JSON.stringify(event)}`),
       })
     : undefined;
-  const verifyActiveProxyTakeover = async (
-    evidence: LaunchedBrowser['activeProxyTakeover'],
-  ): Promise<void> => {
-    if (!evidence) return;
-    const snapshot = proxyRuntime ? await proxyRuntime.startGeneration() : undefined;
-    const matched = requireActiveProxyEgressMatch({
-      profileId: evidence.profileId,
-      expectedEgressIp: evidence.expectedEgressIp,
-      browserEgressIp: snapshot?.browserIp,
-    });
-    console.log(
-      `[aidcp-edge] AdsPower Active profile=${evidence.profileId} 真实出口匹配本次权威代理` +
-        `（egress=${matched.browserEgressIp}），接管现有浏览器`,
-    );
-  };
   if (!startBrowserAbsent) {
-    if (activeProxyTakeover) await verifyActiveProxyTakeover(activeProxyTakeover);
-    else if (proxyRuntime) void proxyRuntime.startGeneration();
+    proxyRuntime?.startGeneration();
   }
   let parkingControlInstalled = !startBrowserAbsent;
   if (!startBrowserAbsent) console.log('[aidcp-edge] 已附着到 page，CDP 就绪（反检测脚本已注入）');
@@ -1413,6 +1394,10 @@ async function main(): Promise<void> {
     enterStandby: async () => {
       console.log('\n[aidcp-edge] 冷待机流程启动：停止自动化、释放浏览器层、关闭浏览器、保留云端连接...');
       clearColdStandbyCloudRetry();
+      if (browserWasAlreadyActive) {
+        console.log('[aidcp-edge] 本核心接管的是启动前已存在的 Active 浏览器，保持浏览器原状并拒绝冷待机');
+        return false;
+      }
       // 释放 ⊥ 在跑租约（change browser-slot-scheduling）：任务持着执行权时绝不把浏览器从它底下抽走。
       // 待机请求推迟到租约结束后由外壳再判（这里如实拒绝，不静默降级成「等一会儿再偷偷关」）。
       if (taskCoordinator.hasActiveLease()) {
@@ -1471,8 +1456,8 @@ async function main(): Promise<void> {
         const relaunched = await provider.launch(launchOpts);
         chrome = relaunched.instance;
         endpoint = relaunched.endpoint;
-        activeProxyTakeover = relaunched.activeProxyTakeover;
         firstLoginPolicyApplied = relaunched.firstLoginPolicyApplied === true;
+        browserWasAlreadyActive = relaunched.wasAlreadyActive === true;
         attachOpts.host = endpoint.host;
         attachOpts.port = endpoint.port;
 
@@ -1480,8 +1465,7 @@ async function main(): Promise<void> {
         //    重连配置在这里被重新构造，classify/rediscover 闭包里的端口随之更新——不换它，唤醒后第一次
         //    瞬断就会拿旧端口探活、探不到即误判「进程已死 = 终局」，把可续跑的连接直接判死。
         await reattachSession(session, attachOpts);
-        if (activeProxyTakeover) await verifyActiveProxyTakeover(activeProxyTakeover);
-        else void proxyRuntime?.startGeneration();
+        proxyRuntime?.startGeneration();
 
         // 3) 停放（最小化 / 移出视野）要重新施加：新浏览器窗口不继承上一代的位置。
         try {

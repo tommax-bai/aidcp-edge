@@ -22,7 +22,6 @@ import {
   type AdsPowerApiResponse,
 } from './ads-api-broker.js';
 import { launchChrome, type ChromeInstance } from './chrome-launcher.js';
-import { normalizeObservedIp } from './proxy-runtime-observer.js';
 
 export type BrowserProviderKind = 'self' | 'adspower';
 
@@ -49,11 +48,8 @@ export interface LaunchedBrowser {
    * Active / orphan 接管没有本代启动证据，必须省略，调用方不得据此运行依赖 browser-chrome 抑制的首登辅助。
    */
   firstLoginPolicyApplied?: true;
-  /** 已存在的配置代理浏览器；附着后必须完成一次精确出口匹配才可接管。 */
-  activeProxyTakeover?: {
-    profileId: string;
-    expectedEgressIp?: string;
-  };
+  /** 本次 launch 接管了启动前已经存在的 Active/有效孤儿浏览器。 */
+  wasAlreadyActive?: true;
 }
 
 export interface BrowserProvider {
@@ -110,6 +106,11 @@ export interface AdsPowerConfig {
   startUrl?: string;
   /** Electron 主进程经匿名 pipe 交付的原环境代理权威；不含此值即明确无代理/旧的非受管调用方。 */
   proxyAuthority?: AdsPowerProxyAuthority;
+  /**
+   * 外壳已确认浏览器处于 Active/有效孤儿 CDP 状态。本次 launch 只允许接管现有浏览器；
+   * 若状态在交接期间变为 Inactive，必须诚实失败并交回外壳重新走启动前代理准备。
+   */
+  activeOnly?: boolean;
 }
 
 export interface AdsPowerProxyConfig {
@@ -126,8 +127,6 @@ export interface AdsPowerProxyAuthority {
   authorityRevision: number;
   originalProxy: AdsPowerProxyConfig;
   targetProxy: AdsPowerProxyConfig;
-  /** Electron 通过本次冻结有效代理观测到的公网出口；仅用于 Active 浏览器的一次性接管闸。 */
-  expectedEgressIp?: string;
 }
 
 export interface AdsPowerDeps {
@@ -239,19 +238,12 @@ export function readAdsPowerProxyAuthority(
     throw new Error('[aidcp-edge] 原环境代理安全通道 Cloud revision 无效');
   }
   const originalProxy = normalizeAdsPowerProxyConfig(parsed.originalProxy);
-  const expectedEgressIp = parsed.expectedEgressIp === undefined
-    ? undefined
-    : normalizeObservedIp(parsed.expectedEgressIp);
-  if (parsed.expectedEgressIp !== undefined && !expectedEgressIp) {
-    throw new Error('[aidcp-edge] 原环境代理安全通道出口证据无效');
-  }
   if (mode === 'direct') {
     return {
       mode,
       authorityRevision,
       originalProxy,
       targetProxy: { ...originalProxy },
-      ...(expectedEgressIp ? { expectedEgressIp } : {}),
     };
   }
   const relayPort = Number(parsed.relayPort);
@@ -262,7 +254,6 @@ export function readAdsPowerProxyAuthority(
     mode,
     authorityRevision,
     originalProxy,
-    ...(expectedEgressIp ? { expectedEgressIp } : {}),
     targetProxy: {
       proxy_soft: 'other',
       proxy_type: 'http',
@@ -422,16 +413,9 @@ export class AdsPowerProvider implements BrowserProvider {
     const activeStatus = String(active?.status ?? '').trim().toLowerCase();
     let port = 0;
     let firstLoginPolicyApplied = false;
-    let activeProxyTakeover: LaunchedBrowser['activeProxyTakeover'];
+    let wasAlreadyActive = false;
     if (activeStatus === 'active') {
-      if (this.cfg.proxyAuthority) {
-        activeProxyTakeover = {
-          profileId: this.cfg.userId,
-          ...(this.cfg.proxyAuthority.expectedEgressIp
-            ? { expectedEgressIp: this.cfg.proxyAuthority.expectedEgressIp }
-            : {}),
-        };
-      }
+      wasAlreadyActive = true;
       port = Number(active?.debug_port);
       if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
         throw new Error(
@@ -442,19 +426,18 @@ export class AdsPowerProvider implements BrowserProvider {
     } else if (activeStatus === 'inactive') {
       const orphan = await this.findValidatedOrphanCdp();
       if (orphan) {
-        if (this.cfg.proxyAuthority) {
-          activeProxyTakeover = {
-            profileId: this.cfg.userId,
-            ...(this.cfg.proxyAuthority.expectedEgressIp
-              ? { expectedEgressIp: this.cfg.proxyAuthority.expectedEgressIp }
-              : {}),
-          };
-        }
+        wasAlreadyActive = true;
         port = orphan.port;
         this.log(
           `[aidcp-edge] AdsPower V2 registry 未登记但检测到该 profile 的有效 CDP，接管失联浏览器 profile=${this.cfg.userId} → debug_port=${port}`,
         );
       } else {
+        if (this.cfg.activeOnly) {
+          throw new Error(
+            `[aidcp-edge] AdsPower Active 接管交接期间浏览器已变为 Inactive（profile=${this.cfg.userId}）` +
+              '——诚实失败，不绕过启动前代理准备',
+          );
+        }
         if (this.cfg.proxyAuthority) {
           await this.synchronizeProfileProxy(
             this.cfg.proxyAuthority.targetProxy,
@@ -514,7 +497,7 @@ export class AdsPowerProvider implements BrowserProvider {
       instance,
       endpoint: { host, port },
       ...(firstLoginPolicyApplied ? { firstLoginPolicyApplied: true as const } : {}),
-      ...(activeProxyTakeover ? { activeProxyTakeover } : {}),
+      ...(wasAlreadyActive ? { wasAlreadyActive: true as const } : {}),
     };
   }
 
@@ -950,6 +933,7 @@ export function selectBrowserProvider(
       userId,
       startUrl: opts.startUrl ?? env.AIDCP_EXPLORE_URL,
       proxyAuthority: readAdsPowerProxyAuthority(env),
+      activeOnly: env.AIDCP_ADS_ACTIVE_ONLY === '1',
     };
     return new AdsPowerProvider(cfg, {
       fetchImpl: opts.fetchImpl,

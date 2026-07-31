@@ -76,7 +76,6 @@ const { invalidateProxyRuntime, normalizeProxyRuntime } = require('./proxy-runti
 const {
   createProxyPreflightController,
   preflightFacebookProxy,
-  probeProxyEgress,
 } = require('./proxy-preflight.cjs');
 const { createProxyChainManager } = require('./proxy-chain-manager.cjs');
 const { createProxyChainOrphanRegistry } = require('./proxy-chain-orphans.cjs');
@@ -448,12 +447,6 @@ function resolveClientAuthBase() {
   const enabled = process.env.AIDCP_CLIENT_AUTH_ENABLE === '1' || Boolean(settings && settings.clientAuthEnabled);
   if (!enabled) return '';
   return deriveClientAuthBaseFromCloudUrl(cloud.url);
-}
-function resolveEgressProbeUrl() {
-  const explicit = normalizeClientAuthUrl(process.env.AIDCP_EGRESS_PROBE_URL || '');
-  if (explicit) return explicit;
-  const clientAuthBase = resolveClientAuthBase();
-  return clientAuthBase ? `${clientAuthBase}/egress` : '';
 }
 function clientAuthEnabled() {
   return Boolean(resolveClientAuthBase());
@@ -1624,7 +1617,7 @@ function makeStatus(provider) {
     presence: { text: '数据管理可用，等待开始自动化', at: new Date().toISOString() },
     publish: null,
     publishPreview: null,
-    // 浏览器启动前的短时代理可用性预检；与 proxyRuntime（浏览器实际出口证据）严格分开。
+    // Inactive 浏览器启动前的短时 Facebook 代理可达性预检。
     proxyPreflight: null,
     proxyMode: systemProxyChainEnabled() ? 'system_then_environment' : 'direct',
     // null=尚未读取 profile 代理配置；true=已配置环境代理、双跳适用；false=明确无代理、双跳不适用。
@@ -1956,17 +1949,7 @@ async function readProxyForPreflight(profileId) {
 
 const proxyPreflight = createProxyPreflightController({
   readProxy: readProxyForPreflight,
-  probe: async (proxy, options) => {
-    const reachable = await preflightFacebookProxy(proxy, options);
-    if (reachable.state !== 'available') return reachable;
-    const egress = await probeProxyEgress(proxy, {
-      ...options,
-      targetUrl: resolveEgressProbeUrl(),
-    });
-    return egress.state === 'available'
-      ? { ...reachable, expectedEgressIp: egress.expectedEgressIp }
-      : { ...reachable, expectedEgressReason: egress.reason };
-  },
+  probe: preflightFacebookProxy,
   onUpdate: (envId, snapshot) => {
     const handle = envs.get(envId);
     if (!handle || handle.removed) return;
@@ -2002,6 +1985,18 @@ function ensureProxyPreflight(handle, config) {
   });
 }
 
+async function adsBrowserStartupState(handle) {
+  if (!handle || handle.kind !== 'adspower' || !handle.profileId) return 'inactive';
+  const result = await adsApi.listActiveProfiles({
+    ...resolveAdsOpts(),
+    profileIds: [handle.profileId],
+  }).catch(() => null);
+  if (!result || !result.ok || !result.listWellFormed || !Array.isArray(result.activeUserIds)) {
+    return 'unknown';
+  }
+  return result.activeUserIds.includes(handle.profileId) ? 'active' : 'inactive';
+}
+
 async function ensureNetworkPreparation(handle) {
   const authority = await ensureProfileProxyAuthority(handle);
   if (authority.state === 'unavailable') return authority;
@@ -2013,6 +2008,15 @@ async function ensureNetworkPreparation(handle) {
     preflightConfig = chain.config;
   }
   return ensureProxyPreflight(handle, preflightConfig);
+}
+
+async function ensureStartupNetworkPreparation(handle) {
+  if (await adsBrowserStartupState(handle) === 'active') {
+    handle.browserAlreadyRunning = true;
+    proxyPreflight.invalidate(handle.envId);
+    return { state: 'skipped', reason: 'active_browser' };
+  }
+  return ensureNetworkPreparation(handle);
 }
 
 function invalidateCompletedProxyPreflightForManualStart(handle) {
@@ -2033,10 +2037,17 @@ function scheduleSelectedProxyPreflight(handle) {
   selectedProxyPreflightTimer = null;
   if (!eligibleForProxyPreflight(handle)) return;
   const envId = handle.envId;
-  selectedProxyPreflightTimer = setTimeout(() => {
+  selectedProxyPreflightTimer = setTimeout(async () => {
     selectedProxyPreflightTimer = null;
     const current = envs.get(envId);
     if (selectedEnvId !== envId || !eligibleForProxyPreflight(current)) return;
+    const browserState = await adsBrowserStartupState(current);
+    if (selectedEnvId !== envId || !eligibleForProxyPreflight(current)) return;
+    if (browserState === 'active') {
+      current.browserAlreadyRunning = true;
+      proxyPreflight.invalidate(envId);
+      return;
+    }
     void ensureNetworkPreparation(current);
   }, 300);
   selectedProxyPreflightTimer.unref?.();
@@ -2536,7 +2547,7 @@ function enqueueTransientBrowserLane(handle, {
       broadcastFleet();
       const released = awaitTransientBrowserRelease(handle, generation);
       if (startCore) {
-        const network = await ensureNetworkPreparation(handle);
+        const network = await ensureStartupNetworkPreparation(handle);
         if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return false;
         if (network && network.state === 'unavailable') {
           stopStartForProxyFailure(handle, network);
@@ -4089,7 +4100,7 @@ function wakeColdStandby(handle, reason) {
       kind,
       run: async () => {
         if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return false;
-        const preflight = await ensureNetworkPreparation(handle);
+        const preflight = await ensureStartupNetworkPreparation(handle);
         if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return false;
         if (preflight && preflight.state === 'unavailable') {
           onColdStandbyWakeFailed(handle, `代理预检未通过：${proxyPreflightFailureText(preflight.reason)}`, generation);
@@ -4288,7 +4299,7 @@ async function startBrowserAbsentCore(handle, {
       return false;
     }
 
-    const network = await ensureNetworkPreparation(handle);
+    const network = await ensureStartupNetworkPreparation(handle);
     if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return false;
     if (network && network.state === 'unavailable') {
       if (!retainStartQueueReservation) releaseStartQueue(handle);
@@ -4497,17 +4508,21 @@ async function spawnEdgeChild(handle, {
   const edgeCwd = appRoot.endsWith('.asar') ? path.dirname(appRoot) : appRoot;
   let spawnEnv;
   let proxyAuthorityPayload = null;
-  let expectedProxyEgressIp = null;
+  let activeBrowserTakeover = false;
   if (handle.kind === 'adspower') {
     if (!cleanupBootstrap) {
-      // 真正轮到 spawn 时再读取一次 Cloud revision；排队前的预检只可复用同 revision 的证据。
-      const network = await ensureNetworkPreparation(handle);
-      if (network.state === 'unavailable') {
-        stopStartForProxyFailure(handle, network);
-        return false;
-      }
-      if (typeof network.expectedEgressIp === 'string') {
-        expectedProxyEgressIp = network.expectedEgressIp;
+      // Active 浏览器以 AdsPower 当前进程事实为权威：直接交给核心接管，不读取/同步代理，也不做网络探测。
+      // 核心会再次确认 Active；若交接期间变为 Inactive，则诚实失败并由下一轮重新走完整启动准备。
+      activeBrowserTakeover = await adsBrowserStartupState(handle) === 'active';
+      if (activeBrowserTakeover) {
+        proxyPreflight.invalidate(handle.envId);
+      } else {
+        // Inactive/无法确认时走既有准备：读取当前权威、必要时建立双跳，并验证 Facebook 可达。
+        const network = await ensureNetworkPreparation(handle);
+        if (network.state === 'unavailable') {
+          stopStartForProxyFailure(handle, network);
+          return false;
+        }
       }
     }
     // 身份闸（红线）：冻结 env 注入唯一稳定身份；无法派生（缺分身 id）则诚实拒绝，绝不回落主机名。
@@ -4541,7 +4556,9 @@ async function spawnEdgeChild(handle, {
     spawnEnv = { ...built.env, ELECTRON_RUN_AS_NODE: '1', AIDCP_ADS_API_BROKER: 'ipc' };
     // Broker injects the runtime-owned key inside Electron. Managed children never receive it.
     delete spawnEnv.AIDCP_ADS_API_KEY;
-    if (handle.proxyAuthority && handle.status.proxyMode === 'system_then_environment'
+    if (activeBrowserTakeover) {
+      spawnEnv.AIDCP_ADS_ACTIVE_ONLY = '1';
+    } else if (handle.proxyAuthority && handle.status.proxyMode === 'system_then_environment'
       && handle.status.proxyChainApplicable === true
       && !cleanupBootstrap) {
       const endpoint = proxyChainManager.endpoint(handle.profileId);
@@ -4555,7 +4572,6 @@ async function spawnEdgeChild(handle, {
         originalProxy: handle.proxyAuthority,
         relayPort: endpoint.proxyPort,
         authorityRevision: handle.proxyAuthorityRevision,
-        ...(expectedProxyEgressIp ? { expectedEgressIp: expectedProxyEgressIp } : {}),
       };
       updateStatus(handle, { proxyMode: 'system_then_environment' });
     } else if (handle.proxyAuthority) {
@@ -4564,7 +4580,6 @@ async function spawnEdgeChild(handle, {
         mode: 'direct',
         originalProxy: handle.proxyAuthority,
         authorityRevision: handle.proxyAuthorityRevision,
-        ...(expectedProxyEgressIp ? { expectedEgressIp: expectedProxyEgressIp } : {}),
       };
       updateStatus(handle, { proxyMode: 'direct' });
     } else if (!cleanupBootstrap) {
@@ -4610,10 +4625,6 @@ async function spawnEdgeChild(handle, {
     ? cloudSel.key
     : cloudKeyForUrl(String(process.env.AIDCP_CLOUD_URL || '').trim() || DEFAULT_CLOUD_URL);
   handle.spawnCloudKey = resolvedCloudKey;
-  // 出口探测复用与当前 dev/ol/custom 云选择一致的 Client Auth 公网基址。显式 env 仍可覆盖；
-  // 不存在可用基址时不猜第三方服务，核心会诚实投影 unavailable。
-  const egressProbeUrl = resolveEgressProbeUrl();
-  if (egressProbeUrl) spawnEnv.AIDCP_EGRESS_PROBE_URL = egressProbeUrl;
   if (controlBootstrap) {
     // 与 AIDCP_ACCOUNT_ID 严格分离：后者会覆盖页面真实身份，绝不能承载可能陈旧的启动引导。
     spawnEnv.AIDCP_START_BROWSER_ABSENT = '1';
@@ -4650,7 +4661,6 @@ async function spawnEdgeChild(handle, {
   // 同理清「本次运行遇同账号并发占用拒启」标记：只反映本 core run 是否撞过 in-use 拒启，退出处据此判终局。
   handle.envInUseThisRun = false;
   handle.envInUseHolder = null;
-  handle.activeProxyTakeoverRejectedThisRun = false;
   handle.spawnedAtMs = Date.now();
   // 换会话把人设绑定态重置回**未知**（change persona-bound-tristate）：上一会话的 stale-true 不能残留成
   // 误显示「已设置」，但也绝不能归零成 false——那等于替云端宣布「未绑」，正是「已设置账号被反复误弹向导」
@@ -5177,12 +5187,8 @@ async function spawnEdgeChild(handle, {
     const envInUse = exitedAbnormally && handle.envInUseThisRun === true;
     const inUseHolder = handle.envInUseHolder ? `（AdsPower 账号 ${handle.envInUseHolder}）` : '';
     const inUseMsg = `环境被其它设备或窗口占用${inUseHolder}；已停止启动，请在占用它的一端关闭后再点「启动」重试。`;
-    const activeProxyTakeoverRejected = exitedAbnormally
-      && handle.activeProxyTakeoverRejectedThisRun === true;
-    const activeProxyTakeoverMsg =
-      'Active 浏览器真实出口与本次权威代理不匹配或无法核验；已停止本次启动且未关闭现有浏览器。请关闭该环境后重新启动。';
     // 有界重起决策（仅对异常退出计入；有意停止 / 不可重起终局一律 stop）。
-    const decision = envInUse || activeProxyTakeoverRejected
+    const decision = envInUse
       ? { action: 'stop', streak: 0 }
       : exitedAbnormally
         ? fleet.decideRespawn(
@@ -5243,8 +5249,6 @@ async function spawnEdgeChild(handle, {
       respawnGaveUp: gaveUp,
       lastMessage: envInUse
         ? inUseMsg
-        : activeProxyTakeoverRejected
-        ? activeProxyTakeoverMsg
         : stopReason === 'user_pause'
         ? '自动化已暂停，引擎和浏览器已关闭；数据管理仍可继续使用。'
         : stopReason === 'user_close'
@@ -5277,8 +5281,8 @@ async function spawnEdgeChild(handle, {
               ? '已暂停，随时可以恢复'
               : '引擎已停止',
       ),
-      ...(envInUse || activeProxyTakeoverRejected
-        ? edgeFailurePatch(envInUse ? inUseMsg : activeProxyTakeoverMsg)
+      ...(envInUse
+        ? edgeFailurePatch(inUseMsg)
         : exitedAbnormally
           ? abnormalExitFailurePatch(handle, code, signal)
           : clearEdgeFailurePatch(handle)),
@@ -5288,11 +5292,6 @@ async function spawnEdgeChild(handle, {
     if (envInUse) {
       // 不可重起终局：给专门的「环境被占用」通知，不带「重新登录」这类误导性提示。
       surfaceFailure(`AIDCP Edge${handle.name ? `（${handle.name}）` : ''} 环境被占用`, inUseMsg);
-    } else if (activeProxyTakeoverRejected) {
-      surfaceFailure(
-        `AIDCP Edge${handle.name ? `（${handle.name}）` : ''} 已停止接管 Active 浏览器`,
-        activeProxyTakeoverMsg,
-      );
     } else if (exitedAbnormally && (decision.streak === 1 || gaveUp)) {
       const adspowerHint = handle.kind === 'adspower'
         ? '请在该分身的浏览器窗口登录后，点击「重新登录」重试；并确认分身 ID 正确、指纹浏览器已就绪。'
@@ -5607,7 +5606,7 @@ async function startAdsPowerFlow(handle, generation = handle && handle.lifecycle
   // 运行时/内核准备可长达数分钟（首启下载）；这期间被暂停/移出/退出则诚实放弃，不再拉起子进程。
   // （startEdge 亦有同一取消闸兜底；此处提前返回避免多余「正在启动」状态残留。）
   if (handle.removed || handle.stopRequested || isQuitting || handle.status.session === 'paused') return;
-  const preflight = await ensureNetworkPreparation(handle);
+  const preflight = await ensureStartupNetworkPreparation(handle);
   if (!isCurrentLifecycleGeneration(handle, generation) || handle.removed || handle.stopRequested
     || isQuitting || handle.status.session === 'paused') return;
   if (preflight && preflight.state === 'unavailable') {
@@ -5809,9 +5808,6 @@ function handleEdgeLogLine(handle, message, isError = false) {
       if (inUse.account) handle.envInUseHolder = inUse.account;
     }
   }
-  if (!stopping && fleet.classifyAdsActiveProxyTakeoverFailure(message).rejected) {
-    handle.activeProxyTakeoverRejectedThisRun = true;
-  }
   if (stopping) {
     if (!handle.removed) updateStatus(handle, { lastMessage: message });
     return;
@@ -5835,7 +5831,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
   // 活着、还会继续打日志，但已经彻底停摆或跑不起来。它经 posture 闩在 handle 上；不把这个闩算进来，
   // 随便哪一行普通日志都会把徽标重置回 running，运营看到的仍是「运行中」。
   const halting = fleet.declaresCoreHalt(message) || postureLatches(livePosture(handle));
-  const next = { edge: halting ? 'warning' : 'running', lastMessage: proxyRuntimeLine ? '代理运行证据已更新' : message };
+  const next = { edge: halting ? 'warning' : 'running', lastMessage: proxyRuntimeLine ? '本次接收流量已更新' : message };
   if (!halting && handle.status.edgeFailure) next.edgeFailure = null;
   if (message.includes('[browser-parking] awaiting-login')) {
     // adspower 首登有界等待门（change adspower-first-login-wait-gate）：核心在等操作者扫码登录、浏览器与 CDP 仍在。

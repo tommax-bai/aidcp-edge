@@ -14,4 +14,3 @@ export * from './browser-window.js';
 export * from './stealth-injector.js';
 export * from './self-identity.js';
 export * from './proxy-runtime-observer.js';
-export * from './active-proxy-takeover.js';

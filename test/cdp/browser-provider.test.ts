@@ -312,12 +312,12 @@ test('AdsPowerProvider.launch：V2 Active 返回有效端点时直接接管，�
   );
   const out = await provider.launch({ host: '127.0.0.1', port: 9222 });
   assert.equal(out.endpoint.port, 59167);
-  assert.equal(out.activeProxyTakeover, undefined, '未配置代理的 Active 环境不得进入代理接管闸');
+  assert.equal(out.wasAlreadyActive, true);
   assert.equal(out.firstLoginPolicyApplied, undefined, 'Active browser 没有本代 fresh-start 策略证据');
   assert.equal(calls.filter((call) => call.url.includes('browser-profile/start')).length, 0);
 });
 
-test('AdsPowerProvider.launch：已配置代理权威的 Active 浏览器交付一次性出口接管证据，不改 profile、不重复 start', async () => {
+test('AdsPowerProvider.launch：Active 浏览器直接接管，不改 profile、不重复 start', async () => {
   const calls: FetchCall[] = [];
   const fetchImpl = routedFetch([
     ['/api/v2/browser-profile/active', () => ({ code: 0, data: { status: 'Active', debug_port: '59167' } })],
@@ -327,20 +327,39 @@ test('AdsPowerProvider.launch：已配置代理权威的 Active 浏览器交付�
     {
       apiBase: 'http://x:50325',
       userId: 'k1',
-      proxyAuthority: { ...doubleHopAuthority, expectedEgressIp: '203.0.113.7' },
+      proxyAuthority: doubleHopAuthority,
     },
     { fetchImpl, ...noopDeps },
   );
   const out = await provider.launch({ host: '127.0.0.1', port: 9222 });
   assert.equal(out.endpoint.port, 59167);
+  assert.equal(out.wasAlreadyActive, true);
   assert.equal(out.firstLoginPolicyApplied, undefined, 'Active browser 不得宣称应用 fresh-start 策略');
-  assert.deepEqual(out.activeProxyTakeover, {
-    profileId: 'k1',
-    expectedEgressIp: '203.0.113.7',
-  });
   assert.equal(calls.filter((call) => call.url.includes('browser-profile/start')).length, 0);
   assert.equal(calls.filter((call) => call.url.includes('/api/v1/user/update')).length, 0);
   assert.equal(calls.filter((call) => call.url.includes('/api/v1/user/list')).length, 0);
+});
+
+test('AdsPowerProvider.launch：active-only 交接变为 Inactive 时诚实失败，不同步代理也不 fresh start', async () => {
+  const calls: FetchCall[] = [];
+  const provider = new AdsPowerProvider(
+    {
+      apiBase: 'http://x:50325',
+      userId: 'k1',
+      activeOnly: true,
+    },
+    {
+      fetchImpl: routedFetch([], calls),
+      ...noopDeps,
+    },
+  );
+  await assert.rejects(
+    provider.launch({ host: '127.0.0.1', port: 9222 }),
+    /Active 接管交接期间浏览器已变为 Inactive/,
+  );
+  assert.equal(calls.some((call) => call.url.includes('browser-profile/start')), false);
+  assert.equal(calls.some((call) => call.url.includes('/api/v1/user/update')), false);
+  assert.equal(calls.some((call) => call.url.includes('/api/v1/user/list')), false);
 });
 
 test('代理权威从匿名 fd 读取，direct 目标严格等于原环境代理且不读取旧 override env', () => {
@@ -349,7 +368,6 @@ test('代理权威从匿名 fd 读取，direct 目标严格等于原环境代理
     mode: 'direct',
     authorityRevision: 7,
     originalProxy,
-    expectedEgressIp: '::ffff:203.0.113.7',
   })) as any;
   const authority = readAdsPowerProxyAuthority(
     {
@@ -363,7 +381,6 @@ test('代理权威从匿名 fd 读取，direct 目标严格等于原环境代理
     authorityRevision: 7,
     originalProxy,
     targetProxy: originalProxy,
-    expectedEgressIp: '203.0.113.7',
   });
   assert.equal(readAdsPowerProxyAuthority({}), undefined);
   assert.throws(
@@ -378,19 +395,6 @@ test('代理权威从匿名 fd 读取，direct 目标严格等于原环境代理
       })) as any,
     ),
     /GOST loopback/,
-  );
-  assert.throws(
-    () => readAdsPowerProxyAuthority(
-      { AIDCP_ADS_PROXY_AUTHORITY_FD: '4' },
-      (() => JSON.stringify({
-        version: 1,
-        mode: 'direct',
-        authorityRevision: 7,
-        originalProxy,
-        expectedEgressIp: 'not-an-ip',
-      })) as any,
-    ),
-    /出口证据无效/,
   );
 });
 

@@ -7,7 +7,6 @@ const require = createRequire(import.meta.url);
 const {
   createProxyPreflightController,
   preflightFacebookProxy,
-  probeProxyEgress,
   proxyUrlForConfig,
   reasonForError,
 } = require('../../src/electron/proxy-preflight.cjs') as {
@@ -22,7 +21,6 @@ const {
       reason: string;
       checkedAt: string;
       authorityRevision?: number;
-      expectedEgressIp?: string;
     }>;
     invalidate: (envId: string) => void;
     snapshot: (envId: string) => { state: string; checkedAt?: string } | null;
@@ -31,12 +29,6 @@ const {
     state: 'available' | 'unavailable' | 'unknown' | 'skipped';
     checkedAt: string;
     reason: string;
-  }>;
-  probeProxyEgress: (proxy: Record<string, unknown>, options?: Record<string, unknown>) => Promise<{
-    state: 'available' | 'unavailable' | 'unknown' | 'skipped';
-    checkedAt: string;
-    reason: string;
-    expectedEgressIp?: string;
   }>;
   proxyUrlForConfig: (proxy: Record<string, unknown>) => { ok: boolean; noProxy?: boolean; proxyType?: string; url?: URL; reason?: string };
   reasonForError: (error: unknown) => string;
@@ -48,25 +40,6 @@ function successfulRequest(capture: Record<string, unknown>, statusCode = 200) {
     capture.options = options;
     const request = new EventEmitter() as EventEmitter & { end: () => void; destroy: (error?: Error) => void };
     request.end = () => queueMicrotask(() => callback({ statusCode, resume: () => undefined }));
-    request.destroy = (error) => { if (error) request.emit('error', error); };
-    return request;
-  };
-}
-
-function successfulEgressRequest(capture: Record<string, unknown>, ip = '203.0.113.7') {
-  return (url: URL, options: Record<string, unknown>, callback: (response: {
-    statusCode: number;
-    headers: Record<string, string>;
-    resume: () => void;
-  }) => void) => {
-    capture.url = String(url);
-    capture.options = options;
-    const request = new EventEmitter() as EventEmitter & { end: () => void; destroy: (error?: Error) => void };
-    request.end = () => queueMicrotask(() => callback({
-      statusCode: 200,
-      headers: { 'x-aidcp-egress-ip': ip },
-      resume: () => undefined,
-    }));
     request.destroy = (error) => { if (error) request.emit('error', error); };
     return request;
   };
@@ -146,32 +119,6 @@ test('407 与网络/协议错误是确定失败，无代理跳过，检测器异
   const unknown = await preflightFacebookProxy(authenticatedHttpProxy, { agentFactory: () => { throw new Error('broken'); } });
   assert.equal(unknown.state, 'unknown');
   assert.equal(reasonForError(Object.assign(new Error('refused'), { code: 'ECONNREFUSED' })), 'connection_refused');
-});
-
-test('冻结有效代理出口探测只返回规范化 IP，公开状态不泄露该证据或认证信息', async () => {
-  const capture: Record<string, unknown> = {};
-  const result = await probeProxyEgress(authenticatedHttpProxy, {
-    targetUrl: 'https://cloud.example/capi/egress',
-    requestImpl: successfulEgressRequest(capture, '::ffff:203.0.113.7'),
-    agentFactory: () => ({ fake: true }),
-    now: () => Date.parse('2026-07-28T00:00:00.000Z'),
-  });
-  assert.deepEqual(result, {
-    state: 'available',
-    checkedAt: '2026-07-28T00:00:00.000Z',
-    reason: 'egress_observed',
-    expectedEgressIp: '203.0.113.7',
-  });
-  assert.equal(capture.url, 'https://cloud.example/capi/egress');
-  assert.equal(JSON.stringify(result).includes('proxy.example'), false);
-  assert.equal(JSON.stringify(result).includes('p@ss'), false);
-
-  const controller = createProxyPreflightController({
-    readProxy: async () => ({ ok: true, proxy: authenticatedHttpProxy }),
-    probe: async () => result,
-  });
-  await controller.ensure({ envId: 'env-egress', profileId: 'profile-egress' });
-  assert.equal(JSON.stringify(controller.snapshot('env-egress')).includes('203.0.113.7'), false);
 });
 
 test('控制器按环境单飞并在 TTL 内复用，缓存与公开快照不保存代理认证信息', async () => {
@@ -341,24 +288,5 @@ test('控制器仅在 Cloud 代理权威 revision 相同时复用缓存', async 
   assert.equal(first.authorityRevision, 3);
   assert.equal(cached.authorityRevision, 3);
   assert.equal(changed.authorityRevision, 4);
-  assert.equal(probes, 2);
-});
-
-test('Facebook 可达但期望出口证据暂缺时不缓存，避免 Active 接管复用无证据结果', async () => {
-  let probes = 0;
-  const controller = createProxyPreflightController({
-    readProxy: async () => ({ ok: true, proxy: authenticatedHttpProxy }),
-    probe: async () => {
-      probes += 1;
-      return {
-        state: 'available',
-        checkedAt: new Date().toISOString(),
-        reason: 'facebook_reachable',
-        expectedEgressReason: 'egress_probe_unavailable',
-      };
-    },
-  });
-  await controller.ensure({ envId: 'env-no-egress', profileId: 'profile-no-egress' });
-  await controller.ensure({ envId: 'env-no-egress', profileId: 'profile-no-egress' });
   assert.equal(probes, 2);
 });

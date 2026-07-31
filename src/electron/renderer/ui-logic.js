@@ -986,43 +986,30 @@
     return `${amount.toFixed(digits)} ${units[index]}`;
   }
 
-  /** 代理配置/启动前预检是辅助语境；“已验证”只可能来自当前浏览器运行证据。 */
+  /** 只呈现配置、Inactive 启动前的 Facebook 可达性结果和本次接管流量。 */
   function proxyRuntimeView(runtime, configuration, preflight) {
     const evidence = runtime && typeof runtime === 'object' ? runtime : {};
     const config = configuration && typeof configuration === 'object' ? configuration : {};
     const early = preflight && typeof preflight === 'object' ? preflight : {};
     const noProxy = config.known === true && config.noProxy === true;
     const bytes = formatReceivedBytes(evidence.sessionReceivedBytes);
-    const currentRuntime = ['pending', 'verified', 'same_as_host', 'unavailable'].includes(evidence.state);
-    let label = '待验证';
+    let label = '待检测';
     let tone = 'pending';
     if (noProxy) {
       label = '未配置代理';
       tone = 'danger';
-    } else if (evidence.state === 'verified') {
-      label = '代理已验证';
-      tone = 'verified';
-    } else if (evidence.state === 'same_as_host') {
-      label = '疑似直连';
-      tone = 'danger';
-    } else if (evidence.state === 'unavailable') {
-      label = '无法确认';
-      tone = 'unknown';
-    } else if (!currentRuntime && early.state === 'checking') {
+    } else if (early.state === 'checking') {
       label = '代理检测中';
       tone = 'pending';
-    } else if (!currentRuntime && early.state === 'available') {
+    } else if (early.state === 'available') {
       label = '代理可用';
       tone = 'verified';
-    } else if (!currentRuntime && early.state === 'unavailable') {
+    } else if (early.state === 'unavailable') {
       label = '代理不可用';
       tone = 'danger';
-    } else if (!currentRuntime && early.state === 'unknown') {
+    } else if (early.state === 'unknown') {
       label = '无法确认';
       tone = 'unknown';
-    } else if (evidence.state === 'stale') {
-      label = evidence.generation > 0 ? '验证已失效' : '待验证';
-      tone = evidence.generation > 0 ? 'danger' : 'pending';
     }
     return {
       label,
@@ -1030,9 +1017,7 @@
       bytes,
       compact: `${label} · 本次 ${bytes}`,
       configuration: config.summary || (config.known ? '无代理配置' : '配置待读取'),
-      browserIp: evidence.browserIp || '未取得',
-      directIp: evidence.directIp || '未取得',
-      checkedAt: currentRuntime ? (evidence.checkedAt || '') : (early.checkedAt || evidence.checkedAt || ''),
+      checkedAt: early.checkedAt || '',
     };
   }
 

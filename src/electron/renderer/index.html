@@ -46,13 +46,11 @@
       <div class="hp-row hidden"><span class="hp-label">引擎进程（兼容诊断）</span><strong id="edge-state" class="badge">未连接</strong></div>
     </div>
 
-    <!-- 当前 Facebook 指纹浏览器的代理运行证据；配置态与实际出口刻意分行，避免“配了=生效”。 -->
+    <!-- 当前 Facebook 指纹浏览器的代理配置、启动前可达性结果与本次接管流量。 -->
     <div id="proxy-runtime-pop" class="proxy-runtime-pop hidden" role="dialog" aria-label="代理运行详情" aria-hidden="true">
-      <div class="pr-head"><strong>代理运行详情</strong><span id="proxy-runtime-state" class="pr-state">待验证</span></div>
+      <div class="pr-head"><strong>代理运行详情</strong><span id="proxy-runtime-state" class="pr-state">待检测</span></div>
       <div class="pr-row"><span>代理配置</span><strong id="proxy-runtime-config">配置待读取</strong></div>
-      <div class="pr-row"><span>浏览器实际出口</span><strong id="proxy-runtime-browser-ip">未取得</strong></div>
-      <div class="pr-row"><span>本机直连出口</span><strong id="proxy-runtime-direct-ip">未取得</strong></div>
-      <div class="pr-row"><span>最后检测</span><strong id="proxy-runtime-checked-at">尚未检测</strong></div>
+      <div class="pr-row"><span>最后可达性检测</span><strong id="proxy-runtime-checked-at">尚未检测</strong></div>
       <div class="pr-row pr-traffic"><span>本次会话接收流量</span><strong id="proxy-runtime-bytes">0 B</strong></div>
       <p class="pr-note">从客户端接管当前受管页面后累计；不含上传，也不是代理商计费流量。</p>
     </div>
