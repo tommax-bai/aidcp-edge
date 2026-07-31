@@ -88,6 +88,69 @@ test('waitForLoginIdentity: 明确人工登录态无超时并在原地读出身�
   assert.equal(reads, 3);
 });
 
+test('waitForLoginIdentity: 每个读身份拍点前串行运行认证协调拍点', async () => {
+  const order: string[] = [];
+  let reads = 0;
+  const res = await waitForLoginIdentity(DUMMY_CDP, {
+    timeoutMs: 0,
+    unbounded: true,
+    intervalMs: 1,
+    interruptPollMs: 1,
+    sleep: immediateSleep,
+    beforeIdentityRead: async () => {
+      order.push('auth');
+      return { kind: 'continue' };
+    },
+    readIdentity: async () => {
+      order.push('identity');
+      reads += 1;
+      return reads === 2 ? okRes() : failRes();
+    },
+  });
+  assert.equal(res.kind, 'identified');
+  assert.deepEqual(order, ['auth', 'identity', 'auth', 'identity']);
+});
+
+test('waitForLoginIdentity: 生命周期中断先于认证协调拍点', async () => {
+  let authPasses = 0;
+  let identityReads = 0;
+  const res = await waitForLoginIdentity(DUMMY_CDP, {
+    timeoutMs: 10_000,
+    intervalMs: 1,
+    interruptPollMs: 1,
+    sleep: immediateSleep,
+    pollInterrupt: () => 'pause',
+    beforeIdentityRead: async () => {
+      authPasses += 1;
+      return { kind: 'continue' };
+    },
+    readIdentity: async () => {
+      identityReads += 1;
+      return failRes();
+    },
+  });
+  assert.deepEqual(res, { kind: 'interrupted', reason: 'pause' });
+  assert.equal(authPasses, 0);
+  assert.equal(identityReads, 0);
+});
+
+test('waitForLoginIdentity: 认证协调拍点失败时安全停手且不读身份', async () => {
+  let identityReads = 0;
+  const res = await waitForLoginIdentity(DUMMY_CDP, {
+    timeoutMs: 10_000,
+    intervalMs: 1,
+    interruptPollMs: 1,
+    sleep: immediateSleep,
+    beforeIdentityRead: async () => ({ kind: 'failed', reason: 'fresh_start_policy_unavailable' }),
+    readIdentity: async () => {
+      identityReads += 1;
+      return okRes();
+    },
+  });
+  assert.deepEqual(res, { kind: 'failed', reason: 'fresh_start_policy_unavailable' });
+  assert.equal(identityReads, 0);
+});
+
 test('waitForLoginIdentity: 恒定假时钟 + 桩 sleep 不死循环/不 RangeError（迭代上界）', async () => {
   // now 恒定：若循环靠 now() 前进判超时会死循环。断言仍有界返回 timeout（锁死 edge-poll-helpers-iteration-bounded 坑）。
   const res = await waitForLoginIdentity(DUMMY_CDP, {
@@ -178,6 +241,22 @@ test('resolveStartupIdentity: adspower + halt + 等待中断 → terminate 干�
   assert.equal(action.kind, 'terminate');
   assert.equal(action.kind === 'terminate' && action.code, 0);
   assert.equal(action.kind === 'terminate' && action.reason, 'interrupted:close');
+});
+
+test('resolveStartupIdentity: 人工等待认证协调失败 → terminate 码1且保留失败原因', async () => {
+  const action = await resolveStartupIdentity({
+    providerKind: 'adspower',
+    initialDecision: HALT,
+    override: undefined,
+    loginWaitMs: 300_000,
+    waitForLogin: () => Promise.resolve({ kind: 'failed', reason: 'fresh_start_policy_unavailable' }),
+    decideIdentity: decideUse,
+  });
+  assert.deepEqual(action, {
+    kind: 'terminate',
+    code: 1,
+    reason: 'login_wait_failed:fresh_start_policy_unavailable',
+  });
 });
 
 test('resolveStartupIdentity: adspower + halt + 等待门关闭(0) → terminate 码1、绝不进等待（关等待仍走真退出）', async () => {

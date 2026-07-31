@@ -432,6 +432,100 @@ test('missing AdsPower credential fill becomes a manual-login result without Nat
   runtime.assertDone();
 });
 
+test('retained manual-login session re-enters the same coordinator when the page advances to 2FA', async () => {
+  const broker = totpBroker([
+    { code: '123456', windowStartMs: 90_000, windowEndMs: 120_000 },
+  ]);
+  const runtime = new ScriptedRuntime([
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('manual_login_required', { reason: 'credential_fill_unavailable' }),
+    },
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('totp_entry_ready', { signalId: 'entry-observed', serverEpochMs: 90_100 }),
+    },
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('totp_entry_ready', { signalId: 'entry-fresh', serverEpochMs: 90_200 }),
+    },
+    {
+      kind: 'facebook_auth_enter_totp',
+      execution: action('facebook_auth_enter_totp', 'entry-fresh'),
+    },
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('totp_submit_ready', { signalId: 'submit-fresh', serverEpochMs: 90_300 }),
+    },
+    {
+      kind: 'facebook_auth_submit_totp',
+      execution: action('facebook_auth_submit_totp', 'submit-fresh'),
+    },
+    { kind: 'facebook_auth_probe', execution: probe('authenticated') },
+  ]);
+  const options = {
+    runtime,
+    totpBroker: broker,
+    freshStartPolicyApplied: true,
+    timeoutMs: 30_000,
+    now: () => 0,
+    sleep: async () => undefined,
+  };
+
+  const initial = await reconcileFacebookStartupAuth(options);
+  assert.deepEqual(initial, {
+    kind: 'manual_required',
+    reason: 'credential_fill_unavailable',
+    actionAttempts: 0,
+  });
+
+  const reentered = await reconcileFacebookStartupAuth(options);
+  assert.deepEqual(reentered, { kind: 'authenticated', actionAttempts: 2 });
+  assert.deepEqual(runtime.calls.map((call) => call.kind), [
+    'facebook_auth_probe',
+    'facebook_auth_probe',
+    'facebook_auth_probe',
+    'facebook_auth_enter_totp',
+    'facebook_auth_probe',
+    'facebook_auth_submit_totp',
+    'facebook_auth_probe',
+  ]);
+  assert.deepEqual(broker.requests, [90_100]);
+  runtime.assertDone();
+});
+
+test('unchanged manual-login page remains a zero-action coordinator cadence', async () => {
+  const runtime = new ScriptedRuntime([
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('manual_login_required', { reason: 'credential_fill_unavailable' }),
+    },
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('manual_login_required', { reason: 'credential_fill_unavailable' }),
+    },
+  ]);
+  const options = {
+    runtime,
+    totpBroker: totpBroker(),
+    freshStartPolicyApplied: true,
+    timeoutMs: 5_000,
+  };
+
+  const first = await reconcileFacebookStartupAuth(options);
+  const second = await reconcileFacebookStartupAuth(options);
+
+  assert.equal(first.kind, 'manual_required');
+  assert.equal(first.actionAttempts, 0);
+  assert.equal(second.kind, 'manual_required');
+  assert.equal(second.actionAttempts, 0);
+  assert.deepEqual(runtime.calls.map((call) => call.kind), [
+    'facebook_auth_probe',
+    'facebook_auth_probe',
+  ]);
+  runtime.assertDone();
+});
+
 test('TOTP entry waits below ten seconds, requests the new window, and re-probes before input', async () => {
   let nowMs = 0;
   const brokerCode = { code: '123456', windowStartMs: 90_000, windowEndMs: 120_000 };

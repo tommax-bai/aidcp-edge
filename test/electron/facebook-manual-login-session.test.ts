@@ -9,6 +9,10 @@ test('credential fill failure keeps the core attached and waits for identity in 
   assert.match(core, /authResult\.kind === 'manual_required'[\s\S]*?type: 'lifecycle\.auth_required'/);
   assert.match(core, /kind: 'manual_login_required'[\s\S]*?reason: authResult\.reason/);
   assert.match(core, /unbounded: Boolean\(manualLoginRequiredReason\)/);
+  assert.match(core, /beforeIdentityRead: manualLoginRequiredReason[\s\S]*?reconcileFacebookAuthIfNeeded\(firstLoginPolicyApplied, loginWaitMs\)/,
+    'the retained session must serially re-enter the existing coordinator with the original policy proof');
+  assert.match(core, /authResult\.kind === 'timeout' && authResult\.actionAttempts > 0[\s\S]*?facebook_auth_timeout_after_action/,
+    'a new coordinator instance must not guess state after a confirmed action times out');
   assert.match(core, /readPlatformIdentity\(\{ allowNavigate: false/);
   assert.match(core, /chrome\.killAndConfirmDead\(\)/,
     'explicit pause or close must confirm the owned AdsPower browser before the startup core exits');
@@ -19,6 +23,15 @@ test('credential fill failure keeps the core attached and waits for identity in 
   );
   assert.doesNotMatch(manualBranch, /terminateNow\(/,
     'the known manual-login result must not disconnect the core');
+
+  const retainedWait = core.slice(
+    core.indexOf('beforeIdentityRead: manualLoginRequiredReason'),
+    core.indexOf('// 平台无关就地重读'),
+  );
+  assert.equal((retainedWait.match(/reconcileFacebookAuthIfNeeded/g) ?? []).length, 1,
+    'manual waiting must install one serialized auth consumer, not parallel watchers');
+  assert.doesNotMatch(retainedWait, /setInterval|setTimeout|Promise\.all/,
+    'manual waiting must reuse the identity cadence instead of creating another scheduler');
 });
 
 test('Electron projects the structured reason without releasing browser ownership', () => {

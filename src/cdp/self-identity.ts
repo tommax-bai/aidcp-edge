@@ -471,7 +471,13 @@ export async function readPageContext(cdp: BrowseCdp): Promise<PageContext> {
 export type LoginWaitResult =
   | { kind: 'identified'; identity: SelfIdentity }
   | { kind: 'timeout' }
-  | { kind: 'interrupted'; reason: string };
+  | { kind: 'interrupted'; reason: string }
+  | { kind: 'failed'; reason: string };
+
+export type LoginWaitPreflightResult =
+  | { kind: 'continue' }
+  | { kind: 'interrupted'; reason: string }
+  | { kind: 'failed'; reason: string };
 
 export interface WaitForLoginOptions {
   /** 总等待预算（ms）。<=0 立即返回 timeout（调用方一般在进入前就判掉）。 */
@@ -487,6 +493,11 @@ export interface WaitForLoginOptions {
   logger?: (msg: string) => void;
   /** 就地重读（默认 readSelfIdentity，allowNavigate=false、单次扫描）。注入以适配多平台/单测。 */
   readIdentity?: (cdp: BrowseCdp) => Promise<SelfIdentityResult>;
+  /**
+   * 每次稀疏身份读取前串行执行的可选协调拍点。它与 readIdentity 不并发；可让保留的人工登录
+   * 会话继续消费同一认证协调器的信号，同时把中断或安全失败显式交还身份门。
+   */
+  beforeIdentityRead?: () => Promise<LoginWaitPreflightResult>;
   /** 轮询中断意图：返回原因串即中断、返回 null 继续。 */
   pollInterrupt?: () => string | null;
 }
@@ -515,6 +526,7 @@ export async function waitForLoginIdentity(
   const readIntervalMs = Math.max(1, opts.intervalMs ?? 5000);
   const interruptPollMs = Math.max(1, opts.interruptPollMs ?? 500);
   const readIdentity = opts.readIdentity ?? ((c) => defaultInPlaceRead(c, sleep, now));
+  const beforeIdentityRead = opts.beforeIdentityRead;
   const pollInterrupt = opts.pollInterrupt ?? (() => null);
 
   const readEveryTicks = Math.max(1, Math.round(readIntervalMs / interruptPollMs));
@@ -529,6 +541,19 @@ export async function waitForLoginIdentity(
       return { kind: 'interrupted', reason: interrupt };
     }
     if (tick % readEveryTicks === 0) {
+      if (beforeIdentityRead) {
+        const preflight = await beforeIdentityRead().catch(
+          (): LoginWaitPreflightResult => ({ kind: 'failed', reason: 'login_wait_preflight_failed' }),
+        );
+        if (preflight.kind === 'interrupted') {
+          log(`[self-identity] 登录等待协调拍点被中断（${preflight.reason}）`);
+          return preflight;
+        }
+        if (preflight.kind === 'failed') {
+          log(`[self-identity] 登录等待协调拍点安全停手（${preflight.reason}）`);
+          return preflight;
+        }
+      }
       const idRes = await readIdentity(cdp).catch(
         (): SelfIdentityResult => ({ ok: false, reason: '等待期就地重读异常' }),
       );
@@ -588,6 +613,7 @@ export async function resolveStartupIdentity(deps: ResolveStartupIdentityDeps): 
       return { kind: 'proceed', decision: decided };
     }
     if (waitRes.kind === 'interrupted') return { kind: 'terminate', code: 0, reason: `interrupted:${waitRes.reason}` };
+    if (waitRes.kind === 'failed') return { kind: 'terminate', code: 1, reason: `login_wait_failed:${waitRes.reason}` };
     return { kind: 'terminate', code: 0, reason: 'login_wait_timeout' };
   }
   if (initialDecision.kind === 'halt') return { kind: 'terminate', code: 1, reason: 'halt' };

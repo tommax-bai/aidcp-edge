@@ -426,6 +426,25 @@ async function main(): Promise<void> {
             timeoutMs: remainingLoginWaitMs,
             unbounded: Boolean(manualLoginRequiredReason),
             logger: (m) => console.log(m),
+            // credential_fill_unavailable 只把会话切到人工等待，不能永久注销原认证消费者。
+            // 每个稀疏身份读取拍点前，用同一 runtime、同一 fresh-start 证明串行重入原协调器；
+            // 人工登录页仍零动作，页面推进到 2FA 后则由原协调器在单次有界调用内继续处理。
+            beforeIdentityRead: manualLoginRequiredReason
+              ? async () => {
+                  const authResult = await reconcileFacebookAuthIfNeeded(firstLoginPolicyApplied, loginWaitMs);
+                  if (authResult.kind === 'interrupted') {
+                    return { kind: 'interrupted' as const, reason: authResult.reason };
+                  }
+                  if (authResult.kind === 'failed') {
+                    return { kind: 'failed' as const, reason: authResult.reason };
+                  }
+                  if (authResult.kind === 'timeout' && authResult.actionAttempts > 0) {
+                    // 已确认动作后的协调状态不能跨新实例猜测恢复（尤其 entered TOTP window）。
+                    return { kind: 'failed' as const, reason: 'facebook_auth_timeout_after_action' };
+                  }
+                  return { kind: 'continue' as const };
+                }
+              : undefined,
             // 平台无关就地重读（allowNavigate=false、单次扫描）：不 hammer CDP、不骚扰二维码页。
             readIdentity: () =>
               readPlatformIdentity({ allowNavigate: false, hydrateTimeoutMs: 1_000, logger: () => undefined }),
@@ -462,6 +481,8 @@ async function main(): Promise<void> {
       } else if (action.reason.startsWith('interrupted:')) {
         const cmd = action.reason.slice('interrupted:'.length);
         console.log(`[aidcp-edge] 等待登录期间收到「${cmd}」→ 干净停止（不自动重起），可在浏览器登录后点「启动/恢复」重来。`);
+      } else if (action.reason.startsWith('login_wait_failed:')) {
+        console.error(`[aidcp-edge] ✗ Facebook 人工登录等待期间认证协调器安全停手（${action.reason.slice('login_wait_failed:'.length)}）。`);
       } else {
         // 常规诚实停手（self / override 失败仍 halt / adspower 关等待门 / 等待后仍 halt）。
         const haltReason = 'reason' in decision ? decision.reason : '';
