@@ -193,6 +193,66 @@ test('login and TOTP routes without hydrated fields remain transitional', async 
   assert.equal(totp.signalId, undefined);
 });
 
+test('TOTP probe uses exact associated labels and keeps long URL generations bounded', async () => {
+  const longQuery = `flow=${'a'.repeat(734)}`;
+  install(`
+    <main>
+      <label for="_r_3_">Code</label>
+      <input id="_r_3_" type="text" autocomplete="off" value="">
+      <div role="button">Continue</div>
+    </main>
+  `, `https://www.facebook.com/two_step_verification/two_factor/?${longQuery}`);
+  const input = document.getElementById('_r_3_') as HTMLInputElement;
+  setRect(input, { left: 100, top: 100, right: 300, bottom: 145 });
+
+  const first = await probe();
+  const unchanged = await probe();
+  assert.equal(first.signal, 'totp_entry_ready');
+  assert.match(String(first.documentGeneration), /^v1:[0-9a-f]{64}$/);
+  assert.equal(String(first.documentGeneration).length, 67);
+  assert.equal(String(first.documentGeneration).includes(longQuery), false);
+  assert.equal(unchanged.documentGeneration, first.documentGeneration);
+  assert.equal(unchanged.signalId, first.signalId);
+
+  history.pushState({}, '', `${location.pathname}?flow=${'b'.repeat(734)}`);
+  const changedRoute = await probe();
+  assert.equal(changedRoute.signal, 'totp_entry_ready');
+  assert.notEqual(changedRoute.documentGeneration, first.documentGeneration);
+  assert.notEqual(changedRoute.signalId, first.signalId);
+});
+
+test('TOTP associated-label fallback supports wrapping labels and rejects nearby or ambiguous text', async () => {
+  install(`
+    <main>
+      <label>Security code<input id="wrapped" type="text" autocomplete="off" value=""></label>
+    </main>
+  `, 'https://www.facebook.com/two_step_verification/two_factor/');
+  const wrappedInput = document.getElementById('wrapped') as HTMLInputElement;
+  setRect(wrappedInput, { left: 100, top: 100, right: 300, bottom: 145 });
+  assert.equal((await probe()).signal, 'totp_entry_ready');
+
+  install(`
+    <main>
+      <p>Enter the login code</p>
+      <input id="unlabelled" type="text" autocomplete="off" value="">
+    </main>
+  `, 'https://www.facebook.com/two_step_verification/two_factor/');
+  const unlabelled = await probe();
+  assert.equal(unlabelled.signal, 'none');
+  assert.equal(unlabelled.reason, 'totp_input_hydrating');
+
+  install(`
+    <main>
+      <label for="first">Code</label><input id="first" type="text" autocomplete="off" value="">
+      <label for="second">Code</label><input id="second" type="text" autocomplete="off" value="">
+    </main>
+  `, 'https://www.facebook.com/two_step_verification/two_factor/');
+  const ambiguous = await probe();
+  assert.equal(ambiguous.signal, 'blocked_unknown');
+  assert.equal(ambiguous.reason, 'totp_input_ambiguous');
+  assert.equal(ambiguous.signalId, undefined);
+});
+
 test('obscured login target and CAPTCHA dispatch no actionable signal', async () => {
   install(`
     <form>

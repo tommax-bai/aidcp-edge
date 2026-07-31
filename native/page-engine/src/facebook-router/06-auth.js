@@ -1,13 +1,14 @@
   const facebookAuthSignalPrefix='aidcp:facebook-auth:v1:';
   const facebookAuthCredentialFillGraceMs=1500;
-  const authDocumentGeneration=()=>{
-    const timeOrigin=Number(window.performance&&window.performance.timeOrigin)||0;
-    return `${location.origin}${location.pathname}${location.search}|${Math.round(timeOrigin)}`;
-  };
   const authDigest=async(value)=>{
     const bytes=new TextEncoder().encode(String(value||''));
     const digest=await crypto.subtle.digest('SHA-256',bytes);
     return Array.from(new Uint8Array(digest),(byte)=>byte.toString(16).padStart(2,'0')).join('');
+  };
+  const authDocumentGeneration=async()=>{
+    const timeOrigin=Number(window.performance&&window.performance.timeOrigin)||0;
+    const urlState=`${location.origin}${location.pathname}${location.search}`;
+    return `v1:${await authDigest(`${Math.round(timeOrigin)}\n${urlState}`)}`;
   };
   const authTopHit=(el)=>{
     const target=point(el);
@@ -36,7 +37,7 @@
     ].join('|');
   };
   const authObservation=async(signal,candidate,reason,extra={})=>{
-    const documentGeneration=authDocumentGeneration();
+    const documentGeneration=await authDocumentGeneration();
     if(!candidate){
       return {
         signal,
@@ -73,17 +74,26 @@
     /\/two_step_verification\/two_factor\/?/i.test(location.pathname)
     ||/two-factor authentication|authentication app|enter (?:the )?(?:login|security) code|双重验证|双重驗證|验证码|驗證碼/i.test(text(document.body,5000))
   );
+  const authEditableInput=(input)=>Boolean(input&&!input.disabled&&!input.readOnly);
+  const authAssociatedLabelText=(input)=>Array.from((input&&input.labels)||[])
+    .map((associated)=>text(associated,512))
+    .join(' ');
+  const authTotpMeaning=(raw)=>/\bcode\b|验证码|驗證碼/i.test(String(raw||''));
   const authTotpInputCandidates=()=>{
     const specific=all([
       'input[autocomplete="one-time-code"]',
       'input[name="approvals_code"]',
       'input[inputmode="numeric"]',
-    ].join(',')).filter(visible);
+    ].join(',')).filter(visible).filter(authEditableInput);
     if(specific.length)return [...new Set(specific)];
     if(!authTotpContext())return [];
-    return all('input[type="text"],input:not([type])').filter(visible).filter((input)=>{
-      const raw=[label(input),input.getAttribute('placeholder')||''].join(' ');
-      return /code|验证码|驗證碼/i.test(raw);
+    return all('input[type="text"],input:not([type])').filter(visible).filter(authEditableInput).filter((input)=>{
+      const raw=[
+        label(input),
+        input.getAttribute('placeholder')||'',
+        authAssociatedLabelText(input),
+      ].join(' ');
+      return authTotpMeaning(raw);
     });
   };
   const authTotpInput=()=>{
@@ -284,7 +294,7 @@
   };
   const authFocusGuard=async()=>{
     const input=authTotpInput();
-    if(!input||authDocumentGeneration()!==String(p.documentGeneration||'')){
+    if(!input||(await authDocumentGeneration())!==String(p.documentGeneration||'')){
       return {kind:'text_target',value:{ok:false,focused:false}};
     }
     const candidateKey=await authDigest(authElementEvidence(input));
@@ -298,7 +308,7 @@
   };
   const authTotpReadback=async()=>{
     const input=authTotpInput();
-    if(!input||authDocumentGeneration()!==String(p.documentGeneration||'')){
+    if(!input||(await authDocumentGeneration())!==String(p.documentGeneration||'')){
       return {kind:'auth_totp_readback',value:{bound:false,empty:false,length:0,matches:false}};
     }
     const candidateKey=await authDigest(authElementEvidence(input));
@@ -317,7 +327,7 @@
     const expectedDocument=String(p.documentGeneration||'');
     const expectedSignal=String(p.expectedSignal||'');
     const expectedCandidateKey=String(p.candidateKey||'');
-    const documentChanged=authDocumentGeneration()!==expectedDocument;
+    const documentChanged=(await authDocumentGeneration())!==expectedDocument;
     if(documentChanged){
       return {
         kind:'facebook_auth_postcondition',
