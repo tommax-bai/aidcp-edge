@@ -2725,6 +2725,40 @@ test('运行方式：Cloud 的 active slow-start 胜出，同时单独展示被�
   assert.match($(w, '#facebook-rule-mode-badge').textContent || '', /冷启动优先（暂停）/);
 });
 
+test('运行方式：未绑定环境以 active 锚点确认冷启动，不要求伪造 effectiveMode', async () => {
+  const w = await boot(facebookRuleModeStub({
+    setFacebookOperationPolicy: async ({ envKey, expectedRevision }) => ({
+      ok: true,
+      data: {
+        data: {
+          envKey,
+          facebookOperationPolicy: {
+            baseMode: 'persona',
+            effectiveMode: null,
+            policyRevision: expectedRevision + 1,
+            slowStart: { state: 'active' },
+            blocker: null,
+          },
+        },
+      },
+    }),
+  }));
+  const persona = $(w, '#facebook-persona-mode-toggle') as unknown as HTMLInputElement;
+  const slow = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
+
+  slow.checked = true;
+  slow.dispatchEvent(new w.Event('change', { bubbles: true }));
+  for (let i = 0; i < 3; i++) await tick();
+
+  assert.equal(persona.checked, false);
+  assert.equal(slow.checked, true);
+  assert.match($(w, '#slow-start-badge').textContent || '', /已选择/);
+  assert.doesNotMatch(
+    $(w, '#slow-start-reason').textContent || '',
+    /运行方式回读与本次选择不一致/,
+  );
+});
+
 test('运行方式：写失败或成功回执不完整时保留最近 Cloud 真态并后台复读', async () => {
   for (const response of [
     { ok: false, data: { error: { code: 'binding_conflict', message: '环境绑定冲突' } } },
