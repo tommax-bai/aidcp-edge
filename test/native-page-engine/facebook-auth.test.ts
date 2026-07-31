@@ -9,20 +9,23 @@ import {
   type FacebookAuthSignal,
   type FacebookAuthRuntime,
 } from '../../src/native-page-engine/facebook-auth.js';
-import type {
-  NativeEffectPhase,
-  NativeFacebookAuthActionKind,
-  NativePageCommand,
-  NativePageCommandExecution,
+import {
+  NativePageEngineError,
+  type NativeEffectPhase,
+  type NativeFacebookAuthActionKind,
+  type NativePageCommand,
+  type NativePageCommandExecution,
 } from '../../src/native-page-engine/client.js';
 
 interface RuntimeStep {
   kind: string;
-  execution: NativePageCommandExecution;
+  execution?: NativePageCommandExecution;
+  error?: Error;
 }
 
 class ScriptedRuntime implements FacebookAuthRuntime {
   readonly calls: NativePageCommand[] = [];
+  readonly closedOwners: string[] = [];
 
   constructor(private readonly steps: RuntimeStep[]) {}
 
@@ -36,7 +39,13 @@ class ScriptedRuntime implements FacebookAuthRuntime {
     const step = this.steps.shift();
     assert.ok(step, `unexpected Native command ${command.kind}`);
     assert.equal(command.kind, step.kind);
+    if (step.error) throw step.error;
+    assert.ok(step.execution, `missing execution for Native command ${command.kind}`);
     return step.execution;
+  }
+
+  async closeOwner(ownerId: string): Promise<void> {
+    this.closedOwners.push(ownerId);
   }
 
   assertDone(): void {
@@ -108,6 +117,150 @@ test('already-authenticated profile is a no-op even without fresh-start policy e
   assert.deepEqual(runtime.calls.map((call) => call.kind), ['facebook_auth_probe']);
   assert.deepEqual(runtime.calls[0]?.params, { allowAuthActions: false });
   assert.deepEqual(broker.requests, []);
+  runtime.assertDone();
+});
+
+test('transient read-only auth probe failure rebuilds its owner and succeeds in the same process', async () => {
+  let nowMs = 0;
+  const logs: string[] = [];
+  const runtime = new ScriptedRuntime([
+    {
+      kind: 'facebook_auth_probe',
+      error: new NativePageEngineError('cdp_error', 'sensitive raw failure', {
+        effectPhase: 'not_started',
+        stderr: 'must not be logged',
+      }),
+    },
+    { kind: 'facebook_auth_probe', execution: probe('authenticated') },
+  ]);
+
+  const result = await reconcileFacebookStartupAuth({
+    runtime,
+    totpBroker: totpBroker(),
+    freshStartPolicyApplied: true,
+    timeoutMs: 5_000,
+    pollIntervalMs: 500,
+    now: () => nowMs,
+    sleep: async (ms) => { nowMs += ms; },
+    logger: (message) => logs.push(message),
+  });
+
+  assert.deepEqual(result, { kind: 'authenticated', actionAttempts: 0 });
+  assert.equal(nowMs, 250);
+  assert.deepEqual(runtime.calls.map((call) => call.kind), [
+    'facebook_auth_probe',
+    'facebook_auth_probe',
+  ]);
+  assert.deepEqual(runtime.closedOwners, ['facebook-startup-auth']);
+  assert.ok(logs.includes(
+    '[facebook-auth] native command failure kind=facebook_auth_probe code=cdp_error '
+    + 'effectPhase=not_started disposition=retry attempt=1 retryInMs=250',
+  ));
+  assert.equal(logs.join('\n').includes('sensitive raw failure'), false);
+  assert.equal(logs.join('\n').includes('must not be logged'), false);
+  runtime.assertDone();
+});
+
+test('twenty-second transient probe exhaustion enters controlled manual login without input', async () => {
+  let nowMs = 0;
+  let calls = 0;
+  const closedOwners: string[] = [];
+  const runtime: FacebookAuthRuntime = {
+    async execute(_ownerId, command) {
+      calls += 1;
+      assert.equal(command.kind, 'facebook_auth_probe');
+      throw new NativePageEngineError('cdp_error', 'persistent startup churn', {
+        effectPhase: 'not_started',
+      });
+    },
+    async closeOwner(ownerId) {
+      closedOwners.push(ownerId);
+    },
+  };
+
+  const result = await reconcileFacebookStartupAuth({
+    runtime,
+    totpBroker: totpBroker(),
+    freshStartPolicyApplied: true,
+    timeoutMs: 60_000,
+    now: () => nowMs,
+    sleep: async (ms) => { nowMs += ms; },
+  });
+
+  assert.deepEqual(result, {
+    kind: 'manual_required',
+    reason: 'auth_probe_unavailable',
+    actionAttempts: 0,
+  });
+  assert.equal(nowMs, 20_000);
+  assert.ok(calls > 1);
+  assert.equal(closedOwners.length, calls);
+  assert.ok(closedOwners.every((ownerId) => ownerId === 'facebook-startup-auth'));
+});
+
+test('contract probe failure is terminal and does not reset the Native owner', async () => {
+  const logs: string[] = [];
+  const runtime = new ScriptedRuntime([
+    {
+      kind: 'facebook_auth_probe',
+      error: new NativePageEngineError('invalid_protocol', 'protocol mismatch'),
+    },
+  ]);
+
+  const result = await reconcileFacebookStartupAuth({
+    runtime,
+    totpBroker: totpBroker(),
+    freshStartPolicyApplied: true,
+    timeoutMs: 5_000,
+    logger: (message) => logs.push(message),
+  });
+
+  assert.deepEqual(result, {
+    kind: 'failed',
+    reason: 'native_auth_command_failed',
+    actionAttempts: 0,
+  });
+  assert.deepEqual(runtime.closedOwners, []);
+  assert.deepEqual(runtime.calls.map((call) => call.kind), ['facebook_auth_probe']);
+  assert.ok(logs.includes(
+    '[facebook-auth] native command failure kind=facebook_auth_probe code=invalid_protocol '
+    + 'effectPhase=unknown disposition=terminal',
+  ));
+  runtime.assertDone();
+});
+
+test('Native action exception is terminal even when its error code is retryable for probes', async () => {
+  const runtime = new ScriptedRuntime([
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('login_submit_ready', { signalId: 'login-1' }),
+    },
+    {
+      kind: 'facebook_auth_submit_login',
+      error: new NativePageEngineError('cdp_error', 'action receipt unavailable', {
+        effectPhase: 'ambiguous',
+      }),
+    },
+  ]);
+
+  const result = await reconcileFacebookStartupAuth({
+    runtime,
+    totpBroker: totpBroker(),
+    freshStartPolicyApplied: true,
+    timeoutMs: 5_000,
+  });
+
+  assert.deepEqual(result, {
+    kind: 'failed',
+    reason: 'native_auth_command_failed',
+    effectPhase: 'ambiguous',
+    actionAttempts: 1,
+  });
+  assert.deepEqual(runtime.closedOwners, []);
+  assert.deepEqual(runtime.calls.map((call) => call.kind), [
+    'facebook_auth_probe',
+    'facebook_auth_submit_login',
+  ]);
   runtime.assertDone();
 });
 

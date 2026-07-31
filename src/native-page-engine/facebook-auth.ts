@@ -4,20 +4,34 @@ import type {
 } from '../cdp/facebook-totp-broker.js';
 import {
   NATIVE_FACEBOOK_AUTH_SIGNALS,
+  NativePageEngineError,
   type NativeFacebookAuthActionKind,
   type NativeFacebookAuthProbeReceipt,
   type NativeFacebookAuthSignal,
   type NativeEffectPhase,
   type NativePageCommand,
   type NativePageCommandExecution,
+  type NativePageEngineErrorCode,
 } from './client.js';
 
 const TOTP_WINDOW_MS = 30_000;
 const TOTP_MIN_REMAINING_MS = 10_000;
 const DEFAULT_POLL_INTERVAL_MS = 500;
 const MAX_COMMAND_TIMEOUT_MS = 30_000;
+const PROBE_STABILIZATION_TIMEOUT_MS = 20_000;
+const PROBE_RETRY_DELAYS_MS = [250, 500, 1_000] as const;
+const FACEBOOK_AUTH_OWNER_ID = 'facebook-startup-auth';
 const SAFE_REASON_RE = /^[a-z0-9_]{1,80}$/;
 const SIGNAL_ID_RE = /^[\x21-\x7e]{1,512}$/;
+const TRANSIENT_PROBE_ERROR_CODES = new Set<NativePageEngineErrorCode>([
+  'endpoint_unreachable',
+  'no_matching_target',
+  'cdp_connect_failed',
+  'cdp_timeout',
+  'cdp_error',
+  'engine_timeout',
+  'engine_exited',
+]);
 
 export type FacebookAuthSignal = NativeFacebookAuthSignal;
 
@@ -47,6 +61,7 @@ export interface FacebookAuthRuntime {
     timeoutMs?: number,
     signal?: AbortSignal,
   ): Promise<NativePageCommandExecution>;
+  closeOwner(ownerId: string): Promise<void>;
 }
 
 export interface FacebookAuthCoordinatorOptions {
@@ -117,6 +132,21 @@ function validSignalId(value: unknown): value is string {
 
 function validServerEpochMs(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) > 0;
+}
+
+function nativeFailure(error: unknown): {
+  code: NativePageEngineErrorCode | 'unknown';
+  effectPhase?: NativeEffectPhase;
+  transientProbe: boolean;
+} {
+  if (!(error instanceof NativePageEngineError)) {
+    return { code: 'unknown', transientProbe: false };
+  }
+  return {
+    code: error.code,
+    effectPhase: error.detail?.effectPhase,
+    transientProbe: TRANSIENT_PROBE_ERROR_CODES.has(error.code),
+  };
 }
 
 function windowFor(serverEpochMs: number): EnteredTotpWindow {
@@ -233,64 +263,150 @@ export async function reconcileFacebookStartupAuth(
   const runCommand = async (
     command: NativePageCommand,
   ): Promise<CommandAttempt> => {
-    const before = interrupted();
-    if (before) return { ok: false, result: result({ kind: 'interrupted', reason: before }) };
-    const remainingMs = remainingBudgetMs();
-    if (remainingMs <= 0) return { ok: false, result: result({ kind: 'timeout' }) };
-
-    const controller = new AbortController();
-    let lifecycleInterrupt: string | null = null;
-    const forwardAbort = (): void => controller.abort();
-    options.signal?.addEventListener('abort', forwardAbort, { once: true });
-    const interruptTimer = options.pollInterrupt
-      ? setInterval(() => {
-          const reason = interrupted();
-          if (!reason) return;
-          lifecycleInterrupt = reason;
-          controller.abort();
-        }, Math.min(pollIntervalMs, remainingMs))
+    const probeStabilizationDeadlineMs = command.kind === 'facebook_auth_probe'
+      ? Math.min(deadlineMs, now() + PROBE_STABILIZATION_TIMEOUT_MS)
       : undefined;
-    interruptTimer?.unref?.();
-    try {
-      const execution = await options.runtime.execute(
-        'facebook-startup-auth',
-        command,
-        Math.max(1, Math.min(MAX_COMMAND_TIMEOUT_MS, remainingMs)),
-        controller.signal,
-      );
-      if (lifecycleInterrupt || options.signal?.aborted) {
+    let transientProbeRetries = 0;
+    for (;;) {
+      const before = interrupted();
+      if (before) return { ok: false, result: result({ kind: 'interrupted', reason: before }) };
+      const remainingMs = remainingBudgetMs();
+      if (remainingMs <= 0) return { ok: false, result: result({ kind: 'timeout' }) };
+      const stabilizationRemainingMs = probeStabilizationDeadlineMs === undefined
+        ? remainingMs
+        : Math.max(0, probeStabilizationDeadlineMs - now());
+      if (transientProbeRetries > 0 && stabilizationRemainingMs <= 0) {
+        log(
+          '[facebook-auth] native probe stabilization exhausted '
+          + `windowMs=${PROBE_STABILIZATION_TIMEOUT_MS} disposition=manual`,
+        );
         return {
           ok: false,
-          result: result({
-            kind: 'interrupted',
-            reason: lifecycleInterrupt ?? 'aborted',
-          }),
+          result: result({ kind: 'manual_required', reason: 'auth_probe_unavailable' }),
         };
       }
-      if (remainingBudgetMs() <= 0) {
-        return { ok: false, result: result({ kind: 'timeout' }) };
+
+      const controller = new AbortController();
+      let lifecycleInterrupt: string | null = null;
+      const forwardAbort = (): void => controller.abort();
+      options.signal?.addEventListener('abort', forwardAbort, { once: true });
+      const interruptTimer = options.pollInterrupt
+        ? setInterval(() => {
+            const reason = interrupted();
+            if (!reason) return;
+            lifecycleInterrupt = reason;
+            controller.abort();
+          }, Math.min(pollIntervalMs, remainingMs))
+        : undefined;
+      interruptTimer?.unref?.();
+      try {
+        const execution = await options.runtime.execute(
+          FACEBOOK_AUTH_OWNER_ID,
+          command,
+          Math.max(1, Math.min(MAX_COMMAND_TIMEOUT_MS, remainingMs, stabilizationRemainingMs)),
+          controller.signal,
+        );
+        if (lifecycleInterrupt || options.signal?.aborted) {
+          return {
+            ok: false,
+            result: result({
+              kind: 'interrupted',
+              reason: lifecycleInterrupt ?? 'aborted',
+            }),
+          };
+        }
+        if (remainingBudgetMs() <= 0) {
+          return { ok: false, result: result({ kind: 'timeout' }) };
+        }
+        return { ok: true, execution };
+      } catch (error) {
+        if (lifecycleInterrupt || options.signal?.aborted) {
+          return {
+            ok: false,
+            result: result({
+              kind: 'interrupted',
+              reason: lifecycleInterrupt ?? 'aborted',
+            }),
+          };
+        }
+        if (remainingBudgetMs() <= 0) {
+          return { ok: false, result: result({ kind: 'timeout' }) };
+        }
+
+        const failure = nativeFailure(error);
+        const retryWindowRemainingMs = probeStabilizationDeadlineMs === undefined
+          ? 0
+          : Math.max(0, probeStabilizationDeadlineMs - now());
+        const retryProbe = command.kind === 'facebook_auth_probe'
+          && failure.transientProbe
+          && retryWindowRemainingMs > 0;
+        const effectPhase = failure.effectPhase ?? 'unknown';
+        if (command.kind === 'facebook_auth_probe'
+            && failure.transientProbe
+            && !retryProbe) {
+          log(
+            `[facebook-auth] native command failure kind=${command.kind} code=${failure.code} `
+            + `effectPhase=${effectPhase} disposition=manual `
+            + `windowMs=${PROBE_STABILIZATION_TIMEOUT_MS}`,
+          );
+          return {
+            ok: false,
+            result: result({ kind: 'manual_required', reason: 'auth_probe_unavailable' }),
+          };
+        }
+        if (!retryProbe) {
+          log(
+            `[facebook-auth] native command failure kind=${command.kind} code=${failure.code} `
+            + `effectPhase=${effectPhase} disposition=terminal`,
+          );
+          return {
+            ok: false,
+            result: result({
+              kind: 'failed',
+              reason: 'native_auth_command_failed',
+              ...(failure.effectPhase ? { effectPhase: failure.effectPhase } : {}),
+            }),
+          };
+        }
+
+        transientProbeRetries += 1;
+        const retryDelayMs = PROBE_RETRY_DELAYS_MS[
+          Math.min(transientProbeRetries - 1, PROBE_RETRY_DELAYS_MS.length - 1)
+        ];
+        log(
+          `[facebook-auth] native command failure kind=${command.kind} code=${failure.code} `
+          + `effectPhase=${effectPhase} disposition=retry `
+          + `attempt=${transientProbeRetries} retryInMs=${retryDelayMs}`,
+        );
+        try {
+          await options.runtime.closeOwner(FACEBOOK_AUTH_OWNER_ID);
+        } catch {
+          log('[facebook-auth] native owner reset failed disposition=terminal');
+          return {
+            ok: false,
+            result: result({ kind: 'failed', reason: 'native_auth_session_reset_failed' }),
+          };
+        }
+
+        const waitMs = Math.min(
+          retryDelayMs,
+          remainingBudgetMs(),
+          Math.max(0, (probeStabilizationDeadlineMs ?? deadlineMs) - now()),
+        );
+        if (waitMs <= 0) {
+          if (remainingBudgetMs() <= 0) {
+            return { ok: false, result: result({ kind: 'timeout' }) };
+          }
+          return {
+            ok: false,
+            result: result({ kind: 'manual_required', reason: 'auth_probe_unavailable' }),
+          };
+        }
+        await sleep(waitMs, options.signal);
+      } finally {
+        if (interruptTimer) clearInterval(interruptTimer);
+        options.signal?.removeEventListener('abort', forwardAbort);
       }
-      return { ok: true, execution };
-    } catch {
-      if (lifecycleInterrupt || options.signal?.aborted) {
-        return {
-          ok: false,
-          result: result({
-            kind: 'interrupted',
-            reason: lifecycleInterrupt ?? 'aborted',
-          }),
-        };
-      }
-      if (remainingBudgetMs() <= 0) {
-        return { ok: false, result: result({ kind: 'timeout' }) };
-      }
-      return {
-        ok: false,
-        result: result({ kind: 'failed', reason: 'native_auth_command_failed' }),
-      };
-    } finally {
-      if (interruptTimer) clearInterval(interruptTimer);
-      options.signal?.removeEventListener('abort', forwardAbort);
     }
   };
 
