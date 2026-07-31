@@ -255,6 +255,30 @@ test('lifecycle interruption stops before the next Native command', async () => 
   runtime.assertDone();
 });
 
+test('missing AdsPower credential fill becomes a manual-login result without Native input', async () => {
+  const runtime = new ScriptedRuntime([
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('manual_login_required', { reason: 'credential_fill_unavailable' }),
+    },
+  ]);
+
+  const result = await reconcileFacebookStartupAuth({
+    runtime,
+    totpBroker: totpBroker(),
+    freshStartPolicyApplied: true,
+    timeoutMs: 5_000,
+  });
+
+  assert.deepEqual(result, {
+    kind: 'manual_required',
+    reason: 'credential_fill_unavailable',
+    actionAttempts: 0,
+  });
+  assert.deepEqual(runtime.calls.map((call) => call.kind), ['facebook_auth_probe']);
+  runtime.assertDone();
+});
+
 test('TOTP entry waits below ten seconds, requests the new window, and re-probes before input', async () => {
   let nowMs = 0;
   const brokerCode = { code: '123456', windowStartMs: 90_000, windowEndMs: 120_000 };

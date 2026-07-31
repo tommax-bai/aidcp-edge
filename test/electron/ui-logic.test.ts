@@ -38,7 +38,7 @@ interface PublishDockV { collapsed: boolean; label: string; summary: string }
 const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   relTime: (from: number, now: number) => string;
   synthesizeHealth: (s: Record<string, unknown>) => Health;
-  fleetLevel: (s: Record<string, unknown>, now: number) => { level: string; needsAction: boolean; label: string };
+  fleetLevel: (s: Record<string, unknown>, now: number) => { level: string; needsAction: boolean; label: string; detail: string };
   bandTone: (s: Record<string, unknown>) => string;
   detailRows: (s: Record<string, unknown>) => Array<{ key: string; label: string; value: string }>;
   presenceView: (s: Record<string, unknown>, now: number) => PresenceV;
@@ -112,6 +112,18 @@ test('健康合成：可恢复状态需要协助，真正中断状态为错误',
   assert.equal(executorError.label, '异常');
   assert.match(executorError.detail, /浏览器异常/);
   assert.match(executorError.detail, /数据管理仍可用/);
+});
+
+test('凭据未填充显示明确人工登录原因', () => {
+  const status = st({
+    auth: 'login required',
+    authReason: 'credential_fill_unavailable',
+    automationState: 'starting',
+    engineLinkState: 'connecting',
+  });
+  assert.equal(uiLogic.synthesizeHealth(status).detail, '需要登录：AdsPower 未填充账号密码');
+  assert.equal(uiLogic.presenceView(status, Date.now()).text, '需要登录：AdsPower 未填充账号密码');
+  assert.equal(uiLogic.fleetLevel(status, Date.now()).detail, '需要登录：AdsPower 未填充账号密码');
 });
 
 // ── 首次连接 ≠ 断线重连（change honest-first-connect-label）──

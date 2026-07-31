@@ -476,6 +476,8 @@ export type LoginWaitResult =
 export interface WaitForLoginOptions {
   /** 总等待预算（ms）。<=0 立即返回 timeout（调用方一般在进入前就判掉）。 */
   timeoutMs: number;
+  /** 已进入明确人工登录态时不设超时；仍保持稀疏只读与亚秒级生命周期中断检查。 */
+  unbounded?: boolean;
   /** 两次就地重读之间的间隔（ms，默认 5000）。 */
   intervalMs?: number;
   /** 中断轮询间隔（ms，默认 500）——比读间隔密，使暂停/关闭响应到亚秒级。 */
@@ -496,8 +498,8 @@ const defaultInPlaceRead = (
 ): Promise<SelfIdentityResult> => readSelfIdentity(cdp, { allowNavigate: false, hydrateTimeoutMs: 0, sleep, now });
 
 /**
- * 有界「等待登录」循环（change adspower-first-login-wait-gate）：保持 CDP 附着、周期就地重读，
- * 读出真 id 即 identified；期间收到中断即 interrupted；预算耗尽 timeout。
+ * 「等待登录」循环（change adspower-first-login-wait-gate）：保持 CDP 附着、周期就地重读，
+ * 读出真 id 即 identified；期间收到中断即 interrupted；普通等待预算耗尽 timeout，明确人工态可无界等待。
  * 【按迭代次数上界循环、不依赖 now() 前进】——单测注入恒定假时钟不会死循环（与 hydrate 循环同款）。
  * 内层就地重读用极小 hydrate 预算（单次扫描），绝不把 readSelfIdentity 默认 ~6s 轮询嵌进 ~5s 外层循环；
  * 中断按 interruptPollMs 亚秒级检查，读按 intervalMs 稀疏进行（不 hammer CDP）。
@@ -516,7 +518,9 @@ export async function waitForLoginIdentity(
   const pollInterrupt = opts.pollInterrupt ?? (() => null);
 
   const readEveryTicks = Math.max(1, Math.round(readIntervalMs / interruptPollMs));
-  const totalTicks = Math.max(1, Math.ceil(timeoutMs / interruptPollMs) + 1);
+  const totalTicks = opts.unbounded
+    ? Number.POSITIVE_INFINITY
+    : Math.max(1, Math.ceil(timeoutMs / interruptPollMs) + 1);
 
   for (let tick = 0; tick < totalTicks; tick++) {
     const interrupt = pollInterrupt();

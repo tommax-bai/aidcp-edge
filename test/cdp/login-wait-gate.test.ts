@@ -71,6 +71,23 @@ test('waitForLoginIdentity: 等待期收到中断 → interrupted（带原因）
   assert.equal(res.kind === 'interrupted' && res.reason, 'close');
 });
 
+test('waitForLoginIdentity: 明确人工登录态无超时并在原地读出身份', async () => {
+  let reads = 0;
+  const res = await waitForLoginIdentity(DUMMY_CDP, {
+    timeoutMs: 0,
+    unbounded: true,
+    intervalMs: 1,
+    interruptPollMs: 1,
+    sleep: immediateSleep,
+    readIdentity: async () => {
+      reads += 1;
+      return reads === 3 ? okRes() : failRes();
+    },
+  });
+  assert.equal(res.kind, 'identified');
+  assert.equal(reads, 3);
+});
+
 test('waitForLoginIdentity: 恒定假时钟 + 桩 sleep 不死循环/不 RangeError（迭代上界）', async () => {
   // now 恒定：若循环靠 now() 前进判超时会死循环。断言仍有界返回 timeout（锁死 edge-poll-helpers-iteration-bounded 坑）。
   const res = await waitForLoginIdentity(DUMMY_CDP, {

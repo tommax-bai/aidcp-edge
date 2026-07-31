@@ -23,7 +23,7 @@ export type FacebookAuthSignal = NativeFacebookAuthSignal;
 
 type ActionableFacebookAuthSignal = Exclude<
   FacebookAuthSignal,
-  'authenticated' | 'blocked_human_verification' | 'blocked_unknown' | 'none'
+  'authenticated' | 'manual_login_required' | 'blocked_human_verification' | 'blocked_unknown' | 'none'
 >;
 
 type FacebookAuthActionCommandKind = NativeFacebookAuthActionKind;
@@ -65,6 +65,7 @@ export interface FacebookAuthCoordinatorOptions {
 export type FacebookAuthCoordinatorResult =
   | { kind: 'authenticated'; actionAttempts: number }
   | { kind: 'disabled'; actionAttempts: 0 }
+  | { kind: 'manual_required'; reason: string; actionAttempts: number }
   | { kind: 'timeout'; actionAttempts: number }
   | { kind: 'interrupted'; reason: string; actionAttempts: number }
   | {
@@ -496,6 +497,12 @@ export async function reconcileFacebookStartupAuth(
 
     if (probe.signal === 'authenticated') {
       return result({ kind: 'authenticated' });
+    }
+    if (probe.signal === 'manual_login_required') {
+      return result({
+        kind: 'manual_required',
+        reason: safeReason(probe.reason, 'manual_login_required'),
+      });
     }
     if (probe.signal === 'blocked_human_verification') {
       return result({

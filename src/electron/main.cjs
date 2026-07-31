@@ -1600,6 +1600,7 @@ function makeStatus(provider) {
     // `cloud !== 'connected'` 会把整个浏览器冷启动窗口讲成断线重连——把「还没」读成「否」。
     cloudEverConnected: false,
     auth: 'checking',
+    authReason: null,
     session: 'idle',
     stats: { views: 0, likes: 0, collects: 0, comments: 0, follows: 0, publishes: 0 },
     dailyUsage: null,
@@ -4650,6 +4651,7 @@ async function spawnEdgeChild(handle, {
   handle.runtimePosture = null;
   handle.runtimePostureCore = null;
   handle.browserStateUnconfirmed = false;
+  handle.status.authReason = null;
   handle.browserPersonaNoticeState = null;
   resetPersonaNoticeGrace(handle);
   handle.browserAlreadyRunning = false;
@@ -4702,6 +4704,7 @@ async function spawnEdgeChild(handle, {
   // 草稿由重连后的云端 hello 快照重新推回。lastPublish 历史态不清（持久数据）。
   updateStatus(handle, {
     edge: 'starting',
+    authReason: null,
     session: handle.automationPaused ? 'paused' : (controlBootstrap ? 'resting' : 'running'),
     closeScope: null,
     // 新核心 = 还没连上过云端，哪怕上一个核心连上过（change honest-first-connect-label）。不复位这一位，
@@ -4745,10 +4748,28 @@ async function spawnEdgeChild(handle, {
     // 暂停/关闭先推进操作代，再把终止指令交给旧代子进程。因此只放行与当前停止意图严格匹配的终局回执；
     // 其它旧代消息（任务阶段、唤醒、Cloud 状态等）仍一律丢弃，不能污染新一轮启动。
     const currentStopReply = !currentGeneration && handle.stopRequested && (
-      (message.type === 'lifecycle.close_failed' && handle.engineStopReason === 'user_close')
+      (message.type === 'lifecycle.close_failed'
+        && (handle.engineStopReason === 'user_close' || handle.engineStopReason === 'user_pause'))
       || (message.type === 'lifecycle.paused' && handle.engineStopReason === 'user_pause')
     );
     if (!currentGeneration && !currentStopReply) return;
+    if (message.type === 'lifecycle.auth_required') {
+      if (message.kind !== 'manual_login_required'
+          || message.reason !== 'credential_fill_unavailable'
+          || handle.platform !== 'facebook') return;
+      // 人工登录等待已是稳定终态，不能继续占住串行启动队列；核心、浏览器和槽位仍保持占用。
+      settleLaunchReady(handle, false);
+      updateStatus(handle, {
+        edge: 'running',
+        auth: 'login required',
+        authReason: message.reason,
+        session: 'idle',
+        lastMessage: '需要登录：AdsPower 未填充账号密码',
+        ...presencePatch('需要登录：AdsPower 未填充账号密码'),
+        ...clearEdgeFailurePatch(handle),
+      });
+      return;
+    }
     if (message.type === 'facebook-totp.request') {
       void handleFacebookTotpRequest(handle, child, message);
       return;
@@ -4983,6 +5004,7 @@ async function spawnEdgeChild(handle, {
     }
     if (message.type === 'lifecycle.close_failed') {
       const cancelledResume = handle.resumeAfterStop && handle.automationIntent === 'enabled';
+      const pauseCloseFailed = handle.engineStopReason === 'user_pause';
       clearColdStandbyTimer(handle);
       handle.coldStandbyPending = false;
       handle.closePending = false;
@@ -4992,7 +5014,7 @@ async function spawnEdgeChild(handle, {
       handle.stopRequested = false;
       handle.engineStopReason = '';
       handle.resumeAfterStop = false;
-      handle.automationIntent = 'stopped';
+      handle.automationIntent = pauseCloseFailed ? 'paused' : 'stopped';
       handle.automationPaused = true;
       updateStatus(handle, {
         edge: 'warning',
@@ -5000,6 +5022,8 @@ async function spawnEdgeChild(handle, {
         loopStage: null,
         lastMessage: cancelledResume
           ? '浏览器关闭状态未能确认，本次重新启动已取消；请重试关闭。'
+          : pauseCloseFailed
+            ? '暂停时未能确认浏览器已关闭；自动化保持暂停，可重试关闭。'
           : '浏览器关闭状态未能确认；自动化引擎仍连接，可重试关闭。',
         ...edgeFailurePatch('浏览器关闭状态未能确认'),
         ...presencePatch('浏览器关闭未确认'),
@@ -5018,6 +5042,7 @@ async function spawnEdgeChild(handle, {
     failPendingCoreRebind(handle, `core_spawn_error:${(err && err.message) || String(err)}`);
     settleLaunchReady(handle, false); // 起不来：立刻放行启动队列的下一个，绝不占着队列干等
     handle.child = undefined;
+    handle.status.authReason = null;
     handle.status.proxyRuntime = invalidateProxyRuntime(handle.status.proxyRuntime);
     handle.runtimePosture = null; // 顺手清爽；真正的作用域判定在读侧（livePosture）
     settleTransientBrowserLease(handle, 'core_spawn_error', false);
@@ -5120,6 +5145,7 @@ async function spawnEdgeChild(handle, {
     const controlPlaneNeverEstablished = handle.controlPlaneOnly && !handle.controlPlaneBootstrapped;
     const wasColdStandby = !controlPlaneNeverEstablished && (handle.coldStandbyPending || handle.coldStandbyActive);
     handle.child = undefined;
+    handle.status.authReason = null;
     handle.status.proxyRuntime = invalidateProxyRuntime(handle.status.proxyRuntime);
     // posture 描述的是**一个还活着的核心**的运行态。进程都没了，它就不再描述任何东西：留着会让
     // 「已停止」被压成「身份已失效 / 自动化已停摆」。真正的终局归因走退出码那条权威判据（下面）。
@@ -5907,6 +5933,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
       // 身份确立 = 登录态权威信号（核心读不出登录身份会诚实退出、不会走到这行），据此翻登录态。
       // adspower 路径此前无人写 'logged in'（cookie 门是 self 专属），人设闸因此永不开——修于本 change。
       next.auth = 'logged in';
+      next.authReason = null;
       refreshSameAccountWarnings();
       // 环境名跟随真实昵称（changes edge-adspower-name-follows-nickname / wechat-channels-env-name-follows-nickname）：
       // 读到非空平台真实昵称且与 AdsPower 环境名不一致时，经写客户端改名封装把该环境名改成昵称。
@@ -6479,7 +6506,7 @@ function lifecycleAxes(handle) {
     && transientRuntime.proofAt >= handle.spawnedAtMs);
   const waitingForResource = handle.launchQueued || handle.startFlowQueued || handle.slotWaitingSince
     || handle.transientBrowserQueued;
-  let browserState = status.overlayBlocked
+  let browserState = (status.overlayBlocked || status.authReason === 'credential_fill_unavailable')
     ? 'blocked'
     : handle.browserStateUnconfirmed
       ? 'error'

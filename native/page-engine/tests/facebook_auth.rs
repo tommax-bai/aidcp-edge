@@ -1,5 +1,6 @@
 use aidcp_page_engine::command::{
-    FacebookAuthSignalParams, FacebookAuthTotpEntryParams, FacebookAuthTotpWindowParams,
+    FacebookAuthProbeParams, FacebookAuthSignalParams, FacebookAuthTotpEntryParams,
+    FacebookAuthTotpWindowParams,
 };
 use aidcp_page_engine::engine::{CommandOutput, Engine, StoredCommandResult};
 use aidcp_page_engine::protocol::{
@@ -12,6 +13,47 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+#[tokio::test]
+async fn manual_login_probe_preserves_the_structured_reason_without_input() {
+    let observations = VecDeque::from([blocked_observation(
+        "manual_login_required",
+        "credential_fill_unavailable",
+    )]);
+    let (port, server) = spawn_auth_cdp(observations, VecDeque::new()).await;
+    let mut engine = Engine::default();
+    engine
+        .open(&session_open(port))
+        .await
+        .expect("open Facebook manual login session");
+
+    let outcome = execute(
+        &mut engine,
+        1,
+        NativeCommand::FacebookAuthProbe(FacebookAuthProbeParams::default()),
+    )
+    .await;
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::FacebookAuthProbe(receipt) = outcome.output.expect("probe receipt") else {
+        panic!("expected Facebook auth probe receipt")
+    };
+    assert_eq!(
+        receipt.signal,
+        aidcp_page_engine::model::FacebookAuthSignal::ManualLoginRequired
+    );
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("credential_fill_unavailable")
+    );
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook manual login fake CDP");
+    assert!(requests.iter().all(|request| {
+        !request["method"]
+            .as_str()
+            .is_some_and(|method| method.starts_with("Input."))
+    }));
+}
 
 #[tokio::test]
 async fn refused_auth_signals_dispatch_zero_input_and_a_consumed_signal_is_not_replayed() {

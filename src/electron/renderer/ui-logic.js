@@ -30,6 +30,14 @@
 
   // ── 健康合成：客户会话 + 自动化 + 浏览器 → 一句结论。core/cloud 仅作旧版兼容，不参与主结论。──
   const AUTH_ATTENTION = { 'login required': '需要登录小红书', 'chrome missing': '本机缺少 Chrome', 'config required': '需要完成初始设置' };
+  const CREDENTIAL_FILL_UNAVAILABLE_DETAIL = '需要登录：AdsPower 未填充账号密码';
+
+  function authAttentionDetail(status) {
+    if (status.auth === 'login required' && status.authReason === 'credential_fill_unavailable') {
+      return CREDENTIAL_FILL_UNAVAILABLE_DETAIL;
+    }
+    return AUTH_ATTENTION[status.auth] || '';
+  }
 
   function lifecycleView(status) {
     const raw = status || {};
@@ -66,7 +74,8 @@
     if (s.automationState === 'error' || ((s.coreState === 'error' || s.edge === 'warning') && s.automationState !== 'stopped')) {
       return { code: 'error', label: '异常', detail: edgeFailure || '自动化引擎未能继续运行，请查看详情' };
     }
-    if (AUTH_ATTENTION[s.auth]) return { code: 'attention', label: '需处理', detail: AUTH_ATTENTION[s.auth] };
+    const authDetail = authAttentionDetail(s);
+    if (authDetail) return { code: 'attention', label: '需处理', detail: authDetail };
     if (s.automationState === 'pausing') return { code: 'paused', label: '暂停中', detail: '正在断开引擎并释放浏览器；数据管理仍可用' };
     if (s.automationState === 'stopping') return { code: 'paused', label: '关闭中', detail: '数据管理仍可用' };
     if (s.automationState === 'waiting_resource') return { code: 'ready', label: '排队中', detail: '轮到当前环境后会自动继续' };
@@ -512,7 +521,13 @@
       const text = s.closeScope === 'local_automation_only' && p && p.text ? p.text : '已关闭浏览器';
       return { text, animate: false, fresh: staticFresh };
     }
-    if (s.auth === 'login required') return { text: '等你登录小红书后继续', animate: false, fresh: '' };
+    if (s.auth === 'login required') {
+      return {
+        text: authAttentionDetail(s) || '等你登录小红书后继续',
+        animate: false,
+        fresh: '',
+      };
+    }
     if (s.auth === 'config required') return { text: '等待完成初始设置', animate: false, fresh: '' };
     // restricted 会主动暂停自动运营并可能关闭浏览器进入冷待机；它不是「本轮配额已完成」，
     // 也不能展示 resting 的自动继续倒计时（平台阻断未解除时并不会按那个时刻正常续跑）。
@@ -776,7 +791,9 @@
     // 阻断浮层待人工（登录/验证码/未知阻断，核心已本地暂停）：即便 edge 仍 running 也 MUST 浮顶为需处理，
     // 绝不呈现为绿色在线（多环境跨窗盯验证码是本控制台核心目的）。置于 running 判定之前。
     if (s.overlayBlocked) return result('attention', true, '需处理', 'attention', 'attention', '等待你处理');
-    if (s.auth === 'login required') return result('attention', true, '需登录', 'attention', 'attention', '需要登录平台');
+    if (s.auth === 'login required') {
+      return result('attention', true, '需登录', 'attention', 'attention', authAttentionDetail(s) || '需要登录平台');
+    }
     if (s.auth === 'config required') return result('attention', true, '待配置', 'attention', 'attention', '需要完成初始设置');
     if (s.auth === 'chrome missing') return result('attention', true, '待配置', 'attention', 'attention', '缺少 Chrome');
     if (s.clientSessionState === 'signed_out' || s.clientSessionState === 'expired') return result('attention', true, '需登录', 'attention', 'attention', '需要登录客户端');

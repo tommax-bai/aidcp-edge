@@ -162,7 +162,7 @@ test('login hydration waits before empty credentials fail closed, while ambiguit
     </form>
   `, 'https://www.facebook.com/login/', 1_800_000_015_000, 0, 2_000);
   const empty = await probe();
-  assert.equal(empty.signal, 'blocked_unknown');
+  assert.equal(empty.signal, 'manual_login_required');
   assert.equal(empty.reason, 'credential_fill_unavailable');
   assert.equal(empty.signalId, undefined);
 

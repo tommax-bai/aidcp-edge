@@ -847,6 +847,7 @@ fn signal_name(signal: FacebookAuthSignal) -> &'static str {
         FacebookAuthSignal::AutomationWarningDismiss => "automation_warning_dismiss",
         FacebookAuthSignal::PushBlockerClose => "push_blocker_close",
         FacebookAuthSignal::RememberPasswordConfirm => "remember_password_confirm",
+        FacebookAuthSignal::ManualLoginRequired => "manual_login_required",
         FacebookAuthSignal::BlockedHumanVerification => "blocked_human_verification",
         FacebookAuthSignal::BlockedUnknown => "blocked_unknown",
         FacebookAuthSignal::None => "none",

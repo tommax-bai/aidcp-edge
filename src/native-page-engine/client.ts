@@ -145,6 +145,7 @@ export const NATIVE_FACEBOOK_AUTH_SIGNALS = [
   'automation_warning_dismiss',
   'push_blocker_close',
   'remember_password_confirm',
+  'manual_login_required',
   'blocked_human_verification',
   'blocked_unknown',
   'none',

@@ -145,7 +145,7 @@
       if(Number.isFinite(documentAge)&&documentAge<facebookAuthCredentialFillGraceMs){
         return authObservation('none',null,'credential_fill_pending');
       }
-      return authObservation('blocked_unknown',null,'credential_fill_unavailable');
+      return authObservation('manual_login_required',null,'credential_fill_unavailable');
     }
     const submit=authUnique(authButtons(form).filter((button)=>{
       const raw=label(button);

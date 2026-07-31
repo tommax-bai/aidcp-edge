@@ -129,6 +129,8 @@ async function main(): Promise<void> {
   // 全部就绪后按原顺序交付。绝不把未知 IPC 当生命周期命令。
   const pendingLifecycleCommands: CoreLifecycleCommand[] = [];
   const lifecycleAuthInterrupts = new LifecycleAuthInterruptTracker();
+  /** 子进程 IPC 的唯一送达判据；人工登录态在完整运行时装配前也需要使用。 */
+  const sendLifecycleIpc = (payload: Record<string, unknown>): boolean => deliverLifecycleIpc(process, payload);
   let dispatchLifecycleCommand: ((command: CoreLifecycleCommand) => void) | undefined;
   type CloudRebindRequest = {
     type: 'lifecycle.cloud_rebind';
@@ -361,31 +363,40 @@ async function main(): Promise<void> {
 
   // 身份确立（account-identity-from-login 1.2 + adspower-first-login-wait-gate）：从登录态读出本节点真实稳定账号 id 作握手身份。
   // self 模式登录态由壳侧登录门保证；adspower 模式无壳侧门——新建环境=全新未登录分身，首读必 halt。故 adspower 首读 halt 时
-  // 不即刻停手，进【有界等待登录门】等操作者扫码；读出真 id 无缝续握手，超时/中断诚实【干净停止】。红线不变：只在读出真实
+  // 不即刻停手，普通路径有界等待；明确凭据未填充时保留受控会话等待人工。读出真 id 无缝续握手。红线不变：只在读出真实
   // 稳定 id 时握手，超时绝不猜、绝不回落 default；所有 halt 都经 terminateNow 真退出（绝不 bare-return 挂僵尸）。
   if (startBrowserAbsent) {
     accountId = controlAccountId;
     console.log(`[aidcp-edge] 控制面账号身份已确立: ${accountId} [source=cloud-bound-bootstrap; browser=absent]`);
   } else {
     let remainingLoginWaitMs = loginWaitMs;
+    let manualLoginRequiredReason: string | undefined;
     if (platformDriver.platform === 'facebook' && provider.kind === 'adspower') {
       const authStartedAt = Date.now();
       const authResult = await reconcileFacebookAuthIfNeeded(firstLoginPolicyApplied, loginWaitMs);
       remainingLoginWaitMs = Math.max(0, loginWaitMs - (Date.now() - authStartedAt));
       if (authResult.kind !== 'authenticated' && authResult.kind !== 'disabled') {
-        if (authResult.kind === 'timeout') {
+        if (authResult.kind === 'manual_required') {
+          manualLoginRequiredReason = authResult.reason;
+          sendLifecycleIpc({
+            type: 'lifecycle.auth_required',
+            kind: 'manual_login_required',
+            reason: authResult.reason,
+            platform: platformDriver.platform,
+          });
+          console.log(`[aidcp-edge] Facebook 需要人工登录（${authResult.reason}）；保留浏览器与 CDP，等待登录完成。`);
+        } else if (authResult.kind === 'timeout') {
           console.error(
             `[aidcp-edge] ✗ Facebook 首登辅助在 ${Math.round(loginWaitMs / 1000)}s 有界预算内未完成 → 干净停止。`,
           );
           terminateNow(0);
-        }
-        if (authResult.kind === 'interrupted') {
+        } else if (authResult.kind === 'interrupted') {
           console.log(`[aidcp-edge] Facebook 首登辅助被中断（${authResult.reason}）→ 干净停止。`);
           terminateNow(0);
+        } else {
+          console.error(`[aidcp-edge] ✗ Facebook 首登辅助安全停手（${authResult.reason}）。`);
+          terminateNow(1);
         }
-        const failureReason = authResult.kind === 'failed' ? authResult.reason : authResult.kind;
-        console.error(`[aidcp-edge] ✗ Facebook 首登辅助安全停手（${failureReason}）。`);
-        terminateNow(1);
       }
     }
     // Facebook AdsPower 可能刚附着在 about:blank：首读显式允许一次消费端首页 bootstrap，再有界等本人锚点；
@@ -401,26 +412,45 @@ async function main(): Promise<void> {
       providerKind: provider.kind,
       initialDecision: decision,
       override: overrideAccountId,
-      loginWaitMs: remainingLoginWaitMs,
+      // 明确人工登录态不设超时；给身份门一个正值只用于进入既有 AdsPower 等待分支。
+      loginWaitMs: manualLoginRequiredReason ? 1 : remainingLoginWaitMs,
       decideIdentity: (r, o) => platformDriver.decideIdentity(r, o),
       logger: (m) => console.log(m),
-      waitForLogin: () => {
-        console.log(
-          `[aidcp-edge] 请在浏览器里完成登录并等待稳定身份（剩余最长 ${Math.round(remainingLoginWaitMs / 1000)}s）…`,
-        );
+      waitForLogin: async () => {
+        console.log(manualLoginRequiredReason
+          ? '[aidcp-edge] 请在保留的浏览器里完成登录；检测到稳定身份后将原地继续。'
+          : `[aidcp-edge] 请在浏览器里完成登录并等待稳定身份（剩余最长 ${Math.round(remainingLoginWaitMs / 1000)}s）…`);
         console.log('[browser-parking] awaiting-login'); // 外壳可识别的等待态状态行（task 1.4 / 4.1）
-        return waitForLoginIdentity(session.cdp, {
-          timeoutMs: remainingLoginWaitMs,
-          logger: (m) => console.log(m),
-          // 平台无关就地重读（allowNavigate=false、单次扫描）：不 hammer CDP、不骚扰二维码页。
-          readIdentity: () =>
-            readPlatformIdentity({ allowNavigate: false, hydrateTimeoutMs: 1_000, logger: () => undefined }),
-          // 中断：等待早窗唯一被搁置的中断路径是经 IPC 堆进 pendingLifecycleCommands 的暂停/关闭；非破坏性探测（find 不 splice），
-          // 成功续跑后仍由下方 dispatchLifecycleCommand 一次性派发这些排队命令（不双派发）。
-          pollInterrupt: () => {
-            return lifecycleAuthInterrupts.current();
-          },
-        });
+        while (true) {
+          const waitResult = await waitForLoginIdentity(session.cdp, {
+            timeoutMs: remainingLoginWaitMs,
+            unbounded: Boolean(manualLoginRequiredReason),
+            logger: (m) => console.log(m),
+            // 平台无关就地重读（allowNavigate=false、单次扫描）：不 hammer CDP、不骚扰二维码页。
+            readIdentity: () =>
+              readPlatformIdentity({ allowNavigate: false, hydrateTimeoutMs: 1_000, logger: () => undefined }),
+            pollInterrupt: () => lifecycleAuthInterrupts.current(),
+          });
+          if (!manualLoginRequiredReason || waitResult.kind !== 'interrupted') return waitResult;
+
+          // 人工登录态仍是本进程持有的真实会话。暂停/关闭必须先确认 AdsPower 已关闭，成功后才退出并释放槽位。
+          const command = lifecycleAuthInterrupts.current();
+          if (!command) return waitResult;
+          const browserClosed = chrome
+            ? await chrome.killAndConfirmDead().catch(() => false)
+            : false;
+          if (browserClosed) {
+            if (command === 'pause' || command === 'pause_and_exit') {
+              sendLifecycleIpc({ type: 'lifecycle.paused' });
+            }
+            terminateNow(0);
+          }
+          sendLifecycleIpc({ type: 'lifecycle.close_failed' });
+          lifecycleAuthInterrupts.release(command);
+          const queuedIndex = pendingLifecycleCommands.indexOf(command);
+          if (queuedIndex >= 0) pendingLifecycleCommands.splice(queuedIndex, 1);
+          console.warn('[aidcp-edge] AdsPower 浏览器关闭状态未确认；保留核心与会话，等待重试关闭。');
+        }
       },
     });
 
@@ -561,13 +591,6 @@ async function main(): Promise<void> {
     5_000,
     Number(process.env.AIDCP_STANDBY_CLOUD_RETRY_MS ?? 30_000) || 30_000,
   );
-  /**
-   * 返回「这一条真的交给外壳了吗」。父子通道断开时 `process.send` 是**静默 no-op**，调用方需要知道。
-   *
-   * 判据本体在 `client/runtime-posture.ts` 的 `deliverLifecycleIpc`（可注入 ⇒ 用例驱动的是**真判据**）。
-   * 上一轮它内联在这里，用例只能传假的送达函数，把它改成恒 true 全套零红——见那个函数的注释。
-   */
-  const sendLifecycleIpc = (payload: Record<string, unknown>): boolean => deliverLifecycleIpc(process, payload);
   /**
    * 对外呈现的**唯一**出口（change §5 收口）：核心的运行态 → 外壳画什么，只经这一条边。
    *
