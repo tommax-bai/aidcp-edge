@@ -62,8 +62,88 @@ async function(input){
     el.click();
     return true;
   };
-  const active=(el)=>Boolean(el&&(el.getAttribute('aria-pressed')==='true'||el.getAttribute('data-active')==='true'||/(active|selected|liked|collected|followed)/i.test(el.className||'')));
-  const selected=(el)=>Boolean(el&&(active(el)||el.checked===true||['aria-checked','aria-selected','aria-current'].some((name)=>['true','page'].includes(String(el.getAttribute(name)||'')))||el.getAttribute('data-cover')==='true'));
+  // ── 「已生效」三态判据（共享扇出点）──────────────────────────────────────
+  // 旧实现是一条裸子串正则：类名里出现 active / selected / liked / collected / followed
+  // 任一**片段**即判已生效。两个后果：① `not-selected` / `unliked` 这类**否定形**被读成正证据；
+  // ② 「读不到状态」与「读到未生效」被压成同一个 false —— 期望值为「关」时于是变成
+  // 「没有任何证据也算达成」。现在恒回三态：'on' 明确已生效 / 'off' 明确未生效 / '' 读不到。
+  // **'' MUST NOT 塌成 'off'**：读不到时该点还是该诚实回未确认，由各调用点自己判，不在这里替它决定。
+  const STATE_FRAGMENTS=['active','selected','liked','collected','followed','checked'];
+  // 否定形前缀：`not-selected` / `de-selected` 这类带分隔符的，以及 `unliked` / `inactive`
+  // 这类直接粘连的，都是**反证据**，绝不是正证据。
+  const NEGATION_SEGMENTS=['not','non','no','un','in','de','dis','off','cancel','remove','clear'];
+  // 计数 / 标签容器：`liked-count`、`collected-num` 说的是「多少人赞过」，不是「我赞过」。
+  const COUNTER_SEGMENTS=['count','counter','cnt','num','number','total','sum','label','text'];
+  // 中文否定：文本回显类证据里，「不公开」含「公开」、「取消关注」含「关注」——
+  // 裸 includes 会把反证据读成正证据，所以文本证据要看紧挨着的前缀。
+  const NEGATION_TEXT=['不','非','未','无','否','取消','关闭'];
+  // 语义类名判据：片段须是完整的 class token，或被连字符 / 下划线包裹（容忍 BEM 与前缀），
+  // 绝不做子串匹配——混淆构建里随便一个随机串都可能偶然含 active。
+  const classStateOf=(el)=>{
+    const raw=el&&el.getAttribute&&el.getAttribute('class');
+    if(!raw||typeof raw!=='string')return '';
+    let negative='';
+    for(const token of raw.toLowerCase().split(/\s+/)){
+      if(!token)continue;
+      const parts=token.split(/[-_]+/).filter(Boolean);
+      for(let i=0;i<parts.length;i++){
+        const part=parts[i];
+        // `unliked` / `inactive`：前缀直接粘在片段上，是明确的未生效。
+        if(NEGATION_SEGMENTS.some((prefix)=>part.startsWith(prefix)&&STATE_FRAGMENTS.includes(part.slice(prefix.length)))){negative='off';continue;}
+        if(!STATE_FRAGMENTS.includes(part))continue;
+        // `liked-count`：计数容器，与自身状态无关，读不到就是读不到。
+        if(COUNTER_SEGMENTS.includes(parts[i+1]||''))continue;
+        // `not-selected`：分隔符形态的否定，同样是未生效。
+        if(NEGATION_SEGMENTS.includes(parts[i-1]||'')){negative='off';continue;}
+        return 'on';
+      }
+    }
+    return negative;
+  };
+  // 属性白名单：这些属性一旦**出现**就是两态可读的——等于真值即 'on'，其余取值即 'off'。
+  const STATE_ATTRS=[['aria-pressed',['true']],['aria-checked',['true']],['aria-selected',['true']],['aria-current',['true','page']],['data-active',['true']],['data-selected',['true']],['data-cover',['true']]];
+  const SWITCH_SELECTOR='input[type="checkbox"],input[type="radio"],[role="switch"],[role="checkbox"]';
+  const stateOf=(el)=>{
+    if(!el||!el.getAttribute)return '';
+    // ① 真表单控件的选中位最权威（其余 input 的 checked 恒为 false，不能当状态读）。
+    if(el.tagName==='INPUT'&&/^(checkbox|radio)$/i.test(String(el.type||'')))return el.checked?'on':'off';
+    // ② 无障碍 / 站点稳定属性。
+    let attrState='';
+    for(const [name,truthy] of STATE_ATTRS){
+      const raw=el.getAttribute(name);
+      if(raw===null||raw===undefined)continue;
+      if(truthy.includes(String(raw)))return 'on';
+      attrState='off';
+    }
+    if(attrState)return attrState;
+    // ③ 语义类名：最弱的一层，读不到就如实回读不到。
+    return classStateOf(el);
+  };
+  // 薄布尔包装，给不需要区分「读不到」的调用点用：**只有明确 'on' 才算已生效**。
+  const selected=(el)=>stateOf(el)==='on';
+  // 有界祖先回溯：状态 / 回显常落在包裹容器上，但「往上找」必须有界且只认真正的行 / 项容器
+  // ——停在任意 div 上就等于把「这块区域看起来是激活态」当成「我这次操作生效了」。
+  // `exclude` 用来挡自证：把自己刚点的候选项圈进来的容器，它的文本恒含目标值，不是证据。
+  const rowOf=(el,selectors,levels=3,exclude)=>{
+    let node=el&&el.parentElement;
+    for(let i=0;node&&i<levels;i++){
+      if(exclude&&node.contains&&node.contains(exclude))return null;
+      if(selectors.some((selector)=>node.matches&&node.matches(selector)))return node;
+      node=node.parentElement;
+    }
+    return null;
+  };
+  // 文本回显证据：目标值出现在容器文本里才算，但紧挨着的中文否定前缀一律排除。
+  const echoes=(haystack,needle)=>{
+    const value=norm(needle,1000);
+    if(!value)return false;
+    const body=norm(haystack,4000);
+    for(let at=body.indexOf(value);at>=0;at=body.indexOf(value,at+1)){
+      const before=body.slice(Math.max(0,at-2),at);
+      if(!NEGATION_TEXT.some((word)=>before.endsWith(word)))return true;
+    }
+    return false;
+  };
   // 互动栏（详情页里赞 / 收藏 / 评论那一条）。它常比笔记本体晚一拍渲染（总结流式重排 / 卡片回收），
   // 定位前有界等一等，避免在渲染完成前误报「找不到互动栏」。
   const ENGAGE_BAR_SELECTORS=['.interactions.engage-bar','.engage-bar','[class*="engage-bar"]'];
@@ -78,6 +158,39 @@ async function(input){
     if(!el)return false;
     if(el.getAttribute('aria-pressed')==='true')return true;
     return /已关注|互相关注|互关|following/i.test(text(el,64));
+  };
+  // 真可编辑判据：`dispatchInput` 对非受控元素直接改 textContent，写进普通 div 之后再回读
+  // 必然「一致」——那是自证，不是证据。只有受控框与 contenteditable 才有回读价值。
+  const editable=(el)=>{
+    if(!el)return false;
+    if('value' in el)return true;
+    if(el.isContentEditable===true)return true;
+    const flag=el.getAttribute&&el.getAttribute('contenteditable');
+    return typeof flag==='string'&&/^(|true|plaintext-only)$/i.test(flag);
+  };
+  // v1 兼容步骤的重试上限。「这一次没确认」与「连续失败到顶、判平台系统性改版」必须可区分，
+  // 而可区分的前提是真的重试过——回报的 attempts 得是实测次数，不是硬写的 1。
+  const COMPAT_MAX_ATTEMPTS=3;
+  // v1 兼容步骤的后置判据：与主路径同源的硬判据，而不是宽松类名激活态。
+  // 赞 / 收藏读图标状态位（翻转可能落在包裹容器上，故做有限层级回溯）；关注读关注态文案 / 按下态；
+  // 评论输入框的业务结果是「它拿到了焦点」——旧实现在这一支上无条件回成功，点不着也报 ok。
+  const compatVerifier=(actionId)=>{
+    // 图标状态位可能挂在被点元素的父层（点中的常是文案 span，图标在同级）：有界回溯两层。
+    // 回溯只对图标这条硬信号开——文案类判据一往上走就会把邻居的文字一起收进来，越走越假。
+    const iconVerifier=(on)=>(el)=>{
+      let node=el;
+      for(let i=0;node&&i<=2;i++){
+        if(iconState(node).includes(on))return true;
+        if(node.getAttribute&&node.getAttribute('aria-pressed')==='true')return true;
+        node=node.parentElement;
+      }
+      return false;
+    };
+    if(actionId==='note.like_button')return iconVerifier('liked');
+    if(actionId==='note.collect_button')return iconVerifier('collected');
+    if(actionId==='note.follow_button')return (el)=>followedState(el);
+    if(actionId==='note.comment_input')return (el)=>Boolean(el)&&document.activeElement===el;
+    return (el)=>selected(el);
   };
   const action=(name,ok,reason,extra={})=>({kind:'action_receipt',value:{action:name,ok,...(reason?{reason}:{}),...extra}});
   // 回执 + 随行观测：一条命令只能回一个输出，但有的终局既要让云端动作角色结案，
@@ -362,7 +475,21 @@ async function(input){
       if(!onRequestedResults())return ambiguous('search','search_navigation_unconfirmed');
     }
     const filters=[p.sort&&{words:{latest:['最新','latest'],most_liked:['最多点赞','点赞最多','most liked'],most_collected:['最多收藏','收藏最多','most collected'],most_commented:['最多评论','评论最多','most commented']}[p.sort]},p.timeWindow&&{words:{one_day:['一天内','24小时','one day'],one_week:['一周内','one week'],half_year:['半年内','half year']}[p.timeWindow]}].filter((item)=>item&&item.words);
-    for(const filter of filters){const opener=findByWords(['筛选','filter']);if(!opener)return fail('search','search_filter_control_not_found');click(opener);await sleep(200);const target=findByWords(filter.words);if(!target)return fail('search','search_filter_value_not_found');if(!selected(target))click(target);await sleep(250);if(!selected(target))return ambiguous('search','search_filter_unconfirmed');}
+    for(const filter of filters){
+      const opener=findByWords(['筛选','filter']);
+      if(!opener)return fail('search','search_filter_control_not_found');
+      click(opener);
+      await sleep(200);
+      const locate=()=>findByWords(filter.words);
+      const target=locate();
+      if(!target)return fail('search','search_filter_value_not_found');
+      // 「读不到状态」MUST NOT 当成已选中而跳过点击：旧判据一旦假阳性就连点都不点，
+      // 却把**未筛选**的结果当成筛过的返回（云端据此选评论目标，日志里看不出任何降级痕迹）。
+      // 只有明确读到 'on' 才允许跳过点击。
+      if(!selected(target)&&!click(target))return ambiguous('search','search_filter_unconfirmed');
+      // 有界轮询等选中态翻转，每轮重解析目标（筛选面板常整体重渲染，旧引用会停在被替换掉的节点上）。
+      if(!(await waitFor(()=>selected(locate()),1200,60)))return ambiguous('search','search_filter_unconfirmed');
+    }
     return done(cards());
   }
   if(kind==='note_open'){
@@ -621,10 +748,30 @@ async function(input){
   if(kind==='interaction_like_comment'){
     // 动作名规范化为云端的关联键 `comment_like`：云端按这个名字才写风控事实、扣评论赞配额，
     // 回执名对不上就既不记账也不结案（失败时还会被当未知动作、在详情页上补发一次列表滚动）。
-    if(!exactNote())return fail('comment_like','note_page_mismatch');const anchor=all('[data-comment-id],[data-id],[id]',detailRoot()||document).find((el)=>String(el.getAttribute('data-comment-id')||el.getAttribute('data-id')||el.id||'')===String(p.commentAnchorId||''));if(!anchor)return fail('comment_like','comment_target_not_found');const control=findByWords(['赞','like'],anchor);if(!control)return fail('comment_like','control_not_found');if(active(control))return done(action('comment_like',true,'already_active',{noteId:p.noteId}));click(control);await sleep(350);return active(control)?done(action('comment_like',true,undefined,{noteId:p.noteId})):ambiguous('comment_like','postcondition_unconfirmed');
+    if(!exactNote())return fail('comment_like','note_page_mismatch');
+    const anchor=all('[data-comment-id],[data-id],[id]',detailRoot()||document).find((el)=>String(el.getAttribute('data-comment-id')||el.getAttribute('data-id')||el.id||'')===String(p.commentAnchorId||''));
+    if(!anchor)return fail('comment_like','comment_target_not_found');
+    // 控件优先取评论行内的具名点赞容器（与详情页互动栏同一套手写语义 class）；
+    // 行内文本查找只作兜底——它会命中「赞 12」这类计数标签。
+    const locate=()=>first(['.like-wrapper','[class*="like-wrapper"]'],anchor)||findByWords(['赞','like'],anchor);
+    const control=locate();
+    if(!control)return fail('comment_like','control_not_found');
+    // 状态位读图标（svg use 的 #like→#liked），与详情页赞 / 收藏走同一条硬判据。
+    // 评论行容器上带 active / selected 的类名到处都是，绝不能当「这条评论我赞过了」的证据：
+    // 那会在**没有点击**的前提下回 already_active，换来一条假的「评论赞已确认」+ 一次真实配额消耗。
+    const engaged=(el)=>Boolean(el&&(iconState(el).includes('liked')||el.getAttribute('aria-pressed')==='true'));
+    if(engaged(control))return done(action('comment_like',true,'already_active',{noteId:p.noteId}));
+    // click 返回假 = 控件不可见、压根没点着；旧实现把这个返回值丢掉、当成已点。
+    if(!click(control))return done(action('comment_like',false,'control_not_actuated',{noteId:p.noteId}),'not_started');
+    // 有界轮询等状态位翻转（真机 300–600ms）：固定睡 350ms 后单次采样正落在翻转窗口中间。
+    const flipped=await waitFor(()=>engaged(locate()),1500,60);
+    return flipped?done(action('comment_like',true,undefined,{noteId:p.noteId})):ambiguous('comment_like','postcondition_unconfirmed');
   }
   if(kind==='plan_execute'){
-    const results=[];for(const step of p.steps||[]){const map={'note.like_button':['赞','like'],'note.collect_button':['收藏','collect'],'note.follow_button':['关注','follow'],'note.comment_input':['评论','comment'],'page.scroll':[]};if(step.actionId==='page.scroll'){
+    const results=[];
+    const map={'note.like_button':['赞','like'],'note.collect_button':['收藏','collect'],'note.follow_button':['关注','follow'],'note.comment_input':['评论','comment'],'page.scroll':[]};
+    for(const step of p.steps||[]){
+    if(step.actionId==='page.scroll'){
       // 兼容路径仍有活跃产出方（云端规划器的 LLM 兜底可自由产出 scroll 步骤），故不删；
       // 但结果必须按实测位移回报，不再无条件 success。
       const scroller=document.scrollingElement||document.documentElement;
@@ -635,7 +782,51 @@ async function(input){
       const moved=after!==before;
       results.push({actionId:step.actionId,ok:moved,outcome:moved?'success':'escalated',attempts:1,reason:moved?('scrolled='+Math.abs(after-before)+'px'):'no_scroll'});
       continue;
-    }const el=findByWords(map[step.actionId]||[]);if(!el){results.push({actionId:step.actionId,ok:false,outcome:'no_target',attempts:1,reason:'allowlisted_target_not_found'});continue;}if(step.op==='input'){dispatchInput(el,String(step.value||''));const read='value' in el?String(el.value||''):text(el,32000);const ok=norm(read,32000)===norm(step.value,32000);results.push({actionId:step.actionId,ok,outcome:ok?'success':'escalated',attempts:1,reason:ok?'confirmed':'input_readback_mismatch'});}else{click(el);await sleep(150);const ok=selected(el)||step.actionId==='note.comment_input';results.push({actionId:step.actionId,ok,outcome:ok?'success':'escalated',attempts:1,reason:ok?'confirmed':'postcondition_unconfirmed'});}}
+    }
+    const locate=()=>findByWords(map[step.actionId]||[]);
+    const el=locate();
+    if(!el){results.push({actionId:step.actionId,ok:false,outcome:'no_target',attempts:1,reason:'allowlisted_target_not_found'});continue;}
+    if(step.op==='input'){
+      // 自证闸：非可编辑元素上 dispatchInput 直接改 textContent，回读必然等于写入值
+      // ——那不是证据，是把自己刚写进去的东西再读一遍（顺带把页面上某个 div 的文字覆盖掉）。
+      if(!editable(el)){results.push({actionId:step.actionId,ok:false,outcome:'no_target',attempts:1,reason:'allowlisted_target_not_found'});continue;}
+      let target=el;let attempts=0;let ok=false;
+      while(attempts<COMPAT_MAX_ATTEMPTS){
+        attempts+=1;
+        dispatchInput(target,String(step.value||''));
+        const read='value' in target?String(target.value||''):text(target,32000);
+        if(norm(read,32000)===norm(step.value,32000)){ok=true;break;}
+        await sleep(120);
+        target=locate()||target;
+      }
+      results.push({actionId:step.actionId,ok,outcome:ok?'success':'escalated',attempts,reason:ok?'confirmed':'input_readback_mismatch'});
+      continue;
+    }
+    // 点击支：判据换成与主路径同源的硬判据（图标状态位 / 关注文案 / 焦点落位），
+    // 不再用宽松类名激活态，`note.comment_input` 也不再无条件 ok。
+    const verify=compatVerifier(step.actionId);
+    let target=el;let attempts=0;let ok=false;let actuated=false;
+    while(attempts<COMPAT_MAX_ATTEMPTS){
+      attempts+=1;
+      if(click(target)){
+        actuated=true;
+        if(await waitFor(()=>{const now=locate();return Boolean(now&&verify(now));},900,60)){ok=true;break;}
+      }
+      await sleep(150);
+      target=locate()||target;
+    }
+    // 「这一次没看到结果」与「连续重试到顶、判定平台系统性改版」不是一回事。
+    // 旧实现硬写 attempts:1 却报 escalated，回报的是请求形状而不是实测过程，
+    // 上游无从区分「该重试」与「该停手报改版」。现在 attempts 如实回报，
+    // 且只有把重试打满仍未确认才配叫 escalated。
+    results.push({
+      actionId:step.actionId,
+      ok,
+      outcome:ok?'success':(actuated?'escalated':'no_target'),
+      attempts,
+      reason:ok?'confirmed':(actuated?'postcondition_unconfirmed':'target_not_actuated'),
+    });
+    }
     return done({kind:'plan_results',value:{results}});
   }
   if(kind==='publish_select_mode'){
@@ -694,14 +885,62 @@ async function(input){
       const editor=first(['[contenteditable="true"]','textarea[placeholder*="正文"]']);if(!editor)return fail('add_with_candidate','publish_editor_not_found');const prefix=p.candidateKind==='topic'?'#':'@';const value=prefix+String(p.value||'');const before='value' in editor?String(editor.value||''):text(editor,32000);dispatchInput(editor,(before+' '+value).trim());await sleep(300);const candidate=findByWords(candidateWords);if(!candidate)return fail('add_with_candidate','publish_candidate_not_found');click(candidate);await sleep(200);const read='value' in editor?String(editor.value||''):text(editor,32000);return norm(read,32000).includes(norm(p.value,1000))?done(action('add_with_candidate',true)):ambiguous('add_with_candidate','publish_candidate_unconfirmed');
     }
     const entryWords=p.candidateKind==='location'?['地点','位置','location']:p.candidateKind==='collection'?['合集','专辑','collection']:[String(p.candidateKind||'')];
-    const entry=findByWords(entryWords);if(!entry)return fail('add_with_candidate','publish_candidate_entry_not_found');click(entry);await sleep(300);const candidate=findByWords(candidateWords);if(!candidate)return fail('add_with_candidate','publish_candidate_not_found');click(candidate);await sleep(250);return selected(candidate)||text(entry.closest('[role="button"],label,div')||entry,500).includes(String(p.value||''))?done(action('add_with_candidate',true)):ambiguous('add_with_candidate','publish_candidate_unconfirmed');
+    const entry=findByWords(entryWords);
+    if(!entry)return fail('add_with_candidate','publish_candidate_entry_not_found');
+    click(entry);
+    await sleep(300);
+    const locate=()=>findByWords(candidateWords);
+    const candidate=locate();
+    if(!candidate)return fail('add_with_candidate','publish_candidate_not_found');
+    if(!click(candidate))return ambiguous('add_with_candidate','publish_candidate_unconfirmed');
+    // 入口行回显（选中的地点 / 合集名写回入口那一行）是独立于「候选项自己长什么样」的证据，
+    // 但回溯必须有界、且不能把候选列表本身圈进来：候选项文本恒等于目标值，
+    // 拿它当证据就是自证——点开列表即「确认成功」。旧写法的 `.closest(…,'div')` 正是这个形态。
+    const echoRoot=entry.contains&&entry.contains(candidate)?null:(rowOf(entry,['[role="button"]','label','[class*="item"]','[class*="option"]','[class*="field"]'],3,candidate)||entry);
+    const confirmed=await waitFor(()=>{
+      if(selected(locate()))return true;
+      return Boolean(echoRoot&&echoes(text(echoRoot,2000),p.value));
+    },1000,60);
+    return confirmed?done(action('add_with_candidate',true)):ambiguous('add_with_candidate','publish_candidate_unconfirmed');
   }
   if(kind==='publish_set_option'){
     const kindWords={visibility:['可见范围','谁可以看','visibility'],comment_permission:['评论权限','允许评论','comment'],save_permission:['保存权限','允许保存','save'],declaration_ai:['AI创作','AI生成','AI'],declaration_ad:['商业合作','广告','ad'],declaration_origin:['原创声明','原创','original']}[p.optionKind]||[String(p.optionKind||'')];
     const label=findByWords(kindWords);if(!label)return fail('set_option','publish_option_not_found');const row=label.closest('label,[role="switch"],[role="checkbox"],[class*="item"],[class*="option"]')||label.parentElement||label;
     const booleanValue=['true','false'].includes(String(p.optionValue));
-    if(booleanValue){const desired=String(p.optionValue)==='true';const control=first(['input[type="checkbox"]','[role="switch"]','[role="checkbox"]'],row)||row;if(selected(control)===desired)return done(action('set_option',true,'already_active'));click(control);await sleep(250);return selected(control)===desired?done(action('set_option',true)):ambiguous('set_option','publish_option_unconfirmed');}
-    click(row);await sleep(250);const target=findByWords([String(p.optionValue||'')]);if(!target)return fail('set_option','publish_option_value_not_found');if(!selected(target))click(target);await sleep(250);return selected(target)||text(row,500).includes(String(p.optionValue||''))?done(action('set_option',true)):ambiguous('set_option','publish_option_unconfirmed');
+    if(booleanValue){
+      const desired=String(p.optionValue)==='true';
+      // `||row` 兜底已删。它的形态是：找不到真正的开关控件时拿整行（往往就是个 div）冒充，
+      // 而 div 上几乎必然读不到状态；旧判据把「读不到」压成 false，于是**期望值为「关」时
+      // `false===false` 直接回「本来就是关的、成功」，连点都不点**——没有证据被当成了证据。
+      // 现在：找不到开关就诚实报找不到。
+      const locate=()=>first([SWITCH_SELECTOR],row)||(row&&row.matches&&row.matches(SWITCH_SELECTOR)&&visible(row)?row:null);
+      const control=locate();
+      if(!control)return fail('set_option','publish_option_not_found');
+      const state=stateOf(control);
+      // 只有**读到明确状态**且恰好等于期望值才允许早退；读不到（''）一律去点。
+      if(state&&(state==='on')===desired)return done(action('set_option',true,'already_active'));
+      if(!click(control))return fail('set_option','publish_option_unconfirmed');
+      const settled=await waitFor(()=>{
+        const next=stateOf(locate());
+        return Boolean(next)&&(next==='on')===desired;
+      },1200,60);
+      return settled?done(action('set_option',true)):ambiguous('set_option','publish_option_unconfirmed');
+    }
+    click(row);
+    await sleep(250);
+    const locate=()=>findByWords([String(p.optionValue||'')]);
+    const target=locate();
+    if(!target)return fail('set_option','publish_option_value_not_found');
+    if(!selected(target)&&!click(target))return ambiguous('set_option','publish_option_unconfirmed');
+    // 取值行的回显同样要挡自证：候选浮层若渲染在这一行里，行文本恒含目标值。
+    // 另外用 `echoes` 而非裸 includes——行上写着「不公开」时，`includes('公开')` 恒真，
+    // 那是反证据不是回显。
+    const echoRoot=row&&row.contains&&row.contains(target)?null:row;
+    const settled=await waitFor(()=>{
+      if(selected(locate()))return true;
+      return Boolean(echoRoot&&echoes(text(echoRoot,2000),p.optionValue));
+    },1200,60);
+    return settled?done(action('set_option',true)):ambiguous('set_option','publish_option_unconfirmed');
   }
   if(kind==='publish_set_schedule'){
     const schedule=findByWords(['定时发布','定时','schedule']);if(!schedule)return fail('set_schedule','schedule_control_not_found');click(schedule);await sleep(200);const field=first(['input[type="datetime-local"]','input[placeholder*="时间"]']);if(!field)return fail('set_schedule','schedule_input_not_found');const date=new Date(Number(p.publishTime));if(!Number.isFinite(date.getTime()))return fail('set_schedule','invalid_schedule_time');const local=new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16);dispatchInput(field,local);return String(field.value||'').startsWith(local.slice(0,13))?done(action('set_schedule',true)):ambiguous('set_schedule','schedule_readback_mismatch');
@@ -747,7 +986,31 @@ async function(input){
     const previews=all('.img-preview-area img,img[id*="creator-preview"],[class*="preview"] img,[class*="upload"] img').filter(visible);
     const index=Math.max(0,Number(p.imageIndex)||0);const preview=previews[index];if(!preview)return fail(kind.replace('publish_',''),'preview_not_found');
     if(kind==='publish_upload_image')return done(action('upload_image',true));
-    const tile=preview.closest('[class*="preview"],[class*="item"],li,div')||preview;click(tile);await sleep(200);const cover=findByWords(['设为封面','封面']);if(cover&&!selected(tile)&&!selected(preview))click(cover);await sleep(250);return selected(tile)||selected(preview)||(cover&&/已.*封面|封面.*已/.test(text(cover,100)))?done(action('set_cover',true)):ambiguous('set_cover','publish_cover_unconfirmed');
+    // 图块容器：有界回溯 + 只认真正的图片项容器。旧写法选择器末项是任意 `div`，
+    // 实际会停在最近的祖先 div 上——图区是轮播结构，那层容器带「当前显示」类名，
+    // 于是「这张图正在显示」被读成「这张图已是封面」，连「设为封面」都不点就回成功。
+    const tile=rowOf(preview,['[class*="preview-item"]','[class*="previewItem"]','[class*="img-item"]','[class*="image-item"]','[class*="upload-item"]','[class*="photo-item"]','li'],3)||preview;
+    // 封面证据必须**同时**说清两件事：说的是封面，且它是已生效态。轮播的「当前显示」与
+    // 点一下就出现的选中外观都不算——前者与封面无关，后者是自证。
+    // 文本兜底 /已.*封面|封面.*已/ 一并删除：同一份路由在点赞那条路径上自己写了
+    // 「平台上『已』字文案随处可见，把它当成功证据必然误报」。
+    const coverConfirmed=(el)=>{
+      if(!el||!el.getAttribute)return false;
+      if(String(el.getAttribute('data-cover')||'')==='true')return true;
+      return String(el.getAttribute('class')||'').toLowerCase().split(/\s+/).some((token)=>{
+        const parts=token.split(/[-_]+/).filter(Boolean);
+        return parts.includes('cover')&&parts.some((part)=>STATE_FRAGMENTS.includes(part));
+      });
+    };
+    const covered=()=>coverConfirmed(tile)||coverConfirmed(preview);
+    if(covered())return done(action('set_cover',true,'already_active'));
+    if(!click(tile))return fail('set_cover','publish_cover_unconfirmed');
+    await sleep(200);
+    // 只认精确动作文案「设为封面」；裸「封面」会命中区块标题、说明文字一类。
+    const cover=findByWords(['设为封面']);
+    // 找不到 / 点不着封面入口就是压根没设过：诚实回未开始，绝不靠外观判据补一个成功。
+    if(!cover||!click(cover))return fail('set_cover','publish_cover_unconfirmed');
+    return await waitFor(covered,1200,60)?done(action('set_cover',true)):ambiguous('set_cover','publish_cover_unconfirmed');
   }
   return fail(kind||'unknown','unsupported_command');
 }

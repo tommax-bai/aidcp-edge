@@ -98,15 +98,20 @@ test('fails closed when publish field readback does not have a target', async ()
 });
 
 test('selects the exact uploaded preview index and requires cover-active evidence', async () => {
+  // 封面证据只认**封面专属**标记（`data-cover` / `cover-active` 这类），且必须由
+  // 真点了「设为封面」之后才出现——点图块本身让它进入选中外观不是证据，那是自证。
   const dom = install(`
     <main>
       <div class="preview-item"><img src="one.jpg"></div>
       <div class="preview-item" id="target"><img src="two.jpg"></div>
-      <button>设为封面</button>
+      <button id="set-cover">设为封面</button>
     </main>
   `, 'https://creator.xiaohongshu.com/publish/publish');
   dom.window.document.querySelector('#target')?.addEventListener('click', (event) => {
     (event.currentTarget as Element).setAttribute('data-active', 'true');
+  });
+  dom.window.document.querySelector('#set-cover')?.addEventListener('click', () => {
+    dom.window.document.querySelector('#target')?.setAttribute('data-cover', 'true');
   });
   const result = await run({
     kind: 'publish_set_cover',
