@@ -12,6 +12,30 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
+/// Deadline-crossing tests: keep the two magnitudes far apart.
+///
+/// This family asserts "the absolute deadline is crossed *at a particular step* of the flow".
+/// It used to express that with 25..250ms of real wall clock, so under concurrent load (several
+/// `cargo test` binaries plus `npm test` on the same machine) the crossing point drifted from the
+/// step under test to an *earlier* probe, and the assertion flipped from `Ambiguous` to
+/// `NotStarted`. Measured at roughly 12% red across full runs, always under load, never idle.
+///
+/// The fix is not a bigger budget - it is two separated magnitudes:
+/// - `DEADLINE_HEADROOM_MS` leaves the steps that MUST NOT cross far more room than scheduling
+///   jitter can eat.
+/// - `SLOW_PROBE_DELAY_MS` makes the step that MUST cross do so from the fake CDP server's own
+///   sleep, which only ever gets longer under load - so the crossing is deterministic in the
+///   direction the assertion needs.
+///
+/// MUST keep `SLOW_PROBE_DELAY_MS > DEADLINE_HEADROOM_MS`; moving them together trades the
+/// determinism straight back for a race. The const assertion below enforces it.
+const DEADLINE_HEADROOM_MS: u64 = 1_200;
+const SLOW_PROBE_DELAY_MS: u64 = 2_500;
+const _: () = assert!(
+    SLOW_PROBE_DELAY_MS > DEADLINE_HEADROOM_MS,
+    "the slow probe must outlast the deadline, or the crossing becomes load-dependent again"
+);
+
 #[derive(Clone, Copy)]
 enum PublishScenario {
     Navigate,
@@ -366,12 +390,11 @@ async fn fake_session(
                         || matches!(scenario, PublishScenario::SlowSubmitState)
                             && kind == "publish_submitted_probe";
                     if should_delay {
-                        let delay_ms = if matches!(scenario, PublishScenario::SlowPostClick) {
-                            250
-                        } else {
-                            100
-                        };
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        // One delay for all three slow scenarios: each of them exists so that the
+                        // probe it slows down is the step that crosses the deadline. Per-scenario
+                        // values only made it harder to see that they must all outlast
+                        // DEADLINE_HEADROOM_MS.
+                        tokio::time::sleep(Duration::from_millis(SLOW_PROBE_DELAY_MS)).await;
                     }
                     result
                 }
@@ -663,10 +686,14 @@ async fn select_mode_reports_ambiguous_after_one_unconfirmed_click() {
         unreachable!();
     };
 
-    let (phase, output) =
-        execute_facebook_publish_select_mode(&mut session, params, &command, unix_time_ms() + 150)
-            .await
-            .expect("select mode");
+    let (phase, output) = execute_facebook_publish_select_mode(
+        &mut session,
+        params,
+        &command,
+        unix_time_ms() + DEADLINE_HEADROOM_MS,
+    )
+    .await
+    .expect("select mode");
     let receipt = receipt(output);
 
     assert_eq!(phase, EffectPhase::Ambiguous);
@@ -709,10 +736,14 @@ async fn select_mode_does_not_confirm_when_an_open_editor_probe_crosses_the_dead
         unreachable!();
     };
 
-    let (phase, output) =
-        execute_facebook_publish_select_mode(&mut session, params, &command, unix_time_ms() + 25)
-            .await
-            .expect("select mode");
+    let (phase, output) = execute_facebook_publish_select_mode(
+        &mut session,
+        params,
+        &command,
+        unix_time_ms() + DEADLINE_HEADROOM_MS,
+    )
+    .await
+    .expect("select mode");
 
     assert_eq!(phase, EffectPhase::NotStarted);
     assert_eq!(
@@ -732,10 +763,14 @@ async fn select_mode_is_ambiguous_when_post_click_confirmation_crosses_the_deadl
         unreachable!();
     };
 
-    let (phase, output) =
-        execute_facebook_publish_select_mode(&mut session, params, &command, unix_time_ms() + 150)
-            .await
-            .expect("select mode");
+    let (phase, output) = execute_facebook_publish_select_mode(
+        &mut session,
+        params,
+        &command,
+        unix_time_ms() + DEADLINE_HEADROOM_MS,
+    )
+    .await
+    .expect("select mode");
 
     assert_eq!(phase, EffectPhase::Ambiguous);
     assert_eq!(
@@ -1019,7 +1054,7 @@ async fn submit_does_not_confirm_when_the_submitted_probe_crosses_the_deadline()
         &command,
         None,
         &requester,
-        unix_time_ms() + 50,
+        unix_time_ms() + DEADLINE_HEADROOM_MS,
     )
     .await
     .expect("submit");
