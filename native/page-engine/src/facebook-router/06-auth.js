@@ -355,7 +355,9 @@
             ||button.getAttribute('data-testid')==='royal_login_button'
             ||/^(log in|login|登录|登入)$/i.test(label(button))
           ));
-          if(submit.reason==='auth_target_ambiguous')determinate=false;
+          // A post-click loading cover keeps the old target structurally present. It is not
+          // evidence that the signal disappeared, so let the bounded verifier poll again.
+          if(submit.reason==='auth_target_ambiguous'||submit.reason==='auth_target_not_topmost')determinate=false;
           if(submit.candidate)candidateKey=await authDigest(authElementEvidence(submit.candidate));
         }
       }
@@ -371,7 +373,7 @@
           const submit=authUnique(authButtons(scope).filter((button)=>
             /^(continue|继续|繼續)$/i.test(label(button))
           ));
-          if(submit.reason==='auth_target_ambiguous')determinate=false;
+          if(submit.reason==='auth_target_ambiguous'||submit.reason==='auth_target_not_topmost')determinate=false;
           if(submit.candidate)candidateKey=await authDigest(authElementEvidence(submit.candidate));
         }
       }

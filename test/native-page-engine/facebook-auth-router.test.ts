@@ -673,6 +673,97 @@ test('login and TOTP postconditions stay bound to the original target without re
   assert.equal(totpGone.output.value.satisfied, true);
 });
 
+test('post-submit loading covers remain indeterminate until login moves or the TOTP signal disappears', async () => {
+  install(`
+    <form>
+      <input name="email" value="filled">
+      <input name="pass" type="password" value="filled">
+      <button id="login" name="login">Log in</button>
+    </form>
+  `, 'https://www.facebook.com/login/');
+  const loginButton = document.getElementById('login')!;
+  setRect(loginButton, { left: 100, top: 100, right: 240, bottom: 145 });
+  const login = await probe();
+  document.body.insertAdjacentHTML('beforeend', '<div id="login-cover"></div>');
+  setRect(document.getElementById('login-cover')!, { left: 100, top: 100, right: 240, bottom: 145 });
+
+  const coveredLogin = await run({
+    kind: 'auth_postcondition',
+    params: {
+      documentGeneration: login.documentGeneration,
+      expectedSignal: 'login_submit_ready',
+      candidateKey: (login.candidate as Record<string, unknown>).candidateKey,
+    },
+  });
+  assert.deepEqual(coveredLogin.output.value, {
+    satisfied: false,
+    documentChanged: false,
+    signalGone: false,
+  });
+
+  history.pushState({}, '', '/two_step_verification/two_factor/');
+  const movedLogin = await run({
+    kind: 'auth_postcondition',
+    params: {
+      documentGeneration: login.documentGeneration,
+      expectedSignal: 'login_submit_ready',
+      candidateKey: (login.candidate as Record<string, unknown>).candidateKey,
+    },
+  });
+  assert.deepEqual(movedLogin.output.value, {
+    satisfied: true,
+    documentChanged: true,
+    signalGone: false,
+  });
+
+  const windowStart = 1_800_000_000_000;
+  install(`
+    <main>
+      <h1>Two-factor authentication</h1>
+      <input id="code" autocomplete="one-time-code" value="123456">
+      <button id="continue">Continue</button>
+    </main>
+  `, 'https://www.facebook.com/two_step_verification/two_factor/', windowStart + 10_000);
+  setRect(document.getElementById('code')!, { left: 100, top: 100, right: 300, bottom: 145 });
+  const continueButton = document.getElementById('continue')!;
+  setRect(continueButton, { left: 100, top: 200, right: 240, bottom: 245 });
+  const totp = await probe({
+    enteredTotpWindowStartUnixMs: windowStart,
+    enteredTotpWindowEndUnixMs: windowStart + 30_000,
+  });
+  document.body.insertAdjacentHTML('beforeend', '<div id="totp-cover"></div>');
+  setRect(document.getElementById('totp-cover')!, { left: 100, top: 200, right: 240, bottom: 245 });
+
+  const coveredTotp = await run({
+    kind: 'auth_postcondition',
+    params: {
+      documentGeneration: totp.documentGeneration,
+      expectedSignal: 'totp_submit_ready',
+      candidateKey: (totp.candidate as Record<string, unknown>).candidateKey,
+    },
+  });
+  assert.deepEqual(coveredTotp.output.value, {
+    satisfied: false,
+    documentChanged: false,
+    signalGone: false,
+  });
+
+  continueButton.remove();
+  const goneTotp = await run({
+    kind: 'auth_postcondition',
+    params: {
+      documentGeneration: totp.documentGeneration,
+      expectedSignal: 'totp_submit_ready',
+      candidateKey: (totp.candidate as Record<string, unknown>).candidateKey,
+    },
+  });
+  assert.deepEqual(goneTotp.output.value, {
+    satisfied: true,
+    documentChanged: false,
+    signalGone: true,
+  });
+});
+
 test('a higher-priority new prompt does not prove the original prompt disappeared', async () => {
   install(`
     <div role="dialog">

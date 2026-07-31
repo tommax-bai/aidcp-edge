@@ -22,8 +22,8 @@ const AUTH_REASON_MAX_BYTES: usize = 256;
 const AUTH_DOCUMENT_MAX_BYTES: usize = 512;
 const MAX_CONSUMED_AUTH_SIGNALS: usize = 64;
 const TOTP_VALIDITY_FLOOR_MS: u64 = 10_000;
-const POSTCONDITION_POLL_MS: u64 = 100;
-const POSTCONDITION_MAX_POLLS: usize = 40;
+const POSTCONDITION_POLL_MS: u64 = 200;
+const POSTCONDITION_MAX_POLLS: usize = 35;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -968,5 +968,15 @@ mod tests {
         assert!(totp_window_is_fresh(Some(50_000), 30_000, 60_000));
         assert!(!totp_window_is_fresh(Some(50_001), 30_000, 60_000));
         assert!(!totp_window_is_fresh(None, 30_000, 60_000));
+    }
+
+    #[test]
+    fn auth_postcondition_receipt_window_is_seven_seconds() {
+        assert_eq!(POSTCONDITION_POLL_MS, 200);
+        assert_eq!(POSTCONDITION_MAX_POLLS, 35);
+        assert_eq!(
+            POSTCONDITION_POLL_MS * POSTCONDITION_MAX_POLLS as u64,
+            7_000
+        );
     }
 }
