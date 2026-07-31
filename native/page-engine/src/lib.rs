@@ -3,6 +3,7 @@ pub mod command;
 pub mod commit_window;
 pub mod effect;
 pub mod endpoint;
+pub mod endpoint_resolver;
 pub mod engine;
 pub mod error;
 pub mod facebook;
@@ -19,11 +20,31 @@ use crate::probe::ProbeResult;
 use crate::protocol::SessionOpenParams;
 use std::time::Duration;
 
+/// 一次性探针（无会话、无重连）。生产链路不走这里 —— 现役调用方只有本模块的单测。
+///
+/// 附着判据与会话路径同源：**给了身份证据就必须复核**。没给证据时沿用平台 / 端口判据，
+/// 因为这条路径没有「当初被准入的那一个实例」可供比对 —— 它的端点就是调用方此刻直接指定的。
 pub async fn execute_probe(params: &SessionOpenParams) -> Result<ProbeResult, EngineError> {
     endpoint::validate_loopback_host(&params.host)?;
+    let admitted = params
+        .browser_debugger_url
+        .as_deref()
+        .and_then(endpoint::BrowserInstanceIdentity::from_browser_debugger_url);
     let operation = async {
-        let targets = endpoint::list_targets(&params.host, params.port).await?;
-        let target = endpoint::select_target(&targets, params.platform, params.port)?;
+        let target = if admitted.is_some() {
+            let observed = endpoint::read_browser_identity(&params.host, params.port).await?;
+            let targets = endpoint::list_targets(&params.host, params.port).await?;
+            endpoint::select_target_for_instance(
+                &targets,
+                params.platform,
+                params.port,
+                admitted.as_ref(),
+                Some(&observed),
+            )?
+        } else {
+            let targets = endpoint::list_targets(&params.host, params.port).await?;
+            endpoint::select_target(&targets, params.platform, params.port)?
+        };
         cdp::run_page_probe(&target.web_socket_debugger_url, target.id).await
     };
     tokio::time::timeout(Duration::from_millis(params.timeout_ms), operation)
@@ -55,6 +76,7 @@ mod tests {
             port,
             platform: Platform::Xiaohongshu,
             timeout_ms: 50,
+            browser_debugger_url: None,
         };
         let error = execute_probe(&params).await.expect_err("timeout");
         assert_eq!(error.code, ErrorCode::CdpTimeout);

@@ -260,13 +260,18 @@ async function main(): Promise<void> {
   // let（非 const）：冷待机唤醒会**重开浏览器**，新一代的 ChromeInstance 与调试端口必须整体换掉——
   // AdsPower 每次启动的 debug_port 都不同，留着旧的会让后续所有生命周期闭包对着一个死端口操作。
   let chrome: ChromeInstance | undefined;
-  let endpoint = { host: cdpHost, port: cdpPort };
+  // `browserDebuggerUrl` 与 host/port 同属**这一代浏览器**：重开浏览器时必须整体换掉。
+  // 它是同机多环境下唯一能把「这一个浏览器进程」和「占了同一端口的另一个进程」分开的证据。
+  let endpoint: { host: string; port: number; browserDebuggerUrl?: string } = {
+    host: cdpHost,
+    port: cdpPort,
+  };
   let firstLoginPolicyApplied = false;
   let browserWasAlreadyActive = false;
   if (!startBrowserAbsent) {
     const launched = await provider.launch(launchOpts);
     chrome = launched.instance;
-    endpoint = launched.endpoint;
+    endpoint = { ...launched.endpoint, browserDebuggerUrl: launched.browserDebuggerUrl };
     firstLoginPolicyApplied = launched.firstLoginPolicyApplied === true;
     browserWasAlreadyActive = launched.wasAlreadyActive === true;
   } else {
@@ -320,8 +325,15 @@ async function main(): Promise<void> {
 
   // 浏览器平台的页面理解与执行统一由 Native Page Engine 持有。运行时在身份首读前建立，
   // 因为 Facebook 身份本身也是页面/登录态派生能力，不能再穿过 TypeScript CDP 边界。
+  // 这个闭包在**会话期内会被反复调用**（建会话一次，引擎每次重连再各一次），读的必须是
+  // 「此刻」的那一代浏览器 —— 冷待机唤醒会整体换掉 `endpoint`，冻住第一次的值等于让引擎
+  // 拿着一个可能已经归别的环境所有的端口去重连。
   const nativePageRuntime = NativePageRuntime.fromEnvironment(
-    () => ({ host: endpoint.host, port: endpoint.port }),
+    () => ({
+      host: endpoint.host,
+      port: endpoint.port,
+      ...(endpoint.browserDebuggerUrl ? { browserDebuggerUrl: endpoint.browserDebuggerUrl } : {}),
+    }),
     platformDriver.platform,
   );
   const readPlatformIdentity = (options: ReadSelfIdentityOptions): Promise<SelfIdentityResult> => (
@@ -1499,7 +1511,9 @@ async function main(): Promise<void> {
         // 1) 重开浏览器。新一代 = 新的调试端口，整体换掉 chrome / endpoint / attachOpts。
         const relaunched = await provider.launch(launchOpts);
         chrome = relaunched.instance;
-        endpoint = relaunched.endpoint;
+        // 新一代浏览器 = 新端口 **且** 新实例标识。两者必须一起换：只换端口会让引擎
+        // 拿着上一代的身份证据去复核新浏览器，一律对不上、重连全数被拒。
+        endpoint = { ...relaunched.endpoint, browserDebuggerUrl: relaunched.browserDebuggerUrl };
         firstLoginPolicyApplied = relaunched.firstLoginPolicyApplied === true;
         browserWasAlreadyActive = relaunched.wasAlreadyActive === true;
         attachOpts.host = endpoint.host;

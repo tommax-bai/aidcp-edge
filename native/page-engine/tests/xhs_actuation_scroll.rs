@@ -9,6 +9,7 @@
 //!  ⑤ 接管**原样穿出**为取消，不被吞成一条普通回执；评论区位置不再变化即停手，不空转。
 
 use aidcp_page_engine::commit_window::CommitWindowRequester;
+use aidcp_page_engine::endpoint_resolver::EndpointResolver;
 use aidcp_page_engine::engine::{CommandOutput, Engine};
 use aidcp_page_engine::error::ErrorCode;
 use aidcp_page_engine::protocol::{
@@ -558,6 +559,7 @@ async fn a_takeover_during_a_feed_gesture_passes_through_as_cancelled() {
             ),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -1016,6 +1018,7 @@ fn session_open(port: u16) -> SessionOpenRecord {
             port,
             platform: Platform::Xiaohongshu,
             timeout_ms: 30_000,
+            browser_debugger_url: None,
         },
     }
 }

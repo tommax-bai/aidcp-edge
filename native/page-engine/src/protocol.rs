@@ -42,6 +42,21 @@ pub struct SessionOpenParams {
     pub port: u16,
     pub platform: Platform,
     pub timeout_ms: u64,
+    /// 被准入的那一个浏览器实例的**身份证据**：浏览器级调试地址
+    /// （`ws://127.0.0.1:<port>/devtools/browser/<uuid>`）。
+    ///
+    /// 端口不是身份 —— 同机多环境并行时，指纹浏览器释放的调试端口会被另一个环境复用。
+    /// 引擎在**重连**时按它复核「这一次连上的浏览器」是否还是「当初被准入的那一个」，
+    /// 对不上就诚实拒绝、不附着任何目标（否则后续一切动作都落在别人的账号里）。
+    ///
+    /// 用 `Option` + `#[serde(default)]` 而非必填：`deny_unknown_fields` 下新增必填字段会让
+    /// **旧宿主 + 新引擎**在 `session.open` 当场解析失败、整条链路开不起来。缺席的代价是
+    /// 「重连一律诚实拒绝」（见 `EngineSession::reconnect`），不是「退化成端口对上就接管」。
+    ///
+    /// ⚠️ 身份**只在开会话时由宿主交付、引擎侧只记下来**。MUST NOT 改成引擎在开会话时
+    /// 自读一次 —— 那是一次额外的端点往返，且此刻还没有任何独立事实可以拿来比对（自读自比恒等真）。
+    #[serde(default)]
+    pub browser_debugger_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -107,6 +122,25 @@ pub struct CommitWindowAckRecord {
     pub accepted: bool,
 }
 
+/// 宿主对「请把这个会话的端点重新解析一次」的应答。
+///
+/// 解析不出来（浏览器已不在 / 提供方拿不到端口）时 MUST 省略 `host` / `port`，
+/// **MUST NOT 把上一次的值原样回填**：那正是「端口被别的环境复用」这条危害的入口。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct EndpointResultRecord {
+    pub protocol_version: u32,
+    pub id: String,
+    pub session_id: String,
+    pub task_id: String,
+    pub command_id: u64,
+    pub token: String,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ShutdownRecord {
@@ -123,6 +157,7 @@ pub enum InputRecord {
     Command(CommandRecord),
     Cancel(CancelRecord),
     CommitWindowAck(CommitWindowAckRecord),
+    EndpointResult(EndpointResultRecord),
     Shutdown(ShutdownRecord),
 }
 
@@ -135,6 +170,7 @@ impl InputRecord {
             Self::Command(record) => &record.id,
             Self::Cancel(record) => &record.id,
             Self::CommitWindowAck(record) => &record.id,
+            Self::EndpointResult(record) => &record.id,
             Self::Shutdown(record) => &record.id,
         }
     }
@@ -147,6 +183,7 @@ impl InputRecord {
             Self::Command(record) => record.protocol_version,
             Self::Cancel(record) => record.protocol_version,
             Self::CommitWindowAck(record) => record.protocol_version,
+            Self::EndpointResult(record) => record.protocol_version,
             Self::Shutdown(record) => record.protocol_version,
         };
         if protocol_version != PROTOCOL_VERSION {
@@ -170,6 +207,20 @@ impl InputRecord {
                 };
                 if !(MIN_TIMEOUT_MS..=max_timeout_ms).contains(&record.params.timeout_ms) {
                     return Err(invalid_request("invalid session timeout"));
+                }
+                // 给了身份证据就必须是**能解析出实例标识**的浏览器级调试地址。
+                // 解析不出来时在门口拒掉，绝不接受成「等于没给」——后者会让一条本该
+                // 被复核的重连悄悄退回到「无证据」那一档。
+                if record
+                    .params
+                    .browser_debugger_url
+                    .as_deref()
+                    .is_some_and(|raw| {
+                        crate::endpoint::BrowserInstanceIdentity::from_browser_debugger_url(raw)
+                            .is_none()
+                    })
+                {
+                    return Err(invalid_request("invalid browser instance identity"));
                 }
             }
             Self::SessionStatus(record) => {
@@ -212,6 +263,25 @@ impl InputRecord {
                 validate_identifier(&record.label, "invalid commit window label")?;
                 if record.command_id == 0 {
                     return Err(invalid_request("invalid command id"));
+                }
+            }
+            Self::EndpointResult(record) => {
+                validate_identifier(&record.session_id, "invalid session id")?;
+                validate_identifier(&record.task_id, "invalid task id")?;
+                validate_identifier(&record.token, "invalid endpoint request token")?;
+                if record.command_id == 0 {
+                    return Err(invalid_request("invalid command id"));
+                }
+                // 端点是「要么给全、要么明说给不出」。半份端点（只有 host / 只有 port）
+                // 若被接受，另一半就只能拿旧值补，而旧端口正是危害的入口。
+                match (record.host.as_deref(), record.port) {
+                    (None, None) => {}
+                    (Some(host), Some(port)) => {
+                        if host.is_empty() || host.len() > 255 || port == 0 {
+                            return Err(invalid_request("invalid resolved endpoint"));
+                        }
+                    }
+                    _ => return Err(invalid_request("incomplete resolved endpoint")),
                 }
             }
             Self::Shutdown(_) => {}
@@ -409,6 +479,35 @@ pub struct CommitWindowRequestRecord<'a> {
     pub token: &'a str,
     pub label: &'a str,
     pub budget_ms: u64,
+}
+
+/// 引擎在**重连**时主动向宿主要一次当前端点。与提交窗口请求同一形状：
+/// 不占 `id` 空间（沿用当前命令的请求 id 作关联键），宿主经 `endpoint_result` 应答。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointRequestRecord<'a> {
+    #[serde(rename = "type")]
+    pub record_type: &'static str,
+    pub protocol_version: u32,
+    pub id: &'a str,
+    pub session_id: &'a str,
+    pub task_id: &'a str,
+    pub command_id: u64,
+    pub token: &'a str,
+}
+
+impl<'a> EndpointRequestRecord<'a> {
+    pub fn new(request: &'a CommandRecord, token: &'a str) -> Self {
+        Self {
+            record_type: "endpoint_request",
+            protocol_version: PROTOCOL_VERSION,
+            id: &request.id,
+            session_id: &request.session_id,
+            task_id: &request.task_id,
+            command_id: request.command_id,
+            token,
+        }
+    }
 }
 
 impl<'a> CommitWindowRequestRecord<'a> {

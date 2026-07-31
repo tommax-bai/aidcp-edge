@@ -5,6 +5,7 @@ use aidcp_page_engine::command::{
     SearchExecuteParams,
 };
 use aidcp_page_engine::commit_window::CommitWindowRequester;
+use aidcp_page_engine::endpoint_resolver::EndpointResolver;
 use aidcp_page_engine::engine::{CommandOutput, Engine};
 use aidcp_page_engine::error::{CdpExceptionClass, CdpExceptionReason, ErrorCode};
 use aidcp_page_engine::model::{ActionReceipt, FacebookListKind};
@@ -2387,6 +2388,7 @@ async fn facebook_comment_commit_window_rejection_clears_and_never_submits() {
         &command,
         Arc::new(AtomicBool::new(false)),
         CommitWindowRequester::new(command.command_id, sender),
+        EndpointResolver::in_process(command.command_id),
     );
     let reject = async move {
         let request = receiver.recv().await.expect("commit window request");
@@ -2469,6 +2471,10 @@ async fn facebook_comment_focus_rejection_stops_before_text_dispatch() {
     );
 }
 
+/// 假浏览器进程的实例标识。宿主在开会话时把它当作**准入证据**交给引擎；
+/// 引擎重连时按它复核「这一次连上的还是不是当初那一个浏览器」。
+const ADMITTED_BROWSER_ID: &str = "fake-browser-0001";
+
 fn session_open(port: u16) -> SessionOpenRecord {
     SessionOpenRecord {
         protocol_version: 2,
@@ -2480,6 +2486,9 @@ fn session_open(port: u16) -> SessionOpenRecord {
             port,
             platform: Platform::Xiaohongshu,
             timeout_ms: 2_000,
+            browser_debugger_url: Some(format!(
+                "ws://127.0.0.1:{port}/devtools/browser/{ADMITTED_BROWSER_ID}"
+            )),
         },
     }
 }
@@ -3516,7 +3525,13 @@ async fn spawn_facebook_group_join_exception_cdp() -> (u16, tokio::task::JoinHan
     let port = listener.local_addr().expect("address").port();
     let server = tokio::spawn(async move {
         let mut requests = Vec::new();
-        for _ in 0..2 {
+        for attempt in 0..2 {
+            // 第二轮是**重连**：引擎在挑目标之前先要复核这个端点还是不是当初那一个浏览器实例，
+            // 所以要先答一次 `/json/version`。第一轮（开会话）没有这一步 ——
+            // 那一刻身份是宿主随开会话参数交付的，引擎不自读。
+            if attempt > 0 {
+                serve_browser_version(&listener, port, ADMITTED_BROWSER_ID).await;
+            }
             serve_target_listing_for(&listener, port, "https://www.facebook.com/groups/42").await;
             let (stream, _) = listener.accept().await.expect("WebSocket request");
             let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
@@ -5170,6 +5185,9 @@ async fn spawn_disconnect_then_recover_cdp() -> (u16, tokio::task::JoinHandle<()
         let _ = first.next().await.expect("first evaluate request");
         first.close(None).await.expect("first close");
 
+        // 重连的第一件事是复核实例身份：先答 `/json/version`，再答 `/json`。
+        // 顺序不能反 —— 引擎在身份对上之前不会去问「你开了哪些页面」。
+        serve_browser_version(&listener, port, ADMITTED_BROWSER_ID).await;
         serve_target_listing(&listener, port).await;
         let (second_stream, _) = listener.accept().await.expect("second WebSocket request");
         let mut second = accept_async(second_stream)
@@ -5204,6 +5222,25 @@ async fn spawn_disconnect_then_recover_cdp() -> (u16, tokio::task::JoinHandle<()
 
 async fn serve_target_listing(listener: &TcpListener, port: u16) {
     serve_target_listing_for(listener, port, "https://www.xiaohongshu.com/explore").await;
+}
+
+/// 假浏览器自报实例标识（CDP `GET /json/version`）。
+async fn serve_browser_version(listener: &TcpListener, port: u16, browser_id: &str) {
+    let (mut http, _) = listener.accept().await.expect("HTTP version request");
+    let mut request = [0_u8; 2048];
+    let _ = http.read(&mut request).await.expect("read version request");
+    let body = json!({
+        "Browser": "Chrome/126.0.0.0",
+        "webSocketDebuggerUrl": format!("ws://127.0.0.1:{port}/devtools/browser/{browser_id}")
+    })
+    .to_string();
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    http.write_all(headers.as_bytes()).await.expect("headers");
+    http.write_all(body.as_bytes()).await.expect("body");
+    http.shutdown().await.expect("HTTP shutdown");
 }
 
 async fn serve_target_listing_for(listener: &TcpListener, port: u16, url: &str) {

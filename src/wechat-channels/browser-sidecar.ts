@@ -86,7 +86,15 @@ export class CdpWechatChannelsBrowserSidecar implements WechatChannelsBrowserSid
         readyTimeoutMs: positiveMs(this.env.AIDCP_WECHAT_BROWSER_READY_TIMEOUT_MS, 20_000),
       });
       this.browser = launched.instance;
-      const endpoint = { host: launched.endpoint.host, port: launched.endpoint.port };
+      // 这里的端点是**冻结**的：本 sidecar 从不原地换浏览器，每次 open() 都新建一个运行时，
+      // 所以「会话期内可重复取值」在这里退化成「每次都取到同一个值」——契约仍然成立。
+      // 若将来给它加上原地重开浏览器的能力，这个闭包必须同步改成读可变的当代端点，
+      // 否则引擎会拿着上一代的端口与实例标识去重连。
+      const endpoint = {
+        host: launched.endpoint.host,
+        port: launched.endpoint.port,
+        ...(launched.browserDebuggerUrl ? { browserDebuggerUrl: launched.browserDebuggerUrl } : {}),
+      };
       const nativeRuntime = this.createNativeRuntime(() => endpoint);
       this.nativeRuntime = nativeRuntime;
       await nativeRuntime.openOwner(this.ownerId);

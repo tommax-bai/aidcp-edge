@@ -285,6 +285,17 @@ pub fn select_target_for_instance(
     admitted: Option<&BrowserInstanceIdentity>,
     observed: Option<&BrowserInstanceIdentity>,
 ) -> Result<CdpTarget, EngineError> {
+    ensure_admitted_instance(admitted, observed)?;
+    select_target(targets, platform, endpoint_port)
+}
+
+/// `select_target_for_instance` 的身份那一半，单独拿出来是为了让附着方能在**列目标之前**
+/// 先把身份复核掉：不是自己的浏览器，连它开了哪些页面都不该去问。
+/// 判据只有这一处实现，两个入口共用。
+pub fn ensure_admitted_instance(
+    admitted: Option<&BrowserInstanceIdentity>,
+    observed: Option<&BrowserInstanceIdentity>,
+) -> Result<(), EngineError> {
     let (Some(admitted), Some(observed)) = (admitted, observed) else {
         return Err(unproven_instance_identity());
     };
@@ -294,10 +305,10 @@ pub fn select_target_for_instance(
             "DevTools endpoint belongs to another browser instance than the admitted one",
         ));
     }
-    select_target(targets, platform, endpoint_port)
+    Ok(())
 }
 
-fn unproven_instance_identity() -> EngineError {
+pub fn unproven_instance_identity() -> EngineError {
     EngineError::new(
         ErrorCode::EndpointUnreachable,
         "DevTools endpoint could not prove it is the admitted browser instance",

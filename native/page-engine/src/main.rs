@@ -1,9 +1,11 @@
 use aidcp_page_engine::commit_window::{CommitWindowRequest, CommitWindowRequester};
+use aidcp_page_engine::endpoint_resolver::{EndpointRequest, EndpointResolver, ResolvedEndpoint};
 use aidcp_page_engine::engine::{CancelResult, CommandOutput, Engine, StoredCommandResult};
 use aidcp_page_engine::error::{EngineError, ErrorCode};
 use aidcp_page_engine::protocol::{
-    CommandRecord, CommandResultRecord, CommitWindowRequestRecord, EffectPhase, InputRecord,
-    LifecycleResponse, MAX_RECORD_BYTES, ReadyRecord, parse_input, recover_request_id,
+    CommandRecord, CommandResultRecord, CommitWindowRequestRecord, EffectPhase,
+    EndpointRequestRecord, InputRecord, LifecycleResponse, MAX_RECORD_BYTES, ReadyRecord,
+    parse_input, recover_request_id,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -19,11 +21,18 @@ struct PendingCommitWindow {
     acknowledgement: oneshot::Sender<bool>,
 }
 
+struct PendingEndpointRequest {
+    token: String,
+    response: oneshot::Sender<Option<ResolvedEndpoint>>,
+}
+
 struct ActiveCommand {
     request: CommandRecord,
     cancellation: Arc<AtomicBool>,
     commit_window_requests: mpsc::UnboundedReceiver<CommitWindowRequest>,
     pending_commit_window: Option<PendingCommitWindow>,
+    endpoint_requests: mpsc::UnboundedReceiver<EndpointRequest>,
+    pending_endpoint: Option<PendingEndpointRequest>,
     handle: JoinHandle<(Engine, Result<StoredCommandResult, EngineError>)>,
 }
 
@@ -33,6 +42,7 @@ type CommandCompletion =
 enum ActiveEvent {
     Completed(Box<CommandCompletion>),
     CommitWindow(Option<CommitWindowRequest>),
+    Endpoint(Option<EndpointRequest>),
     Input(Result<Option<String>, std::io::Error>),
 }
 
@@ -72,6 +82,8 @@ async fn main() {
                 let (commit_window_sender, commit_window_requests) = mpsc::unbounded_channel();
                 let commit_windows =
                     CommitWindowRequester::new(request.command_id, commit_window_sender);
+                let (endpoint_sender, endpoint_requests) = mpsc::unbounded_channel();
+                let endpoints = EndpointResolver::new(request.command_id, endpoint_sender);
                 let mut owned_engine = engine.take().expect("idle engine must be present");
                 let handle = tokio::spawn(async move {
                     let outcome = owned_engine
@@ -79,6 +91,7 @@ async fn main() {
                             &request_for_task,
                             cancellation_for_task,
                             commit_windows,
+                            endpoints,
                         )
                         .await;
                     (owned_engine, outcome)
@@ -88,6 +101,8 @@ async fn main() {
                     cancellation,
                     commit_window_requests,
                     pending_commit_window: None,
+                    endpoint_requests,
+                    pending_endpoint: None,
                     handle,
                 });
                 continue;
@@ -106,6 +121,7 @@ async fn main() {
             tokio::select! {
                 completed = &mut active_command.handle => ActiveEvent::Completed(Box::new(completed)),
                 request = active_command.commit_window_requests.recv() => ActiveEvent::CommitWindow(request),
+                request = active_command.endpoint_requests.recv() => ActiveEvent::Endpoint(request),
                 input = lines.next_line() => ActiveEvent::Input(input),
             }
         };
@@ -164,6 +180,26 @@ async fn main() {
                 });
             }
             ActiveEvent::CommitWindow(None) => {}
+            ActiveEvent::Endpoint(Some(request)) => {
+                let active_command = active.as_mut().expect("active command");
+                // 同一条命令的端点解析请求恒定串行（重连只在命令内发生、且一次一条）。
+                // 撞上第二条只可能是契约破了，此时明说「解析不出来」——绝不让引擎拿着
+                // 一个来路不明的端点去附着。
+                if active_command.pending_endpoint.is_some() {
+                    let _ = request.response.send(None);
+                    continue;
+                }
+                let record = EndpointRequestRecord::new(&active_command.request, &request.token);
+                if write_record(&mut stdout, &record).await.is_err() {
+                    let _ = request.response.send(None);
+                    break;
+                }
+                active_command.pending_endpoint = Some(PendingEndpointRequest {
+                    token: request.token,
+                    response: request.response,
+                });
+            }
+            ActiveEvent::Endpoint(None) => {}
             ActiveEvent::Input(Ok(Some(line))) => {
                 let Some(record) = parse_or_respond(&line, &mut stdout).await else {
                     continue;
@@ -241,6 +277,45 @@ async fn main() {
                                 EngineError::new(
                                     ErrorCode::CommitWindowUnavailable,
                                     "native commit window acknowledgement does not match the active command",
+                                ),
+                            );
+                            if write_record(&mut stdout, &response).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    InputRecord::EndpointResult(request) => {
+                        let active_command = active.as_mut().expect("active command");
+                        let matches_command = request.session_id
+                            == active_command.request.session_id
+                            && request.task_id == active_command.request.task_id
+                            && request.command_id == active_command.request.command_id;
+                        let matches_request = active_command
+                            .pending_endpoint
+                            .as_ref()
+                            .is_some_and(|pending| request.token == pending.token);
+                        if matches_command && matches_request {
+                            let pending = active_command
+                                .pending_endpoint
+                                .take()
+                                .expect("matching endpoint request");
+                            let resolved = match (request.host, request.port) {
+                                (Some(host), Some(port)) => Some(ResolvedEndpoint { host, port }),
+                                _ => None,
+                            };
+                            let accepted = resolved.is_some();
+                            let _ = pending.response.send(resolved);
+                            let result = json!({ "accepted": accepted });
+                            let response = LifecycleResponse::success(&request.id, &result);
+                            if write_record(&mut stdout, &response).await.is_err() {
+                                break;
+                            }
+                        } else {
+                            let response = LifecycleResponse::<serde_json::Value>::failure(
+                                &request.id,
+                                EngineError::new(
+                                    ErrorCode::EndpointUnreachable,
+                                    "native endpoint resolution does not match the active command",
                                 ),
                             );
                             if write_record(&mut stdout, &response).await.is_err() {
@@ -356,6 +431,19 @@ async fn handle_idle_record(
                     EngineError::new(
                         ErrorCode::CommitWindowUnavailable,
                         "native commit window acknowledgement has no active command",
+                    ),
+                ),
+            )
+            .await
+        }
+        InputRecord::EndpointResult(request) => {
+            write_record(
+                stdout,
+                &LifecycleResponse::<serde_json::Value>::failure(
+                    &request.id,
+                    EngineError::new(
+                        ErrorCode::EndpointUnreachable,
+                        "native endpoint resolution has no active command",
                     ),
                 ),
             )

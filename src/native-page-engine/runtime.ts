@@ -10,10 +10,26 @@ import {
   type NativePagePlatform,
 } from './client.js';
 
-export interface NativePageEndpoint { host: string; port: number }
+export interface NativePageEndpoint {
+  host: string;
+  port: number;
+  /**
+   * 这个端点上那一个浏览器实例的身份证据（浏览器级调试地址）。提供方读得到就带上。
+   *
+   * 端口不是身份：同机多环境并行时，指纹浏览器释放的调试端口会被另一个环境复用。
+   * 引擎拿它在**重连**时复核「这一次连上的还是不是当初那一个浏览器」；读不到就省略，
+   * 代价是重连会被诚实拒绝，而不是附着到别人的浏览器上。
+   */
+  browserDebuggerUrl?: string;
+}
 
 export interface NativePageRuntimeOptions {
   binaryPath: string;
+  /**
+   * 端点解析入口。**会话期内会被反复调用**：建会话时一次，之后引擎每次重连各一次。
+   * 因此它必须返回「此刻」的端点，而不是把第一次的结果冻在闭包里
+   * （冻住的那种写法只有在「每次都重建运行时」时才是安全的）。
+   */
   getEndpoint(): NativePageEndpoint;
   expectedManifest: NativePageEngineManifest;
   platform?: NativePagePlatform;
@@ -66,6 +82,16 @@ export class NativePageRuntime {
       binaryPath: options.binaryPath,
       processTimeoutMs: options.processTimeoutMs ?? 31_000,
       expectedManifest: options.expectedManifest,
+      // 会话期内可重复取值：引擎重连时会问一次「现在该连哪里」。取不到就如实回空，
+      // 绝不把上一次的端口原样回填 —— 那个端口此刻可能已经属于另一个环境的浏览器。
+      resolveEndpoint: () => {
+        try {
+          const endpoint = options.getEndpoint();
+          return { host: endpoint.host, port: endpoint.port };
+        } catch {
+          return undefined;
+        }
+      },
       ...(options.binaryArgs ? { binaryArgs: options.binaryArgs } : {}),
       ...(options.env ? { env: options.env } : {}),
     });
@@ -171,7 +197,10 @@ export class NativePageRuntime {
     const endpoint = this.options.getEndpoint();
     const suffix = ownerId.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 80) || 'page';
     const session = await this.client.openSession({
-      ...endpoint,
+      host: endpoint.host,
+      port: endpoint.port,
+      // 准入证据：把提供方读到的浏览器实例标识交给引擎，供它在重连时复核。
+      ...(endpoint.browserDebuggerUrl ? { browserDebuggerUrl: endpoint.browserDebuggerUrl } : {}),
       platform: this.options.platform ?? 'xiaohongshu',
       sessionId: `${this.options.platform ?? 'xiaohongshu'}_${process.pid}_${Date.now().toString(36)}`,
       taskId: suffix,

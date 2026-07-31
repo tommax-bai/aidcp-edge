@@ -44,6 +44,16 @@ export interface LaunchedBrowser {
   /** CDP 附着端点：self=传入端口；adspower=V2 active/start 返回或已验证失联 marker 的 debug_port。 */
   endpoint: { host: string; port: number };
   /**
+   * 这一个浏览器**进程**的身份证据：它自报的浏览器级调试地址
+   * （`ws://127.0.0.1:<port>/devtools/browser/<uuid>`，`/json/version` 读到）。
+   *
+   * 端口不是身份 —— 同机多环境并行时，一个环境释放的调试端口会被另一个环境占上，
+   * 而 `<uuid>` 由浏览器进程启动时生成，换进程必换值、端口回收复用带不过去。
+   * 下游（Native 引擎）拿它在重连时复核「还是不是当初那一个浏览器」。
+   * 读不到就省略：下游会诚实拒绝重连，而不是附着到别人的浏览器上。
+   */
+  browserDebuggerUrl?: string;
+  /**
    * 仅本次确实执行了 AdsPower V2 fresh start，并在 start body 中应用首登策略时存在。
    * Active / orphan 接管没有本代启动证据，必须省略，调用方不得据此运行依赖 browser-chrome 抑制的首登辅助。
    */
@@ -76,10 +86,47 @@ export class BrowserProfileInUseError extends Error {
   }
 }
 
+/**
+ * 从浏览器自报的 `/json/version` 里取实例标识（浏览器级调试地址）。
+ *
+ * **best-effort**：读不到就回 undefined，绝不因此判启动失败 —— 这是一份给下游复核用的证据，
+ * 不是启动的前置条件。缺了它的代价是「下游重连会被诚实拒绝」，而不是任何静默降级。
+ */
+export async function readBrowserDebuggerUrl(
+  host: string,
+  port: number,
+  fetchImpl: typeof fetch,
+  timeoutMs: number,
+): Promise<string | undefined> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl(`http://${host}:${port}/json/version`, {
+      signal: controller.signal,
+    });
+    if (!response.ok) return undefined;
+    const version = await (response.json() as Promise<{ webSocketDebuggerUrl?: unknown }>);
+    const raw = version?.webSocketDebuggerUrl;
+    if (typeof raw !== 'string' || !raw) return undefined;
+    const url = new URL(raw);
+    // 只接受**浏览器级**地址：页面级地址（/devtools/page/…）是标签页，不是进程身份。
+    if (url.protocol !== 'ws:' && url.protocol !== 'wss:') return undefined;
+    if (!/^\/devtools\/browser\/[A-Za-z0-9-]{1,128}$/.test(url.pathname)) return undefined;
+    return raw;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** self：自起真实指纹 Chrome，委托现有 `launchChrome`（行为零变化）。 */
 export class SelfChromeProvider implements BrowserProvider {
   readonly kind = 'self' as const;
-  constructor(private readonly launchImpl: typeof launchChrome = launchChrome) {}
+  constructor(
+    private readonly launchImpl: typeof launchChrome = launchChrome,
+    private readonly fetchImpl: typeof fetch = globalThis.fetch,
+  ) {}
 
   async launch(opts: BrowserLaunchOptions): Promise<LaunchedBrowser> {
     const instance = await this.launchImpl({
@@ -92,7 +139,17 @@ export class SelfChromeProvider implements BrowserProvider {
       loginTimeoutMs: opts.loginTimeoutMs,
     });
     // self 模式下 Chrome 绑定在传入端口上，attach 端点即传入端点。
-    return { instance, endpoint: { host: opts.host, port: opts.port } };
+    const browserDebuggerUrl = await readBrowserDebuggerUrl(
+      opts.host,
+      opts.port,
+      this.fetchImpl,
+      DEFAULT_ADS_CDP_PROBE_TIMEOUT_MS,
+    );
+    return {
+      instance,
+      endpoint: { host: opts.host, port: opts.port },
+      ...(browserDebuggerUrl ? { browserDebuggerUrl } : {}),
+    };
   }
 }
 
@@ -471,7 +528,7 @@ export class AdsPowerProvider implements BrowserProvider {
       );
     }
     const host = '127.0.0.1';
-    await this.waitCdpReady(host, port, opts.readyTimeoutMs ?? 15_000);
+    const browserDebuggerUrl = await this.waitCdpReady(host, port, opts.readyTimeoutMs ?? 15_000);
 
     let closePromise: Promise<boolean> | null = null;
     const closeAndRestore = () => {
@@ -496,6 +553,7 @@ export class AdsPowerProvider implements BrowserProvider {
     return {
       instance,
       endpoint: { host, port },
+      ...(browserDebuggerUrl ? { browserDebuggerUrl } : {}),
       ...(firstLoginPolicyApplied ? { firstLoginPolicyApplied: true as const } : {}),
       ...(wasAlreadyActive ? { wasAlreadyActive: true as const } : {}),
     };
@@ -775,7 +833,18 @@ export class AdsPowerProvider implements BrowserProvider {
     return null;
   }
 
-  private async waitCdpReady(host: string, port: number, timeoutMs: number): Promise<void> {
+  /**
+   * 轮询到 CDP 就绪，**顺手把浏览器自报的实例标识带回来**。
+   *
+   * 这一份 `/json/version` 本来就在读，只是过去把响应体丢了。它是同机多环境下唯一能把
+   * 「这一个浏览器进程」和「另一个占用了同一端口的浏览器进程」分开的证据 —— 换进程必换值，
+   * 端口回收复用带不过去。读不出来就回 undefined（就绪判定不受影响）。
+   */
+  private async waitCdpReady(
+    host: string,
+    port: number,
+    timeoutMs: number,
+  ): Promise<string | undefined> {
     const deadline = this.now() + timeoutMs;
     for (;;) {
       try {
@@ -786,7 +855,28 @@ export class AdsPowerProvider implements BrowserProvider {
           Math.min(this.cdpProbeTimeoutMs, remaining),
           'cdp/json/version',
         );
-        if (r.ok) return;
+        if (r.ok) {
+          try {
+            const version = await this.withTimeout(
+              r.json() as Promise<{ webSocketDebuggerUrl?: unknown }>,
+              this.cdpProbeTimeoutMs,
+              'cdp/json/version 响应',
+            );
+            const raw = version?.webSocketDebuggerUrl;
+            if (typeof raw === 'string' && raw) {
+              const url = new URL(raw);
+              if (
+                (url.protocol === 'ws:' || url.protocol === 'wss:')
+                && /^\/devtools\/browser\/[A-Za-z0-9-]{1,128}$/.test(url.pathname)
+              ) {
+                return raw;
+              }
+            }
+          } catch {
+            /* 证据读不到不影响「已就绪」这个判定本身 */
+          }
+          return undefined;
+        }
       } catch {
         /* 未就绪，继续轮询 */
       }

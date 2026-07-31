@@ -11,6 +11,7 @@
 
 use aidcp_page_engine::commit_window::xiaohongshu_commit_window;
 use aidcp_page_engine::commit_window::{CommitWindowRequest, CommitWindowRequester};
+use aidcp_page_engine::endpoint_resolver::EndpointResolver;
 use aidcp_page_engine::engine::{CommandOutput, DEFAULT_COMMAND_TIMEOUT_MS, Engine};
 use aidcp_page_engine::error::ErrorCode;
 use aidcp_page_engine::protocol::{
@@ -122,6 +123,7 @@ async fn comment_submit_requests_its_commit_window_before_any_write_dispatch() {
             &write_command(1, comment_command()),
             Arc::new(AtomicBool::new(false)),
             CommitWindowRequester::new(1, sender),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -168,6 +170,7 @@ async fn a_refused_commit_window_dispatches_nothing_and_terminates_as_not_starte
             &write_command(1, comment_command()),
             Arc::new(AtomicBool::new(false)),
             CommitWindowRequester::new(1, sender),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -363,6 +366,7 @@ fn session_open(port: u16) -> SessionOpenRecord {
             port,
             platform: Platform::Xiaohongshu,
             timeout_ms: 30_000,
+            browser_debugger_url: None,
         },
     }
 }

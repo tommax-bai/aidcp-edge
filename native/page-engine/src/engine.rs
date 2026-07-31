@@ -2,6 +2,7 @@ use crate::cdp::CdpSession;
 use crate::command::{NoteOpenParams, NoteOpenSelection};
 use crate::commit_window::{CommitWindowRequester, xiaohongshu_commit_window};
 use crate::endpoint;
+use crate::endpoint_resolver::EndpointResolver;
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
 use crate::input::{
@@ -178,8 +179,13 @@ pub struct CancelResult {
 pub(crate) struct EngineSession {
     id: String,
     task_id: String,
+    /// 开会话那一刻宿主交付的端点。**重连时只作兜底**：宿主能重新解析就以宿主的答案为准
+    /// （浏览器重开后端口会变，旧端口随时可能被同机另一个环境占上）。
     host: String,
     port: u16,
+    /// 被准入的那一个浏览器实例的身份证据。`None` = 宿主没给（旧宿主），
+    /// 后果是**重连一律诚实拒绝**，绝不退化成「端口对上就接管」。
+    admitted_instance: Option<endpoint::BrowserInstanceIdentity>,
     platform: Platform,
     timeout_ms: u64,
     target_id: String,
@@ -229,6 +235,7 @@ impl EngineSession {
             task_id: "test-task".to_owned(),
             host: "127.0.0.1".to_owned(),
             port: 0,
+            admitted_instance: None,
             platform,
             timeout_ms: DEFAULT_COMMAND_TIMEOUT_MS,
             target_id,
@@ -265,26 +272,60 @@ impl EngineSession {
         }
     }
 
+    /// 重新附着到**同一个**浏览器实例上。
+    ///
+    /// 三步，缺一不可：
+    ///  1. **重新解析端点**（`resolver`）。会话结构里存的那对 host/port 是开会话那一刻的值；
+    ///     浏览器重开后端口会变，而旧端口不会闲着 —— 同机另一个环境随时可能占上去。
+    ///     宿主解析不出来就诚实失败，MUST NOT 拿旧端口去碰运气。
+    ///  2. **复核实例身份**：读端点自报的浏览器实例标识，与准入时记下的比对。
+    ///     任一侧证据缺失、或两者不一致 → 拒绝附着，**不返回任何目标**。
+    ///     这一步排在列目标之前 —— 不是自己的浏览器，连它开了哪些页面都不该去看。
+    ///  3. 证据对上之后，才走既有的平台 / 端口判据挑目标并连上去。
     async fn reconnect(
         &mut self,
         deadline_unix_ms: u64,
         cancellation: &AtomicBool,
+        resolver: &EndpointResolver,
     ) -> Result<(), EngineError> {
         if cancellation.load(Ordering::Acquire) {
             return Err(cancelled_before_dispatch());
         }
         let remaining = remaining_budget(deadline_unix_ms, self.timeout_ms)?;
-        let operation = async {
-            let targets = endpoint::list_targets(&self.host, self.port).await?;
-            let target = endpoint::select_target(&targets, self.platform, self.port)?;
+        let admitted = self.admitted_instance.clone();
+        let fallback = (self.host.clone(), self.port);
+        let platform = self.platform;
+        let operation = async move {
+            // 没有准入基线就没有任何东西可以拿来比对 —— 立刻诚实拒绝，连端点都不去碰
+            // （去碰也只能碰出一个无从比对的读数，那不叫证据）。
+            let admitted = admitted.ok_or_else(endpoint::unproven_instance_identity)?;
+            let (host, port) = match resolver
+                .resolve(deadline_unix_ms, Some(cancellation))
+                .await?
+            {
+                Some(resolved) => (resolved.host, resolved.port),
+                None => fallback,
+            };
+            endpoint::validate_loopback_host(&host)?;
+            let observed = endpoint::read_browser_identity(&host, port).await?;
+            // 身份复核排在列目标之前。
+            endpoint::ensure_admitted_instance(Some(&admitted), Some(&observed))?;
+            let targets = endpoint::list_targets(&host, port).await?;
+            let target = endpoint::select_target_for_instance(
+                &targets,
+                platform,
+                port,
+                Some(&admitted),
+                Some(&observed),
+            )?;
             let cdp = CdpSession::connect(&target).await?;
-            Ok::<_, EngineError>((target.id, cdp))
+            Ok::<_, EngineError>((host, port, target.id, cdp))
         };
         let cancellation_wait = wait_for_cancellation(cancellation);
         tokio::pin!(cancellation_wait);
         let reconnect = tokio::time::timeout(remaining, operation);
         tokio::pin!(reconnect);
-        let (target_id, cdp) = tokio::select! {
+        let (host, port, target_id, cdp) = tokio::select! {
             _ = &mut cancellation_wait => return Err(cancelled_before_dispatch()),
             result = &mut reconnect => result.map_err(|_| EngineError::new(
                 ErrorCode::CdpTimeout,
@@ -292,6 +333,8 @@ impl EngineSession {
             ))??,
         };
         self.cdp.close().await;
+        self.host = host;
+        self.port = port;
         self.target_id = target_id;
         self.cdp = cdp;
         Ok(())
@@ -312,6 +355,14 @@ impl Engine {
             ));
         }
         endpoint::validate_loopback_host(&request.params.host)?;
+        // 准入时记下这一个浏览器实例的身份证据。**只记、不自读**：开会话这一刻宿主刚把
+        // 浏览器交过来，它自己就是权威，引擎再去自读一次既没有第二个事实可比对
+        // （自读自比恒等真），又要多一次端点往返。证据的用处在**重连**那一刻。
+        let admitted_instance = request
+            .params
+            .browser_debugger_url
+            .as_deref()
+            .and_then(endpoint::BrowserInstanceIdentity::from_browser_debugger_url);
         let operation = async {
             let targets = endpoint::list_targets(&request.params.host, request.params.port).await?;
             let target =
@@ -333,6 +384,7 @@ impl Engine {
             task_id: request.task_id.clone(),
             host: request.params.host.clone(),
             port: request.params.port,
+            admitted_instance,
             platform: request.params.platform,
             timeout_ms: request.params.timeout_ms,
             target_id,
@@ -391,6 +443,7 @@ impl Engine {
             request,
             cancellation,
             CommitWindowRequester::in_process(request.command_id),
+            EndpointResolver::in_process(request.command_id),
         )
         .await
     }
@@ -400,6 +453,7 @@ impl Engine {
         request: &CommandRecord,
         cancellation: Arc<AtomicBool>,
         commit_windows: CommitWindowRequester,
+        endpoints: EndpointResolver,
     ) -> Result<StoredCommandResult, EngineError> {
         let session = self.require_session_mut(&request.session_id)?;
         if session.task_id != request.task_id {
@@ -449,12 +503,28 @@ impl Engine {
         session.active_command_id = Some(request.command_id);
         let outcome = match &request.command {
             NativeCommand::PageProbe(_) if session.platform == Platform::Xiaohongshu => {
-                match execute_page_probe(session, request.deadline_unix_ms, &cancellation).await {
+                match execute_page_probe(
+                    session,
+                    request.deadline_unix_ms,
+                    &cancellation,
+                    &endpoints,
+                )
+                .await
+                {
                     Ok(result) => StoredCommandResult::confirmed(CommandOutput::PageProbe(result)),
                     Err(error) => StoredCommandResult::failed(error),
                 }
             }
-            _ => execute_platform_command(session, request, &cancellation, &commit_windows).await,
+            _ => {
+                execute_platform_command(
+                    session,
+                    request,
+                    &cancellation,
+                    &commit_windows,
+                    &endpoints,
+                )
+                .await
+            }
         };
         session.active_command_id = None;
         session.remember(request.command_id, outcome.clone());
@@ -525,15 +595,14 @@ async fn execute_platform_command(
     request: &CommandRecord,
     cancellation: &AtomicBool,
     commit_windows: &CommitWindowRequester,
+    endpoints: &EndpointResolver,
 ) -> StoredCommandResult {
     let write = request.command.may_write();
     if cancellation.load(Ordering::Acquire) {
         return StoredCommandResult::failed(cancelled_before_dispatch());
     }
-    let remaining = match remaining_budget(
-        request.deadline_unix_ms,
-        command_timeout_ms(session, &request.command),
-    ) {
+    let command_timeout = command_timeout_ms(session, &request.command);
+    let remaining = match remaining_budget(request.deadline_unix_ms, command_timeout) {
         Ok(value) => value,
         Err(error) => return StoredCommandResult::failed(error),
     };
@@ -580,25 +649,39 @@ async fn execute_platform_command(
                 ) =>
         {
             match session
-                .reconnect(request.deadline_unix_ms, cancellation)
+                .reconnect(request.deadline_unix_ms, cancellation, endpoints)
                 .await
             {
-                Ok(()) => match execute_platform_command_once(
-                    session,
-                    &request.command,
-                    Some(cancellation),
-                    commit_windows,
-                    request.deadline_unix_ms,
-                )
-                .await
-                {
-                    Ok((phase, output)) => StoredCommandResult {
-                        effect_phase: phase,
-                        output: Some(output),
-                        error: None,
-                    },
-                    Err(error) => StoredCommandResult::failed(error),
-                },
+                // 重连之后的这一次重试 MUST 与首跑受同一条绝对截止线约束。
+                // 没有这层包裹时它是**无界**的：首跑吃满预算 → 重连 → 重试再从零开始等，
+                // 于是「一条命令最多占多久」不再有上界，而单命令槽位要等它返回才释放
+                // ——下一条命令会被 `CommandInProgress` 顶回，且没有任何东西会把它救出来。
+                Ok(()) => {
+                    let retry_budget =
+                        match remaining_budget(request.deadline_unix_ms, command_timeout) {
+                            Ok(value) => value,
+                            Err(error) => return StoredCommandResult::failed(error),
+                        };
+                    let retry = execute_platform_command_once(
+                        session,
+                        &request.command,
+                        Some(cancellation),
+                        commit_windows,
+                        request.deadline_unix_ms,
+                    );
+                    match tokio::time::timeout(retry_budget, retry).await {
+                        Ok(Ok((phase, output))) => StoredCommandResult {
+                            effect_phase: phase,
+                            output: Some(output),
+                            error: None,
+                        },
+                        Ok(Err(error)) => StoredCommandResult::failed(error),
+                        Err(_) => StoredCommandResult::failed(EngineError::new(
+                            ErrorCode::CdpTimeout,
+                            "native page read command exceeded its deadline",
+                        )),
+                    }
+                }
                 Err(error) => StoredCommandResult::failed(error),
             }
         }
@@ -3148,6 +3231,7 @@ async fn execute_page_probe(
     session: &mut EngineSession,
     deadline_unix_ms: u64,
     cancellation: &AtomicBool,
+    endpoints: &EndpointResolver,
 ) -> Result<ProbeResult, EngineError> {
     let first = probe_once(session, deadline_unix_ms, cancellation).await;
     match first {
@@ -3158,7 +3242,10 @@ async fn execute_page_probe(
                 ErrorCode::CdpError | ErrorCode::CdpConnectFailed
             ) =>
         {
-            session.reconnect(deadline_unix_ms, cancellation).await?;
+            session
+                .reconnect(deadline_unix_ms, cancellation, endpoints)
+                .await?;
+            // `probe_once` 自带 `remaining_budget` 包裹，重试因此与首跑同受绝对截止线约束。
             probe_once(session, deadline_unix_ms, cancellation).await
         }
         Err(error) => Err(error),

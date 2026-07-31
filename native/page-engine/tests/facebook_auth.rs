@@ -612,6 +612,7 @@ fn session_open(port: u16) -> SessionOpenRecord {
             port,
             platform: Platform::Facebook,
             timeout_ms: 45_000,
+            browser_debugger_url: None,
         },
     }
 }

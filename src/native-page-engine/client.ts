@@ -97,6 +97,15 @@ export interface NativePageProbeInput {
   platform: NativePagePlatform;
   /** Native CDP/HTTP operation deadline. */
   timeoutMs?: number;
+  /**
+   * 被准入的那一个浏览器实例的身份证据：浏览器级调试地址
+   * （`ws://127.0.0.1:<port>/devtools/browser/<uuid>`），由提供方在启动 / 接管时读到并原样带过来。
+   *
+   * 端口不是身份 —— 同机多环境并行时，指纹浏览器释放的调试端口会被另一个环境复用。
+   * 引擎在**重连**时按它复核「这一次连上的还是不是当初那一个浏览器」，对不上就诚实拒绝。
+   * 缺席的代价是「重连一律被拒」，不是「退化成端口对上就接管」。
+   */
+  browserDebuggerUrl?: string;
 }
 
 export interface NativePageSessionInput extends NativePageProbeInput {
@@ -355,6 +364,17 @@ export interface NativePageEngineClientOptions {
   spawnImpl?: SpawnEngine;
   /** Production package contract. Tests may omit it for fixture engines. */
   expectedManifest?: NativePageEngineManifest;
+  /**
+   * 会话期内**可重复取值**的端点解析入口。引擎在重连时会问一次：这个会话现在该连哪里？
+   *
+   * 建会话时那对 host/port 是**当时**的值；浏览器被重开（冷待机唤醒即如此）之后端口会换，
+   * 而旧端口不会闲着 —— 同机另一个环境的浏览器随时可能占上去。
+   *
+   * 解析不出来时 MUST 返回 `undefined`，**MUST NOT 把上一次的值原样回填**：
+   * 那正是「端口被别的环境复用」这条危害的入口。省略本项等价于恒定解析不出来
+   * （引擎会沿用建会话时的端点，附着仍受实例身份复核约束）。
+   */
+  resolveEndpoint?: () => { host: string; port: number } | undefined;
 }
 
 interface ReadyRecord {
@@ -398,6 +418,17 @@ interface CommitWindowRequestRecord extends NativeCommitWindowRequest {
   id: string;
 }
 
+/** 引擎在重连时主动要一次当前端点。与提交窗口请求同一形状（沿用当前命令的请求 id 作关联键）。 */
+interface EndpointRequestRecord {
+  type: 'endpoint_request';
+  protocolVersion: number;
+  id: string;
+  sessionId: string;
+  taskId: string;
+  commandId: number;
+  token: string;
+}
+
 interface PendingResponse {
   resolve(value: unknown): void;
   reject(error: NativePageEngineError): void;
@@ -427,6 +458,8 @@ class NativeProcessTransport {
     private readonly child: ChildProcessWithoutNullStreams,
     processTimeoutMs: number,
     private readonly expectedManifest?: NativePageEngineManifest,
+    /** 会话期内可重复取值的端点解析入口；缺席等价于恒定解析不出来。 */
+    private readonly resolveEndpointImpl?: () => { host: string; port: number } | undefined,
   ) {
     this.processTimeoutMs = processTimeoutMs;
     this.readyPromise = new Promise((resolve, reject) => {
@@ -465,7 +498,12 @@ class NativeProcessTransport {
         `Native Page Engine could not start: ${describeError(error)}`,
       );
     }
-    const transport = new NativeProcessTransport(child, processTimeoutMs, options.expectedManifest);
+    const transport = new NativeProcessTransport(
+      child,
+      processTimeoutMs,
+      options.expectedManifest,
+      options.resolveEndpoint,
+    );
     await transport.readyPromise;
     return transport;
   }
@@ -651,6 +689,17 @@ class NativeProcessTransport {
       this.handleCommitWindowRequest(record.id, { ...commitWindow, budgetMs });
       return;
     }
+    if (record.type === 'endpoint_request') {
+      const endpointRequest = parseEndpointRequest(record);
+      if (!endpointRequest) {
+        // 结构坏了才是传输契约破了：连是哪条命令都读不出来，没有可归因的对象。
+        this.failProtocol('Native Page Engine emitted an invalid endpoint request');
+        this.terminate();
+        return;
+      }
+      this.handleEndpointRequest(endpointRequest);
+      return;
+    }
     const pending = this.pending.get(record.id);
     if (!pending) return;
     clearTimeout(pending.timer);
@@ -693,6 +742,44 @@ class NativeProcessTransport {
       pending.disposeCommitWindow = undefined;
       this.failProcess(error);
       this.terminate();
+    });
+  }
+
+  /**
+   * 回答引擎「这个会话现在该连哪里」。
+   *
+   * 解析不出来时如实回一个**空端点**（不带 host/port）—— 引擎收到之后会诚实地判重连失败，
+   * 而不是拿一个来路不明的端口去附着。这条应答绝不能省略：省略了引擎只能干等到命令截止。
+   */
+  private handleEndpointRequest(request: EndpointRequestRecord): void {
+    let resolved: { host: string; port: number } | undefined;
+    try {
+      const candidate = this.resolveEndpointImpl?.();
+      if (
+        candidate
+        && typeof candidate.host === 'string'
+        && candidate.host.length > 0
+        && Number.isSafeInteger(candidate.port)
+        && candidate.port > 0
+      ) {
+        resolved = { host: candidate.host, port: candidate.port };
+      }
+    } catch {
+      resolved = undefined;
+    }
+    const resultId = requestId('endpoint_result');
+    void this.request(resultId, {
+      type: 'endpoint_result',
+      protocolVersion: NATIVE_PAGE_ENGINE_PROTOCOL_VERSION,
+      id: resultId,
+      sessionId: request.sessionId,
+      taskId: request.taskId,
+      commandId: request.commandId,
+      token: request.token,
+      ...(resolved ?? {}),
+    }, Math.min(this.processTimeoutMs, 2_000)).catch(() => {
+      // 应答送不出去 = 传输已经不健康。命令自身的失败仍由引擎按预算如实回报，
+      // 这里不再叠一层猜测性的结论。
     });
   }
 
@@ -926,6 +1013,9 @@ export class NativePageEngineClient {
           port: input.port,
           platform: input.platform,
           timeoutMs,
+          // 引擎侧 `deny_unknown_fields`：没有证据就整项省略，绝不发一个空串顶上
+          //（空串会在引擎入口被判成非法身份、整个会话开不起来）。
+          ...(input.browserDebuggerUrl ? { browserDebuggerUrl: input.browserDebuggerUrl } : {}),
         },
       }, Math.max(this.options.processTimeoutMs ?? 0, timeoutMs + 250));
       const info = parseLifecycle(raw, id, parseSessionInfo);
@@ -1138,6 +1228,22 @@ function parseCommitWindowRequest(value: unknown): CommitWindowRequestRecord | u
     return undefined;
   }
   return value as unknown as CommitWindowRequestRecord;
+}
+
+function parseEndpointRequest(value: unknown): EndpointRequestRecord | undefined {
+  if (
+    !isRecord(value)
+    || value.type !== 'endpoint_request'
+    || value.protocolVersion !== NATIVE_PAGE_ENGINE_PROTOCOL_VERSION
+    || typeof value.id !== 'string'
+    || typeof value.sessionId !== 'string'
+    || typeof value.taskId !== 'string'
+    || !Number.isSafeInteger(value.commandId)
+    || typeof value.token !== 'string'
+  ) {
+    return undefined;
+  }
+  return value as unknown as EndpointRequestRecord;
 }
 
 /**

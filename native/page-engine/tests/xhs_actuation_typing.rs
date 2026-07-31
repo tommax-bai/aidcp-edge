@@ -10,6 +10,7 @@
 //! 另有一条钉死 8.3：富文本正文的换行是**独立的裸回车按键**，任何一次文本写入都不携带回车符。
 
 use aidcp_page_engine::commit_window::CommitWindowRequester;
+use aidcp_page_engine::endpoint_resolver::EndpointResolver;
 use aidcp_page_engine::engine::{CommandOutput, Engine};
 use aidcp_page_engine::error::ErrorCode;
 use aidcp_page_engine::protocol::{
@@ -164,6 +165,7 @@ async fn a_comment_is_typed_character_by_character_instead_of_being_assigned_in_
             ),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -210,6 +212,7 @@ async fn a_long_body_caps_round_trips_without_dropping_a_single_character() {
             &write_command(1, serde_json::from_value(params).expect("command"), 8_000),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -253,6 +256,7 @@ async fn a_typing_deadline_clears_the_editor_and_fails_honestly() {
             &write_command(1, serde_json::from_value(params).expect("command"), 5_500),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -297,6 +301,7 @@ async fn a_takeover_during_typing_passes_through_as_cancelled() {
             &write_command(1, serde_json::from_value(params).expect("command"), 20_000),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -338,6 +343,7 @@ async fn a_newline_in_the_rich_text_body_is_a_bare_enter_key_and_never_a_typed_c
             &write_command(1, serde_json::from_value(params).expect("command"), 20_000),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -396,6 +402,7 @@ async fn a_swallowed_paragraph_break_is_never_reported_as_a_confirmed_body() {
             &write_command(1, serde_json::from_value(params).expect("command"), 20_000),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -448,6 +455,7 @@ async fn a_takeover_after_typing_still_clears_the_editor_before_it_surfaces() {
             ),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -493,6 +501,7 @@ async fn a_probe_failure_after_typing_clears_the_editor_before_it_surfaces() {
             &write_command(1, serde_json::from_value(params).expect("command"), 20_000),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -530,6 +539,7 @@ async fn a_body_that_never_reads_back_is_reported_ambiguous_instead_of_confirmed
             &write_command(1, serde_json::from_value(params).expect("command"), 20_000),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -577,6 +587,7 @@ async fn a_comment_that_never_reads_back_is_refused_before_the_submit_is_ever_cl
             ),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -627,6 +638,7 @@ async fn a_harmless_rewrite_without_hanzi_still_confirms_through_the_similarity_
             &write_command(1, serde_json::from_value(params).expect("command"), 20_000),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -672,6 +684,7 @@ async fn a_full_width_punctuation_rewrite_still_confirms_through_the_hanzi_lane(
             &write_command(1, serde_json::from_value(params).expect("command"), 20_000),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -719,6 +732,7 @@ async fn the_settle_confirmation_spends_the_budget_it_was_given_not_twice_that()
             &write_command(1, serde_json::from_value(params).expect("command"), 20_000),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -774,6 +788,7 @@ async fn a_rich_text_comment_box_refuses_the_contact_separator_before_anything_i
             ),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -829,6 +844,7 @@ async fn a_swallowed_contact_separator_is_refused_before_the_submit_is_ever_clic
             ),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -882,6 +898,7 @@ async fn a_probe_that_threw_is_reported_as_unreadable_and_never_as_a_dirty_edito
             ),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -937,6 +954,7 @@ async fn a_draft_that_survived_a_clear_claiming_success_is_refused_before_any_ke
             ),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -994,6 +1012,7 @@ async fn one_slow_round_trip_pushes_the_tail_past_the_humane_chunk_bound() {
             &write_command(1, serde_json::from_value(params).expect("command"), 14_000),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -1056,6 +1075,7 @@ async fn a_comment_ack_that_is_not_a_clear_yes_stays_ambiguous_with_its_own_caus
                 ),
                 cancellation,
                 CommitWindowRequester::in_process(1),
+                EndpointResolver::in_process(1),
             )
             .await
             .expect("command result");
@@ -1121,6 +1141,7 @@ async fn a_takeover_at_the_last_unschedulable_settle_round_still_passes_through(
             &write_command(1, serde_json::from_value(params).expect("command"), 8_000),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -1170,6 +1191,7 @@ async fn a_body_whose_paragraph_count_cannot_be_read_is_never_confirmed() {
             &write_command(1, serde_json::from_value(params).expect("command"), 20_000),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -1220,6 +1242,7 @@ async fn a_comment_whose_paragraph_count_cannot_be_read_never_reaches_the_submit
             ),
             cancellation,
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -1277,6 +1300,7 @@ async fn an_editor_whose_form_cannot_be_read_refuses_before_a_single_keystroke()
             ),
             cancellation.clone(),
             CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
         )
         .await
         .expect("command result");
@@ -1299,6 +1323,7 @@ async fn an_editor_whose_form_cannot_be_read_refuses_before_a_single_keystroke()
             &write_command(2, serde_json::from_value(params).expect("command"), 20_000),
             cancellation,
             CommitWindowRequester::in_process(2),
+            EndpointResolver::in_process(2),
         )
         .await
         .expect("command result");
@@ -1349,6 +1374,7 @@ fn session_open(port: u16) -> SessionOpenRecord {
             port,
             platform: Platform::Xiaohongshu,
             timeout_ms: 30_000,
+            browser_debugger_url: None,
         },
     }
 }

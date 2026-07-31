@@ -6,6 +6,7 @@
 //   commit-window-oversized  提交窗口请求带一个**超过宿主事实源上限**的预算
 //   commit-window-unknown    提交窗口请求带一个宿主不认识的标签
 //   exit-after-first-command 第一条命令正常应答后进程退出（模拟引擎死掉）
+//   endpoint-request         第一条命令期间向宿主要一次当前端点（模拟重连），把宿主的答复原样回给用例
 import { createInterface } from 'node:readline';
 import { writeFileSync } from 'node:fs';
 
@@ -38,6 +39,8 @@ const cards = {
 let pendingCommand;
 let commandCount = 0;
 let activeTaskId = 'runtime-contract-task';
+/** 开会话时宿主交付的实例身份证据。用例据此断言这条线路没有在中途把证据丢掉。 */
+let admittedBrowserDebuggerUrl = null;
 
 const commandResult = (request, extra) => ({
   type: 'command_result',
@@ -53,6 +56,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   const request = JSON.parse(line);
   if (request.type === 'session_open') {
     activeTaskId = request.taskId;
+    admittedBrowserDebuggerUrl = request.params?.browserDebuggerUrl ?? null;
     write({
       type: 'response',
       protocolVersion: 2,
@@ -84,6 +88,20 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         label: mode === 'commit-window-unknown' ? 'fb_unknown_commit' : 'fb_join_click',
         // 事实源上限是 18_500；引擎在这里故意多要。
         budgetMs: 90_000,
+      });
+      return;
+    }
+    // 模拟重连：引擎在命令期间向宿主要一次「这个会话现在该连哪里」。
+    if (mode === 'endpoint-request') {
+      pendingCommand = request;
+      write({
+        type: 'endpoint_request',
+        protocolVersion: 2,
+        id: request.id,
+        sessionId: request.sessionId,
+        taskId: request.taskId,
+        commandId: request.commandId,
+        token: `ep_${request.commandId}_1`,
       });
       return;
     }
@@ -124,6 +142,38 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       effectPhase: 'not_started',
       reasonCode: 'commit_window_unavailable',
       error: { code: 'commit_window_unavailable', message: 'host refused the commit window' },
+    }));
+    return;
+  }
+  if (request.type === 'endpoint_result') {
+    write({
+      type: 'response',
+      protocolVersion: 2,
+      id: request.id,
+      ok: true,
+      result: { accepted: typeof request.host === 'string' && typeof request.port === 'number' },
+    });
+    if (!pendingCommand) return;
+    const command = pendingCommand;
+    pendingCommand = undefined;
+    // 把宿主的答复原样交给用例：解析到的端点 + 开会话时收到的实例身份证据。
+    // 这条线路上任何一环把值丢了，用例都会当场看见。
+    write(commandResult(command, {
+      ok: true,
+      effectPhase: 'confirmed',
+      reasonCode: 'confirmed',
+      result: {
+        kind: 'action_receipt',
+        value: {
+          action: 'endpoint_echo',
+          ok: true,
+          reason: JSON.stringify({
+            host: request.host ?? null,
+            port: request.port ?? null,
+            admittedBrowserDebuggerUrl,
+          }),
+        },
+      },
     }));
     return;
   }
