@@ -72,6 +72,7 @@ function action(
   kind: NativeFacebookAuthActionKind,
   signalId: string,
   effectPhase: NativeEffectPhase = 'confirmed',
+  reason?: string,
 ): NativePageCommandExecution {
   const confirmed = effectPhase === 'confirmed';
   return {
@@ -80,10 +81,58 @@ function action(
     reasonCode: confirmed ? 'confirmed' : 'postcondition_unconfirmed',
     output: {
       kind: 'facebook_auth_action',
-      value: { action: kind, signalId, ok: confirmed },
+      value: { action: kind, signalId, ok: confirmed, ...(reason ? { reason } : {}) },
     },
   };
 }
+
+test('filled email login advances through one TOTP entry and submit chain', async () => {
+  const broker = totpBroker([
+    { code: '123456', windowStartMs: 90_000, windowEndMs: 120_000 },
+  ]);
+  const runtime = new ScriptedRuntime([
+    { kind: 'facebook_auth_probe', execution: probe('login_submit_ready', { signalId: 'login-1' }) },
+    { kind: 'facebook_auth_submit_login', execution: action('facebook_auth_submit_login', 'login-1') },
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('totp_entry_ready', { signalId: 'entry-observed', serverEpochMs: 90_100 }),
+    },
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('totp_entry_ready', { signalId: 'entry-fresh', serverEpochMs: 90_200 }),
+    },
+    { kind: 'facebook_auth_enter_totp', execution: action('facebook_auth_enter_totp', 'entry-fresh') },
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('totp_submit_ready', { signalId: 'submit-1', serverEpochMs: 90_300 }),
+    },
+    { kind: 'facebook_auth_submit_totp', execution: action('facebook_auth_submit_totp', 'submit-1') },
+    { kind: 'facebook_auth_probe', execution: probe('authenticated') },
+  ]);
+
+  const result = await reconcileFacebookStartupAuth({
+    runtime,
+    totpBroker: broker,
+    freshStartPolicyApplied: true,
+    timeoutMs: 30_000,
+    now: () => 0,
+    sleep: async () => undefined,
+  });
+
+  assert.deepEqual(result, { kind: 'authenticated', actionAttempts: 3 });
+  assert.deepEqual(runtime.calls.map((call) => call.kind), [
+    'facebook_auth_probe',
+    'facebook_auth_submit_login',
+    'facebook_auth_probe',
+    'facebook_auth_probe',
+    'facebook_auth_enter_totp',
+    'facebook_auth_probe',
+    'facebook_auth_submit_totp',
+    'facebook_auth_probe',
+  ]);
+  assert.deepEqual(broker.requests, [90_100]);
+  runtime.assertDone();
+});
 
 function totpBroker(
   codes: FacebookTotpCode[] = [],
@@ -99,6 +148,115 @@ function totpBroker(
     },
   };
 }
+
+test('a proven fresh start clears orphan TOTP text before entering a new code', async () => {
+  const broker = totpBroker([
+    { code: '654321', windowStartMs: 90_000, windowEndMs: 120_000 },
+  ]);
+  const runtime = new ScriptedRuntime([
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('totp_refresh_required', { signalId: 'orphan-1', serverEpochMs: 90_100 }),
+    },
+    { kind: 'facebook_auth_clear_totp', execution: action('facebook_auth_clear_totp', 'orphan-1') },
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('totp_entry_ready', { signalId: 'entry-observed', serverEpochMs: 90_200 }),
+    },
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('totp_entry_ready', { signalId: 'entry-fresh', serverEpochMs: 90_300 }),
+    },
+    { kind: 'facebook_auth_enter_totp', execution: action('facebook_auth_enter_totp', 'entry-fresh') },
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('totp_submit_ready', { signalId: 'submit-1', serverEpochMs: 90_400 }),
+    },
+    { kind: 'facebook_auth_submit_totp', execution: action('facebook_auth_submit_totp', 'submit-1') },
+    { kind: 'facebook_auth_probe', execution: probe('authenticated') },
+  ]);
+
+  const result = await reconcileFacebookStartupAuth({
+    runtime,
+    totpBroker: broker,
+    freshStartPolicyApplied: true,
+    timeoutMs: 30_000,
+    now: () => 0,
+    sleep: async () => undefined,
+  });
+
+  assert.deepEqual(result, { kind: 'authenticated', actionAttempts: 3 });
+  assert.deepEqual(runtime.calls[1], {
+    kind: 'facebook_auth_clear_totp',
+    params: {
+      signalId: 'orphan-1',
+      totpWindowStartUnixMs: 90_000,
+      totpWindowEndUnixMs: 120_000,
+    },
+  });
+  assert.deepEqual(broker.requests, [90_200]);
+  runtime.assertDone();
+});
+
+test('an unproven active browser retains orphan TOTP text for manual handling', async () => {
+  const runtime = new ScriptedRuntime([
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('totp_refresh_required', { signalId: 'orphan-1', serverEpochMs: 90_100 }),
+    },
+  ]);
+
+  const result = await reconcileFacebookStartupAuth({
+    runtime,
+    totpBroker: totpBroker(),
+    freshStartPolicyApplied: false,
+    timeoutMs: 5_000,
+  });
+
+  assert.deepEqual(result, {
+    kind: 'manual_required',
+    reason: 'stale_totp_input_requires_fresh_start',
+    actionAttempts: 0,
+  });
+  assert.deepEqual(runtime.calls.map((call) => call.kind), ['facebook_auth_probe']);
+  runtime.assertDone();
+});
+
+test('an unconfirmed TOTP action preserves its bounded Native receipt reason', async () => {
+  const runtime = new ScriptedRuntime([
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('totp_entry_ready', { signalId: 'entry-observed', serverEpochMs: 90_100 }),
+    },
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('totp_entry_ready', { signalId: 'entry-fresh', serverEpochMs: 90_200 }),
+    },
+    {
+      kind: 'facebook_auth_enter_totp',
+      execution: action('facebook_auth_enter_totp', 'entry-fresh', 'ambiguous', 'totp_entry_target_lost'),
+    },
+  ]);
+
+  const result = await reconcileFacebookStartupAuth({
+    runtime,
+    totpBroker: totpBroker([
+      { code: '123456', windowStartMs: 90_000, windowEndMs: 120_000 },
+    ]),
+    freshStartPolicyApplied: true,
+    timeoutMs: 10_000,
+    now: () => 0,
+    sleep: async () => undefined,
+  });
+
+  assert.deepEqual(result, {
+    kind: 'failed',
+    reason: 'totp_entry_target_lost',
+    effectPhase: 'ambiguous',
+    actionAttempts: 1,
+  });
+  runtime.assertDone();
+});
 
 test('already-authenticated profile is a no-op even without fresh-start policy evidence', async () => {
   const runtime = new ScriptedRuntime([

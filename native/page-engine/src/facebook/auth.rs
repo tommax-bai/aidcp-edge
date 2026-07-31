@@ -7,7 +7,7 @@ use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
 use crate::input::{
     PointerClickOptions, PointerInputFailure, TextInputFailure, dispatch_pointer_click,
-    type_text_humanized_guarded,
+    insert_text_guarded,
 };
 use crate::model::{FacebookAuthActionReceipt, FacebookAuthProbeReceipt, FacebookAuthSignal};
 use crate::protocol::{EffectPhase, NativeCommand};
@@ -296,7 +296,7 @@ async fn execute_totp_entry(
         &observation.document_generation,
         &candidate.candidate_key,
     )?;
-    if let Err(failure) = type_text_humanized_guarded(
+    if let Err(failure) = insert_text_guarded(
         &mut session.cdp,
         &params.totp_code,
         cancellation,

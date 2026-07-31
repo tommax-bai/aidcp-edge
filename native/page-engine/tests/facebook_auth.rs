@@ -279,8 +279,25 @@ async fn totp_entry_rejects_short_and_wrong_windows_before_input_then_confirms_r
             .iter()
             .filter(|request| request["method"] == "Input.insertText")
             .count(),
-        6,
-        "TOTP entry types exactly six Native characters"
+        1,
+        "TOTP entry uses one paste-like Native insertion"
+    );
+    let insertion = requests
+        .iter()
+        .find(|request| request["method"] == "Input.insertText")
+        .expect("one TOTP insertion");
+    assert_eq!(insertion["params"]["text"], "123456");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| {
+                request["params"]["expression"]
+                    .as_str()
+                    .is_some_and(|expression| expression.contains(r#""kind":"auth_focus_guard""#))
+            })
+            .count(),
+        1,
+        "the paste-like insertion is guarded once before the complete code"
     );
     assert_eq!(
         requests

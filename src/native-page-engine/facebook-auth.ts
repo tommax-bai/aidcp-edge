@@ -573,6 +573,11 @@ export async function reconcileFacebookStartupAuth(
 
     const { execution } = attempt;
     const output = execution.output;
+    const boundedReceipt = output?.kind === 'facebook_auth_action'
+      && output.value.action === commandKind
+      && output.value.signalId === probe.signalId
+      ? output.value
+      : undefined;
     if (
       !execution.ok
       || execution.effectPhase !== 'confirmed'
@@ -583,7 +588,10 @@ export async function reconcileFacebookStartupAuth(
     ) {
       return result({
         kind: 'failed',
-        reason: safeReason(execution.reasonCode, 'facebook_auth_action_unconfirmed'),
+        reason: safeReason(
+          boundedReceipt?.reason,
+          safeReason(execution.reasonCode, 'facebook_auth_action_unconfirmed'),
+        ),
         effectPhase: execution.effectPhase,
       });
     }
@@ -738,7 +746,26 @@ export async function reconcileFacebookStartupAuth(
 
     if (probe.signal === 'totp_refresh_required') {
       if (!enteredWindow) {
-        return result({ kind: 'failed', reason: 'entered_totp_window_missing' });
+        if (!options.freshStartPolicyApplied) {
+          return result({
+            kind: 'manual_required',
+            reason: 'stale_totp_input_requires_fresh_start',
+          });
+        }
+        if (!validServerEpochMs(probe.serverEpochMs)) {
+          return result({ kind: 'failed', reason: 'facebook_server_time_unavailable' });
+        }
+        const recoveryWindow = windowFor(probe.serverEpochMs);
+        const recoveryResult = await dispatchAction(
+          probe,
+          ACTION_FOR_SIGNAL.totp_refresh_required,
+          {
+            totpWindowStartUnixMs: recoveryWindow.startMs,
+            totpWindowEndUnixMs: recoveryWindow.endMs,
+          },
+        );
+        if (recoveryResult) return recoveryResult;
+        continue;
       }
       const actionResult = await dispatchAction(
         probe,

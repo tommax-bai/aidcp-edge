@@ -175,6 +175,35 @@ pub(crate) async fn type_text_humanized_guarded(
     .await
 }
 
+/// Inserts one already-bounded value after a single focus check.
+///
+/// Facebook TOTP codes are commonly pasted as one unit. This path deliberately uses one CDP
+/// `Input.insertText` call: it never touches the OS clipboard and never assigns a DOM value or
+/// synthesizes JavaScript input events. Other text entry keeps the existing humanized behavior.
+pub(crate) async fn insert_text_guarded(
+    cdp: &mut CdpSession,
+    value: &str,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+    target_guard_expression: &str,
+) -> Result<(), TextInputFailure> {
+    ensure_text_input_active(cancellation, deadline_unix_ms)?;
+    let result = cdp
+        .evaluate(target_guard_expression, true)
+        .await
+        .map_err(|_| TextInputFailure::Engine)?;
+    match focus_guard_verdict(&result) {
+        FocusGuardVerdict::Focused => {}
+        FocusGuardVerdict::Lost => return Err(TextInputFailure::TargetLost),
+        FocusGuardVerdict::Unreadable => return Err(TextInputFailure::Engine),
+    }
+    ensure_text_input_active(cancellation, deadline_unix_ms)?;
+    cdp.insert_text(value)
+        .await
+        .map_err(|_| TextInputFailure::Engine)?;
+    Ok(())
+}
+
 /// 逐字输入前的焦点守卫读数，三态。
 ///
 /// `Unreadable` 与 `Lost` 必须分开：守卫在页面里抛了异常、或回来的结构对不上（`/result/value/output`
@@ -792,6 +821,13 @@ async fn wait_before_character(
     } else {
         tokio::time::sleep(delay).await;
     }
+    ensure_text_input_active(cancellation, deadline_unix_ms)
+}
+
+fn ensure_text_input_active(
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<(), TextInputFailure> {
     if cancellation.is_some_and(|value| value.load(Ordering::Acquire)) {
         return Err(TextInputFailure::Cancelled);
     }

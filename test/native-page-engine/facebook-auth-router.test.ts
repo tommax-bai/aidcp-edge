@@ -368,13 +368,15 @@ test('TOTP server-time failure and unknown entered window fail closed', async ()
     <main>
       <h1>Two-factor authentication</h1>
       <input id="code" autocomplete="one-time-code" value="123456">
-      <button>Continue</button>
+      <button id="continue">Continue</button>
     </main>
   `, 'https://www.facebook.com/two_step_verification/two_factor/');
+  setRect(document.getElementById('code')!, { left: 100, top: 100, right: 300, bottom: 145 });
+  setRect(document.getElementById('continue')!, { left: 100, top: 200, right: 240, bottom: 245 });
   const noWindow = await probe();
-  assert.equal(noWindow.signal, 'blocked_unknown');
+  assert.equal(noWindow.signal, 'totp_refresh_required');
   assert.equal(noWindow.reason, 'entered_totp_window_unavailable');
-  assert.equal(noWindow.signalId, undefined);
+  assert.match(String(noWindow.signalId), /^aidcp:facebook-auth:v1:[0-9a-f]{64}$/);
 });
 
 test('supported post-login prompts are independent exact topmost signals', async () => {
@@ -565,6 +567,16 @@ test('TOTP focus/readback helpers expose only bounded booleans and counts', asyn
   const candidate = observation.candidate as Record<string, unknown>;
   input.value = '123456';
   input.focus();
+  setRect(input, { left: 140, top: 120, right: 360, bottom: 170 });
+
+  const focus = await run({
+    kind: 'auth_focus_guard',
+    params: {
+      documentGeneration: observation.documentGeneration,
+      candidateKey: candidate.candidateKey,
+    },
+  });
+  assert.deepEqual(focus.output.value, { ok: true, focused: true });
 
   const readback = await run({
     kind: 'auth_totp_readback',

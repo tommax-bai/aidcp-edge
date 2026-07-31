@@ -16,7 +16,7 @@
     const hit=document.elementFromPoint&&document.elementFromPoint(target.cx,target.cy);
     return Boolean(hit&&(hit===el||el.contains(hit)));
   };
-  const authElementEvidence=(el)=>{
+  const authElementEvidence=(el,includeGeometry=true)=>{
     if(!el)return '';
     const path=[];
     let current=el;
@@ -26,16 +26,20 @@
       path.unshift(`${String(current.tagName||'').toLowerCase()}:${Math.max(0,siblings.indexOf(current))}`);
       current=parent;
     }
-    const rect=el.getBoundingClientRect();
-    return [
+    const evidence=[
       path.join('/'),
       norm(el.getAttribute&&el.getAttribute('role'),64),
       norm(el.getAttribute&&el.getAttribute('name'),64),
       norm(el.getAttribute&&el.getAttribute('type'),32),
       norm(el.getAttribute&&el.getAttribute('aria-label'),128),
-      [rect.left,rect.top,rect.width,rect.height].map((value)=>Math.round(Number(value)||0)).join(','),
-    ].join('|');
+    ];
+    if(includeGeometry){
+      const rect=el.getBoundingClientRect();
+      evidence.push([rect.left,rect.top,rect.width,rect.height].map((value)=>Math.round(Number(value)||0)).join(','));
+    }
+    return evidence.join('|');
   };
+  const authTotpElementEvidence=(el)=>authElementEvidence(el,false);
   const authObservation=async(signal,candidate,reason,extra={})=>{
     const documentGeneration=await authDocumentGeneration();
     if(!candidate){
@@ -46,7 +50,10 @@
         ...extra,
       };
     }
-    const candidateKey=await authDigest(authElementEvidence(candidate));
+    const stableTotpInput=signal==='totp_entry_ready'||signal==='totp_refresh_required';
+    const candidateKey=await authDigest(stableTotpInput
+      ?authTotpElementEvidence(candidate)
+      :authElementEvidence(candidate));
     const signalId=`${facebookAuthSignalPrefix}${await authDigest([
       String(p.targetId||''),
       documentGeneration,
@@ -185,7 +192,8 @@
     const start=Number(p.enteredTotpWindowStartUnixMs);
     const end=Number(p.enteredTotpWindowEndUnixMs);
     if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||end-start!==30000){
-      return authObservation('blocked_unknown',null,'entered_totp_window_unavailable',time);
+      if(!authTopHit(input))return authObservation('blocked_unknown',null,'auth_target_not_topmost',time);
+      return authObservation('totp_refresh_required',input,'entered_totp_window_unavailable',time);
     }
     if(serverEpochMs!==null&&(serverEpochMs<start||serverEpochMs>=end||end-serverEpochMs<10000)){
       if(!authTopHit(input))return authObservation('blocked_unknown',null,'auth_target_not_topmost',time);
@@ -297,7 +305,7 @@
     if(!input||(await authDocumentGeneration())!==String(p.documentGeneration||'')){
       return {kind:'text_target',value:{ok:false,focused:false}};
     }
-    const candidateKey=await authDigest(authElementEvidence(input));
+    const candidateKey=await authDigest(authTotpElementEvidence(input));
     return {
       kind:'text_target',
       value:{
@@ -311,7 +319,7 @@
     if(!input||(await authDocumentGeneration())!==String(p.documentGeneration||'')){
       return {kind:'auth_totp_readback',value:{bound:false,empty:false,length:0,matches:false}};
     }
-    const candidateKey=await authDigest(authElementEvidence(input));
+    const candidateKey=await authDigest(authTotpElementEvidence(input));
     const value=String(input.value||'');
     return {
       kind:'auth_totp_readback',
