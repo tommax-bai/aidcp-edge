@@ -444,13 +444,45 @@ async fn ensure_facebook_action_gate_inner(
             .map_err(|error| annotate_operation(error, operation_stages.map(|stages| stages.2)));
     }
 
-    for _ in 0..3 {
-        // 探测本身失败：既不假设有同意条、也不假成功——当作「无同意条」让既有闸继续处置。
-        // 把错误上抛会让整条命令变成引擎错误，等于把一次探测抖动升级成动作失败。
-        let Ok(consent) = probe_facebook_consent(session).await else {
-            return Ok(None);
+    let mut attempts = 0_u32;
+    while attempts < FACEBOOK_CONSENT_MAX_ATTEMPTS {
+        let consent = match probe_facebook_consent(session).await {
+            Ok(consent) => consent,
+            // 一次都还没动过页面就探测失败：既不假设有同意条、也不假成功——
+            // 当作「无同意条」让既有闸继续处置。把错误上抛会让整条命令变成引擎错误，
+            // 等于把一次探测抖动升级成动作失败。
+            Err(_) if attempts == 0 => return Ok(None),
+            // 已经点过接受按钮了，复探却读不回来：这一次**不知道**横幅清没清掉。
+            // 照旧放行等于拿「不知道」冒充「已清掉」，而且从回执上看与「压根没探到同意条」
+            // 一模一样——退役实现在这一档同样停手（consent.ts 的 re-probe failed 分支）。
+            Err(_) => {
+                return facebook_consent_gate_stop(
+                    session,
+                    command,
+                    FacebookConsentGateOutcome {
+                        handled: true,
+                        cleared: FacebookConsentCleared::Unknown,
+                        attempts,
+                    },
+                    operation_stages,
+                );
+            }
         };
         if !consent.present {
+            // 放行前把这一趟的处理结果交给诊断通道：点过之后横幅确实不见了，
+            // 与「这台页面上压根没有同意条」是两件事，MUST NOT 因为都放行就抹平。
+            report_facebook_consent_gate(
+                FacebookConsentGateOutcome {
+                    handled: attempts > 0,
+                    cleared: if attempts > 0 {
+                        FacebookConsentCleared::Confirmed
+                    } else {
+                        FacebookConsentCleared::NotApplicable
+                    },
+                    attempts,
+                },
+                None,
+            );
             return Ok(None);
         }
         let necessary_only = matches!(
@@ -475,43 +507,148 @@ async fn ensure_facebook_action_gate_inner(
         let Some(point) = point else {
             // 认出了同意条，但**策略所需**的按钮定位不到（文案 / 布局漂移，或同文案按钮不唯一）。
             // 诚实停手：绝不改点另一个按钮。这一档与「点满三次仍清不掉」是两回事——
-            // 前者一次都没动过页面（clicked=false），后者是升级停手（clicked=true）。
-            return facebook_consent_gate_failure(session, command, false)
-                .map(Some)
-                .map_err(|error| {
-                    annotate_operation(error, operation_stages.map(|stages| stages.2))
-                });
+            // 前者页面没被动过（clicked=false），后者是升级停手（clicked=true）。
+            return facebook_consent_gate_stop(
+                session,
+                command,
+                FacebookConsentGateOutcome {
+                    handled: true,
+                    cleared: FacebookConsentCleared::StillPresent,
+                    attempts,
+                },
+                operation_stages,
+            );
         };
         dispatch_facebook_click(session, point.cx, point.cy).await?;
+        attempts += 1;
         tokio::time::sleep(Duration::from_millis(700)).await;
     }
-    let Ok(final_probe) = probe_facebook_consent(session).await else {
-        return Ok(None);
+    let final_probe = match probe_facebook_consent(session).await {
+        Ok(final_probe) => final_probe,
+        // 同上：点满上限之后复探读不回来，「不知道清没清掉」不得当成「清掉了」放行。
+        Err(_) => {
+            return facebook_consent_gate_stop(
+                session,
+                command,
+                FacebookConsentGateOutcome {
+                    handled: true,
+                    cleared: FacebookConsentCleared::Unknown,
+                    attempts,
+                },
+                operation_stages,
+            );
+        }
     };
     if final_probe.present {
         // 有界重试到上限仍在——停手升级，绝不静默假成功。
-        return facebook_consent_gate_failure(session, command, true)
-            .map(Some)
-            .map_err(|error| annotate_operation(error, operation_stages.map(|stages| stages.2)));
+        return facebook_consent_gate_stop(
+            session,
+            command,
+            FacebookConsentGateOutcome {
+                handled: true,
+                cleared: FacebookConsentCleared::StillPresent,
+                attempts,
+            },
+            operation_stages,
+        );
     }
+    report_facebook_consent_gate(
+        FacebookConsentGateOutcome {
+            handled: true,
+            cleared: FacebookConsentCleared::Confirmed,
+            attempts,
+        },
+        None,
+    );
     Ok(None)
 }
 
-/// 同意闸失败回执。原因码保持既有的 `blocked_by_consent`（云端无第二个归宿，
+/// 同意条的有界重试上限。到顶仍在就停手升级，绝不无限点下去。
+const FACEBOOK_CONSENT_MAX_ATTEMPTS: u32 = 3;
+
+/// 同意闸这一趟的处理结果，三格与退役实现 `src/facebook/consent.ts` 的
+/// `handled / cleared / attempts` 一一对应（第四格 `reason` 随停手回执一起给）。
+///
+/// 它存在的直接理由：闸放行时走的是同一条「无输出」出口，于是
+/// 「认出了同意条、点了一次、复探读不回来」与「这台页面上压根没有同意条」
+/// 在外面看起来完全一样——三项事实全部消失，真机上无从判断账号到底撞没撞上同意条。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FacebookConsentGateOutcome {
+    /// 探到没探到：这一趟有没有认出一条需要处理的同意条。
+    handled: bool,
+    /// 清没清掉。
+    cleared: FacebookConsentCleared,
+    /// 点了几次接受按钮。
+    attempts: u32,
+}
+
+/// 「清没清掉」是四态不是布尔。`Unknown` 与 `StillPresent` 合成一态，
+/// 就是把「这一次没读到」说成「读到了坏消息」——同 `FocusGuardVerdict` 的三态口径。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FacebookConsentCleared {
+    /// 复探确认横幅已经不在了。
+    Confirmed,
+    /// 复探确认横幅仍在。
+    StillPresent,
+    /// 点过之后复探失败：这一次读不到结论，MUST NOT 冒充成上面任何一态。
+    Unknown,
+    /// 压根没有同意条要清。
+    NotApplicable,
+}
+
+impl FacebookConsentCleared {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::StillPresent => "still_present",
+            Self::Unknown => "unknown",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+/// 同意闸停手回执 + 观测。原因码保持既有的 `blocked_by_consent`（云端无第二个归宿，
 /// 新造原因码只会多一条没人接的字符串）；两档失败靠回执上的「有没有真点过」区分：
 /// `clicked=false` = 探到同意条但策略按钮定位不到（可诊断的文案 / 布局漂移，页面未被动过）；
-/// `clicked=true` = 点过仍未清掉（升级停手）。
-/// 「探到没探到」由回执本身表达：探不到时闸直接放行、根本不产出这条回执。
-fn facebook_consent_gate_failure(
+/// `clicked=true` = 点过仍未清掉（含「复探读不回来、这一次不知道清没清掉」）。
+///
+/// 回执只放得下这一位；`attempts` 与「清没清掉」的四态另走诊断通道——
+/// 往回执上加新字段属协议载荷改动（两份 `protocol.ts` + `model.rs` 须同批），不在本条范围内。
+fn facebook_consent_gate_stop(
     session: &EngineSession,
     command: &NativeCommand,
-    clicked: bool,
-) -> Result<CommandOutput, EngineError> {
-    let mut output = facebook_gate_failure(session, command, "blocked_by_consent")?;
+    outcome: FacebookConsentGateOutcome,
+    operation_stages: Option<(&'static str, &'static str, &'static str)>,
+) -> Result<Option<CommandOutput>, EngineError> {
+    report_facebook_consent_gate(outcome, Some("blocked_by_consent"));
+    let mut output = facebook_gate_failure(session, command, "blocked_by_consent")
+        .map_err(|error| annotate_operation(error, operation_stages.map(|stages| stages.2)))?;
     if let CommandOutput::ActionReceipt(receipt) = &mut output {
-        receipt.clicked = Some(clicked);
+        receipt.clicked = Some(outcome.attempts > 0);
     }
-    Ok(output)
+    Ok(Some(output))
+}
+
+fn report_facebook_consent_gate(outcome: FacebookConsentGateOutcome, reason: Option<&str>) {
+    // 绝大多数命令根本不会撞上同意条，逐条打日志只会把真正撞上的那几条淹掉。
+    if !outcome.handled {
+        return;
+    }
+    let diagnostic = facebook_consent_gate_diagnostic(outcome, reason);
+    eprintln!("native_page_engine_facebook_consent_gate:{diagnostic}");
+}
+
+fn facebook_consent_gate_diagnostic(
+    outcome: FacebookConsentGateOutcome,
+    reason: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "handled": outcome.handled,
+        "cleared": outcome.cleared.as_str(),
+        "attempts": outcome.attempts,
+        "reason": reason,
+    })
+    .to_string()
 }
 
 fn annotate_operation(error: EngineError, operation_stage: Option<&'static str>) -> EngineError {
@@ -967,4 +1104,59 @@ pub(crate) fn facebook_scroll_failure_on_surface(
             type_report: None,
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 「探到了但没清掉」与「压根没探到」在**观测通道**上必须是两条不同的读数。
+    /// 它们在闸里走的是同一条放行出口，只有这三格写下来才分得开。
+    #[test]
+    fn a_handled_banner_and_a_page_without_one_are_different_readings() {
+        let handled = facebook_consent_gate_diagnostic(
+            FacebookConsentGateOutcome {
+                handled: true,
+                cleared: FacebookConsentCleared::Unknown,
+                attempts: 1,
+            },
+            Some("blocked_by_consent"),
+        );
+        let never_seen = facebook_consent_gate_diagnostic(
+            FacebookConsentGateOutcome {
+                handled: false,
+                cleared: FacebookConsentCleared::NotApplicable,
+                attempts: 0,
+            },
+            None,
+        );
+        assert_ne!(handled, never_seen);
+        assert!(handled.contains(r#""handled":true"#));
+        assert!(handled.contains(r#""attempts":1"#));
+        assert!(never_seen.contains(r#""handled":false"#));
+        assert!(never_seen.contains(r#""attempts":0"#));
+    }
+
+    /// 「点过之后复探读不回来」与「复探确认横幅仍在」是两件事：
+    /// 前者是这一次没读到，后者是读到了坏消息。合成一态就是把不知道说成知道。
+    #[test]
+    fn an_unreadable_re_probe_is_never_written_down_as_a_confirmed_verdict() {
+        for cleared in [
+            FacebookConsentCleared::Confirmed,
+            FacebookConsentCleared::StillPresent,
+            FacebookConsentCleared::NotApplicable,
+        ] {
+            assert_ne!(cleared.as_str(), FacebookConsentCleared::Unknown.as_str());
+        }
+        let unknown = facebook_consent_gate_diagnostic(
+            FacebookConsentGateOutcome {
+                handled: true,
+                cleared: FacebookConsentCleared::Unknown,
+                attempts: 3,
+            },
+            Some("blocked_by_consent"),
+        );
+        assert!(unknown.contains(r#""cleared":"unknown""#));
+        assert!(unknown.contains(r#""attempts":3"#));
+    }
 }

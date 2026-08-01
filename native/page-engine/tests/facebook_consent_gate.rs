@@ -19,10 +19,14 @@ const NOTE_ID: &str = "https://www.facebook.com/groups/42/posts/7";
 
 #[derive(Clone, Copy)]
 enum Consent {
+    /// 页面上压根没有同意条。
+    Absent,
     /// 认出了同意条，但策略所需的按钮一个都定位不到（文案 / 布局漂移）。
     PresentWithoutButtons,
     /// 认出了同意条、也点得到，但点满上限仍清不掉。
     PresentButNeverClears,
+    /// 认出了同意条、点了一次，之后复探就读不回来了——横幅清没清掉这一次**不知道**。
+    PresentThenUnreadable,
     /// 探测本身失败（页面规则求值炸了）。
     ProbeFails,
 }
@@ -71,6 +75,63 @@ async fn a_banner_that_never_clears_escalates_after_bounded_attempts() {
         count_mouse(&requests, "mousePressed"),
         3,
         "有界重试：点三次仍在就停手，绝不无限点下去"
+    );
+}
+
+/// 「探到了但没清掉」与「压根没探到」必须在回执上分得开。
+///
+/// 这两档过去共用同一条「闸放行、什么都不留」的出口：认出了同意条、点了一次、复探读不回来，
+/// 与「这台页面上根本没有同意条」交出来的东西一模一样。后果不是报错而是失明——
+/// 运营侧看不出账号到底撞没撞上同意条，也就没人会去查那条横幅为什么点不掉；
+/// 而放行本身还是拿「不知道清没清掉」冒充「已清掉」，正是静默假成功。
+#[tokio::test]
+async fn a_clicked_banner_we_can_no_longer_read_is_never_reported_like_a_page_without_one() {
+    let (port, server) = spawn_consent_cdp(Consent::PresentThenUnreadable).await;
+    let handled = run_comment(port).await;
+    let handled_requests = server.await.expect("consent fake CDP");
+    let CommandOutput::ActionReceipt(handled_receipt) = handled.output.expect("gate receipt")
+    else {
+        panic!("expected an action receipt")
+    };
+
+    let (port, server) = spawn_consent_cdp(Consent::Absent).await;
+    let never_seen = run_comment(port).await;
+    let never_seen_requests = server.await.expect("consent fake CDP");
+    let CommandOutput::ActionReceipt(never_seen_receipt) =
+        never_seen.output.expect("comment receipt")
+    else {
+        panic!("expected an action receipt")
+    };
+
+    assert_ne!(
+        handled_receipt.reason, never_seen_receipt.reason,
+        "「探到了但没清掉」与「压根没探到」MUST 在回执上分得开"
+    );
+    assert_eq!(handled.effect_phase, EffectPhase::NotStarted);
+    assert_eq!(
+        handled_receipt.reason.as_deref(),
+        Some("blocked_by_consent")
+    );
+    assert_eq!(
+        handled_receipt.clicked,
+        Some(true),
+        "点过之后复探读不回来：绝不许拿「这一次不知道」冒充「已经清掉了」"
+    );
+    assert_ne!(
+        never_seen_receipt.reason.as_deref(),
+        Some("blocked_by_consent"),
+        "页面上没有同意条时受闸动作必须照常继续"
+    );
+
+    assert_eq!(
+        count_mouse(&handled_requests, "mousePressed"),
+        1,
+        "复探读不回来就停手，绝不在读不到结论的页面上接着点下去"
+    );
+    assert_eq!(
+        count_mouse(&never_seen_requests, "mousePressed"),
+        0,
+        "压根没有同意条时一次都不点"
     );
 }
 
@@ -162,6 +223,7 @@ async fn spawn_consent_cdp(consent: Consent) -> (u16, tokio::task::JoinHandle<Ve
         let (stream, _) = listener.accept().await.expect("WebSocket request");
         let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
         let mut requests = Vec::new();
+        let mut consent_probes = 0_usize;
         while let Some(message) = websocket.next().await {
             let message = message.expect("valid CDP request");
             let Message::Text(text) = message else {
@@ -173,7 +235,9 @@ async fn spawn_consent_cdp(consent: Consent) -> (u16, tokio::task::JoinHandle<Ve
             let result = if expression.contains(r#""kind":"page_probe""#) {
                 runtime_value("page_probe", page_probe_value())
             } else if expression.contains(r#""kind":"consent_probe""#) {
-                consent_value(consent)
+                let value = consent_value(consent, consent_probes);
+                consent_probes += 1;
+                value
             } else if expression.contains(r#""kind":"comment_editor_probe""#) {
                 runtime_value(
                     "text_target",
@@ -197,8 +261,29 @@ async fn spawn_consent_cdp(consent: Consent) -> (u16, tokio::task::JoinHandle<Ve
     (port, server)
 }
 
-fn consent_value(consent: Consent) -> Value {
+/// `probes` = 这是本条命令的第几次同意探测（0 起）。同意闸的语义天生是「探 → 点 → 复探」，
+/// 只有让假页面按次序作答，才做得出「第一次探到了、复探读不回来」这一档。
+fn consent_value(consent: Consent, probes: usize) -> Value {
+    let present_with_button = runtime_value(
+        "consent_probe",
+        json!({
+            "present": true,
+            "acceptAll": {"cx": 640.0, "cy": 700.0},
+            "acceptAllAmbiguous": false,
+            "necessaryOnlyAmbiguous": false
+        }),
+    );
+    // 页面规则求值返回了一个引擎认不出的形状 —— 等价于探测失败。
+    let unreadable = json!({"result": {"value": {"broken": true}}});
     match consent {
+        Consent::Absent => runtime_value(
+            "consent_probe",
+            json!({
+                "present": false,
+                "acceptAllAmbiguous": false,
+                "necessaryOnlyAmbiguous": false
+            }),
+        ),
         Consent::PresentWithoutButtons => runtime_value(
             "consent_probe",
             json!({
@@ -207,17 +292,15 @@ fn consent_value(consent: Consent) -> Value {
                 "necessaryOnlyAmbiguous": false
             }),
         ),
-        Consent::PresentButNeverClears => runtime_value(
-            "consent_probe",
-            json!({
-                "present": true,
-                "acceptAll": {"cx": 640.0, "cy": 700.0},
-                "acceptAllAmbiguous": false,
-                "necessaryOnlyAmbiguous": false
-            }),
-        ),
-        // 页面规则求值返回了一个引擎认不出的形状 —— 等价于探测失败。
-        Consent::ProbeFails => json!({"result": {"value": {"broken": true}}}),
+        Consent::PresentButNeverClears => present_with_button,
+        Consent::PresentThenUnreadable => {
+            if probes == 0 {
+                present_with_button
+            } else {
+                unreadable
+            }
+        }
+        Consent::ProbeFails => unreadable,
     }
 }
 
