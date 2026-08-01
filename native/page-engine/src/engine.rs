@@ -967,6 +967,11 @@ fn xhs_gated_action_name(command: &NativeCommand) -> Option<&'static str> {
         NativeCommand::InteractionCollect(_) => Some("collect"),
         NativeCommand::InteractionFollow(_) => Some("follow"),
         NativeCommand::InteractionComment(_) => Some("comment"),
+        // 评论点赞与详情页点赞同属「在平台上留下该账号名下的新痕迹」那一类：同样扣配额、
+        // 同样写风控事实，漏掉它就等于给高危写动作留了一条不复检的旁路。
+        // 动作名取云端的关联键 `comment_like`（页面规则里那条归一同源）——名字对不上，
+        // 云端既不记账也不结案，还会把它当未知失败动作在详情页上补发一次列表滚动。
+        NativeCommand::InteractionLikeComment(_) => Some("comment_like"),
         _ => None,
     }
 }

@@ -278,6 +278,51 @@ async fn a_login_wall_refuses_the_follow_with_its_own_reason() {
 }
 
 #[tokio::test]
+async fn a_captcha_page_refuses_the_comment_like_before_any_dispatch() {
+    // 评论点赞曾是这道闸唯一的漏网写动作：闸只认点赞 / 收藏 / 关注 / 评论四条，
+    // 而评论点赞同样扣配额、同样写风控事实，于是它会一路在验证码墙上按下去。
+    let (port, server) = spawn_xhs_cdp("captcha", None).await;
+    let mut engine = Engine::default();
+    engine
+        .open(&session_open(port))
+        .await
+        .expect("open session");
+
+    let result = engine
+        .execute(&write_command(
+            1,
+            command(
+                r#"{"kind":"interaction_like_comment","params":{"noteId":"note-1","commentAnchorId":"comment-1"}}"#,
+            ),
+        ))
+        .await
+        .expect("command result");
+
+    assert_eq!(result.effect_phase, EffectPhase::NotStarted);
+    let CommandOutput::ActionReceipt(receipt) = result.output.expect("gate receipt") else {
+        panic!("expected an action receipt");
+    };
+    // 动作名是云端的关联键：回 `like` 或 `interaction_like_comment` 都会让云端认不出这条回执。
+    assert_eq!(receipt.action, "comment_like");
+    assert!(!receipt.ok);
+    assert_eq!(receipt.reason.as_deref(), Some("blocked_by_captcha"));
+
+    drop(engine);
+    let requests = server.await.expect("fake CDP");
+    assert!(
+        !requests.iter().any(|entry| {
+            entry
+                .pointer("/params/expression")
+                .and_then(Value::as_str)
+                .is_some_and(|expression| {
+                    expression.contains(r#""kind":"interaction_like_comment""#)
+                })
+        }),
+        "命中验证码即零派发：评论点赞的页面规则一次都不许被调用"
+    );
+}
+
+#[tokio::test]
 async fn an_unidentified_page_kind_never_refuses_the_action() {
     // 小红书的看图态 / AI 搜索结果页 / 详情弹层都会落进「未识别」。把它算作拒绝
     // 等于把「没认出来」变成「所有互动都不做了」——那不是保守，那是停摆。
