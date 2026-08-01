@@ -70,36 +70,46 @@ async function engineConstants(): Promise<Record<string, number>> {
   return table;
 }
 
-test('提交窗口的预算只有一处声明：引擎侧的数字是宿主那张表的镜像', async () => {
-  const constants = await engineConstants();
-  const mirrored: Record<string, number> = {};
+test('提交窗口的预算只有一处声明：引擎源码里不得再出现任何预算数字', async () => {
+  // **这条断言在 3.2 之后换了保护对象，别按旧标题读。**
+  //
+  // 旧形态：两侧各写一份数字，这里断言它们逐字相等（防「改了一边忘了另一边」）。
+  // 3.2 把引擎侧的数字整个删掉、线路上只留标签之后，「两份相等」已经无从谈起 ——
+  // 但直接删掉这条用例会**同时丢掉两个仍然成立的保护**，所以改成下面两条：
+  //
+  //  ① 引擎源码里不得再出现窗口预算数字。有人把它加回来 = 第二份事实源复活，
+  //     而且不会有任何文本冲突提示他 —— 这里当场拦下。
+  //  ② 引擎声明的每个标签都必须在宿主表里。宿主表同时是**准入白名单**：
+  //     标签不认识就否决这一次窗口。引擎新增一处窗口却漏进宿主表，
+  //     那处不可逆写入会在**运行期被静默拒发**，而这是本仓最不能接受的失败姿势。
   for (const source of ENGINE_WINDOW_SOURCES) {
     const text = await readFile(fileURLToPath(new URL(source, import.meta.url)), 'utf8');
-    for (const entry of text.matchAll(
-      /label: "([a-z_]+)",\s*\n\s*budget_ms: ([0-9_]+|[A-Za-z_][A-Za-z0-9_:]*),/g,
-    )) {
-      const label = entry[1]!;
-      const raw = entry[2]!;
-      const budget = /^[0-9_]+$/.test(raw)
-        ? Number(raw.replaceAll('_', ''))
-        : constants[raw.split('::').pop()!];
-      assert.equal(
-        typeof budget,
-        'number',
-        `commit window "${label}" derives its budget from "${raw}", which no engine constant declares`,
-      );
-      // 同一个标签在两份源里声明两个不同预算 = 又回到「两边各写一份」，当场拦下。
-      assert.ok(
-        mirrored[label] === undefined || mirrored[label] === budget,
-        `commit window "${label}" is declared twice with different budgets in the engine sources`,
-      );
-      mirrored[label] = budget!;
-    }
+    const leftovers = [...text.matchAll(/budget_ms\s*:/g)];
+    assert.equal(
+      leftovers.length,
+      0,
+      `${source} still declares a commit window budget; the host table is the only source of truth `
+        + `since task 3.2 — an engine-side number here is a second one that nothing reconciles`,
+    );
   }
-  // 单边改一个数字（改宿主没改镜像、或反过来）在这里当场失败，而不是等到运行期把引擎杀掉。
-  // 引擎新增一处窗口却漏进宿主表，也在这里失败 —— 那处写入否则会在运行期被静默拒发。
-  assert.deepEqual(mirrored, NATIVE_COMMIT_WINDOW_BUDGETS);
-  assert.equal(Object.keys(mirrored).length, 8);
+});
+
+test('引擎声明的每个窗口标签都在宿主的准入白名单里', async () => {
+  // 漏一个标签的后果不是「窗口短了」，是宿主**认不出、直接否决这一次窗口**，
+  // 于是那条不可逆写入失去写保护 —— 且在运行期才现形。
+  const declared = new Set<string>();
+  for (const source of ENGINE_WINDOW_SOURCES) {
+    const text = await readFile(fileURLToPath(new URL(source, import.meta.url)), 'utf8');
+    for (const entry of text.matchAll(/label:\s*"([a-z_]+)"/g)) declared.add(entry[1]!);
+  }
+  assert.ok(declared.size > 0, 'no commit window labels found in the engine sources — has the regex drifted?');
+  const allowed = new Set(Object.keys(NATIVE_COMMIT_WINDOW_BUDGETS));
+  const missing = [...declared].filter((label) => !allowed.has(label));
+  assert.deepEqual(
+    missing,
+    [],
+    `engine declares commit window labels the host table does not admit: ${missing.join(', ')}`,
+  );
 });
 
 test('评论提交窗口的预算 ≥ 命令墙钟上限：这条恒等式必须机械成立，不许靠人记得改数字', () => {
