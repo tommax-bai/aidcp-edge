@@ -453,10 +453,29 @@ async function(input){
     const output=cards(); output.value.movement={before,after:window.scrollY,moved:window.scrollY!==before,atBottom:window.scrollY+innerHeight>=document.documentElement.scrollHeight-24};
     return done(output);
   }
+  // 刷新的业务结果是**feed 换了一批**，不是「刷新按钮被点了一下」（缺口登记 E13）。
+  // 原实现点完睡 900ms 直接回当前卡片，三种情况一律兑现成成功：文字匹配点到别的元素、
+  // 点着了但没重载、重载了但内容没变。后果不是报错而是**浏览闭环空转且看不出来** ——
+  // 上游以为换了新批，于是重复读同一批、按新批扣预算，日志里每一条都是成功。
+  // 判据取批次首部的 id 序列（`cards()` 本就带 noteId）：点前记基线、点后有界轮询等它变。
   if(kind==='feed_refresh'){
+    // 首部足够定批：整表比对会被尾部懒加载追加的卡片搅成「变了」，而那与「回顶换新批」无关。
+    const BATCH_HEAD=5;
+    const batchHead=()=>cards().value.cards.slice(0,BATCH_HEAD).map((card)=>card.noteId||'').join('|');
+    const before=batchHead();
     const refresh=findByWords(['刷新','refresh']);
     if(!refresh)return fail('refresh','refresh_control_not_found');
-    click(refresh);await sleep(900);return done(cards());
+    if(!click(refresh))return fail('refresh','refresh_control_not_actuated');
+    // 有界轮询而不是固定睡一觉：睡太短会把还在加载的新批读成「没换」，睡太长纯浪费。
+    const changed=await waitFor(()=>{const now=batchHead();return Boolean(now)&&now!==before;},3000,150);
+    if(!changed){
+      const now=batchHead();
+      // 三态分开：读不到卡片（探针瞎了 / 页面没渲染出来）与「读到了、还是原来那批」不是一回事。
+      // 前者是「不知道」，后者是「确实没换」，压成一态会让上游没法分辨该重试还是该停手。
+      // 两者都 MUST NOT 回成功 —— 平台真的没有新内容时，「没有新批」就是实话。
+      return ambiguous('refresh',now?'refresh_batch_unchanged':'refresh_cards_unreadable');
+    }
+    return done(cards());
   }
   if(kind==='search_execute'){
     const decodeKeyword=(value)=>{let decoded=String(value||'');for(let i=0;i<2;i++){try{const next=decodeURIComponent(decoded);if(next===decoded)break;decoded=next;}catch{break;}}return norm(decoded,512);};
@@ -661,15 +680,38 @@ async function(input){
     // 绝不退化成「点页面上第一个含赞 / 关注字样的元素」——那多半是包裹容器或笔记卡片，
     // 点了等于没切栏，却会被当成看过了。
     if(!tab)return missed('no_target');
-    // 是否命中由点击结果推导，不用类名激活态猜：激活态类名在包裹容器上同样出现。
+    // 这条命令的业务结果是**那一类真的切过去了**，不是「分类栏被点了一下」（缺口登记 E14）。
+    // `click()` 返回真只证明派发成功：点在包裹容器上、点着了但栏没切、栏切了但列表没换，
+    // 三种都会被原实现兑现成「已看过、已清零」。所以点前先取基线、点后要平台自己给出的证据。
+    const rowsKey=()=>notificationRows().slice(0,3).map((row)=>text(row,120)).join('|');
+    const badgeBefore=tabBadgeCount(tab);
+    const rowsBefore=rowsKey();
     if(!click(tab))return missed('tab_not_actuated');
-    await sleep(500);
+    // 三条独立证据，任一成立即可，且都是**平台产出的**、不是我们自己刚做的那个动作：
+    //  ① 叶子分类栏处于激活态 —— 直接坐实「现在就在这一类上」。读的是共享的三态判据 `stateOf`
+    //     （整词分段匹配 + 否定形拒绝 + 读不到如实回读不到），**不是**上面注释里点名禁掉的裸子串匹配；
+    //     且只读 `notificationTab()` 选出的**叶子**元素，包裹容器不参与（包裹容器同样带激活态类名，
+    //     那正是当初不敢用它的原因 —— 判据收紧之后这条证据才重新可用）。
+    //  ② 该类未读角标归零（原本有未读 ⇒ 平台受理了这次消费）。
+    //  ③ 可见列表换了（栏确实切过去了）。
+    const switched=async()=>await waitFor(()=>{
+      const current=notificationTab(category);
+      if(current&&stateOf(current)==='on')return true;
+      if(current&&badgeBefore>0&&tabBadgeCount(current)===0)return true;
+      const now=rowsKey();
+      return Boolean(now)&&now!==rowsBefore;
+    },2500,150);
     if(category==='comment'){
+      // 评论类的成功终局是 items，云端凭 items 到达即结案 —— 所以**没确认切栏就绝不回 items**：
+      // 栏没切时读到的是另一类的行，那会污染到达去重与发送者名册。
+      if(!await switched())return missed('notification_category_unconfirmed');
       await sweepNotificationList();
       return done(notificationItems(category));
     }
     // 「看一眼」两类：清零是首要目的，发送者抽取只是清零的旁路只读输出——
     // 抽不出来只少一份名册增量，绝不反过来毙掉清零回执。
+    // 但「在不在这一类上」必须有证据：证不出来就诚实回未确认，别把一次没生效的点击记成已处理。
+    if(!await switched())return missed('notification_category_unconfirmed');
     let items=[];
     try{items=notificationItems(category).value.items;}catch(error){items=[];}
     return done(observed(action(actionName,true,'viewed'),items.length?{notificationItems:{items}}:undefined));

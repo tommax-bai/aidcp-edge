@@ -11,7 +11,7 @@
     "disposition 两种形态：kind=fix 须写 action（消除动作）与 owner（谁来做）；kind=exception 须写 reason（为什么现在做不到）、blockedBy（前置是什么）与 owner（前置解除后谁来解）。**没有处置的 below_bar 与 confirmed 的区别只存在于读者的记忆里**，而这张表存在的全部理由就是不再依赖任何人的记忆。"
   ],
   "unreadBudget": 0,
-  "belowBarBudget": 4,
+  "belowBarBudget": 1,
   "commands": [
     {
       "nativeKind": "facebook_auth_submit_login",
@@ -76,7 +76,7 @@
     {
       "nativeKind": "feed_refresh",
       "status": "confirmed",
-      "evidence": "刷新后重扫卡片，按实测结果回报"
+      "evidence": "点前记批次首部的 id 序列（cards() 本就带 noteId，取前 5 条）、点后有界轮询 3s / 150ms 等它变；没变即 ambiguous + refresh_batch_unchanged，读不到卡片即 refresh_cards_unreadable，两态分开、**都不回成功**。⚠️ **本条此前记的 confirmed 是错的**：当时写「刷新后重扫卡片，按实测结果回报」，而实现是点完睡 900ms 无条件回当前卡片、全程不取基线也不校验换没换（缺口登记 E13）。**同一张表里既有「登记比代码旧」也有「登记比代码好看」**，两种都只能靠实读判据代码发现，不能靠读这一栏。"
     },
     {
       "nativeKind": "search_execute",
@@ -120,33 +120,18 @@
     },
     {
       "nativeKind": "notification_browse_comments",
-      "status": "below_bar",
-      "evidence": "点击分类栏后**没有任何后置判据**：非评论两类直接 `done(action(actionName,true,'viewed'))`（`xhs-command-router.js:673-676`），评论类扫完列表直接回 items（`:670-672`）——全程只证明「栏被点了」，没证明**栏真切过去了**。差在这里：点到包裹容器、点了但没切、切了但列表没换，三种情况都会兑现成成功。判据现成且是平台自己产出的：该分类的未读角标 `tabBadgeCount`（`:398`，只认分类栏内 1–3 位纯数字叶子）。⚠️ 与 E13（feed 刷新点完无条件回确认）**同形**。",
-      "disposition": {
-        "kind": "fix",
-        "action": "取该分类未读角标的点击前后读数作判据：切栏前记基线，点击后有界轮询等它归零 / 变化，未变即 Ambiguous 而非成功。**MUST NOT 改用分类栏激活态类名**——本文件 :383 与 :395 两处注释都点过，激活态类名在包裹容器上同样出现，属规格明禁的「宽松类名匹配」。评论类另需保证 items 与被点的类别绑定（今天 notificationItems 的 expected 只用于赞 / 收藏分辨，不做类别过滤）。",
-        "owner": "change restore-native-xiaohongshu-action-honesty —— `xhs-command-router.js` 的单写区属主（2026-08-01 复核仍活跃 40/56）。**本 change 不代改**：发现方无权改属主的热点文件，与 E13 同一处置。已登记为 docs/edge-honesty-gap-inventory.md 的 E14。"
-      }
+      "status": "confirmed",
+      "evidence": "点击分类栏后按**平台产出的**证据确认「现在就在这一类上」，三条任一成立即可（`xhs-command-router.js` 的 notification_browse_* 分支）：① 叶子分类栏处于激活态（读共享三态判据 stateOf——整词分段 + 否定形拒绝 + 读不到如实回读不到；**只读叶子**，包裹容器带同样类名但不算数，有专门用例钉住）；② 该类未读角标由非零归零；③ 可见列表换了。有界轮询 2.5s / 150ms，三条都证不出来即 not_started + notification_category_unconfirmed，**绝不记成已清零**。评论类另加一道：没确认切栏就**不回 items**（云端凭 items 到达即结案，栏没切时读到的是另一类的行）。"
     },
     {
       "nativeKind": "notification_browse_likes",
-      "status": "below_bar",
-      "evidence": "点击分类栏后**没有任何后置判据**：非评论两类直接 `done(action(actionName,true,'viewed'))`（`xhs-command-router.js:673-676`），评论类扫完列表直接回 items（`:670-672`）——全程只证明「栏被点了」，没证明**栏真切过去了**。差在这里：点到包裹容器、点了但没切、切了但列表没换，三种情况都会兑现成成功。判据现成且是平台自己产出的：该分类的未读角标 `tabBadgeCount`（`:398`，只认分类栏内 1–3 位纯数字叶子）。⚠️ 与 E13（feed 刷新点完无条件回确认）**同形**。",
-      "disposition": {
-        "kind": "fix",
-        "action": "取该分类未读角标的点击前后读数作判据：切栏前记基线，点击后有界轮询等它归零 / 变化，未变即 Ambiguous 而非成功。**MUST NOT 改用分类栏激活态类名**——本文件 :383 与 :395 两处注释都点过，激活态类名在包裹容器上同样出现，属规格明禁的「宽松类名匹配」。评论类另需保证 items 与被点的类别绑定（今天 notificationItems 的 expected 只用于赞 / 收藏分辨，不做类别过滤）。",
-        "owner": "change restore-native-xiaohongshu-action-honesty —— `xhs-command-router.js` 的单写区属主（2026-08-01 复核仍活跃 40/56）。**本 change 不代改**：发现方无权改属主的热点文件，与 E13 同一处置。已登记为 docs/edge-honesty-gap-inventory.md 的 E14。"
-      }
+      "status": "confirmed",
+      "evidence": "点击分类栏后按**平台产出的**证据确认「现在就在这一类上」，三条任一成立即可（`xhs-command-router.js` 的 notification_browse_* 分支）：① 叶子分类栏处于激活态（读共享三态判据 stateOf——整词分段 + 否定形拒绝 + 读不到如实回读不到；**只读叶子**，包裹容器带同样类名但不算数，有专门用例钉住）；② 该类未读角标由非零归零；③ 可见列表换了。有界轮询 2.5s / 150ms，三条都证不出来即 not_started + notification_category_unconfirmed，**绝不记成已清零**。评论类另加一道：没确认切栏就**不回 items**（云端凭 items 到达即结案，栏没切时读到的是另一类的行）。"
     },
     {
       "nativeKind": "notification_browse_follows",
-      "status": "below_bar",
-      "evidence": "点击分类栏后**没有任何后置判据**：非评论两类直接 `done(action(actionName,true,'viewed'))`（`xhs-command-router.js:673-676`），评论类扫完列表直接回 items（`:670-672`）——全程只证明「栏被点了」，没证明**栏真切过去了**。差在这里：点到包裹容器、点了但没切、切了但列表没换，三种情况都会兑现成成功。判据现成且是平台自己产出的：该分类的未读角标 `tabBadgeCount`（`:398`，只认分类栏内 1–3 位纯数字叶子）。⚠️ 与 E13（feed 刷新点完无条件回确认）**同形**。",
-      "disposition": {
-        "kind": "fix",
-        "action": "取该分类未读角标的点击前后读数作判据：切栏前记基线，点击后有界轮询等它归零 / 变化，未变即 Ambiguous 而非成功。**MUST NOT 改用分类栏激活态类名**——本文件 :383 与 :395 两处注释都点过，激活态类名在包裹容器上同样出现，属规格明禁的「宽松类名匹配」。评论类另需保证 items 与被点的类别绑定（今天 notificationItems 的 expected 只用于赞 / 收藏分辨，不做类别过滤）。",
-        "owner": "change restore-native-xiaohongshu-action-honesty —— `xhs-command-router.js` 的单写区属主（2026-08-01 复核仍活跃 40/56）。**本 change 不代改**：发现方无权改属主的热点文件，与 E13 同一处置。已登记为 docs/edge-honesty-gap-inventory.md 的 E14。"
-      }
+      "status": "confirmed",
+      "evidence": "点击分类栏后按**平台产出的**证据确认「现在就在这一类上」，三条任一成立即可（`xhs-command-router.js` 的 notification_browse_* 分支）：① 叶子分类栏处于激活态（读共享三态判据 stateOf——整词分段 + 否定形拒绝 + 读不到如实回读不到；**只读叶子**，包裹容器带同样类名但不算数，有专门用例钉住）；② 该类未读角标由非零归零；③ 可见列表换了。有界轮询 2.5s / 150ms，三条都证不出来即 not_started + notification_category_unconfirmed，**绝不记成已清零**。评论类另加一道：没确认切栏就**不回 items**（云端凭 items 到达即结案，栏没切时读到的是另一类的行）。"
     },
     {
       "nativeKind": "notification_back_home",

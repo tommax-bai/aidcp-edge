@@ -53,7 +53,7 @@ const UNREAD_BUDGET_CEILING = 0;
  * **这个数字同样只许改小。** 真要新增一条不达标项（读出新缺陷、或某条判据退化），
  * 抬它是允许的 —— 但必须是一次看得见的、要给理由的改动，而不是顺手加一。
  */
-const BELOW_BAR_BUDGET_CEILING = 4;
+const BELOW_BAR_BUDGET_CEILING = 1;
 
 /** below_bar 的处置形态与各自的必填字段（任务 1.3）。 */
 const DISPOSITION_FIELDS: Record<string, string[]> = {
