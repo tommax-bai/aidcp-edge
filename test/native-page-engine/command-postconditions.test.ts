@@ -18,10 +18,109 @@ import test from 'node:test';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
-type Entry = { nativeKind: string; status: string; evidence: string };
-type Registry = { unreadBudget: number; commands: Entry[]; invariants: string[] };
+type Disposition = { kind?: string; action?: string; reason?: string; blockedBy?: string; owner?: string };
+type Entry = { nativeKind: string; status: string; evidence: string; disposition?: Disposition };
+type Registry = {
+  unreadBudget: number;
+  belowBarBudget: number;
+  commands: Entry[];
+  invariants: string[];
+};
 
 const STATUSES = new Set(['confirmed', 'below_bar', 'not_applicable', 'unread']);
+
+/**
+ * 未读预算的**上限字面量**（change extend-native-postcondition-coverage，任务 1.5）。
+ *
+ * 「只许下降」这句话，靠单文件断言是查不出来的——测试看不见历史，一个被调高的预算和一个
+ * 一直就是这么高的预算长得一模一样。所以把上限钉在**测试这一侧**：调高预算必须同时调高这个
+ * 字面量，那是一次显式的、会出现在 diff 里的动作。
+ *
+ * **这个数字只许改小。** 等它降到 0，`<=` 与「预算恰等于实际条数」两条合起来就自动升级成
+ * D4 要的硬断言：任何命令都不得再落进 unread，新增写命令必须当场分类。
+ */
+const UNREAD_BUDGET_CEILING = 16;
+
+/** below_bar 的处置形态与各自的必填字段（任务 1.3）。 */
+const DISPOSITION_FIELDS: Record<string, string[]> = {
+  fix: ['action', 'owner'],
+  exception: ['reason', 'blockedBy', 'owner'],
+};
+
+/**
+ * 预算类判据。**提成纯函数是为了让门禁能先抓一次自己**（任务 1.6）：
+ * 直接写成 assert 的话，只能靠临时改真表来验证断言承重，改完还得还原——那种验证不会留下来。
+ */
+function budgetProblems(registry: Registry): string[] {
+  const problems: string[] = [];
+  const count = (status: string) => registry.commands.filter((entry) => entry.status === status).length;
+
+  const unread = count('unread');
+  if (unread > registry.unreadBudget) {
+    problems.push(`unreadBudget 被突破：实际 ${unread} 条 > 预算 ${registry.unreadBudget}`);
+  }
+  if (registry.unreadBudget !== unread) {
+    problems.push(
+      `unreadBudget 留了空位：预算 ${registry.unreadBudget} ≠ 实际 ${unread} 条`
+        + '——空位就是允许新的未读悄悄补进来',
+    );
+  }
+  if (registry.unreadBudget > UNREAD_BUDGET_CEILING) {
+    problems.push(
+      `unreadBudget 被抬起：${registry.unreadBudget} > 上限 ${UNREAD_BUDGET_CEILING}`
+        + '——这个数字只许下降',
+    );
+  }
+
+  const belowBar = count('below_bar');
+  if (belowBar > registry.belowBarBudget) {
+    problems.push(`belowBarBudget 被突破：实际 ${belowBar} 条 > 预算 ${registry.belowBarBudget}`);
+  }
+  if (registry.belowBarBudget !== belowBar) {
+    problems.push(
+      `belowBarBudget 留了空位：预算 ${registry.belowBarBudget} ≠ 实际 ${belowBar} 条`,
+    );
+  }
+  return problems;
+}
+
+/**
+ * 处置类判据（任务 1.3）。没有处置的 below_bar 与 confirmed 的区别只存在于读者的记忆里，
+ * 而这张表存在的全部理由就是不再依赖任何人的记忆。
+ */
+function dispositionProblems(registry: Registry): string[] {
+  const problems: string[] = [];
+  for (const entry of registry.commands) {
+    if (entry.status !== 'below_bar') {
+      if (entry.disposition) {
+        problems.push(
+          `${entry.nativeKind} 不是 below_bar 却还挂着 disposition`
+            + '——判据修达标后处置必须一并摘掉，否则表里会留下一条永远等不到的待办',
+        );
+      }
+      continue;
+    }
+    const disposition = entry.disposition;
+    if (!disposition) {
+      problems.push(`${entry.nativeKind} 标成 below_bar 却没有 disposition：没写谁来解、什么时候解`);
+      continue;
+    }
+    const required = DISPOSITION_FIELDS[disposition.kind ?? ''];
+    if (!required) {
+      problems.push(
+        `${entry.nativeKind} 的 disposition.kind "${disposition.kind}" 不在 `
+          + `${Object.keys(DISPOSITION_FIELDS).join(' / ')} 之内`,
+      );
+      continue;
+    }
+    for (const field of required) {
+      if (!(disposition as Record<string, unknown>)[field]?.toString().trim()) {
+        problems.push(`${entry.nativeKind} 的 ${disposition.kind} 处置缺 ${field}`);
+      }
+    }
+  }
+  return problems;
+}
 
 const registry = JSON.parse(
   await readFile(resolve(repoRoot, 'native/page-engine/command-postconditions.json'), 'utf8'),
@@ -73,19 +172,14 @@ test('5.6 每一条都有分类与理由，四种状态之外不许新造', () =
   }
 });
 
-test('5.11 未读是单调棘轮：只许下降', () => {
-  const unread = registry.commands.filter((entry) => entry.status === 'unread');
-  assert.ok(
-    unread.length <= registry.unreadBudget,
-    `未读 ${unread.length} 条，超过预算 ${registry.unreadBudget} —— 这个数字只许下降。`
-      + '新增写命令的默认归宿**不是** unread：不当场分类，这张表就退化成一个永远填不完的许愿单',
-  );
-  // 预算跟着实际值一起降，否则削减之后会留出空位给新的未读回填（棘轮的经典失效方式）。
-  assert.equal(
-    registry.unreadBudget,
-    unread.length,
-    '预算与实际未读数必须相等：留出空位就等于允许新的未读悄悄补进来',
-  );
+test('5.11 / 1.2 两个方向都上棘轮：未读与不达标各自不留空位、只许下降', () => {
+  // 只锁 unread 一个方向是不够的：把一条 unread 改成 below_bar、附一句「差在哪」，
+  // unreadBudget 依法下降、门禁全绿，而那条命令的假成功风险一点没变。
+  assert.deepEqual(budgetProblems(registry), [], '盘点表的预算对不上');
+});
+
+test('1.3 每条 below_bar 都写明「谁来解、卡在什么前置上」', () => {
+  assert.deepEqual(dispositionProblems(registry), [], 'below_bar 的处置登记不完整');
 });
 
 test('5.11 「不达标」与「未读」都必须写清差在哪 —— 它们不构成「有校验」', () => {
@@ -110,4 +204,90 @@ test('5.6 本 change 亲手落的那几条确实在表里、且标成达标', ()
   for (const kind of ['interaction_comment', 'publish_fill_field', 'note_scroll_comments']) {
     assert.equal(byKind.get(kind)?.status, 'confirmed', `${kind} 的后置判据本轮已达标，不该被降级`);
   }
+});
+
+/*
+ * 以下是**门禁抓自己**的样本（任务 1.6）。
+ *
+ * 为什么要常驻而不是跑一次变异：新加的断言到底承不承重，只有让它当场红一次才知道；
+ * 而那种一次性验证做完就没了，下一个人重构判据时不会再触发。所以每条新断言配一个
+ * 会触发它的样本，并断言**恰好是它**报的错——「有红」不等于「是这条抓住的」。
+ */
+
+/** 一份各项都合法的最小盘点表，样本从它出发只坏一处。 */
+function healthyRegistry(): Registry {
+  return {
+    invariants: [],
+    unreadBudget: 1,
+    belowBarBudget: 1,
+    commands: [
+      { nativeKind: 'sample_confirmed', status: 'confirmed', evidence: '实测位移' },
+      { nativeKind: 'sample_unread', status: 'unread', evidence: '本轮未读' },
+      {
+        nativeKind: 'sample_below_bar',
+        status: 'below_bar',
+        evidence: '判据是自证，**不能**区分本次与残留',
+        disposition: { kind: 'fix', action: '改为按本次标识回读', owner: 'change X §3.2' },
+      },
+    ],
+  };
+}
+
+test('1.6 门禁抓自己：健康样本必须零问题（否则下面的样本红了也说明不了什么）', () => {
+  assert.deepEqual(budgetProblems(healthyRegistry()), []);
+  assert.deepEqual(dispositionProblems(healthyRegistry()), []);
+});
+
+test('1.6 门禁抓自己：unread 改成 below_bar 而不抬 belowBarBudget —— 正是要堵的那条洗白路', () => {
+  const sample = healthyRegistry();
+  const entry = sample.commands.find((e) => e.nativeKind === 'sample_unread')!;
+  entry.status = 'below_bar';
+  entry.evidence = '有判据但**不能**证明效果';
+  entry.disposition = { kind: 'fix', action: '补判据', owner: 'change X' };
+  sample.unreadBudget = 0; // 洗白动作会顺手把未读预算降下来，看起来像进展
+
+  const problems = budgetProblems(sample);
+  assert.equal(problems.length, 2, `期望恰好由两条 belowBarBudget 判据抓住，实际：${problems.join(' | ')}`);
+  assert.match(problems[0], /belowBarBudget 被突破/);
+  assert.match(problems[1], /belowBarBudget 留了空位/);
+});
+
+test('1.6 门禁抓自己：unreadBudget 被抬起', () => {
+  const sample = healthyRegistry();
+  sample.unreadBudget = UNREAD_BUDGET_CEILING + 1;
+  sample.commands.push(
+    ...Array.from({ length: UNREAD_BUDGET_CEILING }, (_, index) => ({
+      nativeKind: `sample_unread_${index}`,
+      status: 'unread',
+      evidence: '本轮未读',
+    })),
+  );
+
+  const problems = budgetProblems(sample);
+  assert.equal(problems.length, 1, `期望恰好由上限那条抓住，实际：${problems.join(' | ')}`);
+  assert.match(problems[0], /unreadBudget 被抬起/);
+});
+
+test('1.6 门禁抓自己：below_bar 没有处置 / 处置缺字段 / 达标后处置没摘掉', () => {
+  const missing = healthyRegistry();
+  delete missing.commands.find((e) => e.nativeKind === 'sample_below_bar')!.disposition;
+  assert.deepEqual(
+    dispositionProblems(missing).map((problem) => problem.replace(/：.*/, '')),
+    ['sample_below_bar 标成 below_bar 却没有 disposition'],
+  );
+
+  const incomplete = healthyRegistry();
+  incomplete.commands.find((e) => e.nativeKind === 'sample_below_bar')!.disposition = {
+    kind: 'exception',
+    reason: '真机上长什么样今天没有证据',
+    owner: '标定后补',
+  };
+  assert.deepEqual(dispositionProblems(incomplete), ['sample_below_bar 的 exception 处置缺 blockedBy']);
+
+  const stale = healthyRegistry();
+  const fixed = stale.commands.find((e) => e.nativeKind === 'sample_below_bar')!;
+  fixed.status = 'confirmed';
+  stale.belowBarBudget = 0;
+  assert.equal(dispositionProblems(stale).length, 1, '判据修达标后残留的处置必须被抓出来');
+  assert.match(dispositionProblems(stale)[0], /不是 below_bar 却还挂着 disposition/);
 });

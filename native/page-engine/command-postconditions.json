@@ -5,9 +5,13 @@
     "本表 MUST 恰好覆盖引擎命令类型里 may_write 为真的全部命令，一条不多一条不少。**没列出的命令会被读成已覆盖**——这正是本表要消除的那种沉默。",
     "status 只有四种：confirmed=后置判据达标；below_bar=有判据但不达 5.9/5.10 的强度条（须写清差在哪）；not_applicable=结构上没有可读回的业务结果（须写清为什么，且不得因此默认成功）；unread=本轮没逐条读过。",
     "unread 是**单调棘轮**：unreadBudget 只许下降，绝不许上调。新增写命令时它的默认归宿不是 unread——新命令必须当场分类，否则这张表会退化成一个永远填不完的许愿单。",
-    "below_bar 与 unread 都 MUST NOT 被读成「有校验」。前者是已知不够，后者是没人核过——两者都不构成「这条命令不会假成功」的证据。"
+    "below_bar 与 unread 都 MUST NOT 被读成「有校验」。前者是已知不够，后者是没人核过——两者都不构成「这条命令不会假成功」的证据。",
+    "below_bar 的棘轮与 unread **同构**：belowBarBudget 恰等于实际条数、不留空位、只许下降。同构是刻意的——两个形态不同的棘轮会让「哪个方向被锁住了」变成需要读代码才知道的事。",
+    "**只锁 unread 一个方向是不够的**：把一条 unread 改成 below_bar、附一句「差在哪」，unreadBudget 依法下降、门禁全绿，而那条命令的假成功风险一点没变。所以 below_bar 每条 MUST 带 disposition（具名处置），让这条路要么真消除、要么当场留下「谁来解、卡在什么前置上」。",
+    "disposition 两种形态：kind=fix 须写 action（消除动作）与 owner（谁来做）；kind=exception 须写 reason（为什么现在做不到）、blockedBy（前置是什么）与 owner（前置解除后谁来解）。**没有处置的 below_bar 与 confirmed 的区别只存在于读者的记忆里**，而这张表存在的全部理由就是不再依赖任何人的记忆。"
   ],
   "unreadBudget": 16,
+  "belowBarBudget": 3,
   "commands": [
     {
       "nativeKind": "facebook_auth_submit_login",
@@ -77,7 +81,12 @@
     {
       "nativeKind": "search_execute",
       "status": "below_bar",
-      "evidence": "关键词 / 结果路由确认到位，但**搜索输入那一道判据把「读不到」折成「读到了一个否」**——差在这里：它**不能**区分「探针瞎了」与「确实没输进去」，失败方向诚实、归因却是错的。登记见 change §9.5-1；实现点在单写区属主处，本 change 不代改"
+      "evidence": "关键词 / 结果路由确认到位，但**搜索输入那一道判据把「读不到」折成「读到了一个否」**——差在这里：它**不能**区分「探针瞎了」与「确实没输进去」，失败方向诚实、归因却是错的。登记见 change §9.5-1；实现点在单写区属主处，本 change 不代改",
+      "disposition": {
+        "kind": "fix",
+        "action": "先当场核属主再定归属：属主 change 仍活跃则交还并登记；属主已归档 / 已不在则由本 change 直接修，把「读不到」与「读到了一个否」分成两个结论。**「实现点在单写区属主处」这句登记本身就是待核项，不得照抄**——本仓已为「等一个已经归档的属主」空卡过任务",
+        "owner": "change extend-native-postcondition-coverage §3.1"
+      }
     },
     {
       "nativeKind": "note_open",
@@ -187,7 +196,12 @@
     {
       "nativeKind": "publish_upload_image",
       "status": "below_bar",
-      "evidence": "判据是「该序号位置存在预览图」——它不能把这张预览与**本次**上传绑定，上一次残留的预览同样满足。达标形态需按本次上传的标识回读"
+      "evidence": "判据是「该序号位置存在预览图」——它不能把这张预览与**本次**上传绑定，上一次残留的预览同样满足。达标形态需按本次上传的标识回读",
+      "disposition": {
+        "kind": "fix",
+        "action": "判据改为按**本次上传**的标识回读，须能区分「本次产生的」与「之前就在的」；残留预览不得再满足判据。具体取哪个标识由实现期实读决定，但不能区分就不算达标",
+        "owner": "change extend-native-postcondition-coverage §3.2"
+      }
     },
     {
       "nativeKind": "publish_set_cover",
@@ -202,7 +216,13 @@
     {
       "nativeKind": "publish_add_with_candidate",
       "status": "below_bar",
-      "evidence": "仅 topic 一支达标（正文里的真话题 token + 剔隐藏后缀 + 精确相等）；mention / location / collection 仍走注入路由，判据是「打进去再读回来」＝自证。前置是真机标定各自的结构信号（backlog 簇 123.34）"
+      "evidence": "仅 topic 一支达标（正文里的真话题 token + 剔隐藏后缀 + 精确相等）；mention / location / collection 仍走注入路由，判据是「打进去再读回来」＝自证。前置是真机标定各自的结构信号（backlog 簇 123.34）",
+      "disposition": {
+        "kind": "exception",
+        "reason": "mention / location / collection 三支的结构接受信号在真机上长什么样，今天**没有任何证据**。凭猜写判据只会得到第二个自证判据",
+        "blockedBy": "真机标定，docs/real-machine-acceptance-backlog.md 簇 123.34（与簇 122 / 123 / 125 共用同一台机器与分身，随下一次真机 session 连着做）",
+        "owner": "标定完成后由本 change 或其后继按标定结果补判据。**标定前 MUST NOT 记 confirmed（无证据），也 MUST NOT 记 not_applicable**——它们结构上有可读回的业务结果，用「读不出来」冒充「本来就没有」是另一种假成功"
+      }
     },
     {
       "nativeKind": "publish_set_option",
