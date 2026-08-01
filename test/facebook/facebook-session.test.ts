@@ -968,6 +968,26 @@ test('首页明确空态只上报观察；Cloud 专用授权后进入 Reels，�
   );
 });
 
+test('配置 Reels 主入口 reason 复用现有 enterReels 路径', async () => {
+  const reel: FacebookReelCard = {
+    noteId: 'https://www.facebook.com/reel/primary-1',
+    summary: 'configured primary reel',
+    author: 'Bao',
+    videoKey: 'video-primary-1',
+  };
+  const h = makeSession({
+    mode: 'on',
+    settleBatches: [{ cards: [], degraded: false, reason: 'no_feed' }],
+    homeState: { state: 'cards_ready', generation: 'g-primary', loading: false },
+    reelCards: [reel],
+  });
+  await h.session.start();
+  await h.session.onCloudCommand(makeEnv('page.scroll', { reason: 'facebook_reels_primary' }));
+  assert.equal(h.cards.at(-1)?.listKind, 'reels');
+  assert.equal(h.cards.at(-1)?.cards[0].noteId, reel.noteId);
+  assert.equal(h.actions.some((action) => action.ok === false), false);
+});
+
 test('Reels 路由先到、首卡晚到时保持 pending，恢复当前卡前不切下一条也不退回 Feed', async () => {
   const first: FacebookReelCard = {
     noteId: 'https://www.facebook.com/reel/333',

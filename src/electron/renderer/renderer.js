@@ -26,6 +26,10 @@ const fields = {
   facebookConsumptionModeToggle: document.querySelector('#facebook-consumption-mode-toggle'),
   facebookConsumptionModeBadge: document.querySelector('#facebook-consumption-mode-badge'),
   facebookConsumptionModeReason: document.querySelector('#facebook-consumption-mode-reason'),
+  facebookOperationPolicyRow: document.querySelector('#facebook-operation-policy-row'),
+  facebookOperationModeSelect: document.querySelector('#facebook-operation-mode-select'),
+  facebookPrimarySurfaceSelect: document.querySelector('#facebook-primary-surface-select'),
+  facebookOperationPolicyStatus: document.querySelector('#facebook-operation-policy-status'),
   riskRecoveryRow: document.querySelector('#risk-recovery-row'),
   riskRecoveryButton: document.querySelector('#risk-recovery-button'),
   riskRecoveryFeedback: document.querySelector('#risk-recovery-feedback'),
@@ -425,6 +429,8 @@ const settingsUi = {
   adsFbRunMode: document.querySelector('#ads-fb-run-mode'),
   adsFbRunModeField: document.querySelector('#ads-fb-run-mode-field'),
   adsFbRunModeWrap: document.querySelector('#ads-fb-run-mode-wrap'),
+  adsFbPrimarySurface: document.querySelector('#ads-fb-primary-surface'),
+  adsFbPrimarySurfaceField: document.querySelector('#ads-fb-primary-surface-field'),
   adsFbApproval: document.querySelector('#ads-fb-approval'),
   adsFbImportWrap: document.querySelector('#ads-fb-import-wrap'),
   adsFbImport: document.querySelector('#ads-fb-import'),
@@ -627,6 +633,7 @@ function updateFacebookImportVisibility() {
   // 离开 Facebook 就把运行方式与免审复位，避免残留选择在切回时或经其它平台提交时被携带。
   if (!facebook) {
     if (settingsUi.adsFbRunMode) settingsUi.adsFbRunMode.value = 'normal';
+    if (settingsUi.adsFbPrimarySurface) settingsUi.adsFbPrimarySurface.value = 'reels';
     if (settingsUi.adsFbApproval) settingsUi.adsFbApproval.checked = false;
   }
   const batch = facebook && settingsUi.adsFbCreateMode && settingsUi.adsFbCreateMode.value === 'batch';
@@ -634,6 +641,8 @@ function updateFacebookImportVisibility() {
   settingsUi.adsFbCreateMode?.classList.toggle('hidden', !facebook);
   settingsUi.adsFbRunModeField?.classList.toggle('hidden', !facebook);
   settingsUi.adsFbRunMode?.classList.toggle('hidden', !facebook);
+  settingsUi.adsFbPrimarySurfaceField?.classList.toggle('hidden', !facebook);
+  settingsUi.adsFbPrimarySurface?.classList.toggle('hidden', !facebook);
   settingsUi.adsFbRunModeWrap?.classList.toggle('hidden', !facebook);
   settingsUi.adsFbImportWrap?.classList.toggle('hidden', !facebook);
   settingsUi.adsTemplateField?.classList.toggle('hidden', Boolean(batch));
@@ -908,6 +917,7 @@ async function ensureSlowStartHttpFetch(envKey) {
 }
 
 const FACEBOOK_OPERATION_BASE_MODES = new Set(['persona', 'rule', 'consumption']);
+const FACEBOOK_PRIMARY_SURFACES = new Set(['feed', 'reels']);
 const FACEBOOK_OPERATION_EFFECTIVE_MODES = new Set([
   'persona', 'slow_start', 'rule', 'consumption', 'blocked',
 ]);
@@ -936,8 +946,11 @@ function normalizeFacebookOperationPolicyResponse(res, expectedEnvKey) {
   if (!hasExactObjectKeys(payload, ['envKey', 'facebookOperationPolicy'])
       || payload.envKey !== expectedEnvKey
       || !hasExactObjectKeys(policy, [
-        'baseMode', 'effectiveMode', 'policyRevision', 'slowStart', 'blocker',
+        'primarySurface', 'surfaceRevision', 'baseMode', 'effectiveMode',
+        'policyRevision', 'slowStart', 'blocker',
       ])
+      || !FACEBOOK_PRIMARY_SURFACES.has(policy.primarySurface)
+      || !Number.isSafeInteger(policy.surfaceRevision) || policy.surfaceRevision < 1
       || !FACEBOOK_OPERATION_BASE_MODES.has(policy.baseMode)
       || !Number.isSafeInteger(policy.policyRevision) || policy.policyRevision < 1
       || (policy.effectiveMode !== null
@@ -946,6 +959,8 @@ function normalizeFacebookOperationPolicyResponse(res, expectedEnvKey) {
       || !FACEBOOK_SLOW_START_STATES.has(policy.slowStart.state)
       || (policy.blocker !== null && typeof policy.blocker !== 'string')) return null;
   return {
+    primarySurface: policy.primarySurface,
+    surfaceRevision: policy.surfaceRevision,
     baseMode: policy.baseMode,
     effectiveMode: policy.effectiveMode,
     policyRevision: policy.policyRevision,
@@ -1925,7 +1940,7 @@ function hideFacebookConsumptionModeRow() {
   }
 }
 
-function setOperationModeUnknown(message, error = false) {
+function setLegacyOperationModeUnknown(message, error = false) {
   const context = selectedFacebookOperationPolicyContext();
   const slowStartHttp = context && slowStartHttpByEnv.get(context.envKey);
   if (context && slowStartHttp?.kind === 'ok') {
@@ -2013,7 +2028,7 @@ function operationModeBadgeText({ mode, selectedMode, config, pending }) {
   return `${label} · 未选择`;
 }
 
-function applyFacebookOperationPolicyView(config, context) {
+function applyLegacyFacebookOperationPolicyView(config, context) {
   const feedback = facebookOperationPolicyFeedbackByEnv.get(context.envKey);
   const pending = feedback && feedback.kind === 'pending' ? feedback : null;
   // radio 的 change 事件触发前浏览器会先切换 DOM；这里始终用最后一份 Cloud 确认真态把它恢复。
@@ -2126,12 +2141,69 @@ function applyFacebookOperationPolicyView(config, context) {
   }
 }
 
+function hideLegacyFacebookOperationModeRows() {
+  hideFacebookPersonaModeRow();
+  hideFacebookRuleModeRow();
+  hideFacebookConsumptionModeRow();
+  fields.slowStartToggleWrap?.classList.add('hidden');
+}
+
+function setOperationModeUnknown(message, error = false) {
+  hideLegacyFacebookOperationModeRows();
+  const context = selectedFacebookOperationPolicyContext();
+  fields.facebookOperationPolicyRow?.classList.toggle('hidden', !context);
+  fields.facebookOperationPolicyRow?.classList.remove('is-pending');
+  fields.facebookOperationPolicyRow?.removeAttribute('aria-busy');
+  if (fields.facebookOperationModeSelect) fields.facebookOperationModeSelect.disabled = true;
+  if (fields.facebookPrimarySurfaceSelect) fields.facebookPrimarySurfaceSelect.disabled = true;
+  if (fields.facebookOperationPolicyStatus) {
+    fields.facebookOperationPolicyStatus.textContent = context ? message : '';
+    fields.facebookOperationPolicyStatus.className = context
+      ? `parking-hint${error ? ' is-error' : ''}`
+      : 'parking-hint hidden';
+  }
+}
+
+function applyFacebookOperationPolicyView(config, context) {
+  hideLegacyFacebookOperationModeRows();
+  const feedback = facebookOperationPolicyFeedbackByEnv.get(context.envKey);
+  const pending = feedback?.kind === 'pending' ? feedback : null;
+  const error = feedback?.kind === 'error' ? String(feedback.message || '') : '';
+  const modeUnavailable = !window.aidcpEdge
+    || typeof window.aidcpEdge.setFacebookOperationPolicy !== 'function';
+  const surfaceUnavailable = !window.aidcpEdge
+    || typeof window.aidcpEdge.setFacebookPrimarySurface !== 'function';
+  const selectedMode = selectedModeFromFacebookOperationPolicy(config);
+
+  fields.facebookOperationPolicyRow?.classList.remove('hidden');
+  fields.facebookOperationPolicyRow?.classList.toggle('is-pending', Boolean(pending));
+  if (pending) fields.facebookOperationPolicyRow?.setAttribute('aria-busy', 'true');
+  else fields.facebookOperationPolicyRow?.removeAttribute('aria-busy');
+  if (fields.facebookOperationModeSelect) {
+    fields.facebookOperationModeSelect.value = selectedMode;
+    fields.facebookOperationModeSelect.disabled = Boolean(pending) || modeUnavailable;
+  }
+  if (fields.facebookPrimarySurfaceSelect) {
+    fields.facebookPrimarySurfaceSelect.value = config.primarySurface;
+    fields.facebookPrimarySurfaceSelect.disabled = Boolean(pending) || surfaceUnavailable;
+  }
+  if (fields.facebookOperationPolicyStatus) {
+    const text = pending
+      ? '正在等待 Cloud 回读确认…'
+      : error || config.blocker
+        || (modeUnavailable || surfaceUnavailable ? '当前客户端无法修改运行方式或主浏览入口' : '');
+    fields.facebookOperationPolicyStatus.textContent = text;
+    fields.facebookOperationPolicyStatus.className = text
+      ? `parking-hint${error || config.blocker || modeUnavailable || surfaceUnavailable ? ' is-error' : ''}`
+      : 'parking-hint hidden';
+  }
+}
+
 function renderFacebookOperationPolicy() {
   const context = selectedFacebookOperationPolicyContext();
   if (!context) {
-    hideFacebookPersonaModeRow();
-    hideFacebookRuleModeRow();
-    hideFacebookConsumptionModeRow();
+    hideLegacyFacebookOperationModeRows();
+    fields.facebookOperationPolicyRow?.classList.add('hidden');
     return;
   }
   if (!window.aidcpEdge
@@ -4825,6 +4897,14 @@ fields.facebookConsumptionModeToggle?.addEventListener('change', (event) => {
   event.stopPropagation();
   void submitFacebookOperationMode('consumption', Boolean(event.target.checked));
 });
+fields.facebookOperationModeSelect?.addEventListener('change', (event) => {
+  event.stopPropagation();
+  void submitFacebookOperationMode(String(event.target.value || ''), true);
+});
+fields.facebookPrimarySurfaceSelect?.addEventListener('change', (event) => {
+  event.stopPropagation();
+  void submitFacebookPrimarySurface(String(event.target.value || ''));
+});
 
 fields.riskRecoveryButton?.addEventListener('click', (event) => {
   event.stopPropagation();
@@ -5034,6 +5114,65 @@ async function submitFacebookOperationMode(mode, enabled) {
       renderSlowStart((current.env && current.env.status) || currentStatus);
       renderFacebookOperationPolicy();
     }
+  } catch (err) {
+    settleError(`设置失败：${(err && err.message) || err}`);
+  }
+}
+
+async function submitFacebookPrimarySurface(primarySurface) {
+  const context = selectedFacebookOperationPolicyContext();
+  if (!context || !FACEBOOK_PRIMARY_SURFACES.has(primarySurface)
+      || !window.aidcpEdge
+      || typeof window.aidcpEdge.setFacebookPrimarySurface !== 'function') return;
+  const { envKey } = context;
+  const http = facebookOperationPolicyHttpByEnv.get(envKey);
+  if (!http || http.kind !== 'ok') return;
+  const existing = facebookOperationPolicyFeedbackByEnv.get(envKey);
+  if (existing?.kind === 'pending') return;
+  if (http.config.primarySurface === primarySurface) {
+    renderFacebookOperationPolicy();
+    return;
+  }
+
+  facebookOperationPolicyFeedbackByEnv.set(envKey, {
+    kind: 'pending',
+    primarySurface,
+  });
+  renderFacebookOperationPolicy();
+
+  const settleError = (message) => {
+    facebookOperationPolicyFeedbackByEnv.set(envKey, {
+      kind: 'error',
+      message: String(message || '设置失败'),
+    });
+    const current = selectedFacebookOperationPolicyContext();
+    if (current && current.envKey === envKey) renderFacebookOperationPolicy();
+    void ensureFacebookOperationPolicyHttpFetch(envKey, {
+      force: true,
+      preserveConfirmed: true,
+    });
+  };
+
+  try {
+    const res = await window.aidcpEdge.setFacebookPrimarySurface({
+      envKey,
+      expectedRevision: http.config.surfaceRevision,
+      primarySurface,
+    });
+    const config = normalizeFacebookOperationPolicyResponse(res, envKey);
+    if (!config || config.primarySurface !== primarySurface) {
+      settleError(facebookOperationPolicyError(
+        res,
+        res && res.ok
+          ? 'Cloud 已返回，但主浏览入口回读与本次选择不一致，请稍后重试'
+          : '设置失败',
+      ));
+      return;
+    }
+    facebookOperationPolicyFeedbackByEnv.delete(envKey);
+    facebookOperationPolicyHttpByEnv.set(envKey, { kind: 'ok', config });
+    const current = selectedFacebookOperationPolicyContext();
+    if (current && current.envKey === envKey) renderFacebookOperationPolicy();
   } catch (err) {
     settleError(`设置失败：${(err && err.message) || err}`);
   }
@@ -7976,6 +8115,7 @@ function resetCreateProxyForm() {
   if (createProxyUi.type) createProxyUi.type.value = 'no_proxy';
   for (const k of ['host', 'port', 'user', 'pass']) if (createProxyUi[k]) createProxyUi[k].value = '';
   if (settingsUi.adsProxyBatch) settingsUi.adsProxyBatch.value = '';
+  if (settingsUi.adsFbPrimarySurface) settingsUi.adsFbPrimarySurface.value = 'reels';
   setCreateProxyExpanded(false);
   updateFacebookImportVisibility();
 }
@@ -7991,9 +8131,14 @@ function readFacebookCreationIntents(platform) {
   if (platform !== 'facebook') return {};
   const raw = settingsUi.adsFbRunMode ? String(settingsUi.adsFbRunMode.value || '') : '';
   const runMode = CREATE_RUN_MODES.includes(raw) ? raw : 'normal';
+  const rawSurface = settingsUi.adsFbPrimarySurface
+    ? String(settingsUi.adsFbPrimarySurface.value || '')
+    : '';
+  const primarySurface = FACEBOOK_PRIMARY_SURFACES.has(rawSurface) ? rawSurface : 'reels';
   const autoApprove = Boolean(settingsUi.adsFbApproval && settingsUi.adsFbApproval.checked);
   return {
     facebookRunMode: runMode,
+    facebookPrimarySurface: primarySurface,
     ...(autoApprove ? { commentApprovalMode: 'auto_approve_all' } : {}),
   };
 }
@@ -8008,6 +8153,9 @@ function facebookCreateConfigHint(receipt) {
   const parts = [];
   if (receipt.operationModeConfigured !== true) {
     parts.push('运行方式尚未获得 Cloud 回读确认。');
+  }
+  if (receipt.primarySurfaceConfigured !== true) {
+    parts.push('主浏览入口尚未获得 Cloud 回读确认。');
   }
   if (mode === 'cold_start') {
     parts.push(receipt.slowStartConfigured === true

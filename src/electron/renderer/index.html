@@ -464,6 +464,25 @@
           </div>
         </div>
         <div id="quota-windows" class="quota-windows hidden"></div>
+        <div id="facebook-operation-policy-row" class="slow-start-row hidden">
+          <label class="create-field" for="facebook-operation-mode-select">
+            <span>运行方式</span>
+            <select id="facebook-operation-mode-select" class="ads-template" aria-label="Facebook 运行方式">
+              <option value="persona">普通</option>
+              <option value="slow_start">冷启动</option>
+              <option value="rule">规则</option>
+              <option value="consumption">消费</option>
+            </select>
+          </label>
+          <label class="create-field" for="facebook-primary-surface-select">
+            <span>主浏览入口</span>
+            <select id="facebook-primary-surface-select" class="ads-template" aria-label="Facebook 主浏览入口">
+              <option value="feed">Feed</option>
+              <option value="reels">Reels</option>
+            </select>
+          </label>
+          <span id="facebook-operation-policy-status" class="parking-hint hidden"></span>
+        </div>
         <!-- Facebook 运行方式四选一：普通人设、冷启动、规则、消费。静态节点只由 Cloud unified
              operation policy 投影驱动；radio 共用 name 保证语义互斥，renderer 仍会在每次 change 后
              立即恢复最后确认态，直到 Cloud 写后回读成功。非 Facebook 时四行全部隐藏。 -->
@@ -1109,6 +1128,13 @@
                 <option value="cold_start">冷启动</option>
                 <option value="rule">规则</option>
                 <option value="consumption">消费</option>
+              </select>
+            </label>
+            <label id="ads-fb-primary-surface-field" class="create-field hidden">
+              <span>主浏览入口</span>
+              <select id="ads-fb-primary-surface" class="ads-template" aria-label="Facebook 主浏览入口">
+                <option value="feed">Feed</option>
+                <option value="reels" selected>Reels</option>
               </select>
             </label>
             <label id="ads-template-field" class="create-field">

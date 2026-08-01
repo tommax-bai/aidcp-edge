@@ -7,12 +7,15 @@ const {
   provisioningFacebookOperationPolicy,
   provisioningCommittedFacebookOperationPolicy,
   provisioningOperationModeMatches,
+  provisioningPrimarySurfaceMatches,
 } = require_('../../src/electron/facebook-provisioning-receipt.cjs');
 
 type Mode = 'persona' | 'slow_start' | 'rule' | 'consumption';
 
 function policyFor(mode: Mode, revision = 7) {
   return {
+    primarySurface: 'reels',
+    surfaceRevision: 1,
     baseMode: mode === 'slow_start' ? 'persona' : mode,
     effectiveMode: null,
     policyRevision: revision,
@@ -53,6 +56,7 @@ test('provisioning success accepts only the complete committed customer projecti
     const policy = provisioningFacebookOperationPolicy(success('env-1', mode), 'env-1');
     assert.ok(policy);
     assert.equal(provisioningOperationModeMatches(policy, mode), true);
+    assert.equal(provisioningPrimarySurfaceMatches(policy, 'reels'), true);
   }
 
   const incomplete: any = success('env-1', 'rule');
@@ -76,6 +80,7 @@ test('post-commit provisioning failures require the named status and exact curre
   for (const [reason, status] of [
     ['operation_policy_refresh_unavailable', 503],
     ['intent_operation_mode_mismatch', 409],
+    ['intent_primary_surface_mismatch', 409],
   ] as const) {
     const current = provisioningCommittedFacebookOperationPolicy({
       ok: false,

@@ -7,6 +7,7 @@ const FACEBOOK_OPERATION_MODES = new Set([
   'consumption',
 ]);
 const FACEBOOK_BASE_MODES = new Set(['persona', 'rule', 'consumption']);
+const FACEBOOK_PRIMARY_SURFACES = new Set(['feed', 'reels']);
 const FACEBOOK_EFFECTIVE_MODES = new Set([
   'persona',
   'slow_start',
@@ -17,6 +18,7 @@ const FACEBOOK_EFFECTIVE_MODES = new Set([
 const COMMITTED_FAILURE_STATUS = Object.freeze({
   operation_policy_refresh_unavailable: 503,
   intent_operation_mode_mismatch: 409,
+  intent_primary_surface_mismatch: 409,
 });
 
 function isRecord(value) {
@@ -37,6 +39,8 @@ function normalizeProvisioningPolicy(policy) {
       'baseMode',
       'effectiveMode',
       'policyRevision',
+      'primarySurface',
+      'surfaceRevision',
       'slowStart',
       'blocker',
     ])
@@ -47,6 +51,9 @@ function normalizeProvisioningPolicy(policy) {
     )
     || !Number.isSafeInteger(policy.policyRevision)
     || policy.policyRevision < 1
+    || !FACEBOOK_PRIMARY_SURFACES.has(policy.primarySurface)
+    || !Number.isSafeInteger(policy.surfaceRevision)
+    || policy.surfaceRevision < 1
     || !hasExactKeys(policy.slowStart, ['state'])
     || (policy.slowStart.state !== 'active' && policy.slowStart.state !== 'off')
     || (policy.blocker !== null && typeof policy.blocker !== 'string')
@@ -54,6 +61,8 @@ function normalizeProvisioningPolicy(policy) {
     return null;
   }
   return {
+    primarySurface: policy.primarySurface,
+    surfaceRevision: policy.surfaceRevision,
     baseMode: policy.baseMode,
     effectiveMode: policy.effectiveMode,
     policyRevision: policy.policyRevision,
@@ -132,9 +141,16 @@ function provisioningOperationModeMatches(policy, requestedMode) {
     );
 }
 
+function provisioningPrimarySurfaceMatches(policy, requestedSurface) {
+  return Boolean(policy)
+    && FACEBOOK_PRIMARY_SURFACES.has(requestedSurface)
+    && policy.primarySurface === requestedSurface;
+}
+
 module.exports = {
   FACEBOOK_OPERATION_MODES,
   provisioningFacebookOperationPolicy,
   provisioningCommittedFacebookOperationPolicy,
   provisioningOperationModeMatches,
+  provisioningPrimarySurfaceMatches,
 };

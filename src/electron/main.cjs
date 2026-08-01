@@ -55,6 +55,7 @@ const {
   provisioningFacebookOperationPolicy,
   provisioningCommittedFacebookOperationPolicy,
   provisioningOperationModeMatches,
+  provisioningPrimarySurfaceMatches,
 } = require('./facebook-provisioning-receipt.cjs');
 const {
   buildFacebookSelectedPersona,
@@ -979,6 +980,7 @@ async function finalizeCreatedEnvironmentAssignment(
   intent,
   {
     facebookOperationMode = null,
+    facebookPrimarySurface = 'reels',
     slowStartEnabled = false,
     facebookRuleModeEnabled = false,
     commentApprovalMode = null,
@@ -995,8 +997,15 @@ async function finalizeCreatedEnvironmentAssignment(
         ? 'rule'
         : null;
   // 只为「本次真的提交了的意图」写确认位：没提交的项在回执里彻底缺席，回执因此说不出任何该项的成功声明。
-  const configuredFlags = (operationConfirmed, approvalConfirmed = operationConfirmed) => ({
+  const configuredFlags = (
+    operationConfirmed,
+    surfaceConfirmed = operationConfirmed,
+    approvalConfirmed = operationConfirmed,
+  ) => ({
     ...(requestedOperationMode ? { operationModeConfigured: operationConfirmed } : {}),
+    ...(facebookPrimarySurface
+      ? { primarySurfaceConfigured: surfaceConfirmed }
+      : {}),
     ...(requestedOperationMode === 'slow_start'
       ? { slowStartConfigured: operationConfirmed }
       : {}),
@@ -1010,6 +1019,7 @@ async function finalizeCreatedEnvironmentAssignment(
   });
   const submittedLabels = [
     ...(requestedOperationMode ? ['运行方式'] : []),
+    ...(facebookPrimarySurface ? ['主浏览入口'] : []),
     ...(autoApproveComments ? ['全局免审'] : []),
   ];
   const unconfirmedSuffix = submittedLabels.length > 0 ? `；${submittedLabels.join('、')}未确认` : '';
@@ -1039,6 +1049,7 @@ async function finalizeCreatedEnvironmentAssignment(
         label: String(result.name || '').trim() || null,
         platform: normalizePlatform(result.platform),
         ...(requestedOperationMode ? { facebookOperationMode: requestedOperationMode } : {}),
+        ...(facebookPrimarySurface ? { facebookPrimarySurface } : {}),
         ...(autoApproveComments ? { commentApprovalMode: 'auto_approve_all' } : {}),
         proxyAuthority: proxyAuthority.authority,
       },
@@ -1061,20 +1072,18 @@ async function finalizeCreatedEnvironmentAssignment(
       committedCurrent.policy,
       requestedOperationMode,
     );
+    const primarySurfaceConfirmed = provisioningPrimarySurfaceMatches(
+      committedCurrent.policy,
+      facebookPrimarySurface,
+    );
     const currentResult = {
       ...result,
       // current 只证明归属与 operation policy；评论免审批不在这个最小 DTO 中，不能顺带判成功。
-      ...configuredFlags(operationModeConfirmed, false),
+      ...configuredFlags(operationModeConfirmed, primarySurfaceConfirmed, false),
     };
-    const warning = committedCurrent.reason === 'intent_operation_mode_mismatch'
-      ? `Cloud 已确认环境归属，但当前运行方式与本次选择不一致（当前 revision ${
-        committedCurrent.policy.policyRevision
-      }）；已按当前持久化真态加入本地运行环境。`
-      : operationModeConfirmed
-        ? 'Cloud 已确认环境归属和运行方式已持久化，但运行策略缓存刷新暂不可用；已加入本地运行环境，Cloud 恢复前不会据此开始新工作。'
-        : `Cloud 已确认环境归属，但返回的持久化运行方式与本次选择不一致（当前 revision ${
-          committedCurrent.policy.policyRevision
-        }）；已加入本地运行环境且未声称运行方式配置成功。`;
+    const warning = operationModeConfirmed && primarySurfaceConfirmed
+      ? 'Cloud 已确认环境归属、运行方式和主浏览入口已持久化，但运行策略缓存刷新暂不可用；已加入本地运行环境，Cloud 恢复前不会据此开始新工作。'
+      : 'Cloud 已确认环境归属，但当前运行方式或主浏览入口与本次选择不一致；已按当前持久化真态加入本地运行环境。';
     return finalizeCreatedEnvironmentFromCommittedCurrent(
       result,
       proxyAuthority,
@@ -1095,12 +1104,15 @@ async function finalizeCreatedEnvironmentAssignment(
   const operationModeConfirmed = requestedOperationMode
     ? provisioningOperationModeMatches(operationPolicy, requestedOperationMode)
     : true;
+  const primarySurfaceConfirmed = facebookPrimarySurface
+    ? provisioningPrimarySurfaceMatches(operationPolicy, facebookPrimarySurface)
+    : true;
   const confirmedResult = {
     ...result,
-    ...configuredFlags(operationModeConfirmed, true),
+    ...configuredFlags(operationModeConfirmed, primarySurfaceConfirmed, true),
   };
-  const operationModeWarning = requestedOperationMode && !operationModeConfirmed
-    ? '环境归属已确认，但运行方式尚未获得 Cloud 写后回读确认。'
+  const operationModeWarning = !operationModeConfirmed || !primarySurfaceConfirmed
+    ? '环境归属已确认，但运行方式或主浏览入口尚未获得 Cloud 写后回读确认。'
     : '';
   if (proxyAuthority.noProxy) {
     proxyAuthorityStore.remove(result.userId);
@@ -6918,6 +6930,36 @@ ipcMain.handle('facebook-operation-policy:get', (_event, raw) => handleInteracti
   return res;
 }));
 
+ipcMain.handle('facebook-primary-surface:set', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'expectedRevision', 'primarySurface']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  if (!Number.isInteger(args.expectedRevision) || args.expectedRevision < 1) {
+    throw new Error('expectedRevision 不合法');
+  }
+  if (args.primarySurface !== 'feed' && args.primarySurface !== 'reels') {
+    throw new Error('primarySurface 不合法');
+  }
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/facebook-primary-surface`,
+    method: 'PUT',
+    body: {
+      expectedRevision: args.expectedRevision,
+      primarySurface: args.primarySurface,
+    },
+  });
+}));
+
+ipcMain.handle('facebook-primary-surface:get', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/facebook-primary-surface`,
+    method: 'GET',
+  });
+}));
+
 // 旧规则模式 IPC 只为已发布客户端保留兼容；新 UI 不再以它作为运行方式权威。
 // main 固定 customer-auth 路径/方法，accountId、平台和绑定均由 Cloud 权威解析；不要求环境内核在线。
 ipcMain.handle('facebook-rule-mode:set', (_event, raw) => handleInteractionIpc(async () => {
@@ -7967,6 +8009,9 @@ function safeCreatedEnvironment(finalized) {
     ...(typeof finalized.operationModeConfigured === 'boolean'
       ? { operationModeConfigured: finalized.operationModeConfigured }
       : {}),
+    ...(typeof finalized.primarySurfaceConfigured === 'boolean'
+      ? { primarySurfaceConfigured: finalized.primarySurfaceConfigured }
+      : {}),
     ...(typeof finalized.commentApprovalConfigured === 'boolean'
       ? { commentApprovalConfigured: finalized.commentApprovalConfigured }
       : {}),
@@ -7993,6 +8038,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
     const {
       runMode,
       facebookOperationMode,
+      facebookPrimarySurface,
       slowStartEnabled,
       facebookRuleModeEnabled,
       commentApprovalMode,
@@ -8000,6 +8046,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
     // 本批全部环境共用同一份归一后的意图 → 批量对全批一致生效。
     const provisioningConfig = {
       facebookOperationMode,
+      facebookPrimarySurface,
       slowStartEnabled,
       facebookRuleModeEnabled,
       commentApprovalMode,
@@ -8116,6 +8163,9 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
     const operationModeConfigured = facebookOperationMode
       ? allConfirmed('operationModeConfigured')
       : undefined;
+    const primarySurfaceConfigured = facebookPrimarySurface
+      ? allConfirmed('primarySurfaceConfigured')
+      : undefined;
     const commentApprovalConfigured = commentApprovalMode === 'auto_approve_all'
       ? allConfirmed('commentApprovalConfigured')
       : undefined;
@@ -8124,6 +8174,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       ...(facebookRuleModeEnabled && !ruleModeConfigured ? ['规则模式'] : []),
       ...(facebookOperationMode === 'consumption' && !consumptionModeConfigured ? ['消费模式'] : []),
       ...(facebookOperationMode && !operationModeConfigured ? ['运行方式'] : []),
+      ...(facebookPrimarySurface && !primarySurfaceConfigured ? ['主浏览入口'] : []),
       ...(commentApprovalMode === 'auto_approve_all' && !commentApprovalConfigured ? ['全局免审'] : []),
     ];
     const committedCurrentWarnings = Array.from(new Set(
@@ -8155,6 +8206,7 @@ ipcMain.handle('ads:createEnv', async (_event, opts) => {
       ...(ruleModeConfigured === undefined ? {} : { ruleModeConfigured }),
       ...(consumptionModeConfigured === undefined ? {} : { consumptionModeConfigured }),
       ...(operationModeConfigured === undefined ? {} : { operationModeConfigured }),
+      ...(primarySurfaceConfigured === undefined ? {} : { primarySurfaceConfigured }),
       ...(commentApprovalConfigured === undefined ? {} : { commentApprovalConfigured }),
       ...(unassigned.length > 0 ? {
         visibilityWarning: `${created.length - unassigned.length}/${created.length} 个环境已分配并加入运行环境；其余环境未完成权威确认，未加入运行环境${

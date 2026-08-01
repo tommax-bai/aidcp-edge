@@ -9,6 +9,7 @@
 
 const RUN_MODES = Object.freeze(['normal', 'cold_start', 'rule', 'consumption']);
 const OPERATION_MODES = Object.freeze(['persona', 'slow_start', 'rule', 'consumption']);
+const PRIMARY_SURFACES = Object.freeze(['feed', 'reels']);
 const OPERATION_MODE_BY_RUN_MODE = Object.freeze({
   normal: 'persona',
   cold_start: 'slow_start',
@@ -18,9 +19,16 @@ const OPERATION_MODE_BY_RUN_MODE = Object.freeze({
 const APPROVAL_MODES = Object.freeze(['source_rules', 'auto_approve_all']);
 
 // 只有这四个键属于本模块管辖的意图；平台门禁按「键是否出现」判定，出现即视为意图。
-const INTENT_KEYS = Object.freeze(['facebookRunMode', 'slowStartEnabled', 'facebookRuleModeEnabled', 'commentApprovalMode']);
+const INTENT_KEYS = Object.freeze([
+  'facebookRunMode',
+  'facebookPrimarySurface',
+  'slowStartEnabled',
+  'facebookRuleModeEnabled',
+  'commentApprovalMode',
+]);
 const INTENT_LABELS = Object.freeze({
   facebookRunMode: '运行方式',
+  facebookPrimarySurface: '主浏览入口',
   slowStartEnabled: '慢启动',
   facebookRuleModeEnabled: '规则模式',
   commentApprovalMode: '全局免审',
@@ -70,6 +78,7 @@ function resolveFacebookCreationIntents({ platform, opts } = {}) {
       ok: true,
       runMode: null,
       facebookOperationMode: null,
+      facebookPrimarySurface: null,
       slowStartEnabled: false,
       facebookRuleModeEnabled: false,
       commentApprovalMode: null,
@@ -83,6 +92,15 @@ function resolveFacebookCreationIntents({ platform, opts } = {}) {
       return { ok: false, error: '运行方式只能是普通、冷启动、规则或消费四者之一，本次创建已拒绝' };
     }
     runMode = raw;
+  }
+
+  let facebookPrimarySurface = 'reels';
+  if (provided.includes('facebookPrimarySurface')) {
+    const raw = String(source.facebookPrimarySurface).trim();
+    if (!PRIMARY_SURFACES.includes(raw)) {
+      return { ok: false, error: '主浏览入口只能是 Feed 或 Reels，本次创建已拒绝' };
+    }
+    facebookPrimarySurface = raw;
   }
 
   const explicitSlowStart = readBooleanIntent(source, 'slowStartEnabled');
@@ -124,6 +142,7 @@ function resolveFacebookCreationIntents({ platform, opts } = {}) {
     ok: true,
     runMode: resolvedRunMode,
     facebookOperationMode: OPERATION_MODE_BY_RUN_MODE[resolvedRunMode],
+    facebookPrimarySurface,
     slowStartEnabled,
     facebookRuleModeEnabled,
     commentApprovalMode,
@@ -133,6 +152,7 @@ function resolveFacebookCreationIntents({ platform, opts } = {}) {
 module.exports = {
   RUN_MODES,
   OPERATION_MODES,
+  PRIMARY_SURFACES,
   OPERATION_MODE_BY_RUN_MODE,
   APPROVAL_MODES,
   INTENT_KEYS,

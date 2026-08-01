@@ -8,7 +8,12 @@ const renderer = readFileSync(new URL('../../src/electron/renderer/renderer.js',
 const html = readFileSync(new URL('../../src/electron/renderer/index.html', import.meta.url), 'utf8');
 
 test('统一运行策略只经具名 IPC 与固定 customer-auth 环境路径读写', () => {
-  for (const channel of ['facebook-operation-policy:get', 'facebook-operation-policy:set']) {
+  for (const channel of [
+    'facebook-operation-policy:get',
+    'facebook-operation-policy:set',
+    'facebook-primary-surface:get',
+    'facebook-primary-surface:set',
+  ]) {
     assert.match(main, new RegExp(`ipcMain\\.handle\\('${channel}'`));
     assert.match(preload, new RegExp(`ipcRenderer\\.invoke\\('${channel}'`));
   }
@@ -22,6 +27,8 @@ test('统一运行策略只经具名 IPC 与固定 customer-auth 环境路径读
   assert.match(block, /\['persona', 'slow_start', 'rule', 'consumption'\]\.includes\(args\.mode\)/);
   assert.match(block, /`\/environments\/\$\{encodeURIComponent\(envKey\)\}\/facebook-operation-policy`/);
   assert.match(block, /body: \{ expectedRevision: args\.expectedRevision, mode: args\.mode \}/);
+  assert.match(block, /facebook-primary-surface/);
+  assert.match(block, /primarySurface: args\.primarySurface/);
   assert.doesNotMatch(
     block,
     /accountId|viewsPerLike|joinEveryNRounds|confirmedLikesPerJoin|confirmedJoinsPerComment/,
@@ -34,21 +41,13 @@ test('统一运行策略只经具名 IPC 与固定 customer-auth 环境路径读
   );
 });
 
-test('已建环境模式区按普通、冷启动、规则、消费顺序展示，四项统一走 CAS 模式写', () => {
-  const persona = html.indexOf('id="facebook-persona-mode-row"');
-  const slow = html.indexOf('id="slow-start-row"');
-  const rule = html.indexOf('id="facebook-rule-mode-row"');
-  const consumption = html.indexOf('id="facebook-consumption-mode-row"');
+test('已建环境使用一个四选一模式和一个独立 Feed/Reels 选择', () => {
+  const policy = html.indexOf('id="facebook-operation-policy-row"');
   const risk = html.indexOf('id="risk-recovery-row"');
-  assert.ok(
-    persona >= 0 && persona < slow && slow < rule && rule < consumption && consumption < risk,
-    '模式区顺序必须保持普通、冷启动、规则、消费，且位于解除受限之前',
-  );
-  const block = html.slice(persona, risk);
-  assert.match(block, /id="facebook-persona-mode-toggle"/);
-  assert.match(block, /id="facebook-consumption-mode-toggle"/);
-  assert.match(block, /不在客户端保存节奏数字/);
-  assert.doesNotMatch(block, /规则\s*>\s*消费|规则、消费、普通人设/);
+  assert.ok(policy >= 0 && policy < risk);
+  const block = html.slice(policy, risk);
+  assert.match(block, /id="facebook-operation-mode-select"[\s\S]*value="persona"[\s\S]*value="slow_start"[\s\S]*value="rule"[\s\S]*value="consumption"/);
+  assert.match(block, /id="facebook-primary-surface-select"[\s\S]*value="feed"[\s\S]*value="reels"/);
 
   const submitStart = renderer.indexOf('async function submitFacebookOperationMode');
   const submitEnd = renderer.indexOf('// 旧慢启动/规则写函数', submitStart);
@@ -74,7 +73,8 @@ test('已建环境写入期间只渲染最后确认态，目标模式只作为 p
   assert.ok(applyStart >= 0 && applyEnd > applyStart);
   assert.match(apply, /const selectedMode = selectedModeFromFacebookOperationPolicy\(config\)/);
   assert.doesNotMatch(apply, /pending\s*\?\s*pending\.mode/);
-  assert.match(apply, /pending\.mode === item\.mode/);
+  assert.match(apply, /facebookOperationModeSelect\.value = selectedMode/);
+  assert.match(apply, /facebookPrimarySurfaceSelect\.value = config\.primarySurface/);
 
   const fetchStart = renderer.indexOf('async function ensureFacebookOperationPolicyHttpFetch');
   const fetchEnd = renderer.indexOf('function facebookRuleModeError', fetchStart);
@@ -83,7 +83,7 @@ test('已建环境写入期间只渲染最后确认态，目标模式只作为 p
   assert.match(fetch, /if \(next\.kind === 'ok' \|\| !retainExisting\)/);
 });
 
-test('创建环境四选一包含消费模式，并只提交 facebookOperationMode', () => {
+test('创建环境四选一包含消费模式，主浏览入口默认 Reels 并独立提交', () => {
   const selectStart = html.indexOf('id="ads-fb-run-mode"');
   const selectEnd = html.indexOf('</select>', selectStart);
   const select = html.slice(selectStart, selectEnd);
@@ -92,14 +92,20 @@ test('创建环境四选一包含消费模式，并只提交 facebookOperationMo
   const rule = select.indexOf('value="rule"');
   const consumption = select.indexOf('value="consumption"');
   assert.ok(normal >= 0 && normal < cold && cold < rule && rule < consumption);
+  const surfaceStart = html.indexOf('id="ads-fb-primary-surface"');
+  const surfaceEnd = html.indexOf('</select>', surfaceStart);
+  const surface = html.slice(surfaceStart, surfaceEnd);
+  assert.match(surface, /value="reels" selected/);
 
   const finalizeStart = main.indexOf('async function finalizeCreatedEnvironmentAssignment');
   const finalizeEnd = main.indexOf('async function validateExistingClientSessionForStartup', finalizeStart);
   const finalize = main.slice(finalizeStart, finalizeEnd);
   assert.match(finalize, /facebookOperationMode: requestedOperationMode/);
+  assert.match(finalize, /facebookPrimarySurface/);
   assert.match(finalize, /provisioningFacebookOperationPolicy\(response, envKey\)/);
   assert.match(finalize, /provisioningCommittedFacebookOperationPolicy\(response, envKey\)/);
   assert.match(finalize, /provisioningOperationModeMatches\(operationPolicy, requestedOperationMode\)/);
+  assert.match(finalize, /provisioningPrimarySurfaceMatches\(operationPolicy, facebookPrimarySurface\)/);
   assert.doesNotMatch(
     finalize,
     /\{ slowStartEnabled: true \}|\{ facebookRuleModeEnabled: true \}|viewsPerLike|confirmedJoinsPerComment/,
@@ -121,8 +127,7 @@ test('已提交 provisioning 的 current 真态恢复归属并加入本地 roste
   const finalizeEnd = main.indexOf('async function validateExistingClientSessionForStartup', finalizeStart);
   const finalize = main.slice(finalizeStart, finalizeEnd);
   assert.match(finalize, /provisioningCommittedFacebookOperationPolicy\(response, envKey\)/);
-  assert.match(finalize, /intent_operation_mode_mismatch/);
   assert.match(finalize, /operation_policy_refresh_unavailable|运行策略缓存刷新暂不可用/);
-  assert.match(finalize, /configuredFlags\(operationModeConfirmed, false\)/);
+  assert.match(finalize, /configuredFlags\(operationModeConfirmed, primarySurfaceConfirmed, false\)/);
   assert.match(finalize, /finalizeCreatedEnvironmentFromCommittedCurrent\(/);
 });

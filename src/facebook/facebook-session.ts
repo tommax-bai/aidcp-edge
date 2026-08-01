@@ -246,7 +246,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   private tempo: number;
   /** 当前可滚动列表的来源；详情页恢复时必须回原 feed 或原搜索页，不能一律跳首页。 */
   private activeFeedUrl: string;
-  /** 当前列表形态；只有 Cloud 的 empty_feed_reels_fallback 授权可以把 feed 切成 reels。 */
+  /** 当前列表形态；只有 Cloud 的配置入口或 Feed exhaustion 授权可以把 feed 切成 reels。 */
   private listMode: 'feed' | 'reels' = 'feed';
   /** 已进入 Reels 路由但首卡还未完成水合；恢复前绝不切下一条，也不退回 Feed。 */
   private reelsTransitionPending = false;
@@ -543,7 +543,10 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         const payload = (env.payload ?? {}) as PageScrollPayload;
         await this.runBrowseCommand('scroll', async () => {
           await this.ensureFeedDwell(payload.dwellMs);
-          if (payload.reason === 'empty_feed_reels_fallback') return this.enterReels();
+          if (
+            payload.reason === 'empty_feed_reels_fallback'
+            || payload.reason === 'facebook_reels_primary'
+          ) return this.enterReels();
           if (this.listMode === 'reels') return this.scrollReels();
           return this.scrollFeed();
         });

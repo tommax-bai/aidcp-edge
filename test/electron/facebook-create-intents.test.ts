@@ -9,6 +9,7 @@ type Resolved = {
   error?: string;
   runMode?: string | null;
   facebookOperationMode?: string | null;
+  facebookPrimarySurface?: string | null;
   slowStartEnabled?: boolean;
   facebookRuleModeEnabled?: boolean;
   commentApprovalMode?: string | null;
@@ -61,6 +62,7 @@ test('Facebook 创建默认既不开慢启动也不开规则模式（旧的写�
   assert.equal(resolved.ok, true);
   assert.equal(resolved.runMode, 'normal');
   assert.equal(resolved.facebookOperationMode, 'persona');
+  assert.equal(resolved.facebookPrimarySurface, 'reels');
   assert.equal(resolved.slowStartEnabled, false);
   assert.equal(resolved.facebookRuleModeEnabled, false);
   assert.equal(resolved.commentApprovalMode, null, '免审默认关闭：不下发该字段');
@@ -108,6 +110,7 @@ test('非 Facebook 平台携带任一运行方式或免审意图 → 整请求�
     { slowStartEnabled: true },
     { facebookRuleModeEnabled: true },
     { commentApprovalMode: 'auto_approve_all' },
+    { facebookPrimarySurface: 'reels' },
   ]) {
     for (const platform of ['xiaohongshu', 'wechat_channels']) {
       const resolved = resolveFacebookCreationIntents({ platform, opts });
@@ -125,6 +128,7 @@ test('非 Facebook 平台不带这些键时照常放行，且不携带任何配�
   assert.equal(resolved.ok, true);
   assert.equal(resolved.runMode, null);
   assert.equal(resolved.facebookOperationMode, null);
+  assert.equal(resolved.facebookPrimarySurface, null);
   assert.equal(resolved.slowStartEnabled, false);
   assert.equal(resolved.facebookRuleModeEnabled, false);
   assert.equal(resolved.commentApprovalMode, null);
@@ -166,4 +170,20 @@ test('运行方式非法枚举与非布尔单项意图都整请求拒绝', () =>
   const badBoolean = resolveFacebookCreationIntents({ platform: 'facebook', opts: { slowStartEnabled: 'true' } });
   assert.equal(badBoolean.ok, false);
   assert.match(String(badBoolean.error), /只接受开或关/);
+});
+
+test('主浏览入口默认 Reels，也可显式选择 Feed', () => {
+  const defaults = resolveFacebookCreationIntents({ platform: 'facebook', opts: {} });
+  assert.equal(defaults.facebookPrimarySurface, 'reels');
+  const feed = resolveFacebookCreationIntents({
+    platform: 'facebook',
+    opts: { facebookPrimarySurface: 'feed' },
+  });
+  assert.equal(feed.ok, true);
+  assert.equal(feed.facebookPrimarySurface, 'feed');
+  const invalid = resolveFacebookCreationIntents({
+    platform: 'facebook',
+    opts: { facebookPrimarySurface: 'video' },
+  });
+  assert.equal(invalid.ok, false);
 });
