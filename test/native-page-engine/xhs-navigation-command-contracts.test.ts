@@ -314,3 +314,110 @@ test('aria 与纯文案两种关闭控件走同一条三态判据', async () => 
     assert.equal(result.effectPhase, 'confirmed', `${closeControl} 控件关成后应确认`);
   }
 });
+
+// ── profile_open：打开作者主页 ────────────────────────────────────────────
+//
+// 补测理由：此前只有宿主路由层的用例（`browse-session.test.ts` 走的是信封与命令映射），
+// **没有任何页面行为断言** —— 「到底打开了谁的主页」这件事脱机无人守。
+//
+// 它比另外两条多一态：**精确目标绑定**。云端指定了 authorId 时，页面上找到的作者链接
+// 若不是那个人，MUST NOT 点下去 —— 点错人的后果不是本条命令失败，是后续关注 / 读粉丝数
+// 全部记在别人账上。所以「找到了但不是要找的那个」必须与「没找到」一样是未开始终局。
+
+const PROFILE_A = 'author0001aaaa';
+const PROFILE_B = 'author0002bbbb';
+
+function profileLinkHtml(authorId: string): string {
+  return `<div class="author"><a href="/user/profile/${authorId}" id="author">作者甲</a></div>`;
+}
+
+function navigateProfileOnClick(dom: JSDOM, authorId: string): { clicks: number } {
+  const counter = { clicks: 0 };
+  dom.window.document.querySelector('#author')?.addEventListener('click', () => {
+    counter.clicks += 1;
+    dom.window.history.pushState({}, '', `/user/profile/${authorId}`);
+  });
+  return counter;
+}
+
+test('页面上没有作者入口时诚实回未开始，且一次都没点', async () => {
+  const dom = install('<body><div class="note-detail-mask">正文</div></body>', DETAIL_URL);
+  const counter = countClicks(dom);
+
+  const result = await runRouter({ kind: 'profile_open', params: { authorId: PROFILE_A } });
+
+  assert.equal(result.effectPhase, 'not_started');
+  const value = receipt(result);
+  assert.equal(value.action, 'open_profile', '动作名必须是规范名 open_profile');
+  assert.equal(value.ok, false);
+  assert.equal(value.reason, 'profile_target_not_found');
+  assert.equal(counter.clicks, 0);
+});
+
+test('★ 找到的作者不是云端指定的那一个时绝不点下去', async () => {
+  // 红线：点错人不会让本条命令失败，只会让后续关注 / 读粉丝数全部记到别人账上。
+  const dom = install(`<body><div class="note-detail-mask">${profileLinkHtml(PROFILE_B)}</div></body>`, DETAIL_URL);
+  const counter = countClicks(dom);
+
+  const result = await runRouter({ kind: 'profile_open', params: { authorId: PROFILE_A } });
+
+  assert.equal(result.effectPhase, 'not_started');
+  const value = receipt(result);
+  assert.equal(value.reason, 'profile_target_mismatch');
+  // 「不是要找的那个」与「没找到」区分开，但**都必须一下都没点**。
+  assert.equal(counter.clicks, 0);
+});
+
+test('点中指定作者并真的跳到他的主页才算确认', async () => {
+  const dom = install(`<body><div class="note-detail-mask">${profileLinkHtml(PROFILE_A)}</div></body>`, DETAIL_URL);
+  const counter = navigateProfileOnClick(dom, PROFILE_A);
+
+  const result = await runRouter({ kind: 'profile_open', params: { authorId: PROFILE_A } });
+
+  assert.equal(counter.clicks, 1);
+  assert.equal(result.effectPhase, 'confirmed');
+  assert.equal(result.output.kind, 'profile_detail');
+  assert.equal(result.output.value.authorId, PROFILE_A);
+});
+
+test('★ 点了但没跳到主页时是 ambiguous，绝不回确认', async () => {
+  const dom = install(`<body><div class="note-detail-mask">${profileLinkHtml(PROFILE_A)}</div></body>`, DETAIL_URL);
+  const counter = countClicks(dom);
+
+  const result = await runRouter({ kind: 'profile_open', params: { authorId: PROFILE_A } });
+
+  assert.equal(counter.clicks, 1);
+  assert.equal(result.effectPhase, 'ambiguous');
+  assert.notEqual(result.effectPhase, 'confirmed');
+  const value = receipt(result);
+  assert.equal(value.action, 'open_profile');
+  assert.equal(value.reason, 'profile_navigation_unconfirmed');
+});
+
+test('★ 跳到了主页但跳错了人时同样不确认', async () => {
+  // 这一条与上一条是两个不同的失败：路径确实进了 /user/profile/，但不是指定的那个人。
+  // 若只判「是不是主页路径」，跳错人会被当成成功。
+  const dom = install(`<body><div class="note-detail-mask">${profileLinkHtml(PROFILE_A)}</div></body>`, DETAIL_URL);
+  const counter = navigateProfileOnClick(dom, PROFILE_B);
+
+  const result = await runRouter({ kind: 'profile_open', params: { authorId: PROFILE_A } });
+
+  assert.equal(counter.clicks, 1);
+  assert.equal(result.effectPhase, 'ambiguous');
+  assert.equal(receipt(result).reason, 'profile_navigation_unconfirmed');
+});
+
+test('已经站在指定作者主页上时直接回详情，不再多点一次', async () => {
+  const dom = install(
+    `<body><h1>作者甲</h1><div class="user-data"><span>12</span><span>340</span><span>56</span></div></body>`,
+    `https://www.xiaohongshu.com/user/profile/${PROFILE_A}`,
+  );
+  const counter = countClicks(dom);
+
+  const result = await runRouter({ kind: 'profile_open', params: { authorId: PROFILE_A } });
+
+  assert.equal(result.effectPhase, 'confirmed');
+  assert.equal(result.output.kind, 'profile_detail');
+  assert.equal(result.output.value.authorId, PROFILE_A);
+  assert.equal(counter.clicks, 0, '已经在目标页时不该再点任何东西');
+});
