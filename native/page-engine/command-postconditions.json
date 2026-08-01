@@ -1,0 +1,223 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Native 写命令的**后置校验盘点**（change restore-native-actuation-humanization-and-locating，任务 5.6 / 5.11）。规格里「每一条写命令都必须校验其效果」这条保证，在这张表存在之前**没有任何人说得清每条命令落在线的哪一侧**——所以它只能按「已逐条核过的面」读，不能当成整个运行时的属性。本表就是那份逐面盘点。",
+  "invariants": [
+    "本表 MUST 恰好覆盖引擎命令类型里 may_write 为真的全部命令，一条不多一条不少。**没列出的命令会被读成已覆盖**——这正是本表要消除的那种沉默。",
+    "status 只有四种：confirmed=后置判据达标；below_bar=有判据但不达 5.9/5.10 的强度条（须写清差在哪）；not_applicable=结构上没有可读回的业务结果（须写清为什么，且不得因此默认成功）；unread=本轮没逐条读过。",
+    "unread 是**单调棘轮**：unreadBudget 只许下降，绝不许上调。新增写命令时它的默认归宿不是 unread——新命令必须当场分类，否则这张表会退化成一个永远填不完的许愿单。",
+    "below_bar 与 unread 都 MUST NOT 被读成「有校验」。前者是已知不够，后者是没人核过——两者都不构成「这条命令不会假成功」的证据。"
+  ],
+  "unreadBudget": 16,
+  "commands": [
+    {
+      "nativeKind": "facebook_auth_submit_login",
+      "status": "unread",
+      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+    },
+    {
+      "nativeKind": "facebook_auth_enter_totp",
+      "status": "unread",
+      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+    },
+    {
+      "nativeKind": "facebook_auth_submit_totp",
+      "status": "unread",
+      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+    },
+    {
+      "nativeKind": "facebook_auth_clear_totp",
+      "status": "unread",
+      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+    },
+    {
+      "nativeKind": "facebook_auth_dismiss_warning",
+      "status": "unread",
+      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+    },
+    {
+      "nativeKind": "facebook_auth_close_push_blocker",
+      "status": "unread",
+      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+    },
+    {
+      "nativeKind": "facebook_auth_confirm_remember_password",
+      "status": "unread",
+      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+    },
+    {
+      "nativeKind": "plan_execute",
+      "status": "unread",
+      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+    },
+    {
+      "nativeKind": "session_stop",
+      "status": "not_applicable",
+      "evidence": "它不在页面上产生任何业务效果，没有可读回的业务结果。**不得因此默认成功**——它回报的是本地会话收尾是否完成"
+    },
+    {
+      "nativeKind": "browse_next",
+      "status": "confirmed",
+      "evidence": "实测位移，双向计；到底判定取滚动后那次读数"
+    },
+    {
+      "nativeKind": "browse_scroll",
+      "status": "confirmed",
+      "evidence": "同上"
+    },
+    {
+      "nativeKind": "page_scroll",
+      "status": "confirmed",
+      "evidence": "同上"
+    },
+    {
+      "nativeKind": "feed_refresh",
+      "status": "confirmed",
+      "evidence": "刷新后重扫卡片，按实测结果回报"
+    },
+    {
+      "nativeKind": "search_execute",
+      "status": "below_bar",
+      "evidence": "关键词 / 结果路由确认到位，但**搜索输入那一道判据把「读不到」折成「读到了一个否」**——差在这里：它**不能**区分「探针瞎了」与「确实没输进去」，失败方向诚实、归因却是错的。登记见 change §9.5-1；实现点在单写区属主处，本 change 不代改"
+    },
+    {
+      "nativeKind": "note_open",
+      "status": "confirmed",
+      "evidence": "详情容器 + 笔记 id 一致；错误页 / 访问限制词库先行否决，地址解析得出 id 不算打开成功"
+    },
+    {
+      "nativeKind": "note_close",
+      "status": "confirmed",
+      "evidence": "有界轮询确认浮层已关"
+    },
+    {
+      "nativeKind": "navigation_back",
+      "status": "confirmed",
+      "evidence": "有界轮询确认已回到列表面"
+    },
+    {
+      "nativeKind": "note_browse_images",
+      "status": "confirmed",
+      "evidence": "图序标记（轮播激活片下标，退到首张可见图地址）前后比对；复制片不计真图"
+    },
+    {
+      "nativeKind": "note_scroll_comments",
+      "status": "confirmed",
+      "evidence": "实测位移 + 可见评论行数；行数读不到回「读不到」，绝不顶成 1"
+    },
+    {
+      "nativeKind": "profile_open",
+      "status": "unread",
+      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+    },
+    {
+      "nativeKind": "notification_open",
+      "status": "unread",
+      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+    },
+    {
+      "nativeKind": "notification_browse_comments",
+      "status": "unread",
+      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+    },
+    {
+      "nativeKind": "notification_browse_likes",
+      "status": "unread",
+      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+    },
+    {
+      "nativeKind": "notification_browse_follows",
+      "status": "unread",
+      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+    },
+    {
+      "nativeKind": "notification_back_home",
+      "status": "unread",
+      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+    },
+    {
+      "nativeKind": "interaction_like",
+      "status": "confirmed",
+      "evidence": "小红书：有界轮询等图标状态位翻转；否定形类名不算正证据；Facebook：两个浏览面各自三态（Confirmed / Unchanged / Indeterminate）；Reels 面身份退化分支走三道闸编排，探针读不到绝不塌成「没点上」"
+    },
+    {
+      "nativeKind": "interaction_collect",
+      "status": "confirmed",
+      "evidence": "同上"
+    },
+    {
+      "nativeKind": "interaction_follow",
+      "status": "confirmed",
+      "evidence": "小红书：有界轮询等关注态文案 / 按下态；Facebook：关注态探针前后比对，带目标帖身份"
+    },
+    {
+      "nativeKind": "interaction_comment",
+      "status": "confirmed",
+      "evidence": "小红书：两条独立证据：正文出现在评论区 + 编辑器已被平台清空；扫描面剔除编辑器及其容器（防自证）；有界轮询 8×250ms；Facebook：评论到达探针（按帖 + 文本 + 账号身份）"
+    },
+    {
+      "nativeKind": "interaction_like_comment",
+      "status": "confirmed",
+      "evidence": "有界轮询等图标状态位翻转（原为固定睡眠后单次采样）"
+    },
+    {
+      "nativeKind": "group_join",
+      "status": "confirmed",
+      "evidence": "有界轮询复查加入态"
+    },
+    {
+      "nativeKind": "identity_read_self_profile",
+      "status": "unread",
+      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+    },
+    {
+      "nativeKind": "captcha_click",
+      "status": "confirmed",
+      "evidence": "焦点落位分档（editable / opaque / none）+ 键入取证 + 清除结果三态；回放模式按实际路径派生（本波 2.10）"
+    },
+    {
+      "nativeKind": "publish_navigate_entry",
+      "status": "unread",
+      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+    },
+    {
+      "nativeKind": "publish_select_mode",
+      "status": "confirmed",
+      "evidence": "ready() 结构判据：图文编辑区真的出现"
+    },
+    {
+      "nativeKind": "publish_upload_image",
+      "status": "below_bar",
+      "evidence": "判据是「该序号位置存在预览图」——它不能把这张预览与**本次**上传绑定，上一次残留的预览同样满足。达标形态需按本次上传的标识回读"
+    },
+    {
+      "nativeKind": "publish_set_cover",
+      "status": "confirmed",
+      "evidence": "封面专属证据（data-cover 等），有界回溯只认真正的图片项容器；轮播「当前显示」与点后选中外观都不算"
+    },
+    {
+      "nativeKind": "publish_fill_field",
+      "status": "confirmed",
+      "evidence": "有界回读：空白归一 / 汉字档 / 段落数三道比对，段落数读不到不放行"
+    },
+    {
+      "nativeKind": "publish_add_with_candidate",
+      "status": "below_bar",
+      "evidence": "仅 topic 一支达标（正文里的真话题 token + 剔隐藏后缀 + 精确相等）；mention / location / collection 仍走注入路由，判据是「打进去再读回来」＝自证。前置是真机标定各自的结构信号（backlog 簇 123.34）"
+    },
+    {
+      "nativeKind": "publish_set_option",
+      "status": "confirmed",
+      "evidence": "有界轮询等开关状态位；读不到明确状态一律去点，删掉了「否 === 否」那条兜底"
+    },
+    {
+      "nativeKind": "publish_set_schedule",
+      "status": "confirmed",
+      "evidence": "分段控件回读设定值（原生赋值路径，见 8.1 的具名收窄）"
+    },
+    {
+      "nativeKind": "publish_submit",
+      "status": "confirmed",
+      "evidence": "只认页面上的成功文案这条正证据；地址判据已明令删除（抢占 / 恢复导航会伪造它）"
+    }
+  ]
+}
