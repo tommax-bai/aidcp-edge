@@ -25,6 +25,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
+/// 话题候选项的落点。与本文件其余落点（编辑器 240,300 / 提交 320,460）刻意拉开距离：
+/// 指针原语记「上一次落点」是**进程级全局**，落点撞车会让轨迹塌成单帧、把帧数断言变成抖动
+/// （见 tasks.md §9.5-7）。
+const TOPIC_CANDIDATE_POINT: (f64, f64) = (612.0, 188.0);
+
 /// 假 CDP 记录到的一次会话：页面收到的全部请求 + 真正被写进编辑器的文本。
 struct Observed {
     requests: Vec<Value>,
@@ -34,6 +39,8 @@ struct Observed {
     editor_probes: usize,
     /// 提交之后的到达确认探针读了几次。有界轮询与「单次采样」的差别只能在这里看出来。
     ack_probes: usize,
+    /// 话题候选探针读了几次。
+    topic_candidate_probes: usize,
 }
 
 impl Observed {
@@ -119,6 +126,13 @@ struct FakePage {
     /// 平台慢：前 N 次确认探针一律回「没出现、也没清空」，第 N+1 次才给出上面那两条读数。
     /// 0 = 第一次就绪。用来把「有界轮询」与「固定睡一觉后单次采样」分开。
     ack_ready_after_probes: usize,
+    /// 话题建议下拉：`None` = 一直认不出目标项（既没有精确候选、也没有「新建话题」）；
+    /// `Some(n)` = 前 n 次探针还没渲染出来，第 n+1 次给出目标项。
+    topic_candidate_after_probes: Option<usize>,
+    /// 点中候选之后，正文里到底会不会生成**真话题 token**。
+    /// `false` 用来造出那个关键现场：字打进去了、候选也点了，但话题根本没贴上 ——
+    /// 而正文里明明躺着一串 `#关键词`，任何「正文里搜得到就算成功」的判据都会在这里说谎。
+    topic_commits_on_click: bool,
     /// 回读时不给 `paragraphs` 判定：分片认不出段落结构。段落数是换行的**唯一**结构证据 ——
     /// 两道文本比对（归一 / 汉字档）对换行完全免疫。
     omit_paragraphs: bool,
@@ -150,6 +164,8 @@ impl Default for FakePage {
             ack_appeared: Some(true),
             ack_editor_cleared: Some(true),
             ack_ready_after_probes: 0,
+            topic_candidate_after_probes: Some(0),
+            topic_commits_on_click: true,
             omit_paragraphs: false,
             omit_plain_value: false,
             cancel_at_caret_probe: 0,
@@ -1227,6 +1243,172 @@ async fn a_comment_ack_with_both_evidences_confirms() {
     let _ = server.await.expect("fake page");
 }
 
+/// 加话题（8.1 的第三个消费点）：确认必须来自正文里生成的**真话题 token**，
+/// 不是「正文里搜得到这几个字」。
+///
+/// 这一场造的是那条判据说谎时的现场：字打进去了、候选也点了，但平台没把它变成话题。
+/// 正文里此刻明明躺着一串 `#关键词`（我们自己打的），所以任何拿正文子串当证据的判据
+/// 都会在这里回「成功」—— 而稿子发出去时那只是一串普通文字，拿不到话题带来的分发，
+/// 回执上却一切正常。**自证循环：用输入证明输入生效。**
+#[tokio::test]
+async fn a_topic_that_never_became_a_real_token_is_never_confirmed() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            plain_value: false,
+            topic_commits_on_click: false,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let params = json!({
+        "kind": "publish_add_with_candidate",
+        "params": {"recordId": 9, "seq": 2, "candidateKind": "topic", "value": "考研", "candidates": ["考研"]},
+    });
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(1, serde_json::from_value(params).expect("command"), 25_000),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::PublishReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected a publish receipt");
+    };
+    assert!(!receipt.ok, "话题没真的贴上却报成功 = 静默假成功");
+    assert_eq!(
+        receipt.error.as_deref(),
+        Some("publish_candidate_unconfirmed")
+    );
+    // 字已经打进正文了 ⇒ 这一条 MUST NOT 回「未开始」（那等于说正文没被碰过）。
+    assert_eq!(result.effect_phase, EffectPhase::Ambiguous);
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    // 正文里确实躺着我们打进去的那串字 —— 这正是旧判据会读到并当成证据的东西。
+    assert!(
+        observed.editor.contains("#考研"),
+        "这一场的前提是正文里真有那串字，否则它什么也没证明：{:?}",
+        observed.editor
+    );
+}
+
+/// 反向那一半：真 token 出来了才配 Confirmed。少了它，把确认闸改成恒假同样全绿。
+/// 顺带钉住三件只有到这一步才成立的事：逐字打、拟人指针点候选、注入路由分支零调用。
+#[tokio::test]
+async fn a_topic_that_became_a_real_token_confirms_after_hardware_typing() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            plain_value: false,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let params = json!({
+        "kind": "publish_add_with_candidate",
+        "params": {"recordId": 9, "seq": 2, "candidateKind": "topic", "value": "考研", "candidates": ["考研"]},
+    });
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(1, serde_json::from_value(params).expect("command"), 25_000),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::PublishReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected a publish receipt");
+    };
+    assert!(receipt.ok, "真 token 出来了却不确认：{:?}", receipt.error);
+    assert_eq!(result.effect_phase, EffectPhase::Confirmed);
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    // ① 触发串是**逐字**打出去的，不是把整段正文重新赋值一次。
+    let chunks = observed.inserted_chunks();
+    assert!(
+        chunks.len() >= " #考研".chars().count(),
+        "触发串必须逐字派发，实得 {} 次写入：{chunks:?}",
+        chunks.len()
+    );
+    assert_eq!(chunks.concat(), " #考研");
+    // ② 候选是**拟人指针轨迹**点的：页面侧 .click() 实测不提交那个待定 span。
+    assert!(observed.input_events("Input.dispatchMouseEvent") > 2 * 2);
+    // ③ 注入路由的同名分支一次都不该被调用 —— 已被引擎特化截走。
+    assert_eq!(
+        observed.evaluated(r#""kind":"publish_add_with_candidate""#),
+        0
+    );
+}
+
+/// 下拉里既没有精确候选、也没有「新建话题」时 MUST **不点**。
+///
+/// 随便点一个的代价是**不可逆**：稿子上贴了一个无关话题，之后没有任何一步会去撤它。
+/// 诚实的做法是不点、如实回未确认 —— 正文里会留下一串裸 `#关键词`（与退役实现同行为），
+/// 而云端把这条指令算作尽力而为，稿子照发。
+#[tokio::test]
+async fn a_dropdown_without_a_matching_candidate_is_never_clicked() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            plain_value: false,
+            topic_candidate_after_probes: None,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let params = json!({
+        "kind": "publish_add_with_candidate",
+        "params": {"recordId": 9, "seq": 2, "candidateKind": "topic", "value": "考研", "candidates": ["考研"]},
+    });
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(1, serde_json::from_value(params).expect("command"), 25_000),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::PublishReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected a publish receipt");
+    };
+    assert!(!receipt.ok);
+    assert_eq!(
+        receipt.error.as_deref(),
+        Some("publish_candidate_not_found")
+    );
+    assert_eq!(result.effect_phase, EffectPhase::Ambiguous);
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    // 只有落焦那一次点击，没有第二次 —— 候选一次都没被点。
+    assert_eq!(
+        observed.mouse_events("mousePressed"),
+        1,
+        "认不出目标候选时多点了一下：那一下会贴上一个无关话题"
+    );
+}
+
 /// 到达确认是**有界轮询**，不是「固定睡一觉之后单次采样」（H.1 的另一半）。
 ///
 /// 单次采样只有一个采样点，落早了就读不到 —— 一条真的发出去了的评论被回报成不确定，
@@ -1595,6 +1777,7 @@ async fn spawn_page(
             enter_presses: 0,
             editor_probes: 0,
             ack_probes: 0,
+            topic_candidate_probes: 0,
         };
         let mut inserts = 0_usize;
         let mut caret_probes = 0_usize;
@@ -1713,6 +1896,44 @@ fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value
     if expression.contains(r#""kind":"note_guard""#) {
         return value(json!({"found": true, "match": true, "noteId": "note-1"}));
     }
+    if expression.contains(r#""kind":"topic_candidate""#) {
+        observed.topic_candidate_probes += 1;
+        return match page.topic_candidate_after_probes {
+            Some(ready_after) if observed.topic_candidate_probes > ready_after => value(json!({
+                "found": true, "dropdown": true, "matched": "exact",
+                "x": TOPIC_CANDIDATE_POINT.0, "y": TOPIC_CANDIDATE_POINT.1,
+            })),
+            // 下拉在、但里面既没有精确候选也没有「新建话题」：MUST 报没找到，
+            // 让引擎**不点** —— 随便点一个会给稿子贴上一个无关话题。
+            _ => value(json!({"found": false, "dropdown": true})),
+        };
+    }
+    if expression.contains(r#""kind":"topic_committed""#) {
+        // 真 token 只在候选**真的被点过**之后才出现。正文里那串 `#关键词` 一直都在
+        // （它是我们自己打进去的），所以任何拿正文子串当证据的判据在这里都会说谎。
+        // 落点带 ±3px 抖动（拟人化），所以按**距离**认，不按逐字相等 —— 后者会把
+        // 「点到了」误判成「没点」，用例于是变成一个恒红的抖动源。
+        let clicked = observed.requests.iter().any(|request| {
+            if request["method"] != "Input.dispatchMouseEvent"
+                || request["params"]["type"] != "mousePressed"
+            {
+                return false;
+            }
+            let (Some(x), Some(y)) = (
+                request["params"]["x"].as_f64(),
+                request["params"]["y"].as_f64(),
+            ) else {
+                return false;
+            };
+            (x - TOPIC_CANDIDATE_POINT.0).abs() <= 8.0 && (y - TOPIC_CANDIDATE_POINT.1).abs() <= 8.0
+        });
+        let committed = clicked && page.topic_commits_on_click;
+        return value(json!({
+            "found": true,
+            "committed": committed,
+            "pills": if committed { 1 } else { 0 },
+        }));
+    }
     if expression.contains(r#""kind":"comment_submit""#) {
         return value(json!({"found": true, "x": 320.0, "y": 460.0}));
     }
@@ -1759,6 +1980,13 @@ fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value
                 "text": "Uncaught",
                 "exception": {"className": "TypeError", "description": "boom"},
             }});
+        }
+        if expression.contains(r#""op":"cursor_to_end""#) {
+            return value(json!({
+                "found": true, "cursorAtEnd": true, "focused": true,
+                "value": observed.editor.clone(), "plainValue": page.plain_value,
+                "x": 240.0, "y": 300.0, "paragraphs": 0,
+            }));
         }
         if expression.contains(r#""op":"clear""#) {
             // 清场自称成功那一拍的读数照样是干净的（`cleared:true` / `value:""`），

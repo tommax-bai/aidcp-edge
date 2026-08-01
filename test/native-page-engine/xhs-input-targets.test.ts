@@ -27,6 +27,8 @@ type TargetRequest = {
   noteId?: string;
   fieldType?: string;
   text?: string;
+  /** 话题候选 / 话题真 token 的目标词。 */
+  value?: string;
 };
 
 type TargetResult = Record<string, unknown>;
@@ -306,4 +308,68 @@ test('详情浮层关闭控件：「浮层不在」与「浮层在但控件没�
   const none = runInputTargets({ kind: 'detail_close' });
   assert.equal(none.overlay, false);
   assert.equal(none.found, false);
+});
+
+test('话题候选：只认精确候选或「新建话题」，认不出就报没找到、绝不让调用方乱点', () => {
+  const dropdown = (items: string) => `<!doctype html><html><body>
+    <div contenteditable="true"><p>正文</p></div>
+    <div class="tippy-box" role="tooltip"><div id="creator-editor-topic-container">${items}</div></div>
+  </body></html>`;
+
+  installXhsDom(dropdown('<div class="item">#考研 12万浏览</div>'), 'https://creator.xiaohongshu.com/publish/publish');
+  const exact = runInputTargets({ kind: 'topic_candidate', value: '考研' });
+  assert.equal(exact.found, true);
+  assert.equal(exact.matched, 'exact');
+  assert.equal(typeof exact.x, 'number');
+
+  // 只有「新建话题」时用它兜底 —— 那正是这个词还不存在的正常情形。
+  installXhsDom(dropdown('<div class="item">新建话题 考研</div>'), 'https://creator.xiaohongshu.com/publish/publish');
+  assert.equal(runInputTargets({ kind: 'topic_candidate', value: '考研' }).matched, 'create');
+
+  // 下拉里全是无关词：MUST 报没找到。点其中任何一个都会给稿子贴上一个**撤不回来**的无关话题。
+  installXhsDom(
+    dropdown('<div class="item">#雅思 3万浏览</div><div class="item">#托福 1万浏览</div>'),
+    'https://creator.xiaohongshu.com/publish/publish',
+  );
+  const missed = runInputTargets({ kind: 'topic_candidate', value: '考研' });
+  assert.equal(missed.found, false);
+  assert.equal(missed.dropdown, true, '「下拉没弹出来」与「弹了但没有目标项」是两态');
+
+  // 下拉压根没弹：与上一态分开。
+  installXhsDom('<!doctype html><html><body><div contenteditable="true"></div></body></html>', 'https://creator.xiaohongshu.com/publish/publish');
+  assert.equal(runInputTargets({ kind: 'topic_candidate', value: '考研' }).dropdown, false);
+});
+
+test('话题真 token：纯文本 #关键词 判 false，精确相等而非子串（H.1 同族的自证循环）', () => {
+  const page = (body: string) => `<!doctype html><html><body>
+    <div contenteditable="true">${body}</div>
+  </body></html>`;
+  const url = 'https://creator.xiaohongshu.com/publish/publish';
+
+  // ① 用户打了字但没从候选提交：正文里只有纯文本。**这正是旧判据会读成成功的那一场**——
+  //    它读回的是自己刚写进去的东西。
+  installXhsDom(page('<p>正文 #考研</p>'), url);
+  assert.equal(runInputTargets({ kind: 'topic_committed', value: '考研' }).committed, false);
+
+  // ② 真 token（带 data-topic），并剔除隐藏后缀 span.content-hide 再比。
+  installXhsDom(
+    page('<p>正文 <a class="tiptap-topic" data-topic=\'{"name":"考研"}\'>#考研<span class="content-hide">[话题]#</span></a></p>'),
+    url,
+  );
+  assert.equal(runInputTargets({ kind: 'topic_committed', value: '考研' }).committed, true);
+
+  // ③ 精确相等而非子串：已存在的「#考研数学」不得让「考研」判成已贴上。
+  installXhsDom(
+    page('<p>正文 <a class="tiptap-topic" data-topic=\'{"name":"考研数学"}\'>#考研数学<span class="content-hide">[话题]#</span></a></p>'),
+    url,
+  );
+  assert.equal(
+    runInputTargets({ kind: 'topic_committed', value: '考研' }).committed,
+    false,
+    '子串会把「#考研数学」误判成「考研」已贴上',
+  );
+
+  // ④ data-topic 不是合法 JSON 时回落到文本比对，不整条判死。
+  installXhsDom(page('<p><a class="tiptap-topic" data-topic="{坏JSON">#考研</a></p>'), url);
+  assert.equal(runInputTargets({ kind: 'topic_committed', value: '考研' }).committed, true);
 });

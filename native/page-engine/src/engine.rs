@@ -60,6 +60,14 @@ const FACEBOOK_PUBLISH_FILL_TIMEOUT_MS: u64 = 600_000;
 const XHS_COMMENT_TAIL_RESERVE_MS: u64 = 6_000;
 /// 小红书发布字段：写完之后还要花掉的墙钟 —— 有界回读 2s + 光标归尾 + 失败清场 + 余量。
 const XHS_FILL_TAIL_RESERVE_MS: u64 = 3_500;
+/// 加话题：打完 `#关键词` 之后还要花掉的墙钟 —— 等候选下拉 4s + 拟人点击 + 等真 token 4s + 余量。
+/// 留不出来就在**打字之前**零派发地拒绝：话题词一旦进了正文就撤不回来（见下面那条清场红线）。
+const XHS_TOPIC_TAIL_RESERVE_MS: u64 = 10_000;
+/// 候选下拉与真 token 各自的有界轮询窗口（沿用退役实现的实测量级）。
+const XHS_TOPIC_CANDIDATE_BUDGET_MS: u64 = 4_000;
+const XHS_TOPIC_CANDIDATE_INTERVAL_MS: u64 = 250;
+const XHS_TOPIC_COMMIT_BUDGET_MS: u64 = 4_000;
+const XHS_TOPIC_COMMIT_INTERVAL_MS: u64 = 300;
 /// 单个换行的归尾确认上限（退役实测值）与下限。低于下限时「连续两轮 80ms 命中」
 /// 结构上排不下，与其开写到一半超时，不如**开工前零派发**地诚实拒绝。
 const XHS_NEWLINE_STABILIZE_CEILING_MS: u64 = 1_500;
@@ -839,6 +847,13 @@ async fn execute_xhs_command_once(
         }
         PublishFillField(params) => {
             execute_xhs_publish_fill_field(session, params, cancellation, deadline_unix_ms).await
+        }
+        // 候选类特化**只截 `topic` 一种**：它的「真的贴上了没有」判据在退役实现里做过实机校准
+        // （真 token + 剔隐藏后缀 + 精确相等），可以整套移植。`mention` / `location` /
+        // `collection` 不截、仍走注入路由 —— 它们没有任何校准过的 token 判据，
+        // 在桩上现编一个选择器等于拿运营机赌运气。
+        PublishAddWithCandidate(params) if params.candidate_kind == "topic" => {
+            execute_xhs_publish_add_topic(session, params, cancellation, deadline_unix_ms).await
         }
         // 滚动特化：共享惯性滚轮手势（滚前把光标移到**实测**可滚区中心），位移按实测回报。
         // 只有 `browse_next` 需要先关详情浮层——注入路由也只在这一条上关，另两条是纯翻页。
@@ -1970,6 +1985,217 @@ async fn execute_xhs_publish_fill_field(
         true,
         None,
     ))
+}
+
+/// 小红书加话题：落焦正文 → 光标归尾 → **硬件级逐字**打 ` #关键词` → 有界等候选下拉 →
+/// 拟人指针点候选 → 有界等正文里出现**真话题 token**。
+///
+/// 整套（选择器、两个 4s 窗口、「只认精确候选或新建话题、都没有就不点」、真 token 判据）
+/// 移植自退役实现的 `runAddTopic` / `committedTopicPill`，那是实机校准过的。
+///
+/// **改掉的那件事**：注入路由那版把整段正文重新赋值一次，然后拿「正文里搜得到这几个字」
+/// 当确认 —— 而它读回的正是自己刚写进去的那串 `#关键词`。**自证循环：用输入证明输入生效。**
+/// 后果不是没贴上就报错，而是**没贴上也报成功**：稿子发出去时话题只是一串普通文字，
+/// 拿不到话题带来的分发，而回执上一切正常。
+///
+/// 🔴 **打字之后没有安全取消点，这是有意的**：话题词一进正文就撤不回来 ——
+/// 本路径唯一的清场原语是**整字段清空**，而此刻正文里躺着整篇稿子，清它等于毁稿。
+/// 所以取消只在打字**之前**生效；之后把两个有界窗口跑完再让位（合计 ≤ 8s）。
+async fn execute_xhs_publish_add_topic(
+    session: &mut EngineSession,
+    params: &crate::command::PublishCandidateParams,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let record_id = params.record_id;
+    let seq = params.seq;
+    let outcome = |phase: EffectPhase, ok: bool, error: Option<&str>| {
+        xhs_candidate_outcome(phase, record_id, seq, ok, error)
+    };
+    let not_started = |error: &str| outcome(EffectPhase::NotStarted, false, Some(error));
+    // 话题名归一到与分片判据同一口径（去前导 #、去空白）；空词零派发拒绝。
+    let keyword: String = params.value.trim_start_matches('#').trim().to_owned();
+    if keyword.is_empty() {
+        return Ok(not_started("publish_topic_value_empty"));
+    }
+
+    let field_request =
+        serde_json::json!({"kind":"publish_field","op":"probe","fieldType":"content"});
+    let field = probe_xhs_input_target(session, field_request.clone()).await?;
+    if let Err(reason) = xhs_target_gate(
+        &field,
+        "found",
+        "publish_editor_not_found",
+        "publish_editor_probe_unreadable",
+    ) {
+        return Ok(not_started(reason));
+    }
+    let Some((x, y)) = xhs_target_point(&field) else {
+        return Ok(not_started("publish_editor_not_found"));
+    };
+    // 收尾窗口排不下就在**打字之前**拒绝：开写到一半撞死线会把一串裸 `#关键词` 留在正文里，
+    // 而那时候既撤不回来、也没有第二次机会去点候选。
+    let Some(typing_deadline) = xhs_typing_deadline(deadline_unix_ms, XHS_TOPIC_TAIL_RESERVE_MS)
+    else {
+        return Ok(not_started("publish_topic_budget_exhausted"));
+    };
+
+    if let Err(failure) = dispatch_pointer_click(
+        &mut session.cdp,
+        x,
+        y,
+        PointerClickOptions::default(),
+        cancellation,
+        deadline_unix_ms,
+    )
+    .await
+    {
+        return match failure {
+            PointerInputFailure::CancelledBeforePress => Err(cancelled_before_dispatch()),
+            PointerInputFailure::DeadlineBeforePress => {
+                Ok(not_started("publish_topic_deadline_exceeded"))
+            }
+            // 落焦点击不是不可逆动作：这里报「未开始」说的是**这个话题**没开始，属实。
+            PointerInputFailure::MoveFailed(_) | PointerInputFailure::SubmitDispatched(_) => {
+                Ok(not_started("publish_editor_not_actuated"))
+            }
+        };
+    }
+    let focused = probe_xhs_input_target(
+        session,
+        serde_json::json!({"kind":"publish_field","op":"focus","fieldType":"content"}),
+    )
+    .await?;
+    if let Err(reason) = xhs_target_gate(
+        &focused,
+        "focused",
+        "publish_editor_focus_failed",
+        "publish_editor_focus_unreadable",
+    ) {
+        return Ok(not_started(reason));
+    }
+    // 光标归尾：话题是在光标处继续写的，光标停在中间会把它插进正文里、还可能劈开已有 token。
+    let at_end = probe_xhs_input_target(
+        session,
+        serde_json::json!({"kind":"publish_field","op":"cursor_to_end","fieldType":"content"}),
+    )
+    .await?;
+    if let Err(reason) = xhs_target_gate(
+        &at_end,
+        "cursorAtEnd",
+        "publish_topic_caret_not_at_end",
+        "publish_topic_caret_unreadable",
+    ) {
+        return Ok(not_started(reason));
+    }
+
+    // ── 这一行之后，正文被改动了。以下每一个出口都 MUST NOT 回「未开始」。 ──
+    // 前导空格：避免与前一个 token 粘连（退役实现同口径）。
+    let trigger = format!(" #{keyword}");
+    if let Err(failure) =
+        type_text_humanized(&mut session.cdp, &trigger, cancellation, typing_deadline).await
+    {
+        // 取消在这里仍可能发生（逐字输入的取消缝在「这一字符的等待已结束、写入尚未发出」那一瞬），
+        // 但此时可能已经写进去几个字符 —— **不能**回「未开始」，那等于说正文没被碰过。
+        return Ok(outcome(
+            EffectPhase::Ambiguous,
+            false,
+            Some(match failure {
+                TextInputFailure::Cancelled => "publish_topic_cancelled_mid_typing",
+                TextInputFailure::Deadline => "publish_topic_deadline_exceeded",
+                TextInputFailure::TargetLost => "publish_editor_focus_lost",
+                TextInputFailure::NewlineUnstable | TextInputFailure::Engine => {
+                    "publish_topic_typing_failed"
+                }
+            }),
+        ));
+    }
+
+    // 有界等建议下拉里的目标项。找不到就**不点** —— 随便点一个会给稿子贴上一个无关话题，
+    // 而贴上去之后没有任何一步会去撤。此时正文里留着一串裸 `#关键词`（与退役实现同行为），
+    // 回执如实说没确认。
+    let candidate_request = serde_json::json!({"kind":"topic_candidate","value":keyword});
+    let mut candidate_point = None;
+    for _ in 0..(XHS_TOPIC_CANDIDATE_BUDGET_MS / XHS_TOPIC_CANDIDATE_INTERVAL_MS) {
+        tokio::time::sleep(Duration::from_millis(XHS_TOPIC_CANDIDATE_INTERVAL_MS)).await;
+        let probed = probe_xhs_input_target(session, candidate_request.clone()).await?;
+        if xhs_target_optional_bool(&probed, "found") == Some(true) {
+            candidate_point = xhs_target_point(&probed);
+            if candidate_point.is_some() {
+                break;
+            }
+        }
+    }
+    let Some((cx, cy)) = candidate_point else {
+        return Ok(outcome(
+            EffectPhase::Ambiguous,
+            false,
+            Some("publish_candidate_not_found"),
+        ));
+    };
+    // 真实指针事件：退役实现实测过 —— 页面侧 `.click()` **不提交**那个待定 span。
+    if let Err(failure) = dispatch_pointer_click(
+        &mut session.cdp,
+        cx,
+        cy,
+        PointerClickOptions::default(),
+        cancellation,
+        deadline_unix_ms,
+    )
+    .await
+    {
+        return Ok(outcome(
+            EffectPhase::Ambiguous,
+            false,
+            Some(match failure {
+                PointerInputFailure::DeadlineBeforePress => "publish_topic_deadline_exceeded",
+                // 取消已经晚了：正文里躺着话题词。回「未开始」等于让上游以为可以从头再来。
+                PointerInputFailure::CancelledBeforePress => "publish_topic_cancelled_after_typing",
+                PointerInputFailure::MoveFailed(_) | PointerInputFailure::SubmitDispatched(_) => {
+                    "publish_candidate_not_actuated"
+                }
+            }),
+        ));
+    }
+
+    // 后置校验：正文里出现**真话题 token**才算贴上。读不到与读到「没有」都不确认，
+    // 但两者都走同一个出口 —— 这里的三态与别处不同：本判据在解析成功时恒带 `committed`，
+    // 读不到只可能是分片抛异常，而那两种都指向「没贴上或不知道」，处置一致。
+    let commit_request = serde_json::json!({"kind":"topic_committed","value":keyword});
+    for _ in 0..(XHS_TOPIC_COMMIT_BUDGET_MS / XHS_TOPIC_COMMIT_INTERVAL_MS) {
+        tokio::time::sleep(Duration::from_millis(XHS_TOPIC_COMMIT_INTERVAL_MS)).await;
+        let probed = probe_xhs_input_target(session, commit_request.clone()).await?;
+        if xhs_target_optional_bool(&probed, "committed") == Some(true) {
+            return Ok(outcome(EffectPhase::Confirmed, true, None));
+        }
+    }
+    Ok(outcome(
+        EffectPhase::Ambiguous,
+        false,
+        Some("publish_candidate_unconfirmed"),
+    ))
+}
+
+fn xhs_candidate_outcome(
+    phase: EffectPhase,
+    record_id: u64,
+    seq: u32,
+    ok: bool,
+    error: Option<&str>,
+) -> (EffectPhase, CommandOutput) {
+    (
+        phase,
+        CommandOutput::PublishReceipt(PublishReceipt {
+            record_id,
+            seq,
+            kind: "add_with_candidate".to_owned(),
+            ok,
+            submit_dispatched: None,
+            value: None,
+            post_url: None,
+            error: error.map(str::to_owned),
+        }),
+    )
 }
 
 /// 发布正文的有界回读。三种结局分开返回，绝不压成一态：

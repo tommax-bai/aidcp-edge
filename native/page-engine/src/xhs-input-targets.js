@@ -194,6 +194,51 @@
     const area=scrollArea(['[class*="comment-list"]','[class*="comments"]','[class*="detail"]'],root);
     return {...area,rows:commentRows(root).length};
   }
+  // ── 话题候选与话题真 token ─────────────────────────────────────────────────
+  // 选择器与判据整套移植自退役实现（`src/flows/publish-command-handlers.ts::runAddTopic`
+  // 与 `src/flows/publish-post.ts::committedTopicPill`），那是**实机校准过**的，
+  // 不在这里自创。
+  const normTopic=(value)=>String(value??'').replace(/^#+/,'').replace(/\s+/g,'').toLowerCase();
+  // 建议下拉里的目标项。**只认两种**：文本以关键词开头的真候选，或「新建话题」那一项。
+  // 都不成立时 MUST 报没找到、由调用方不点 —— 随便点一个会给稿子贴上一个无关话题，
+  // 而那是不可逆的（贴上去之后没有任何一步会去撤）。
+  if(kind==='topic_candidate'){
+    const wanted=normTopic(req.value);
+    if(!wanted)return {found:false};
+    const box=first(['.tippy-box[role="tooltip"]']);
+    if(!box)return {found:false,dropdown:false};
+    const items=all('#creator-editor-topic-container .item,.item',box).filter(visible);
+    if(!items.length)return {found:false,dropdown:true};
+    const isCreate=(el)=>/新建话题/.test(text(el,200));
+    const exact=items.find((el)=>!isCreate(el)&&normTopic(text(el,200)).indexOf(wanted)===0);
+    const create=items.find(isCreate);
+    const target=exact||create;
+    if(!target)return {found:false,dropdown:true};
+    return {found:true,dropdown:true,matched:exact?'exact':'create',...geometry(target)};
+  }
+  // 话题**真的贴上了没有**。判据是正文里生成了真 token（`a.tiptap-topic[data-topic]`），
+  // 不是「整段正文里搜得到这几个字」—— 后者读回的正是我们自己刚打进去的那串 `#关键词`，
+  // 属自证循环：用输入证明输入生效。纯文本 `#关键词`（打了字但没从候选提交）明确判 false。
+  // 比对前先剔除隐藏后缀 `span.content-hide`（「[话题]#」），并做**精确相等**而非子串 ——
+  // 子串会把已存在的「#考研数学」误判成「考研」已贴上。
+  if(kind==='topic_committed'){
+    const wanted=normTopic(req.value);
+    if(!wanted)return {found:true,committed:false};
+    const editor=publishField('content')||document;
+    const pills=all('a.tiptap-topic,a[data-topic]',editor);
+    const committed=pills.some((pill)=>{
+      // 隐藏后缀按选择器直取，**不能**走 `first()` —— 那一条按可见性过滤，
+      // 而这个 span 恰恰是隐藏的，过滤之后永远取不到、后缀也就永远剔不掉。
+      const hidden=pill.querySelector?pill.querySelector('.content-hide'):null;
+      let raw=pill.textContent||'';
+      if(hidden&&hidden.textContent)raw=raw.replace(hidden.textContent,'');
+      let name='';
+      const attr=pill.getAttribute&&pill.getAttribute('data-topic');
+      if(attr){try{name=normTopic(JSON.parse(attr).name);}catch{name='';}}
+      return name===wanted||normTopic(raw)===wanted;
+    });
+    return {found:true,committed,pills:pills.length};
+  }
   // 详情浮层的关闭控件。`overlay` 与 `found` 是两件事：浮层不在（无需关）与浮层在但关闭控件
   // 没认出来（关不掉），调用方要分开处置。
   if(kind==='detail_close'){
