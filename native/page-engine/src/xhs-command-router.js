@@ -1024,10 +1024,9 @@ async function(input){
     if(matches.length!==1)return done({kind:'publish_receipt',value:{recordId:Number(p.recordId),seq:Number(p.seq),kind:kind.replace('publish_',''),ok:false,error:matches.length?'scheduled_match_ambiguous':'scheduled_record_not_found'}},matches.length?'ambiguous':'not_started');
     const row=matches[0];const raw=text(row,4000);const href=(first(['a[href]'],row)||{}).href||'';const id=norm(row.getAttribute('data-note-id')||row.getAttribute('data-id')||noteIdFrom(href),256);const scheduled=/定时|待发布|scheduled/i.test(raw);let timeConfirmed=true;if(Number(p.publishTime)){const date=new Date(Number(p.publishTime));const hh=String(date.getHours()).padStart(2,'0');const mm=String(date.getMinutes()).padStart(2,'0');timeConfirmed=raw.includes(hh+':'+mm);}const ok=scheduled&&timeConfirmed&&Boolean(id);return done({kind:'publish_receipt',value:{recordId:Number(p.recordId),seq:Number(p.seq),kind:kind.replace('publish_',''),ok,value:id||undefined,postUrl:href||undefined,error:ok?undefined:!scheduled?'scheduled_state_unconfirmed':!timeConfirmed?'scheduled_time_unconfirmed':'scheduled_platform_id_unavailable'}});
   }
-  if(kind==='publish_upload_image'||kind==='publish_set_cover'){
+  if(kind==='publish_set_cover'){
     const previews=all('.img-preview-area img,img[id*="creator-preview"],[class*="preview"] img,[class*="upload"] img').filter(visible);
     const index=Math.max(0,Number(p.imageIndex)||0);const preview=previews[index];if(!preview)return fail(kind.replace('publish_',''),'preview_not_found');
-    if(kind==='publish_upload_image')return done(action('upload_image',true));
     // 图块容器：有界回溯 + 只认真正的图片项容器。旧写法选择器末项是任意 `div`，
     // 实际会停在最近的祖先 div 上——图区是轮播结构，那层容器带「当前显示」类名，
     // 于是「这张图正在显示」被读成「这张图已是封面」，连「设为封面」都不点就回成功。

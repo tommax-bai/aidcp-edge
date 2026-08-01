@@ -129,6 +129,23 @@ test('selects the exact uploaded preview index and requires cover-active evidenc
   assert.equal(missing.output.value.reason, 'preview_not_found');
 });
 
+test('does not let the page router claim a native-specialized image upload succeeded', async () => {
+  install(
+    '<main><div class="preview-item"><img src="existing.jpg"></div></main>',
+    'https://creator.xiaohongshu.com/publish/publish',
+  );
+  const result = await run({
+    kind: 'publish_upload_image',
+    params: { recordId: 1, seq: 6, imageIndex: 0 },
+  });
+  assert.equal(result.effectPhase, 'not_started');
+  assert.deepEqual(result.output.value, {
+    action: 'publish_upload_image',
+    ok: false,
+    reason: 'unsupported_command',
+  });
+});
+
 test('scheduled capture requires one exact title, scheduled state, platform id, and target time', async () => {
   const publishTime = new Date(2026, 6, 22, 18, 45).getTime();
   install(`
