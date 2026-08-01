@@ -10,48 +10,48 @@
     "**只锁 unread 一个方向是不够的**：把一条 unread 改成 below_bar、附一句「差在哪」，unreadBudget 依法下降、门禁全绿，而那条命令的假成功风险一点没变。所以 below_bar 每条 MUST 带 disposition（具名处置），让这条路要么真消除、要么当场留下「谁来解、卡在什么前置上」。",
     "disposition 两种形态：kind=fix 须写 action（消除动作）与 owner（谁来做）；kind=exception 须写 reason（为什么现在做不到）、blockedBy（前置是什么）与 owner（前置解除后谁来解）。**没有处置的 below_bar 与 confirmed 的区别只存在于读者的记忆里**，而这张表存在的全部理由就是不再依赖任何人的记忆。"
   ],
-  "unreadBudget": 16,
-  "belowBarBudget": 3,
+  "unreadBudget": 0,
+  "belowBarBudget": 6,
   "commands": [
     {
       "nativeKind": "facebook_auth_submit_login",
-      "status": "unread",
-      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+      "status": "confirmed",
+      "evidence": "点击后按**导航代际 + 候选指纹**复核（`facebook/auth.rs:797` verify_postcondition → `facebook-router/06-auth.js:392` authPostcondition）：文档代际变了（timeOrigin+URL 摘要，只有真换文档才变，页内重渲染不变）即算生效；否则重新结构化观测该信号，按候选指纹判它是否已消失。**读不出来时 determinate=false，绝不折成成功、也绝不折成「确实没发生」**，有界轮询到顶回 Ambiguous，且 unconfirmed 与 unreadable 两个原因码分开。 本条走 `execute_click`（`auth.rs:154`），期望信号 login_submit_ready。"
     },
     {
       "nativeKind": "facebook_auth_enter_totp",
-      "status": "unread",
-      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+      "status": "confirmed",
+      "evidence": "录入后按**元素指纹绑定 + 精确相等**回读（`auth.rs:310` read_totp → `06-auth.js:376` authTotpReadback）：要求 bound（读的是同一个输入框）+ matches（值与下发码逐字相等）+ length===6 + 非空，四者缺一即 Ambiguous；读不到回 Ambiguous 的独立原因码。**不属「自证」禁令覆盖面**——该禁令针对「业务结果是平台接受了提交」那类（规格 native-locating-gates 明写，且把 mention/location/collection 具名为例外）；本条的业务结果就是「码进了那个框」，受控输入框会拒改或规范化，精确回读确实证明了它。"
     },
     {
       "nativeKind": "facebook_auth_submit_totp",
-      "status": "unread",
-      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+      "status": "confirmed",
+      "evidence": "点击后按**导航代际 + 候选指纹**复核（`facebook/auth.rs:797` verify_postcondition → `facebook-router/06-auth.js:392` authPostcondition）：文档代际变了（timeOrigin+URL 摘要，只有真换文档才变，页内重渲染不变）即算生效；否则重新结构化观测该信号，按候选指纹判它是否已消失。**读不出来时 determinate=false，绝不折成成功、也绝不折成「确实没发生」**，有界轮询到顶回 Ambiguous，且 unconfirmed 与 unreadable 两个原因码分开。 本条先校验 TOTP 时间窗仍新鲜（`auth.rs:378`，不新鲜即 NotStarted），再走 `execute_click_with_observation`（`auth.rs:539`）。"
     },
     {
       "nativeKind": "facebook_auth_clear_totp",
-      "status": "unread",
-      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+      "status": "confirmed",
+      "evidence": "清空后按**元素指纹绑定 + 空值**回读（`auth.rs:507`）：要求 bound + empty + length===0；读不到 / 不匹配各有独立原因码回 Ambiguous。键入中途被取消或派发失败**回 Ambiguous 而非 NotStarted**（`auth.rs:456`/`:497`），因为退格已经打出去了。"
     },
     {
       "nativeKind": "facebook_auth_dismiss_warning",
-      "status": "unread",
-      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+      "status": "confirmed",
+      "evidence": "点击后按**导航代际 + 候选指纹**复核（`facebook/auth.rs:797` verify_postcondition → `facebook-router/06-auth.js:392` authPostcondition）：文档代际变了（timeOrigin+URL 摘要，只有真换文档才变，页内重渲染不变）即算生效；否则重新结构化观测该信号，按候选指纹判它是否已消失。**读不出来时 determinate=false，绝不折成成功、也绝不折成「确实没发生」**，有界轮询到顶回 Ambiguous，且 unconfirmed 与 unreadable 两个原因码分开。 本条走 `execute_click`，期望信号 automation_warning_dismiss。"
     },
     {
       "nativeKind": "facebook_auth_close_push_blocker",
-      "status": "unread",
-      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+      "status": "confirmed",
+      "evidence": "点击后按**导航代际 + 候选指纹**复核（`facebook/auth.rs:797` verify_postcondition → `facebook-router/06-auth.js:392` authPostcondition）：文档代际变了（timeOrigin+URL 摘要，只有真换文档才变，页内重渲染不变）即算生效；否则重新结构化观测该信号，按候选指纹判它是否已消失。**读不出来时 determinate=false，绝不折成成功、也绝不折成「确实没发生」**，有界轮询到顶回 Ambiguous，且 unconfirmed 与 unreadable 两个原因码分开。 本条走 `execute_click`，期望信号 push_blocker_close。"
     },
     {
       "nativeKind": "facebook_auth_confirm_remember_password",
-      "status": "unread",
-      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+      "status": "confirmed",
+      "evidence": "点击后按**导航代际 + 候选指纹**复核（`facebook/auth.rs:797` verify_postcondition → `facebook-router/06-auth.js:392` authPostcondition）：文档代际变了（timeOrigin+URL 摘要，只有真换文档才变，页内重渲染不变）即算生效；否则重新结构化观测该信号，按候选指纹判它是否已消失。**读不出来时 determinate=false，绝不折成成功、也绝不折成「确实没发生」**，有界轮询到顶回 Ambiguous，且 unconfirmed 与 unreadable 两个原因码分开。 本条走 `execute_click`，期望信号 remember_password_confirm。"
     },
     {
       "nativeKind": "plan_execute",
-      "status": "unread",
-      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+      "status": "confirmed",
+      "evidence": "两支都有实测判据：page.scroll 按**实测位移**回报（`xhs-command-router.js:777-784`，无位移即 no_scroll，不再无条件 success）；点击支用与主路径**同源的硬判据** compatVerifier（图标状态位 / 关注文案 / 焦点落位，`:806`），有界重试，且区分「点了但没确认」(escalated) 与「根本没点上」(no_target)，attempts 如实回报。输入支带**自证闸**：非可编辑元素直接判 no_target（`:790`）——在 div 上 dispatchInput 会改 textContent、回读必然相等，那不是证据。⚠️ **本条在活路径上已死**（云端 createEnvelope 出口没有它，唯一产出方是云端联调脚本）：这条分类是「读过了、判据够强」，不是「它在跑」。"
     },
     {
       "nativeKind": "session_stop",
@@ -115,33 +115,48 @@
     },
     {
       "nativeKind": "profile_open",
-      "status": "unread",
-      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+      "status": "confirmed",
+      "evidence": "点击前按地址里的 authorId **精确绑定目标**（`xhs-command-router.js:629`，找到的不是指定作者即 fail profile_target_mismatch，绝不点下去）；点击后复核地址确实落在 /user/profile/ 且含该 authorId，不满足回 ambiguous profile_navigation_unconfirmed。已有行为契约用例把「跳到了主页」与「跳到了那个人的主页」分成两条（`test/native-page-engine/xhs-navigation-command-contracts.test.ts`）。"
     },
     {
       "nativeKind": "notification_open",
-      "status": "unread",
-      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+      "status": "confirmed",
+      "evidence": "有界轮询确认地址真落到通知面（`xhs-command-router.js:641` waitFor 1800/120），不落回 ambiguous notification_navigation_unconfirmed；**并额外要求分类栏可读**（`:644`，读不到回 ambiguous notification_tabs_not_found）——这一条正是为「读不到分类栏」与「三栏都是 0」必须可区分而加：云端把计数 ≤0 当该类已清零跳过，读不到时若回一份全 0 读数，整条巡视会静默什么都不做。"
     },
     {
       "nativeKind": "notification_browse_comments",
-      "status": "unread",
-      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+      "status": "below_bar",
+      "evidence": "点击分类栏后**没有任何后置判据**：非评论两类直接 `done(action(actionName,true,'viewed'))`（`xhs-command-router.js:673-676`），评论类扫完列表直接回 items（`:670-672`）——全程只证明「栏被点了」，没证明**栏真切过去了**。差在这里：点到包裹容器、点了但没切、切了但列表没换，三种情况都会兑现成成功。判据现成且是平台自己产出的：该分类的未读角标 `tabBadgeCount`（`:398`，只认分类栏内 1–3 位纯数字叶子）。⚠️ 与 E13（feed 刷新点完无条件回确认）**同形**。",
+      "disposition": {
+        "kind": "fix",
+        "action": "取该分类未读角标的点击前后读数作判据：切栏前记基线，点击后有界轮询等它归零 / 变化，未变即 Ambiguous 而非成功。**MUST NOT 改用分类栏激活态类名**——本文件 :383 与 :395 两处注释都点过，激活态类名在包裹容器上同样出现，属规格明禁的「宽松类名匹配」。评论类另需保证 items 与被点的类别绑定（今天 notificationItems 的 expected 只用于赞/收藏分辨，不做类别过滤）。",
+        "owner": "change extend-native-postcondition-coverage §3.4"
+      }
     },
     {
       "nativeKind": "notification_browse_likes",
-      "status": "unread",
-      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+      "status": "below_bar",
+      "evidence": "点击分类栏后**没有任何后置判据**：非评论两类直接 `done(action(actionName,true,'viewed'))`（`xhs-command-router.js:673-676`），评论类扫完列表直接回 items（`:670-672`）——全程只证明「栏被点了」，没证明**栏真切过去了**。差在这里：点到包裹容器、点了但没切、切了但列表没换，三种情况都会兑现成成功。判据现成且是平台自己产出的：该分类的未读角标 `tabBadgeCount`（`:398`，只认分类栏内 1–3 位纯数字叶子）。⚠️ 与 E13（feed 刷新点完无条件回确认）**同形**。",
+      "disposition": {
+        "kind": "fix",
+        "action": "取该分类未读角标的点击前后读数作判据：切栏前记基线，点击后有界轮询等它归零 / 变化，未变即 Ambiguous 而非成功。**MUST NOT 改用分类栏激活态类名**——本文件 :383 与 :395 两处注释都点过，激活态类名在包裹容器上同样出现，属规格明禁的「宽松类名匹配」。评论类另需保证 items 与被点的类别绑定（今天 notificationItems 的 expected 只用于赞/收藏分辨，不做类别过滤）。",
+        "owner": "change extend-native-postcondition-coverage §3.4"
+      }
     },
     {
       "nativeKind": "notification_browse_follows",
-      "status": "unread",
-      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+      "status": "below_bar",
+      "evidence": "点击分类栏后**没有任何后置判据**：非评论两类直接 `done(action(actionName,true,'viewed'))`（`xhs-command-router.js:673-676`），评论类扫完列表直接回 items（`:670-672`）——全程只证明「栏被点了」，没证明**栏真切过去了**。差在这里：点到包裹容器、点了但没切、切了但列表没换，三种情况都会兑现成成功。判据现成且是平台自己产出的：该分类的未读角标 `tabBadgeCount`（`:398`，只认分类栏内 1–3 位纯数字叶子）。⚠️ 与 E13（feed 刷新点完无条件回确认）**同形**。",
+      "disposition": {
+        "kind": "fix",
+        "action": "取该分类未读角标的点击前后读数作判据：切栏前记基线，点击后有界轮询等它归零 / 变化，未变即 Ambiguous 而非成功。**MUST NOT 改用分类栏激活态类名**——本文件 :383 与 :395 两处注释都点过，激活态类名在包裹容器上同样出现，属规格明禁的「宽松类名匹配」。评论类另需保证 items 与被点的类别绑定（今天 notificationItems 的 expected 只用于赞/收藏分辨，不做类别过滤）。",
+        "owner": "change extend-native-postcondition-coverage §3.4"
+      }
     },
     {
       "nativeKind": "notification_back_home",
-      "status": "unread",
-      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+      "status": "confirmed",
+      "evidence": "点击后复核地址真落在 /explore（`xhs-command-router.js:678`），不落回 ambiguous home_navigation_unconfirmed；找不到入口回 fail。三态已由行为契约用例锁住（`xhs-navigation-command-contracts.test.ts`）。**它是出口命令**：假成功不体现在自己身上，体现在它之后的每一条命令上。"
     },
     {
       "nativeKind": "interaction_like",
@@ -175,8 +190,8 @@
     },
     {
       "nativeKind": "identity_read_self_profile",
-      "status": "unread",
-      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+      "status": "confirmed",
+      "evidence": "直达自己主页后先等页面类型确实是 Profile（`engine.rs:810` wait_for_page_kind 5s，不到即 navigation_postcondition_failed），再复用 ProfileOpen 那条带 authorId 精确绑定的路径取资料（`engine.rs:813`），拿不到 ProfileDetail 即报错。**两道都是页面自己产出的结构信号**，不是把下发的 accountId 回显一遍。"
     },
     {
       "nativeKind": "captcha_click",
@@ -185,8 +200,8 @@
     },
     {
       "nativeKind": "publish_navigate_entry",
-      "status": "unread",
-      "evidence": "本轮未逐条读其后置判据。**MUST NOT 据此认为它有校验**——未分类只说明没人核过，不说明它安全"
+      "status": "confirmed",
+      "evidence": "导航后等页面类型确实是 Publish（`engine.rs:911` wait_for_page_kind 6s）；不到**不报成功**，回 Ambiguous + publish_entry_unconfirmed（`engine.rs:913-925`）。"
     },
     {
       "nativeKind": "publish_select_mode",

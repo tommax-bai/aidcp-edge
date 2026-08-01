@@ -36,10 +36,11 @@ const STATUSES = new Set(['confirmed', 'below_bar', 'not_applicable', 'unread'])
  * 一直就是这么高的预算长得一模一样。所以把上限钉在**测试这一侧**：调高预算必须同时调高这个
  * 字面量，那是一次显式的、会出现在 diff 里的动作。
  *
- * **这个数字只许改小。** 等它降到 0，`<=` 与「预算恰等于实际条数」两条合起来就自动升级成
- * D4 要的硬断言：任何命令都不得再落进 unread，新增写命令必须当场分类。
+ * **这个数字只许改小，且它已经降到 0**（16 条 unread 于 2026-08-01 逐条读完并分类）。于是
+ * `<=` 与「预算恰等于实际条数」两条合起来就是硬断言：**任何写命令都不得再落进 unread**，
+ * 新增写命令必须当场分类，不能先挂在这里等人回头看。这一格不该再被抬起来。
  */
-const UNREAD_BUDGET_CEILING = 16;
+const UNREAD_BUDGET_CEILING = 0;
 
 /** below_bar 的处置形态与各自的必填字段（任务 1.3）。 */
 const DISPOSITION_FIELDS: Record<string, string[]> = {
@@ -51,7 +52,9 @@ const DISPOSITION_FIELDS: Record<string, string[]> = {
  * 预算类判据。**提成纯函数是为了让门禁能先抓一次自己**（任务 1.6）：
  * 直接写成 assert 的话，只能靠临时改真表来验证断言承重，改完还得还原——那种验证不会留下来。
  */
-function budgetProblems(registry: Registry): string[] {
+function budgetProblems(registry: Registry, ceiling = UNREAD_BUDGET_CEILING): string[] {
+  // ceiling 可传是为了让下面的合成样本**带着自己的上限**跑：写死读全局的话，
+  // 真上限一旦变化，样本就会悄悄不再触发那条规则、退化成装饰。
   const problems: string[] = [];
   const count = (status: string) => registry.commands.filter((entry) => entry.status === status).length;
 
@@ -65,10 +68,9 @@ function budgetProblems(registry: Registry): string[] {
         + '——空位就是允许新的未读悄悄补进来',
     );
   }
-  if (registry.unreadBudget > UNREAD_BUDGET_CEILING) {
+  if (registry.unreadBudget > ceiling) {
     problems.push(
-      `unreadBudget 被抬起：${registry.unreadBudget} > 上限 ${UNREAD_BUDGET_CEILING}`
-        + '——这个数字只许下降',
+      `unreadBudget 被抬起：${registry.unreadBudget} > 上限 ${ceiling}——这个数字只许下降`,
     );
   }
 
@@ -214,6 +216,12 @@ test('5.6 本 change 亲手落的那几条确实在表里、且标成达标', ()
  * 会触发它的样本，并断言**恰好是它**报的错——「有红」不等于「是这条抓住的」。
  */
 
+/**
+ * 样本自带的上限。**故意不等于真上限**：真上限今天是 0（未读已归零），
+ * 而这些样本要验的是「规则本身承不承重」，得留出一格未读才演示得了。
+ */
+const SAMPLE_CEILING = 1;
+
 /** 一份各项都合法的最小盘点表，样本从它出发只坏一处。 */
 function healthyRegistry(): Registry {
   return {
@@ -234,7 +242,7 @@ function healthyRegistry(): Registry {
 }
 
 test('1.6 门禁抓自己：健康样本必须零问题（否则下面的样本红了也说明不了什么）', () => {
-  assert.deepEqual(budgetProblems(healthyRegistry()), []);
+  assert.deepEqual(budgetProblems(healthyRegistry(), SAMPLE_CEILING), []);
   assert.deepEqual(dispositionProblems(healthyRegistry()), []);
 });
 
@@ -246,24 +254,24 @@ test('1.6 门禁抓自己：unread 改成 below_bar 而不抬 belowBarBudget —
   entry.disposition = { kind: 'fix', action: '补判据', owner: 'change X' };
   sample.unreadBudget = 0; // 洗白动作会顺手把未读预算降下来，看起来像进展
 
-  const problems = budgetProblems(sample);
+  const problems = budgetProblems(sample, SAMPLE_CEILING);
   assert.equal(problems.length, 2, `期望恰好由两条 belowBarBudget 判据抓住，实际：${problems.join(' | ')}`);
   assert.match(problems[0], /belowBarBudget 被突破/);
   assert.match(problems[1], /belowBarBudget 留了空位/);
 });
 
 test('1.6 门禁抓自己：unreadBudget 被抬起', () => {
+  // 健康样本已有 1 条未读、预算 1 = SAMPLE_CEILING。再加一条并把预算抬到 2：
+  // 「≤ 预算」与「预算等于实际条数」两条都仍满足，**只有上限那条会红**。
   const sample = healthyRegistry();
-  sample.unreadBudget = UNREAD_BUDGET_CEILING + 1;
-  sample.commands.push(
-    ...Array.from({ length: UNREAD_BUDGET_CEILING }, (_, index) => ({
-      nativeKind: `sample_unread_${index}`,
-      status: 'unread',
-      evidence: '本轮未读',
-    })),
-  );
+  sample.unreadBudget = SAMPLE_CEILING + 1;
+  sample.commands.push({
+    nativeKind: 'sample_unread_extra',
+    status: 'unread',
+    evidence: '本轮未读',
+  });
 
-  const problems = budgetProblems(sample);
+  const problems = budgetProblems(sample, SAMPLE_CEILING);
   assert.equal(problems.length, 1, `期望恰好由上限那条抓住，实际：${problems.join(' | ')}`);
   assert.match(problems[0], /unreadBudget 被抬起/);
 });
