@@ -241,7 +241,10 @@ test('opens and closes a correlated host commit window before Native write compl
     return () => { open = false; };
   });
   assert.equal(execution.effectPhase, 'confirmed');
-  assert.deepEqual(seen, [{ label: 'fb_join_click', budgetMs: 18_500, commandId: 1 }]);
+  // 预算来自**宿主事实源**（`NATIVE_COMMIT_WINDOW_BUDGETS` 的 `fb_join_click`），不是引擎报的。
+  // change `harden-native-engine-runtime-contracts` 3.2 之后，引擎的开窗请求线路上**只有标签**：
+  // 假引擎与真引擎一样不再发预算数字，宿主按标签发放，守卫拿到的就是这个授予值。
+  assert.deepEqual(seen, [{ label: 'fb_join_click', budgetMs: 27_750, commandId: 1 }]);
   assert.equal(open, false);
   await session.close();
 });

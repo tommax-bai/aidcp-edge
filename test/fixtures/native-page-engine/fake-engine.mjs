@@ -120,7 +120,6 @@ if (mode === 'malformed') {
           commandId: request.commandId,
           token: `cw_${request.commandId}_1`,
           label: 'fb_join_click',
-          budgetMs: 18_500,
         })}\n`);
         return;
       }
