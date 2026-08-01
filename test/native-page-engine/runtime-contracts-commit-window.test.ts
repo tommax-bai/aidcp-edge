@@ -52,23 +52,14 @@ const ENGINE_WINDOW_SOURCES = [
 ];
 
 /**
- * 引擎里那些「命令墙钟上限」类的常量。预算允许写成对它们的**引用**而不是字面量 ——
- * 那正是我们要的：上限被调时（Facebook 时间预算整体 ×1.5 就调过一次）预算自动跟随，
- * 而不是留一份手抄值在那里等着静默失配。故这里把引用解析开再对账，
- * 解析不出来 MUST 响亮失败（悄悄跳过等于把那条窗口从对账表里抹掉）。
+ * 这里曾有一段「把引擎侧预算里的常量引用解析开再对账」的辅助（`ENGINE_CONSTANT_SOURCES` +
+ * `engineConstants()`）。它服务的是**引擎侧还写着预算数字**的那个年代：预算允许写成对命令墙钟上限
+ * 常量的引用而非字面量，于是对账前要先把引用解开。
+ *
+ * 任务 3.2 把引擎侧的预算数字整个删掉之后，**引擎那边已经没有任何数字需要解析** ——
+ * 这段辅助随之失去全部调用方，故一并删除。若将来有人把预算数字加回引擎侧（下面第一条断言会当场拦下），
+ * 需要的也不是把这段捞回来，而是先回答「为什么又要第二份事实源」。
  */
-const ENGINE_CONSTANT_SOURCES = ['../../native/page-engine/src/engine.rs'];
-
-async function engineConstants(): Promise<Record<string, number>> {
-  const table: Record<string, number> = {};
-  for (const source of ENGINE_CONSTANT_SOURCES) {
-    const text = await readFile(fileURLToPath(new URL(source, import.meta.url)), 'utf8');
-    for (const entry of text.matchAll(/^(?:pub )?const ([A-Z0-9_]+): u64 = ([0-9_]+);/gm)) {
-      table[entry[1]!] = Number(entry[2]!.replaceAll('_', ''));
-    }
-  }
-  return table;
-}
 
 test('提交窗口的预算只有一处声明：引擎源码里不得再出现任何预算数字', async () => {
   // **这条断言在 3.2 之后换了保护对象，别按旧标题读。**
