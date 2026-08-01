@@ -35,6 +35,10 @@ test('credential fill failure keeps the core attached and waits for identity in 
     'a retained wait must publish a changed manual reason without terminating or adding another watcher');
   assert.doesNotMatch(retainedWait, /setInterval|setTimeout|Promise\.all/,
     'manual waiting must reuse the identity cadence instead of creating another scheduler');
+  assert.match(core, /onAutomaticProgress:[\s\S]*?type: 'lifecycle\.auth_progress'[\s\S]*?kind: 'automatic_login'/,
+    'a retained coordinator that regains automatic authority must publish structured progress');
+  assert.match(core, /type: 'lifecycle\.auth_failed'[\s\S]*?kind: 'terminal_auth_failure'/,
+    'terminal authentication failures must be structured before process exit');
 });
 
 test('Electron accepts only enumerated Facebook manual reasons and keeps their browser blocked', () => {
@@ -66,6 +70,7 @@ test('Electron accepts only enumerated Facebook manual reasons and keeps their b
   assert.match(authHandler, /settleLaunchReady\(handle, false\)/,
     'manual attention must release only the serial launch waiter');
   assert.match(authHandler, /authReason: message\.reason/);
+  assert.match(authHandler, /loginFlow: \{ state: 'manual_required', reason: message\.reason \}/);
   assert.match(authHandler, /lastMessage: authMessage[\s\S]*?presencePatch\(authMessage\)/,
     'the accepted structured reason must drive the visible manual-attention copy');
   assert.match(shell, /status\.overlayBlocked \|\| facebookManualAuthMessage\(status\.authReason\)/,
@@ -74,6 +79,22 @@ test('Electron accepts only enumerated Facebook manual reasons and keeps their b
     'the existing stable account event clears the manual reason after in-place login');
   assert.match(shell, /message\.type === 'lifecycle\.close_failed'[\s\S]*?user_close'[\s\S]*?user_pause'/,
     'a failed confirmed-close attempt must remain visible for both explicit stop commands');
+
+  assert.match(shell,
+    /message\.type === 'lifecycle\.auth_progress'[\s\S]*?loginFlow: \{ state: 'automatic' \}[\s\S]*?正在自动登录/,
+    'automatic progress must replace the earlier manual projection without log parsing');
+  assert.match(authHandler,
+    /message\.type === 'lifecycle\.auth_failed'[\s\S]*?loginFlow: \{ state: 'failed', reason \}/,
+    'terminal authentication failure must enter an explicit projected state');
+  assert.match(shell,
+    /const terminalLoginFailure = handle\.status\.loginFlow[\s\S]*?const exitedAbnormally = Boolean\(terminalLoginFailure\)/,
+    'current-generation authentication failure must outrank an older intentional stop reason');
+  assert.match(shell,
+    /const decision = terminalLoginFailure[\s\S]*?\{ action: 'stop', streak: 0 \}/,
+    'terminal authentication failure must not enter an automatic restart loop');
+  assert.match(shell,
+    /loginFlow: terminalLoginFailure[\s\S]*?登录认证异常[\s\S]*?edgeFailurePatch/,
+    'child close must preserve the authentication failure instead of projecting ordinary offline');
 
   const browserControl = shell.slice(
     shell.indexOf('function writeBrowserControlCommand'),

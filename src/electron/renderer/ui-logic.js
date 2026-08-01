@@ -53,6 +53,17 @@
     );
   }
 
+  function loginFlowState(status) {
+    const flow = status && status.loginFlow;
+    return flow && typeof flow === 'object' ? flow.state : '';
+  }
+
+  function loginFlowFailureDetail(status) {
+    const flow = status && status.loginFlow;
+    const reason = flow && typeof flow.reason === 'string' ? flow.reason.trim() : '';
+    return reason ? `登录认证异常：${reason}` : '登录认证异常，需要处理后重新启动';
+  }
+
   function lifecycleView(status) {
     const raw = status || {};
     const automationState = raw.automationState
@@ -85,6 +96,7 @@
     }
     if (s.risk === 'frozen') return { code: 'error', label: '已暂停', detail: '账号已暂停，当前无法继续操作，请查看详情' };
     if (s.risk === 'restricted') return { code: 'attention', label: '受限制', detail: '账号受限，自动运营已暂停；确认 Facebook 可正常使用后可解除受限' };
+    if (loginFlowState(s) === 'failed') return { code: 'error', label: '异常', detail: loginFlowFailureDetail(s) };
     if (s.automationState === 'error' || ((s.coreState === 'error' || s.edge === 'warning') && s.automationState !== 'stopped')) {
       return { code: 'error', label: '异常', detail: edgeFailure || '自动化引擎未能继续运行，请查看详情' };
     }
@@ -99,6 +111,9 @@
     }
     if (s.browserState === 'error') {
       return { code: 'attention', label: '异常', detail: '浏览器异常；数据管理仍可用，可重新打开浏览器恢复页面操作' };
+    }
+    if (loginFlowState(s) === 'automatic') {
+      return { code: 'ready', label: '登录中', detail: '系统正在自动登录，无需人工操作' };
     }
     if (s.automationState === 'paused') return { code: 'paused', label: '已暂停', detail: '引擎已断开；数据管理仍可继续使用' };
     if (s.automationState === 'running') {
@@ -798,6 +813,9 @@
     );
     const edgeFailure = s.edgeFailure && typeof s.edgeFailure.summary === 'string' ? s.edgeFailure.summary.trim() : '';
     if (s.respawnGaveUp) return result('error', true, '已停机', 'error', 'attention', '错误 · 已放弃重启');
+    if (loginFlowState(s) === 'failed') {
+      return result('error', true, '异常', 'error', 'attention', loginFlowFailureDetail(s));
+    }
     if (s.automationState === 'error' || ((s.coreState === 'error' || s.edge === 'warning') && s.automationState !== 'stopped')) {
       return result('error', true, '异常', 'error', 'attention', edgeFailure || '自动化引擎异常');
     }
@@ -816,6 +834,9 @@
     if (s.risk === 'restricted') return result('attention', true, '受限制', 'attention', 'attention', '账号受限');
     if (s.sameAccountWarning) return result('attention', true, '有冲突', 'attention', 'attention', '账号重复运行');
     if (s.browserState === 'error') return result('attention', true, '异常', 'attention', 'attention', '浏览器异常');
+    if (loginFlowState(s) === 'automatic') {
+      return result('launching', false, '登录中', 'starting', 'starting', '系统正在自动登录，无需人工操作');
+    }
     if (s.automationState === 'waiting_resource') {
       return result('launching', false, '排队中', 'queued', 'queued', '等待浏览器执行位');
     }

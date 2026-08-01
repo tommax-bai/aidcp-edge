@@ -38,7 +38,14 @@ interface PublishDockV { collapsed: boolean; label: string; summary: string }
 const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
   relTime: (from: number, now: number) => string;
   synthesizeHealth: (s: Record<string, unknown>) => Health;
-  fleetLevel: (s: Record<string, unknown>, now: number) => { level: string; needsAction: boolean; label: string; detail: string };
+  fleetLevel: (s: Record<string, unknown>, now: number) => {
+    level: string;
+    needsAction: boolean;
+    label: string;
+    state: string;
+    railGroup: string;
+    detail: string;
+  };
   bandTone: (s: Record<string, unknown>) => string;
   detailRows: (s: Record<string, unknown>) => Array<{ key: string; label: string; value: string }>;
   presenceView: (s: Record<string, unknown>, now: number) => PresenceV;
@@ -166,6 +173,53 @@ test('Facebook 2FA 与探针人工态显示需处理而非异常', () => {
   }
 });
 
+test('人工登录恢复自动执行后立即归启动中，且不冒充任务运行', () => {
+  const automatic = st({
+    automationState: 'stopped',
+    engineLinkState: 'connecting',
+    browserState: 'ready',
+    auth: 'checking',
+    authReason: null,
+    loginFlow: { state: 'automatic' },
+    session: 'idle',
+  });
+
+  const health = uiLogic.synthesizeHealth(automatic);
+  assert.equal(health.code, 'ready');
+  assert.equal(health.label, '登录中');
+  assert.match(health.detail, /无需人工操作/);
+
+  const fleet = uiLogic.fleetLevel(automatic, Date.now());
+  assert.equal(fleet.level, 'launching');
+  assert.equal(fleet.needsAction, false);
+  assert.equal(fleet.label, '登录中');
+  assert.equal(fleet.railGroup, 'starting');
+  assert.notEqual(fleet.railGroup, 'running');
+});
+
+test('自动登录终止后归需要处理并保留认证原因，不回落离线', () => {
+  const failed = st({
+    automationState: 'stopped',
+    engineLinkState: 'disconnected',
+    browserState: 'closed',
+    auth: 'checking',
+    loginFlow: { state: 'failed', reason: 'auth_target_not_found' },
+    edge: 'warning',
+    session: 'idle',
+  });
+
+  const health = uiLogic.synthesizeHealth(failed);
+  assert.equal(health.code, 'error');
+  assert.equal(health.label, '异常');
+  assert.match(health.detail, /auth_target_not_found/);
+
+  const fleet = uiLogic.fleetLevel(failed, Date.now());
+  assert.equal(fleet.needsAction, true);
+  assert.equal(fleet.railGroup, 'attention');
+  assert.equal(fleet.label, '异常');
+  assert.notEqual(fleet.level, 'offline');
+});
+
 // ── 首次连接 ≠ 断线重连（change honest-first-connect-label）──
 // 冷启动窗口的真实形状：核心一打印日志 edge 就被翻成 running，spawn 时 session 已乐观写成 running，
 // 而核心 main() 里连云端排在「起浏览器 → CDP attach → 登录闸」之后——于是 cloud 还是 disconnected。
@@ -226,6 +280,8 @@ test('健康合成：主状态最多三个汉字，具体对象和原因留在�
     st({ risk: 'frozen' }),
     st({ risk: 'restricted' }),
     st({ auth: 'login required', automationState: 'stopped' }),
+    st({ loginFlow: { state: 'automatic' }, automationState: 'stopped' }),
+    st({ loginFlow: { state: 'failed', reason: 'auth_target_not_found' }, automationState: 'stopped' }),
     st({ browserState: 'error', automationState: 'ready' }),
   ];
   for (const status of cases) {

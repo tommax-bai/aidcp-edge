@@ -178,6 +178,11 @@ function facebookManualAuthMessage(reason) {
     : null;
 }
 
+function facebookAuthFailureReason(reason) {
+  const value = typeof reason === 'string' ? reason : '';
+  return /^[a-z0-9_]{1,80}$/.test(value) ? value : null;
+}
+
 // ── 边端日志落文件（排障用）──────────────────────────────────────────────
 // 核心子进程 stdout/stderr 除了进 UI 活动流，再逐行 append 到 userData/logs/edge.log，
 // 便于事后精确复盘。多环境下同一文件、每行带 [envId] 前缀（交织输出仍可按环境筛）。
@@ -1627,6 +1632,7 @@ function makeStatus(provider) {
     cloudEverConnected: false,
     auth: 'checking',
     authReason: null,
+    loginFlow: null,
     session: 'idle',
     stats: { views: 0, likes: 0, collects: 0, comments: 0, follows: 0, publishes: 0 },
     dailyUsage: null,
@@ -2636,6 +2642,7 @@ function advanceLifecycleGeneration(handle, reason) {
     handle.status.loopStage = null;
     handle.status.loopStageGeneration = handle.lifecycleGeneration;
     handle.status.loopStageBrowserIndependent = false;
+    handle.status.loginFlow = null;
   }
   lifecycleQueue.cancel?.(handle.envId);
   launchQueue.cancel?.(handle.envId);
@@ -4678,6 +4685,7 @@ async function spawnEdgeChild(handle, {
   handle.runtimePostureCore = null;
   handle.browserStateUnconfirmed = false;
   handle.status.authReason = null;
+  handle.status.loginFlow = null;
   handle.browserPersonaNoticeState = null;
   resetPersonaNoticeGrace(handle);
   handle.browserAlreadyRunning = false;
@@ -4731,6 +4739,7 @@ async function spawnEdgeChild(handle, {
   updateStatus(handle, {
     edge: 'starting',
     authReason: null,
+    loginFlow: null,
     session: handle.automationPaused ? 'paused' : (controlBootstrap ? 'resting' : 'running'),
     closeScope: null,
     // 新核心 = 还没连上过云端，哪怕上一个核心连上过（change honest-first-connect-label）。不复位这一位，
@@ -4779,6 +4788,23 @@ async function spawnEdgeChild(handle, {
       || (message.type === 'lifecycle.paused' && handle.engineStopReason === 'user_pause')
     );
     if (!currentGeneration && !currentStopReply) return;
+    if (message.type === 'lifecycle.auth_progress') {
+      if (message.kind !== 'automatic_login'
+          || message.platform !== 'facebook'
+          || handle.platform !== 'facebook'
+          || typeof message.phase !== 'string'
+          || typeof message.action !== 'string') return;
+      updateStatus(handle, {
+        edge: 'starting',
+        auth: 'checking',
+        authReason: null,
+        loginFlow: { state: 'automatic' },
+        lastMessage: '正在自动登录 Facebook；无需人工操作。',
+        ...presencePatch('正在自动登录…'),
+        ...clearEdgeFailurePatch(handle),
+      });
+      return;
+    }
     if (message.type === 'lifecycle.auth_required') {
       const authMessage = facebookManualAuthMessage(message.reason);
       if (message.kind !== 'manual_login_required'
@@ -4790,10 +4816,29 @@ async function spawnEdgeChild(handle, {
         edge: 'running',
         auth: 'login required',
         authReason: message.reason,
+        loginFlow: { state: 'manual_required', reason: message.reason },
         session: 'idle',
         lastMessage: authMessage,
         ...presencePatch(authMessage),
         ...clearEdgeFailurePatch(handle),
+      });
+      return;
+    }
+    if (message.type === 'lifecycle.auth_failed') {
+      const reason = facebookAuthFailureReason(message.reason);
+      if (message.kind !== 'terminal_auth_failure'
+          || message.platform !== 'facebook'
+          || handle.platform !== 'facebook'
+          || !reason) return;
+      settleLaunchReady(handle, false);
+      updateStatus(handle, {
+        edge: 'warning',
+        auth: 'checking',
+        authReason: null,
+        loginFlow: { state: 'failed', reason },
+        lastMessage: `登录认证异常：${reason}。自动化已安全停手。`,
+        ...presencePatch('登录认证异常，需要处理'),
+        ...edgeFailurePatch(`登录认证异常：${reason}`),
       });
       return;
     }
@@ -5070,6 +5115,7 @@ async function spawnEdgeChild(handle, {
     settleLaunchReady(handle, false); // 起不来：立刻放行启动队列的下一个，绝不占着队列干等
     handle.child = undefined;
     handle.status.authReason = null;
+    handle.status.loginFlow = null;
     handle.status.proxyRuntime = invalidateProxyRuntime(handle.status.proxyRuntime);
     handle.runtimePosture = null; // 顺手清爽；真正的作用域判定在读侧（livePosture）
     settleTransientBrowserLease(handle, 'core_spawn_error', false);
@@ -5166,6 +5212,9 @@ async function spawnEdgeChild(handle, {
     const wasPausing = handle.pausePending;
     const wasRestarting = handle.restartPending;
     const stopReason = handle.engineStopReason;
+    const terminalLoginFailure = handle.status.loginFlow && handle.status.loginFlow.state === 'failed'
+      ? handle.status.loginFlow
+      : null;
     const shouldResumeAfterStop = handle.resumeAfterStop && handle.automationIntent === 'enabled';
     // 初始 browser-absent 核心只有在发出 lifecycle.standby ack 后才算真正待机成功。若 Cloud hello
     // 失败即退出，pending 不能把它洗成“有意待机退出”——那会吞掉真实握手故障且永不重试。
@@ -5173,6 +5222,7 @@ async function spawnEdgeChild(handle, {
     const wasColdStandby = !controlPlaneNeverEstablished && (handle.coldStandbyPending || handle.coldStandbyActive);
     handle.child = undefined;
     handle.status.authReason = null;
+    if (!terminalLoginFailure) handle.status.loginFlow = null;
     handle.status.proxyRuntime = invalidateProxyRuntime(handle.status.proxyRuntime);
     // posture 描述的是**一个还活着的核心**的运行态。进程都没了，它就不再描述任何东西：留着会让
     // 「已停止」被压成「身份已失效 / 自动化已停摆」。真正的终局归因走退出码那条权威判据（下面）。
@@ -5197,7 +5247,8 @@ async function spawnEdgeChild(handle, {
     handle.pausePending = false;
     handle.coreParked = false;
     handle.closePending = false;
-    const exitedAbnormally = !intentional && (signal != null || (code != null && code !== 0));
+    const exitedAbnormally = Boolean(terminalLoginFailure)
+      || (!intentional && (signal != null || (code != null && code !== 0)));
     handle.browserStateUnconfirmed = exitedAbnormally;
     const message = exitMessage(code, signal);
     if (handle.removed) return; // 已摘除的环境不再投影状态
@@ -5241,7 +5292,9 @@ async function spawnEdgeChild(handle, {
     const inUseHolder = handle.envInUseHolder ? `（AdsPower 账号 ${handle.envInUseHolder}）` : '';
     const inUseMsg = `环境被其它设备或窗口占用${inUseHolder}；已停止启动，请在占用它的一端关闭后再点「启动」重试。`;
     // 有界重起决策（仅对异常退出计入；有意停止 / 不可重起终局一律 stop）。
-    const decision = envInUse
+    const decision = terminalLoginFailure
+      ? { action: 'stop', streak: 0 }
+      : envInUse
       ? { action: 'stop', streak: 0 }
       : exitedAbnormally
         ? fleet.decideRespawn(
@@ -5284,7 +5337,10 @@ async function spawnEdgeChild(handle, {
       edge: exitedAbnormally ? 'warning' : 'stopped',
       cloud: 'disconnected',
       loopStage: null,
-      session: stopReason === 'user_pause'
+      loginFlow: terminalLoginFailure,
+      session: terminalLoginFailure
+        ? 'idle'
+        : stopReason === 'user_pause'
         ? 'paused'
         : stopReason === 'user_close' || stopReason === 'binding_untrusted'
           ? 'closed'
@@ -5300,7 +5356,9 @@ async function spawnEdgeChild(handle, {
       ...(handle.kind === 'adspower' ? { auth: 'checking' } : {}),
       overlayBlocked: false,
       respawnGaveUp: gaveUp,
-      lastMessage: envInUse
+      lastMessage: terminalLoginFailure
+        ? `登录认证异常：${terminalLoginFailure.reason}。自动化已停止，需要处理后重新启动。`
+        : envInUse
         ? inUseMsg
         : stopReason === 'user_pause'
         ? '自动化已暂停，引擎和浏览器已关闭；数据管理仍可继续使用。'
@@ -5316,7 +5374,9 @@ async function spawnEdgeChild(handle, {
           ? `${message} 将在 ${Math.round((decision.delayMs || 0) / 1000)}s 后自动重启（第 ${decision.streak}/${RESPAWN_OPTS.maxConsecutiveFailures} 次）。`
           : message,
       ...presencePatch(
-        stopReason === 'user_pause'
+        terminalLoginFailure
+          ? '登录认证异常，需要处理'
+          : stopReason === 'user_pause'
           ? '自动化已暂停'
           : stopReason === 'user_close'
             ? '自动化已关闭'
@@ -5334,7 +5394,9 @@ async function spawnEdgeChild(handle, {
               ? '已暂停，随时可以恢复'
               : '引擎已停止',
       ),
-      ...(envInUse
+      ...(terminalLoginFailure
+        ? edgeFailurePatch(`登录认证异常：${terminalLoginFailure.reason}`)
+        : envInUse
         ? edgeFailurePatch(inUseMsg)
         : exitedAbnormally
           ? abnormalExitFailurePatch(handle, code, signal)
@@ -5961,6 +6023,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
       // adspower 路径此前无人写 'logged in'（cookie 门是 self 专属），人设闸因此永不开——修于本 change。
       next.auth = 'logged in';
       next.authReason = null;
+      next.loginFlow = null;
       refreshSameAccountWarnings();
       // 环境名跟随真实昵称（changes edge-adspower-name-follows-nickname / wechat-channels-env-name-follows-nickname）：
       // 读到非空平台真实昵称且与 AdsPower 环境名不一致时，经写客户端改名封装把该环境名改成昵称。

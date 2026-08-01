@@ -87,6 +87,7 @@ function action(
 }
 
 test('filled email login advances through one TOTP entry and submit chain', async () => {
+  const automaticProgress: Array<{ signal: string; action: string }> = [];
   const broker = totpBroker([
     { code: '123456', windowStartMs: 90_000, windowEndMs: 120_000 },
   ]);
@@ -117,6 +118,7 @@ test('filled email login advances through one TOTP entry and submit chain', asyn
     timeoutMs: 30_000,
     now: () => 0,
     sleep: async () => undefined,
+    onAutomaticProgress: (progress: { signal: string; action: string }) => automaticProgress.push(progress),
   });
 
   assert.deepEqual(result, { kind: 'authenticated', actionAttempts: 3 });
@@ -131,6 +133,11 @@ test('filled email login advances through one TOTP entry and submit chain', asyn
     'facebook_auth_probe',
   ]);
   assert.deepEqual(broker.requests, [90_100]);
+  assert.deepEqual(automaticProgress, [
+    { signal: 'login_submit_ready', action: 'facebook_auth_submit_login' },
+    { signal: 'totp_entry_ready', action: 'facebook_auth_enter_totp' },
+    { signal: 'totp_submit_ready', action: 'facebook_auth_submit_totp' },
+  ]);
   runtime.assertDone();
 });
 
@@ -597,6 +604,7 @@ test('lifecycle interruption stops before the next Native command', async () => 
 });
 
 test('missing AdsPower credential fill becomes a manual-login result without Native input', async () => {
+  const automaticProgress: Array<{ signal: string; action: string }> = [];
   const runtime = new ScriptedRuntime([
     {
       kind: 'facebook_auth_probe',
@@ -609,6 +617,7 @@ test('missing AdsPower credential fill becomes a manual-login result without Nat
     totpBroker: totpBroker(),
     freshStartPolicyApplied: true,
     timeoutMs: 5_000,
+    onAutomaticProgress: (progress) => automaticProgress.push(progress),
   });
 
   assert.deepEqual(result, {
@@ -617,10 +626,12 @@ test('missing AdsPower credential fill becomes a manual-login result without Nat
     actionAttempts: 0,
   });
   assert.deepEqual(runtime.calls.map((call) => call.kind), ['facebook_auth_probe']);
+  assert.deepEqual(automaticProgress, [], 'manual-required observation must not imply autonomous progress');
   runtime.assertDone();
 });
 
 test('retained manual-login session re-enters the same coordinator when the page advances to 2FA', async () => {
+  const automaticProgress: Array<{ signal: string; action: string }> = [];
   const broker = totpBroker([
     { code: '123456', windowStartMs: 90_000, windowEndMs: 120_000 },
   ]);
@@ -658,6 +669,7 @@ test('retained manual-login session re-enters the same coordinator when the page
     timeoutMs: 30_000,
     now: () => 0,
     sleep: async () => undefined,
+    onAutomaticProgress: (progress: { signal: string; action: string }) => automaticProgress.push(progress),
   };
 
   const initial = await reconcileFacebookStartupAuth(options);
@@ -679,6 +691,10 @@ test('retained manual-login session re-enters the same coordinator when the page
     'facebook_auth_probe',
   ]);
   assert.deepEqual(broker.requests, [90_100]);
+  assert.deepEqual(automaticProgress, [
+    { signal: 'totp_entry_ready', action: 'facebook_auth_enter_totp' },
+    { signal: 'totp_submit_ready', action: 'facebook_auth_submit_totp' },
+  ], 'only structurally bound automatic actions publish progress');
   runtime.assertDone();
 });
 

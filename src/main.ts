@@ -358,6 +358,23 @@ async function main(): Promise<void> {
       timeoutMs,
       logger: (message) => console.log(message),
       pollInterrupt: () => lifecycleAuthInterrupts.current(),
+      onAutomaticProgress: (progress) => sendLifecycleIpc({
+        type: 'lifecycle.auth_progress',
+        kind: 'automatic_login',
+        phase: progress.signal,
+        action: progress.action,
+        platform: platformDriver.platform,
+      }),
+    });
+  };
+
+  const reportFacebookAuthFailure = (reason: string): void => {
+    if (platformDriver.platform !== 'facebook' || provider.kind !== 'adspower') return;
+    sendLifecycleIpc({
+      type: 'lifecycle.auth_failed',
+      kind: 'terminal_auth_failure',
+      reason,
+      platform: platformDriver.platform,
     });
   };
 
@@ -398,6 +415,7 @@ async function main(): Promise<void> {
           });
           console.log(`[aidcp-edge] Facebook 需要人工登录（${authResult.reason}）；保留浏览器与 CDP，等待登录完成。`);
         } else if (authResult.kind === 'timeout') {
+          reportFacebookAuthFailure('facebook_auth_timeout');
           console.error(
             `[aidcp-edge] ✗ Facebook 首登辅助在 ${Math.round(loginWaitMs / 1000)}s 有界预算内未完成 → 干净停止。`,
           );
@@ -406,6 +424,7 @@ async function main(): Promise<void> {
           console.log(`[aidcp-edge] Facebook 首登辅助被中断（${authResult.reason}）→ 干净停止。`);
           terminateNow(0);
         } else {
+          reportFacebookAuthFailure(authResult.reason);
           console.error(`[aidcp-edge] ✗ Facebook 首登辅助安全停手（${authResult.reason}）。`);
           terminateNow(1);
         }
@@ -499,6 +518,7 @@ async function main(): Promise<void> {
 
     if (action.kind === 'terminate') {
       if (action.reason === 'login_wait_timeout') {
+        reportFacebookAuthFailure('login_wait_timeout');
         console.error(
           `[aidcp-edge] ✗ 等待登录超时（剩余 ${Math.round(remainingLoginWaitMs / 1000)}s 内未完成登录）→ 诚实停手（干净停止、不自动重起）。请在浏览器登录目标账号后点「启动」重试。`,
         );
@@ -506,8 +526,11 @@ async function main(): Promise<void> {
         const cmd = action.reason.slice('interrupted:'.length);
         console.log(`[aidcp-edge] 等待登录期间收到「${cmd}」→ 干净停止（不自动重起），可在浏览器登录后点「启动/恢复」重来。`);
       } else if (action.reason.startsWith('login_wait_failed:')) {
-        console.error(`[aidcp-edge] ✗ Facebook 人工登录等待期间认证协调器安全停手（${action.reason.slice('login_wait_failed:'.length)}）。`);
+        const reason = action.reason.slice('login_wait_failed:'.length);
+        reportFacebookAuthFailure(reason);
+        console.error(`[aidcp-edge] ✗ Facebook 人工登录等待期间认证协调器安全停手（${reason}）。`);
       } else {
+        reportFacebookAuthFailure('identity_unresolved');
         // 常规诚实停手（self / override 失败仍 halt / adspower 关等待门 / 等待后仍 halt）。
         const haltReason = 'reason' in decision ? decision.reason : '';
         console.error(`[aidcp-edge] ✗ 身份确立失败：登录态读不出稳定账号 id（${haltReason}）。`);

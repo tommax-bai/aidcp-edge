@@ -75,6 +75,10 @@ export interface FacebookAuthCoordinatorOptions {
   now?: () => number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   pollIntervalMs?: number;
+  onAutomaticProgress?: (progress: {
+    signal: FacebookAuthSignal;
+    action: NativeFacebookAuthActionKind;
+  }) => void;
 }
 
 export type FacebookAuthCoordinatorResult =
@@ -563,6 +567,11 @@ export async function reconcileFacebookStartupAuth(
       return result({ kind: 'failed', reason: 'fresh_start_policy_unavailable' });
     }
 
+    try {
+      options.onAutomaticProgress?.({ signal: probe.signal, action: commandKind });
+    } catch (error) {
+      log(`[facebook-auth] automatic progress observer failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     dispatchedSignalIds.add(probe.signalId);
     actionAttempts += 1;
     const attempt = await runCommand({
