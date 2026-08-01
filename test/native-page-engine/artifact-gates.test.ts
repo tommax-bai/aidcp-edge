@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
+import { readFacebookRouterSource } from './facebook-router-source.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const require = createRequire(import.meta.url);
@@ -25,6 +26,7 @@ const inventory = require(resolve(repoRoot, 'scripts/native-engine-inventory.cjs
   assertFragmentInventoryReconciled: (root: string) => string[];
   assertFragmentsEndWithNewline: (root: string) => void;
   assertPackagingAllowListExcludesFragments: (patterns: unknown[]) => void;
+  concatenateFragments: (root: string) => Buffer;
   forbiddenFragmentBasenames: (root: string) => string[];
   listCleartextPageRuleSources: (root: string) => string[];
   packagedFragmentEntries: (root: string) => string[];
@@ -65,6 +67,15 @@ function withTempDir<T>(run: (dir: string) => T): T {
   const dir = mkdtempSync(join(tmpdir(), 'aidcp-gate-'));
   try {
     return run(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function withTempDirAsync<T>(run: (dir: string) => Promise<T>): Promise<T> {
+  const dir = mkdtempSync(join(tmpdir(), 'aidcp-gate-'));
+  try {
+    return await run(dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -348,6 +359,93 @@ test('a structural sentinel fails once the joined literal appears in release sou
 
 test('every registered fragment ends with a newline', () => {
   assert.doesNotThrow(() => inventory.assertFragmentsEndWithNewline(repoRoot));
+});
+
+/**
+ * 4.3：两份拼接实现必须逐字节相等。
+ *
+ * 分片拼接在本仓有三处实现：构建期的 `build.rs::read_ordered_sources`（决定二进制里
+ * 到底是哪段源码）、Node 侧的 `concatenateFragments()`（本条的对照实现）、以及测试侧的
+ * `readFacebookRouterSource()`（十来条路由契约用例都拿它当「引擎会执行的那段源码」）。
+ *
+ * 三者规则一旦漂开（一侧插了分隔符、或漏了尾随换行校验），那十来条契约用例断言的就不再是
+ * 二进制里的那段源码，而它们**仍然全绿** —— 这正是本 change 要消灭的形态：
+ * 本地全绿、只有真跑页面命令才现形。Rust 侧的对应闭环在
+ * `native/page-engine/tests/embedded_asset_decoding.rs`：那条断言证明二进制解码回来的
+ * 就是磁盘上按同样规则拼出来的字节。两条合起来把三处实现钉在一起。
+ */
+test('both fragment concatenations produce byte-identical router source', async () => {
+  const fromInventory = inventory.concatenateFragments(repoRoot);
+  const fromTestHelper = Buffer.from(await readFacebookRouterSource(repoRoot), 'utf8');
+  assert.ok(fromInventory.length > 0, 'the concatenated router source must not be empty');
+  assert.equal(
+    fromTestHelper.length,
+    fromInventory.length,
+    'the two fragment concatenations disagree on length',
+  );
+  assert.ok(
+    fromTestHelper.equals(fromInventory),
+    'the two fragment concatenations are not byte-identical',
+  );
+  // 拼接不带分隔字节：片长之和必须恰好等于总长，多一个字节都说明有人插了分隔符。
+  const entries = inventory.readFragmentManifest(repoRoot);
+  const summed = entries.reduce(
+    (total, entry) => total + readFileSync(resolve(repoRoot, inventory.FRAGMENT_DIRECTORY, entry)).length,
+    0,
+  );
+  assert.equal(summed, fromInventory.length, 'fragment concatenation inserted separator bytes');
+});
+
+test('a fragment without a trailing newline fails both concatenation implementations', async () => {
+  // 可证伪性：把某片的尾随换行拿掉，两份实现都必须拒绝。
+  // 只在临时目录里造语料，绝不动真分片。
+  await withTempDirAsync(async (dir) => {
+    const entries = inventory.readFragmentManifest(repoRoot);
+    const routerDir = join(dir, inventory.FRAGMENT_DIRECTORY);
+    mkdirSync(routerDir, { recursive: true });
+    writeFileSync(join(routerDir, 'manifest.txt'), `${entries.join('\n')}\n`);
+    for (const entry of entries) {
+      const contents = readFileSync(resolve(repoRoot, inventory.FRAGMENT_DIRECTORY, entry), 'utf8');
+      const mangled = entry === entries[0] ? contents.replace(/\n$/, '') : contents;
+      writeFileSync(join(routerDir, entry), mangled);
+    }
+    assert.throws(
+      () => inventory.concatenateFragments(dir),
+      /must end with a newline before concatenation/,
+    );
+    await assert.rejects(
+      readFacebookRouterSource(dir),
+      /must end with a newline before concatenation/,
+    );
+  });
+});
+
+test('an unregistered fragment fails both concatenation implementations', async () => {
+  await withTempDirAsync(async (dir) => {
+    const entries = inventory.readFragmentManifest(repoRoot);
+    const routerDir = join(dir, inventory.FRAGMENT_DIRECTORY);
+    mkdirSync(routerDir, { recursive: true });
+    writeFileSync(join(routerDir, 'manifest.txt'), `${entries.join('\n')}\n`);
+    for (const entry of entries) {
+      writeFileSync(
+        join(routerDir, entry),
+        readFileSync(resolve(repoRoot, inventory.FRAGMENT_DIRECTORY, entry)),
+      );
+    }
+    // 对照：未植入时两份实现都放行，且结果相等。
+    assert.ok(
+      Buffer.from(await readFacebookRouterSource(dir), 'utf8').equals(inventory.concatenateFragments(dir)),
+    );
+    writeFileSync(join(routerDir, '95-unregistered.js'), '// planted\n');
+    assert.throws(
+      () => inventory.concatenateFragments(dir),
+      /page-rule fragment is not registered in/,
+    );
+    await assert.rejects(
+      readFacebookRouterSource(dir),
+      /page-rule fragment is not registered in/,
+    );
+  });
 });
 
 test('the build script asserts both fragment-inventory invariants', () => {

@@ -17,6 +17,24 @@ const EXPECTED_PLATFORM_ADAPTERS = Object.freeze([
   Object.freeze({ platform: 'wechat_channels', adapterVersion: 'wechat-channels-v1' }),
 ]);
 const EXPECTED_CAPABILITY_DIGEST = '89c8488c1e475780b6b9fedde8b14fcb06d5285884e5bda1d325ef26da4b1c71';
+const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
+
+/**
+ * 引擎源码输入摘要（`scripts/build-native-page-engine.mjs` 的 `sourceDigest`）。
+ *
+ * 打包态**无法重算**它：安装包里没有 Rust 源码树与页面规则分片。所以这里只能判
+ * 「在不在、像不像一个 sha256」—— 但这已经是它要挡的那件事：清单里没有这个字段，
+ * 说明这份产物出自**还没有把产物与源码绑定**的构建器，它的自洽（二进制哈希 / 能力摘要 /
+ * crate 版本号）对源码漂移完全无感。缺字段一律判不兼容，MUST NOT 当成「旧版兼容」放行。
+ *
+ * ⚠️ 落地顺序（踩过一次，写下来防复发）：本文件**硬校验 `schemaVersion === 1`**。
+ * 因此写入侧（5.1）只新增字段、没有抬版本号 —— 先抬版本会让打包在这里就炸。
+ * 现在读取侧已接受该字段，才谈得上抬版本；抬的时候两侧必须在同一个提交里一起动。
+ * 这条路径不是死代码：**每一次出包都会跑到**（`scripts/after-pack.cjs` 打包后置校验）。
+ */
+function hasBoundSourceDigest(manifest) {
+  return typeof manifest.sourceDigest === 'string' && DIGEST_PATTERN.test(manifest.sourceDigest);
+}
 
 function executableName(platform) {
   return platform === 'win32' ? 'aidcp-page-engine.exe' : 'aidcp-page-engine';
@@ -39,6 +57,7 @@ function readNativePageEngineArtifact(
     || manifest.platformAdapterVersion !== EXPECTED_PLATFORM_ADAPTER_VERSION
     || JSON.stringify(manifest.platformAdapters) !== JSON.stringify(EXPECTED_PLATFORM_ADAPTERS)
     || manifest.capabilityDigest !== EXPECTED_CAPABILITY_DIGEST
+    || !hasBoundSourceDigest(manifest)
     || manifest.platform !== target.platform
     || manifest.arch !== target.arch
     || manifest.executable !== expectedExecutable

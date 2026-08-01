@@ -182,6 +182,35 @@ function assertFragmentsEndWithNewline(repoRoot) {
 }
 
 /**
+ * `build.rs::read_ordered_sources` 的 Node 侧**逐条镜像**：按有序清单拼出 Facebook 路由的
+ * 明文源，规则与构建期完全一致 —— 清单顺序、每片必须以换行结尾、片间**不插任何分隔字节**、
+ * 目录里不得有未登记分片。
+ *
+ * 为什么要有第二份实现：测试侧本来就有一份 TypeScript 复刻（`test/native-page-engine/
+ * facebook-router-source.ts`），十来条路由契约用例都拿它当「引擎真正会执行的那段源码」。
+ * 两份拼法一旦漂开（一侧插了分隔符、或漏了尾随换行校验），那十来条用例断言的就不再是
+ * 二进制里的那段源码 —— 而它们仍然全绿。所以这里给出可比对的第二实现，
+ * 由 gate 套件断言两者**逐字节相等**。
+ *
+ * @returns {Buffer} 拼接后的字节，与 build.rs 编码前拿到的完全一致。
+ */
+function concatenateFragments(repoRoot) {
+  const directory = fragmentDirectory(repoRoot);
+  const entries = assertFragmentInventoryReconciled(repoRoot);
+  const chunks = [];
+  for (const entry of entries) {
+    const contents = readFileSync(join(directory, entry));
+    if (contents.length === 0 || contents[contents.length - 1] !== 0x0a) {
+      throw new Error(
+        `page-rule fragment must end with a newline before concatenation: ${FRAGMENT_DIRECTORY}/${entry}`,
+      );
+    }
+    chunks.push(contents);
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
  * 全部明文页面规则语料（仓库根相对路径，POSIX 分隔符，字典序）。
  *
  * 由**目录结构**派生而非任何清单：清单只管「哪些分片按什么顺序拼进 Facebook 路由」，
@@ -269,6 +298,7 @@ module.exports = {
   assertFragmentInventoryReconciled,
   assertFragmentsEndWithNewline,
   assertPackagingAllowListExcludesFragments,
+  concatenateFragments,
   forbiddenFragmentBasenames,
   fragmentDirectory,
   fragmentManifestPath,

@@ -2,6 +2,9 @@ pub mod cdp;
 pub mod command;
 pub mod commit_window;
 pub mod effect;
+/// 嵌入资产编码密钥的单一定义；编码端 `build.rs` 用 `include!` 取的是同一份文件。
+/// 保持 crate 私有：解码是各平台模块的内部实现，外部只用 `*_expression()` 那批入口。
+mod embedded_asset_key;
 pub mod endpoint;
 pub mod endpoint_resolver;
 pub mod engine;

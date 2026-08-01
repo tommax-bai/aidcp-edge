@@ -121,6 +121,7 @@ async function writeSignedLikeApp() {
       { platform: 'wechat_channels', adapterVersion: 'wechat-channels-v1' },
     ],
     capabilityDigest: '89c8488c1e475780b6b9fedde8b14fcb06d5285884e5bda1d325ef26da4b1c71',
+    sourceDigest: '1'.repeat(64),
     platform: 'darwin',
     arch: 'arm64',
     executable: 'aidcp-page-engine',

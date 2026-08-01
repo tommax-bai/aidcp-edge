@@ -48,6 +48,7 @@ test('rejects a manifest that lies about the binary architecture', async () => {
       { platform: 'wechat_channels', adapterVersion: 'wechat-channels-v1' },
     ],
     capabilityDigest: '89c8488c1e475780b6b9fedde8b14fcb06d5285884e5bda1d325ef26da4b1c71',
+    sourceDigest: '1'.repeat(64),
     platform: 'darwin',
     arch: 'x64',
     executable: 'aidcp-page-engine',
@@ -56,6 +57,61 @@ test('rejects a manifest that lies about the binary architecture', async () => {
   assert.throws(
     () => artifact.verifyNativePageEngineArtifact(dir, { platform: 'darwin', arch: 'x64' }),
     /architecture mismatch/,
+  );
+});
+
+// 5.5：打包态校验必须接受并校验源码摘要字段，缺字段视为不兼容清单。
+// 失败优先：先证明缺了这个字段会红，再谈「已接受」。缺字段说明该产物出自还没有把
+// 产物与源码绑定的构建器 —— 它的自洽（二进制哈希 / 能力摘要 / crate 版本号）对源码漂移
+// 完全无感，放行等于让一份相对源码已过期的引擎照常出包、照常签名、照常发出去。
+test('packaged verification refuses a manifest without a bound engine-source digest', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'aidcp-native-artifact-nodigest-'));
+  const binary = macho(0x0100000c);
+  const binaryPath = join(dir, 'aidcp-page-engine');
+  await writeFile(binaryPath, binary);
+  await chmod(binaryPath, 0o755);
+  const manifest = {
+    schemaVersion: 1,
+    engineVersion: '0.1.0',
+    protocolVersion: 2,
+    platformAdapterVersion: 'multi-platform-v1',
+    platformAdapters: [
+      { platform: 'xiaohongshu', adapterVersion: 'xiaohongshu-v1' },
+      { platform: 'facebook', adapterVersion: 'facebook-v1' },
+      { platform: 'wechat_channels', adapterVersion: 'wechat-channels-v1' },
+    ],
+    capabilityDigest: '89c8488c1e475780b6b9fedde8b14fcb06d5285884e5bda1d325ef26da4b1c71',
+    platform: 'darwin',
+    arch: 'arm64',
+    executable: 'aidcp-page-engine',
+    sha256: createHash('sha256').update(binary).digest('hex'),
+  };
+  const target = { platform: 'darwin', arch: 'arm64' };
+
+  await writeFile(join(dir, 'manifest.json'), JSON.stringify(manifest));
+  assert.throws(
+    () => artifact.verifyNativePageEngineArtifact(dir, target),
+    /manifest is incompatible/,
+  );
+
+  // 形状也要判：一个不是 sha256 的占位串同样不算「已绑定」。
+  await writeFile(
+    join(dir, 'manifest.json'),
+    JSON.stringify({ ...manifest, sourceDigest: 'not-a-digest' }),
+  );
+  assert.throws(
+    () => artifact.verifyNativePageEngineArtifact(dir, target),
+    /manifest is incompatible/,
+  );
+
+  // 对照：带上合法摘要即放行，证明上面两条红的是摘要判据本身，不是别的检查。
+  await writeFile(
+    join(dir, 'manifest.json'),
+    JSON.stringify({ ...manifest, sourceDigest: 'a'.repeat(64) }),
+  );
+  assert.equal(
+    artifact.verifyNativePageEngineArtifact(dir, target).binaryPath,
+    binaryPath,
   );
 });
 
@@ -76,6 +132,7 @@ test('installed runtime accepts signed-byte drift while retaining manifest and a
       { platform: 'wechat_channels', adapterVersion: 'wechat-channels-v1' },
     ],
     capabilityDigest: '89c8488c1e475780b6b9fedde8b14fcb06d5285884e5bda1d325ef26da4b1c71',
+    sourceDigest: '1'.repeat(64),
     platform: 'darwin',
     arch: 'arm64',
     executable: 'aidcp-page-engine',

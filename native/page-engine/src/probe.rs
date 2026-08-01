@@ -1,3 +1,4 @@
+use crate::embedded_asset_key::EMBEDDED_ASSET_KEY;
 use crate::error::{
     CdpExceptionClass, CdpExceptionReason, DecodeStage, EngineError, ErrorCode, ErrorDiagnostic,
     JsonValueType,
@@ -7,15 +8,11 @@ use url::Url;
 
 include!(concat!(env!("OUT_DIR"), "/xhs_page_probe_bytes.rs"));
 
-const PROBE_KEY: &[u8] = &[
-    0x91, 0x2f, 0xc4, 0x6a, 0x5d, 0xe3, 0x18, 0xb7, 0x42, 0x0d, 0xfa,
-];
-
 pub fn xhs_page_probe_expression() -> Result<String, EngineError> {
     let decoded: Vec<u8> = XHS_PAGE_PROBE_BYTES
         .iter()
         .enumerate()
-        .map(|(index, byte)| byte ^ PROBE_KEY[index % PROBE_KEY.len()])
+        .map(|(index, byte)| byte ^ EMBEDDED_ASSET_KEY[index % EMBEDDED_ASSET_KEY.len()])
         .collect();
     String::from_utf8(decoded).map_err(|_| invalid_probe_result())
 }

@@ -1,3 +1,4 @@
+use crate::embedded_asset_key::EMBEDDED_ASSET_KEY;
 use crate::error::{
     CdpExceptionClass, CdpExceptionReason, DecodeStage, EngineError, ErrorCode, ErrorDiagnostic,
     JsonValueType,
@@ -35,10 +36,6 @@ include!(concat!(
     env!("OUT_DIR"),
     "/facebook_file_input_selector_bytes.rs"
 ));
-
-const ROUTER_KEY: &[u8] = &[
-    0x91, 0x2f, 0xc4, 0x6a, 0x5d, 0xe3, 0x18, 0xb7, 0x42, 0x0d, 0xfa,
-];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -751,7 +748,7 @@ fn router_expression(input: Value) -> Result<String, EngineError> {
     let decoded: Vec<u8> = FACEBOOK_COMMAND_ROUTER_BYTES
         .iter()
         .enumerate()
-        .map(|(index, byte)| byte ^ ROUTER_KEY[index % ROUTER_KEY.len()])
+        .map(|(index, byte)| byte ^ EMBEDDED_ASSET_KEY[index % EMBEDDED_ASSET_KEY.len()])
         .collect();
     let source = String::from_utf8(decoded).map_err(|_| invalid_result())?;
     let input = serde_json::to_string(&input).map_err(|_| invalid_result())?;
@@ -762,7 +759,7 @@ pub fn file_input_selector() -> Result<String, EngineError> {
     let decoded: Vec<u8> = FACEBOOK_FILE_INPUT_SELECTOR_BYTES
         .iter()
         .enumerate()
-        .map(|(index, byte)| byte ^ ROUTER_KEY[index % ROUTER_KEY.len()])
+        .map(|(index, byte)| byte ^ EMBEDDED_ASSET_KEY[index % EMBEDDED_ASSET_KEY.len()])
         .collect();
     String::from_utf8(decoded)
         .map(|value| value.trim().to_owned())

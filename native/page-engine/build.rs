@@ -4,11 +4,14 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
-const KEY: &[u8] = &[
-    0x91, 0x2f, 0xc4, 0x6a, 0x5d, 0xe3, 0x18, 0xb7, 0x42, 0x0d, 0xfa,
-];
+// 编码密钥的单一定义。构建脚本是独立编译单元，`use crate::…` 到不了 lib，
+// 所以这里用 `include!` 取用同一份文件 —— 而不是再抄一份字节。
+// 配套的 `cargo:rerun-if-changed` 声明在 main() 的第一行：少了它，改密钥不会重新编码，
+// 运行时却已经换了新密钥去解旧资产 —— 本地全绿、只有真跑页面命令才现形。
+include!("src/embedded_asset_key.rs");
 
 fn main() {
+    println!("cargo:rerun-if-changed=src/embedded_asset_key.rs");
     println!("cargo:rerun-if-changed=src/xhs-page-probe.js");
     println!("cargo:rerun-if-changed=src/xhs-command-router.js");
     println!("cargo:rerun-if-changed=src/xhs-file-input-selector.txt");
@@ -24,7 +27,7 @@ fn main() {
     let encoded: Vec<u8> = source
         .iter()
         .enumerate()
-        .map(|(index, byte)| byte ^ KEY[index % KEY.len()])
+        .map(|(index, byte)| byte ^ EMBEDDED_ASSET_KEY[index % EMBEDDED_ASSET_KEY.len()])
         .collect();
     let bytes = encoded
         .iter()
@@ -41,7 +44,7 @@ fn main() {
     let router_encoded: Vec<u8> = router_source
         .iter()
         .enumerate()
-        .map(|(index, byte)| byte ^ KEY[index % KEY.len()])
+        .map(|(index, byte)| byte ^ EMBEDDED_ASSET_KEY[index % EMBEDDED_ASSET_KEY.len()])
         .collect();
     let router_bytes = router_encoded
         .iter()
@@ -58,7 +61,7 @@ fn main() {
     let selector_encoded: Vec<u8> = selector_source
         .iter()
         .enumerate()
-        .map(|(index, byte)| byte ^ KEY[index % KEY.len()])
+        .map(|(index, byte)| byte ^ EMBEDDED_ASSET_KEY[index % EMBEDDED_ASSET_KEY.len()])
         .collect();
     let selector_bytes = selector_encoded
         .iter()
@@ -76,7 +79,7 @@ fn main() {
     let search_geometry_encoded: Vec<u8> = search_geometry_source
         .iter()
         .enumerate()
-        .map(|(index, byte)| byte ^ KEY[index % KEY.len()])
+        .map(|(index, byte)| byte ^ EMBEDDED_ASSET_KEY[index % EMBEDDED_ASSET_KEY.len()])
         .collect();
     let search_geometry_bytes = search_geometry_encoded
         .iter()
@@ -95,7 +98,7 @@ fn main() {
     let input_targets_encoded: Vec<u8> = input_targets_source
         .iter()
         .enumerate()
-        .map(|(index, byte)| byte ^ KEY[index % KEY.len()])
+        .map(|(index, byte)| byte ^ EMBEDDED_ASSET_KEY[index % EMBEDDED_ASSET_KEY.len()])
         .collect();
     let input_targets_bytes = input_targets_encoded
         .iter()
@@ -113,7 +116,7 @@ fn main() {
     let facebook_router_encoded: Vec<u8> = facebook_router_source
         .iter()
         .enumerate()
-        .map(|(index, byte)| byte ^ KEY[index % KEY.len()])
+        .map(|(index, byte)| byte ^ EMBEDDED_ASSET_KEY[index % EMBEDDED_ASSET_KEY.len()])
         .collect();
     let facebook_router_bytes = facebook_router_encoded
         .iter()
@@ -132,7 +135,7 @@ fn main() {
     let facebook_selector_encoded: Vec<u8> = facebook_selector_source
         .iter()
         .enumerate()
-        .map(|(index, byte)| byte ^ KEY[index % KEY.len()])
+        .map(|(index, byte)| byte ^ EMBEDDED_ASSET_KEY[index % EMBEDDED_ASSET_KEY.len()])
         .collect();
     let facebook_selector_bytes = facebook_selector_encoded
         .iter()

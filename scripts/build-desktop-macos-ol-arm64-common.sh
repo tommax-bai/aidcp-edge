@@ -77,8 +77,18 @@ prepare_rust_toolchain() {
 
   if ! RUSTUP_TOOLCHAIN="$rust_version" "$rustup_bin" which cargo >/dev/null 2>&1; then
     echo "Installing Rust $rust_version"
-    "$rustup_bin" toolchain install "$rust_version" --profile minimal
+    "$rustup_bin" toolchain install "$rust_version" --profile minimal \
+      --component clippy --component rustfmt
   fi
+  # 组件必须无条件补齐，不能只在安装分支里给。两个原因：
+  #  1. 上面那个判断只看 cargo 在不在，而 cargo 在 minimal profile 里就有 ——
+  #     「工具链已装、但没有 clippy / rustfmt」这一档**检测不出来**，会直接跳过安装。
+  #  2. 下面 export 的 RUSTUP_TOOLCHAIN 会让 rustup **绕过 rust-toolchain.toml**
+  #     直接选定工具链，于是那份文件里的 components 声明在这条路径上**永远不生效**。
+  # 后果不是打包失败（打包只要 cargo build），而是同一台机器之后跑 gate:native 时
+  # fmt / clippy 找不到 —— 现场看起来像「门禁坏了」，实际是这里少装了两个组件。
+  # component add 是幂等的，已装时是空操作。
+  "$rustup_bin" component add --toolchain "$rust_version" clippy rustfmt
   "$rustup_bin" target add --toolchain "$rust_version" aarch64-apple-darwin
 
   export RUSTUP_TOOLCHAIN="$rust_version"

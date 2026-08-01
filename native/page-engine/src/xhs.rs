@@ -1,4 +1,5 @@
 use crate::command::NativeCommand;
+use crate::embedded_asset_key::EMBEDDED_ASSET_KEY;
 use crate::engine::CommandOutput;
 use crate::error::{DecodeStage, EngineError, ErrorCode, JsonValueType};
 use crate::model::{
@@ -21,10 +22,6 @@ include!(concat!(
 ));
 include!(concat!(env!("OUT_DIR"), "/xhs_input_targets_bytes.rs"));
 
-const ROUTER_KEY: &[u8] = &[
-    0x91, 0x2f, 0xc4, 0x6a, 0x5d, 0xe3, 0x18, 0xb7, 0x42, 0x0d, 0xfa,
-];
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct BrowserCommandResult {
@@ -36,7 +33,7 @@ pub fn command_expression(command: &NativeCommand) -> Result<String, EngineError
     let decoded: Vec<u8> = XHS_COMMAND_ROUTER_BYTES
         .iter()
         .enumerate()
-        .map(|(index, byte)| byte ^ ROUTER_KEY[index % ROUTER_KEY.len()])
+        .map(|(index, byte)| byte ^ EMBEDDED_ASSET_KEY[index % EMBEDDED_ASSET_KEY.len()])
         .collect();
     let source = String::from_utf8(decoded).map_err(|_| invalid_result())?;
     let command = serde_json::to_string(command).map_err(|_| invalid_result())?;
@@ -47,7 +44,7 @@ pub fn file_input_selector() -> Result<String, EngineError> {
     let decoded: Vec<u8> = XHS_FILE_INPUT_SELECTOR_BYTES
         .iter()
         .enumerate()
-        .map(|(index, byte)| byte ^ ROUTER_KEY[index % ROUTER_KEY.len()])
+        .map(|(index, byte)| byte ^ EMBEDDED_ASSET_KEY[index % EMBEDDED_ASSET_KEY.len()])
         .collect();
     String::from_utf8(decoded)
         .map(|value| value.trim().to_owned())
@@ -58,7 +55,7 @@ pub fn search_input_expression(mode: &str) -> Result<String, EngineError> {
     let decoded: Vec<u8> = XHS_SEARCH_INPUT_GEOMETRY_BYTES
         .iter()
         .enumerate()
-        .map(|(index, byte)| byte ^ ROUTER_KEY[index % ROUTER_KEY.len()])
+        .map(|(index, byte)| byte ^ EMBEDDED_ASSET_KEY[index % EMBEDDED_ASSET_KEY.len()])
         .collect();
     let source = String::from_utf8(decoded).map_err(|_| invalid_result())?;
     let mode = serde_json::to_string(mode).map_err(|_| invalid_result())?;
@@ -74,7 +71,7 @@ pub fn input_targets_expression(request: &Value) -> Result<String, EngineError> 
     let decoded: Vec<u8> = XHS_INPUT_TARGETS_BYTES
         .iter()
         .enumerate()
-        .map(|(index, byte)| byte ^ ROUTER_KEY[index % ROUTER_KEY.len()])
+        .map(|(index, byte)| byte ^ EMBEDDED_ASSET_KEY[index % EMBEDDED_ASSET_KEY.len()])
         .collect();
     let source = String::from_utf8(decoded).map_err(|_| invalid_result())?;
     let request = serde_json::to_string(request).map_err(|_| invalid_result())?;
