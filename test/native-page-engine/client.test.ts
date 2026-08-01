@@ -275,7 +275,11 @@ test('rejects a ready engine whose capability manifest differs from the packaged
   const strict = new NativePageEngineClient({
     binaryPath: process.execPath,
     binaryArgs: [fixture],
-    processTimeoutMs: 500,
+    // 预算给足 10s，理由与本文件顶部的 `client()` 完全一致：这条测的是**协议语义**
+    // （能力清单与打包契约不符 ⇒ invalid_protocol），而要拿到清单来比对，引擎必须先真的起来握手。
+    // 此前这里硬写 500ms，绕过了那条默认值：满负载并行跑全量时子进程起不来，
+    // 拿到的是 engine_timeout 而不是它要测的 invalid_protocol —— **单跑必过、全量偶发**。
+    processTimeoutMs: 10_000,
     env: { AIDCP_FAKE_ENGINE_MODE: 'success' },
     expectedManifest: {
       engineVersion: 'test',
