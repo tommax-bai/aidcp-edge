@@ -331,6 +331,7 @@ pub(crate) async fn execute_facebook_feed_scroll(
     session: &mut EngineSession,
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
+    mut foreground_activated: bool,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let expected_list_url = session.facebook.active_list_url.clone();
     ensure_facebook_active_list(session).await?;
@@ -354,10 +355,12 @@ pub(crate) async fn execute_facebook_feed_scroll(
         }
     };
     let start_y = current.scroll_y;
+    let initial = current.clone();
     let mut saw_any_card = !current.cards.is_empty();
     let mut validated_card_witness = FacebookValidatedFeedCardWitness::from_probe(&current);
 
     for _ in 0..FACEBOOK_FEED_SCROLL_ROUNDS {
+        let wheel_was_foregrounded = foreground_activated;
         let before = current;
         dispatch_facebook_feed_wheel(session, &before, cancellation, deadline_unix_ms).await?;
         let after = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_IN_PLACE).await?;
@@ -380,6 +383,25 @@ pub(crate) async fn execute_facebook_feed_scroll(
             moved: after.scroll_y != start_y,
             at_bottom: Some(facebook_near_bottom(&after)),
         };
+        if facebook_feed_no_movement_recovery_eligible(&initial, &before, &after) {
+            if wheel_was_foregrounded {
+                return Ok(facebook_scroll_failure(
+                    EffectPhase::Ambiguous,
+                    "scroll_movement_unconfirmed",
+                ));
+            }
+            session.cdp.bring_to_front().await?;
+            foreground_activated = true;
+            let refreshed = probe_facebook_feed(session).await?;
+            if !facebook_feed_foreground_retry_context_matches(&after, &refreshed) {
+                return Ok(facebook_scroll_failure(
+                    EffectPhase::Ambiguous,
+                    "scroll_movement_unconfirmed",
+                ));
+            }
+            current = refreshed;
+            continue;
+        }
         let fresh = facebook_page_cards(session, after.clone(), true, Some(movement));
         if !fresh.cards.is_empty() {
             return Ok((EffectPhase::Confirmed, CommandOutput::PageCards(fresh)));
@@ -742,6 +764,50 @@ fn facebook_feed_height_grew(
     after: &facebook::FacebookFeedProbe,
 ) -> bool {
     after.scroll_height > before.scroll_height + FACEBOOK_FEED_LAZYLOAD_GROWTH_PX
+}
+
+fn facebook_feed_same_document(
+    expected: &facebook::FacebookFeedProbe,
+    current: &facebook::FacebookFeedProbe,
+) -> bool {
+    expected.document_time_origin_ms > 0
+        && expected.document_generation.is_some()
+        && current.url == expected.url
+        && current.surface == expected.surface
+        && current.document_generation == expected.document_generation
+        && current.document_time_origin_ms == expected.document_time_origin_ms
+        && current.document_age_ms >= expected.document_age_ms
+}
+
+fn facebook_feed_ready_for_foreground_recovery(probe: &facebook::FacebookFeedProbe) -> bool {
+    facebook_list_surface(&probe.surface)
+        && probe.list_state == crate::model::FacebookListState::Ready
+        && !probe.loading
+        && !probe.explicit_empty
+        && !probe.explicit_end
+        && probe.scroll_height > probe.scroll_viewport_height + 1.0
+        && !facebook_near_bottom(probe)
+}
+
+fn facebook_feed_no_movement_recovery_eligible(
+    initial: &facebook::FacebookFeedProbe,
+    before: &facebook::FacebookFeedProbe,
+    after: &facebook::FacebookFeedProbe,
+) -> bool {
+    initial.scroll_y == before.scroll_y
+        && before.scroll_y == after.scroll_y
+        && facebook_feed_same_document(initial, before)
+        && facebook_feed_same_document(before, after)
+        && facebook_feed_ready_for_foreground_recovery(after)
+}
+
+fn facebook_feed_foreground_retry_context_matches(
+    evidence: &facebook::FacebookFeedProbe,
+    refreshed: &facebook::FacebookFeedProbe,
+) -> bool {
+    facebook_feed_same_document(evidence, refreshed)
+        && facebook_feed_ready_for_foreground_recovery(refreshed)
+        && evidence.scroll_y == refreshed.scroll_y
 }
 
 fn record_facebook_explicit_end_sample(samples: usize, explicit_end: bool) -> usize {
@@ -1363,6 +1429,86 @@ mod tests {
             document_age_ms: 10_000,
             feed_recovery_target: None,
         }
+    }
+
+    #[test]
+    fn foreground_recovery_requires_a_first_same_document_nonterminal_miss() {
+        let initial = feed_probe(4_000.0, 0.0, false, false);
+        let before = initial.clone();
+        let mut unchanged = before.clone();
+        unchanged.document_age_ms += 500;
+        assert!(facebook_feed_no_movement_recovery_eligible(
+            &initial, &before, &unchanged
+        ));
+
+        let mut moved = unchanged.clone();
+        moved.scroll_y = 650.0;
+        assert!(!facebook_feed_no_movement_recovery_eligible(
+            &initial, &before, &moved
+        ));
+
+        let mut loading = unchanged.clone();
+        loading.loading = true;
+        assert!(!facebook_feed_no_movement_recovery_eligible(
+            &initial, &before, &loading
+        ));
+
+        let mut bottom = unchanged.clone();
+        bottom.scroll_y = 3_100.0;
+        let bottom_before = bottom.clone();
+        assert!(!facebook_feed_no_movement_recovery_eligible(
+            &bottom,
+            &bottom_before,
+            &bottom
+        ));
+
+        let mut changed_document = unchanged.clone();
+        changed_document.document_generation = Some("doc-2".to_owned());
+        assert!(!facebook_feed_no_movement_recovery_eligible(
+            &initial,
+            &before,
+            &changed_document
+        ));
+
+        let mut changed_time_origin = unchanged.clone();
+        changed_time_origin.document_time_origin_ms += 1;
+        assert!(!facebook_feed_no_movement_recovery_eligible(
+            &initial,
+            &before,
+            &changed_time_origin
+        ));
+
+        let mut changed_surface = unchanged.clone();
+        changed_surface.surface = "search".to_owned();
+        assert!(!facebook_feed_no_movement_recovery_eligible(
+            &initial,
+            &before,
+            &changed_surface
+        ));
+
+        let mut prior_progress = before.clone();
+        prior_progress.scroll_y = 400.0;
+        let after_prior_progress = prior_progress.clone();
+        assert!(!facebook_feed_no_movement_recovery_eligible(
+            &initial,
+            &prior_progress,
+            &after_prior_progress
+        ));
+    }
+
+    #[test]
+    fn foreground_retry_context_requires_the_same_ready_scroll_position() {
+        let evidence = feed_probe(4_000.0, 0.0, false, false);
+        let mut refreshed = evidence.clone();
+        refreshed.document_age_ms += 1;
+        assert!(facebook_feed_foreground_retry_context_matches(
+            &evidence, &refreshed
+        ));
+
+        refreshed.scroll_y = 10.0;
+        assert!(!facebook_feed_foreground_retry_context_matches(
+            &evidence, &refreshed
+        ));
     }
 
     /// 「首页有物理卡但读不出可信身份」的探测样本：滚动兜底阶梯的唯一准入形态。

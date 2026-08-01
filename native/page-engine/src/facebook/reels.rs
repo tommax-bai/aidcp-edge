@@ -182,16 +182,23 @@ pub(crate) async fn execute_facebook_page_scroll(
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
-    if matches!(
+    let foreground_activated = matches!(
         command,
         NativeCommand::PageScroll(params)
             if params.reason.as_deref() == Some("idle_recover_nudge")
-    ) {
+    );
+    if foreground_activated {
         session.cdp.bring_to_front().await?;
     }
     let before = probe_facebook_reel(session).await?;
     if !before.is_reels_surface() {
-        return execute_facebook_feed_scroll(session, cancellation, deadline_unix_ms).await;
+        return execute_facebook_feed_scroll(
+            session,
+            cancellation,
+            deadline_unix_ms,
+            foreground_activated,
+        )
+        .await;
     }
     if !before.ok || before.video_key.is_none() {
         return Ok(facebook_scroll_failure(

@@ -6,7 +6,7 @@ use aidcp_page_engine::command::{
 };
 use aidcp_page_engine::commit_window::CommitWindowRequester;
 use aidcp_page_engine::endpoint_resolver::EndpointResolver;
-use aidcp_page_engine::engine::{CommandOutput, Engine};
+use aidcp_page_engine::engine::{CommandOutput, Engine, StoredCommandResult};
 use aidcp_page_engine::error::{CdpExceptionClass, CdpExceptionReason, ErrorCode};
 use aidcp_page_engine::model::{ActionReceipt, FacebookListKind};
 use aidcp_page_engine::protocol::{
@@ -307,6 +307,83 @@ async fn facebook_feed_scroll_dispatches_a_humanized_multi_frame_wheel_gesture()
         .map(|(index, _)| index)
         .expect("wheel peak");
     assert!(peak > 0 && peak + 1 < deltas.len());
+}
+
+#[tokio::test]
+async fn facebook_feed_scroll_foregrounds_once_after_proven_background_no_movement() {
+    let (outcome, requests) =
+        run_facebook_feed_scroll_recovery(FacebookFeedScrollRecovery::Moves).await;
+
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::PageCards(cards) = outcome.output.expect("Feed cards") else {
+        panic!("expected Feed cards")
+    };
+    assert_eq!(
+        cards.cards[0].note_id.as_deref(),
+        Some("https://www.facebook.com/Alice/posts/pfbidAFTER")
+    );
+
+    let gesture_starts = requests
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| {
+            request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseMoved"
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let foreground = requests
+        .iter()
+        .position(|request| request["method"] == "Page.bringToFront")
+        .expect("foreground activation");
+    assert_eq!(gesture_starts.len(), 2);
+    assert!(gesture_starts[0] < foreground && foreground < gesture_starts[1]);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "Page.bringToFront")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn facebook_feed_scroll_is_ambiguous_when_the_foreground_retry_still_does_not_move() {
+    let (outcome, requests) =
+        run_facebook_feed_scroll_recovery(FacebookFeedScrollRecovery::Still).await;
+
+    assert_eq!(outcome.effect_phase, EffectPhase::Ambiguous);
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("scroll receipt") else {
+        panic!("expected scroll action receipt")
+    };
+    assert!(!receipt.ok);
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("scroll_movement_unconfirmed")
+    );
+
+    assert_eq!(pointer_event_count(&requests, "mouseMoved"), 2);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "Page.bringToFront")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn facebook_feed_scroll_does_not_foreground_after_document_drift() {
+    let (outcome, requests) =
+        run_facebook_feed_scroll_recovery(FacebookFeedScrollRecovery::Drifts).await;
+
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    assert_eq!(pointer_event_count(&requests, "mouseMoved"), 1);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Page.bringToFront")
+    );
 }
 
 /// 三条 feed-recovery 用例的恢复落点。**必须互不相同**，原因是进程级共享状态：
@@ -3842,6 +3919,104 @@ async fn spawn_facebook_feed_scroll_cdp() -> (u16, tokio::task::JoinHandle<Vec<V
     (port, server)
 }
 
+#[derive(Clone, Copy)]
+enum FacebookFeedScrollRecovery {
+    Moves,
+    Still,
+    Drifts,
+}
+
+async fn run_facebook_feed_scroll_recovery(
+    recovery: FacebookFeedScrollRecovery,
+) -> (StoredCommandResult, Vec<Value>) {
+    let (port, server) = spawn_facebook_feed_scroll_recovery_cdp(recovery).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 30_000;
+    engine.open(&open).await.expect("open Facebook session");
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "feed-scroll-recovery-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 20_000,
+            command: NativeCommand::PageScroll(PageScrollParams {
+                reason: Some("feed_scroll".to_owned()),
+                dwell_ms: None,
+            }),
+        })
+        .await
+        .expect("Feed scroll recovery");
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook Feed recovery fake CDP");
+    (outcome, requests)
+}
+
+async fn spawn_facebook_feed_scroll_recovery_cdp(
+    recovery: FacebookFeedScrollRecovery,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        serve_target_listing_for(&listener, port, "https://www.facebook.com/").await;
+        let (stream, _) = listener.accept().await.expect("WebSocket request");
+        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
+        let mut requests = Vec::new();
+        let mut foregrounded = false;
+        let mut wheel_gestures = 0usize;
+        for _ in 0..3 {
+            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        }
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            if request["method"] == "Page.bringToFront" {
+                foregrounded = true;
+            }
+            if request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseMoved"
+            {
+                wheel_gestures += 1;
+            }
+            let result = match router_kind(&request).as_deref() {
+                Some("reel_probe") => router_cdp(
+                    "reel_probe",
+                    json!({
+                        "ok": false,
+                        "reason": "not_reel"
+                    }),
+                ),
+                Some("page_probe") => facebook_feed_page_probe_cdp(),
+                Some("consent_probe") => facebook_consent_absent_cdp(),
+                Some("feed_probe") => {
+                    let drifted = matches!(recovery, FacebookFeedScrollRecovery::Drifts)
+                        && wheel_gestures > 0;
+                    let moved = matches!(recovery, FacebookFeedScrollRecovery::Moves)
+                        && foregrounded
+                        && wheel_gestures >= 2;
+                    facebook_feed_scroll_recovery_probe_cdp(moved, drifted)
+                }
+                _ => json!({}),
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
+        }
+        requests
+    });
+    (port, server)
+}
+
 async fn spawn_facebook_feed_recovery_cdp(
     confirm_home: bool,
     target: (f64, f64),
@@ -4019,6 +4194,57 @@ fn facebook_feed_scroll_probe_cdp(after_scroll: bool) -> Value {
             "scrollHeight": 2400,
             "scrollViewportHeight": 800,
             "documentTimeOriginMs": 1780000000000_u64,
+            "documentAgeMs": 2000
+        }),
+    )
+}
+
+fn facebook_feed_scroll_recovery_probe_cdp(moved: bool, drifted: bool) -> Value {
+    router_cdp(
+        "feed_probe",
+        json!({
+            "cards": [{
+                "index": 0,
+                "title": if moved {
+                    "After recovery"
+                } else if drifted {
+                    "Different document"
+                } else {
+                    "Before recovery"
+                },
+                "likeCount": 0,
+                "collectCount": 0,
+                "noteId": if moved {
+                    "https://www.facebook.com/Alice/posts/pfbidAFTER"
+                } else if drifted {
+                    "https://www.facebook.com/Alice/posts/pfbidDRIFT"
+                } else {
+                    "https://www.facebook.com/Alice/posts/pfbidBEFORE"
+                }
+            }],
+            "documentGeneration": if drifted { "search-generation" } else { "home-generation" },
+            "listKind": "feed",
+            "listState": "ready",
+            "loading": false,
+            "articleCount": 1,
+            "explicitEmpty": false,
+            "explicitEnd": false,
+            "url": if drifted {
+                "https://www.facebook.com/search/posts?q=changed"
+            } else {
+                "https://www.facebook.com/"
+            },
+            "surface": if drifted { "search" } else { "home" },
+            "scrollY": if moved { 650 } else { 0 },
+            "innerWidth": 1440,
+            "innerHeight": 800,
+            "scrollHeight": 2400,
+            "scrollViewportHeight": 800,
+            "documentTimeOriginMs": if drifted {
+                1780000001000_u64
+            } else {
+                1780000000000_u64
+            },
             "documentAgeMs": 2000
         }),
     )
@@ -5562,7 +5788,7 @@ async fn spawn_facebook_inline_context_change_cdp() -> (u16, tokio::task::JoinHa
 
 /// 身份采集夹具：首屏「有物理卡但零地址」，一次可信指针移动之后才出现带地址的卡。
 /// 复刻 2026-07-29 越南语首页实测到的形态。
-fn facebook_identity_probe_cdp(acquired: bool) -> Value {
+fn facebook_identity_probe_cdp(acquired: bool, moved: bool) -> Value {
     router_cdp(
         "feed_probe",
         json!({
@@ -5586,7 +5812,7 @@ fn facebook_identity_probe_cdp(acquired: bool) -> Value {
             "explicitEnd": false,
             "url": "https://www.facebook.com/",
             "surface": "home",
-            "scrollY": 650,
+            "scrollY": if moved { 1300 } else { 650 },
             "innerWidth": 1440,
             "innerHeight": 800,
             "scrollHeight": 2400,
@@ -5621,6 +5847,7 @@ async fn spawn_facebook_identity_acquisition_cdp() -> (u16, tokio::task::JoinHan
         let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
         let mut requests = Vec::new();
         let mut hovered = false;
+        let mut wheel_gestures = 0usize;
         for _ in 0..3 {
             requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
         }
@@ -5636,13 +5863,19 @@ async fn spawn_facebook_identity_acquisition_cdp() -> (u16, tokio::task::JoinHan
             {
                 hovered = true;
             }
+            if request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseMoved"
+                && request["params"]["x"] == 720.0
+            {
+                wheel_gestures += 1;
+            }
             let result = match router_kind(&request).as_deref() {
                 Some("reel_probe") => {
                     router_cdp("reel_probe", json!({"ok": false, "reason": "not_reel"}))
                 }
                 Some("page_probe") => facebook_feed_page_probe_cdp(),
                 Some("consent_probe") => facebook_consent_absent_cdp(),
-                Some("feed_probe") => facebook_identity_probe_cdp(hovered),
+                Some("feed_probe") => facebook_identity_probe_cdp(hovered, wheel_gestures >= 2),
                 Some("identity_candidates") => facebook_identity_candidates_cdp(hovered),
                 Some("feed_recovery_target") => router_cdp(
                     "point_target",
@@ -5700,11 +5933,13 @@ async fn facebook_identity_acquisition_hovers_without_ever_pressing() {
 
     engine.shutdown().await;
     let requests = server.await.expect("identity acquisition fake CDP");
-    assert!(
+    assert_eq!(
         requests
             .iter()
-            .all(|request| request["method"] != "Page.bringToFront"),
-        "routine identity-acquisition scroll must remain in the background"
+            .filter(|request| request["method"] == "Page.bringToFront")
+            .count(),
+        1,
+        "identity acquisition is not movement, so the stalled wheel must recover once"
     );
     assert!(
         requests.iter().any(|request| {
