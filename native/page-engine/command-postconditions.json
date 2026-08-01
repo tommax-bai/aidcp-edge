@@ -11,7 +11,7 @@
     "disposition 两种形态：kind=fix 须写 action（消除动作）与 owner（谁来做）；kind=exception 须写 reason（为什么现在做不到）、blockedBy（前置是什么）与 owner（前置解除后谁来解）。**没有处置的 below_bar 与 confirmed 的区别只存在于读者的记忆里**，而这张表存在的全部理由就是不再依赖任何人的记忆。"
   ],
   "unreadBudget": 0,
-  "belowBarBudget": 5,
+  "belowBarBudget": 4,
   "commands": [
     {
       "nativeKind": "facebook_auth_submit_login",
@@ -205,13 +205,8 @@
     },
     {
       "nativeKind": "publish_upload_image",
-      "status": "below_bar",
-      "evidence": "判据是「该序号位置存在预览图」——它不能把这张预览与**本次**上传绑定，上一次残留的预览同样满足。达标形态需按本次上传的标识回读",
-      "disposition": {
-        "kind": "fix",
-        "action": "判据改为按**本次上传**的标识回读，须能区分「本次产生的」与「之前就在的」；残留预览不得再满足判据。具体取哪个标识由实现期实读决定，但不能区分就不算达标",
-        "owner": "change extend-native-postcondition-coverage §3.2"
-      }
+      "status": "confirmed",
+      "evidence": "判据已绑定**本次**上传：写文件之前先取一份预览位身份基线，写之后有界轮询（5s / 250ms）等目标序号位出现**基线里没有的**身份（`engine.rs` 的 execute_xhs_publish_upload_image → 分片 `xhs-input-targets.js` 的 publish_previews，身份取图片地址的长度 + FNV-1a 摘要、不外传地址本身）。残留预览不再满足判据。四种终局各有独立原因码、一条都不压成另一条：基线读不到（**在写文件之前**停手，回 not_started）、那一位一直没出现、出现了但身份读不出来、出现了但还是基线里那张（后三者均 ambiguous）。身份缺席时按「读不出来」算（悲观默认），绝不当成新图。脱机用例 `native/page-engine/tests/xhs_publish_upload_binding.rs` 5 例，三次变异分别由三条不同用例抓住。"
     },
     {
       "nativeKind": "publish_set_cover",

@@ -64,6 +64,10 @@ const XHS_FILL_TAIL_RESERVE_MS: u64 = 3_500;
 /// 留不出来就在**打字之前**零派发地拒绝：话题词一旦进了正文就撤不回来（见下面那条清场红线）。
 const XHS_TOPIC_TAIL_RESERVE_MS: u64 = 10_000;
 /// 候选下拉与真 token 各自的有界轮询窗口（沿用退役实现的实测量级）。
+// 上传后等预览位换新的有界预算。沿用旧实现的 5s / 250ms，只把判据换掉，
+// 免得在同一次改动里既动判据又动时间量级、事后分不清是哪一边导致的差异。
+const XHS_UPLOAD_PREVIEW_BUDGET_MS: u64 = 5_000;
+const XHS_UPLOAD_PREVIEW_INTERVAL_MS: u64 = 250;
 const XHS_TOPIC_CANDIDATE_BUDGET_MS: u64 = 4_000;
 const XHS_TOPIC_CANDIDATE_INTERVAL_MS: u64 = 250;
 const XHS_TOPIC_COMMIT_BUDGET_MS: u64 = 4_000;
@@ -893,16 +897,7 @@ async fn execute_xhs_command_once(
         NoteScrollComments(params) => {
             execute_xhs_comment_scroll(session, params, cancellation, deadline_unix_ms).await
         }
-        PublishUploadImage(params) => {
-            validate_publish_file(&params.path)?;
-            let selector = xhs::file_input_selector()?;
-            let node_id = session.cdp.query_selector_node(&selector).await?;
-            session
-                .cdp
-                .set_file_input_files(node_id, std::slice::from_ref(&params.path))
-                .await?;
-            verify_uploaded_preview(session, command).await
-        }
+        PublishUploadImage(params) => execute_xhs_publish_upload_image(session, params).await,
         PublishNavigateEntry(params) => {
             session
                 .cdp
@@ -2920,22 +2915,140 @@ async fn wait_for_page_kind(
     }
 }
 
-async fn verify_uploaded_preview(
+/// 一个配图预览位的身份。`blank` 说的是「这一位的地址读不出来」，
+/// **不是**「这一位是空的」——两者的处置不同，前者不许当成证据。
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct XhsPreviewSlot {
+    id: String,
+    blank: bool,
+}
+
+/// 读当前所有配图预览位的身份。
+///
+/// `Err` = 页内表达式抛了异常（`evaluated_value` 认），**不是**「页面上没有预览图」；
+/// `Ok(None)` = 读回来的结构里没有条目数组（分片形状漂了）。两者都不得落成一个空列表：
+/// 空列表会让紧接着的判等「基线里没有这个身份」恒真，把判据反转成恒绿。
+async fn read_xhs_publish_previews(
     session: &mut EngineSession,
-    command: &NativeCommand,
+) -> Result<Option<Vec<XhsPreviewSlot>>, EngineError> {
+    let request = serde_json::json!({"kind":"publish_previews"});
+    let value = probe_xhs_input_target(session, request).await?;
+    evaluated_value(&value)?;
+    let Some(items) = value
+        .pointer("/result/value/items")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        items
+            .iter()
+            .map(|item| XhsPreviewSlot {
+                id: item
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                // 读不到就按「读不出来」算：默认 true 是刻意的悲观方向，
+                // 默认 false 会把一个身份不明的预览位当成一张新图。
+                blank: item
+                    .get("blank")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true),
+            })
+            .collect(),
+    ))
+}
+
+/// 与 `xhs_publish_outcome`（正文填写）/ `xhs_candidate_outcome`（候选项）同族：
+/// 每条特化各带一个把命令种类写死的回执构造器。种类字符串是云端的关联键，
+/// 不能由调用方顺手传 —— 传错了不会报错，只会让云端等不到这条回执。
+fn xhs_upload_outcome(
+    phase: EffectPhase,
+    record_id: u64,
+    seq: u32,
+    ok: bool,
+    error: Option<&str>,
+) -> (EffectPhase, CommandOutput) {
+    (
+        phase,
+        CommandOutput::PublishReceipt(PublishReceipt {
+            record_id,
+            seq,
+            kind: "upload_image".to_owned(),
+            ok,
+            submit_dispatched: None,
+            value: None,
+            post_url: None,
+            error: error.map(str::to_owned),
+        }),
+    )
+}
+
+/// 上传配图：判据必须绑定**本次**上传。
+///
+/// 旧判据是「那个序号位上存在预览图」，而**上一次留下的残留预览同样满足** —— 一次根本没生效的
+/// 上传照样回确认，上游据此继续走到提交，最后发出去的稿子少一张图或配错图。
+/// 现在写之前先取一份预览位身份基线，写之后有界轮询等那一位出现**基线里没有的**身份。
+///
+/// 四种终局各有独立原因码，一条都不许压成另一条：基线读不到（写之前停手）、
+/// 那一位一直没出现、出现了但身份读不出来、出现了但还是基线里那张。
+async fn execute_xhs_publish_upload_image(
+    session: &mut EngineSession,
+    params: &crate::command::PublishFileParams,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let outcome = |phase: EffectPhase, ok: bool, error: Option<&str>| {
+        xhs_upload_outcome(phase, params.record_id, params.seq, ok, error)
+    };
+    validate_publish_file(&params.path)?;
+
+    // 基线只能在写之前取，取不到就**在派发之前**停手：这时候什么都还没发生，回「未开始」是实话。
+    // 带着取不到的基线继续写，判据就退回成「有预览图即可」—— 那正是这次要消灭的东西，
+    // 而且退回得悄无声息（回执照样是确认）。
+    let Some(baseline) = read_xhs_publish_previews(session).await? else {
+        return Ok(outcome(
+            EffectPhase::NotStarted,
+            false,
+            Some("publish_upload_baseline_unreadable"),
+        ));
+    };
+    let known: std::collections::HashSet<&str> = baseline
+        .iter()
+        .filter(|slot| !slot.blank)
+        .map(|slot| slot.id.as_str())
+        .collect();
+
+    let selector = xhs::file_input_selector()?;
+    let node_id = session.cdp.query_selector_node(&selector).await?;
+    session
+        .cdp
+        .set_file_input_files(node_id, std::slice::from_ref(&params.path))
+        .await?;
+
+    let index = params.image_index as usize;
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_millis(XHS_UPLOAD_PREVIEW_BUDGET_MS);
+    // 附件已经写下去了：这之后的任何失败都是「不确定」，绝不是「未开始」。
+    // 原因码取**最后一轮实际读到的那个**，不给初值 —— 给初值就等于在没读之前先替页面下了个结论，
+    // 而超时时上报的恰恰是那个从没被验证过的猜测。
+    let reason;
     loop {
-        let (_, output) = evaluate_router(session, command).await?;
-        let confirmed = matches!(&output, CommandOutput::PublishReceipt(receipt) if receipt.ok);
-        if confirmed {
-            return Ok((EffectPhase::Confirmed, output));
-        }
+        let observed = match read_xhs_publish_previews(session).await? {
+            None => "publish_upload_preview_unreadable",
+            Some(previews) => match previews.get(index) {
+                None => "publish_upload_preview_absent",
+                Some(slot) if slot.blank => "publish_upload_preview_unreadable",
+                Some(slot) if known.contains(slot.id.as_str()) => "publish_upload_preview_not_new",
+                Some(_) => return Ok(outcome(EffectPhase::Confirmed, true, None)),
+            },
+        };
         if tokio::time::Instant::now() >= deadline {
-            return Ok((EffectPhase::Ambiguous, output));
+            reason = observed;
+            break;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(Duration::from_millis(XHS_UPLOAD_PREVIEW_INTERVAL_MS)).await;
     }
+    Ok(outcome(EffectPhase::Ambiguous, false, Some(reason)))
 }
 
 fn validated_note_url(raw: &str, expected_note_id: Option<&str>) -> Result<Url, EngineError> {

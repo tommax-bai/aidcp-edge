@@ -239,6 +239,31 @@
     });
     return {found:true,committed,pills:pills.length};
   }
+  // 配图预览位的**身份读数**。只回身份、不回判定 —— 判定要「写之前」与「写之后」两次读数
+  // 才做得出来，而一次调用只看得见当下这一次。
+  //
+  // 为什么需要它：上传的判据原本是「那个序号位上有预览图」，而**上一次留下的残留预览同样满足**，
+  // 于是一次根本没生效的上传照样回确认。绑定要的是「这一张是这次传上去的」。
+  //
+  // 身份取图片地址的 **长度 + FNV-1a 摘要**，不回地址本身：调用方只需要判等，
+  // 送出原地址既无必要、又把页面内容漏进 IPC。摘要碰撞只会让「新图」被读成「还是旧的」，
+  // 方向是悲观的（回未确认），不会假成功。
+  // 地址读不到时 **MUST NOT 发明身份**：照实标 `blank`，由调用方按「读不出来」处置 ——
+  // 空串之间彼此相等，把它当身份会让两张读不出地址的图互相冒充。
+  if(kind==='publish_previews'){
+    const fnv=(value)=>{
+      let h=0x811c9dc5;
+      for(let i=0;i<value.length;i+=1){h^=value.charCodeAt(i);h=Math.imul(h,0x01000193)>>>0;}
+      return h.toString(16).padStart(8,'0');
+    };
+    // 选择器与命令路由里上传 / 设封面那一支**逐字一致**：两处对不上的话，
+    // 「第 N 个预览位」在两边指的就不是同一张图，判定会悄悄错位。
+    const previews=all('.img-preview-area img,img[id*="creator-preview"],[class*="preview"] img,[class*="upload"] img').filter(visible);
+    return {found:true,count:previews.length,items:previews.slice(0,64).map((el,i)=>{
+      const src=String((el.getAttribute&&el.getAttribute('src'))||el.src||'');
+      return src?{index:i,id:`${src.length.toString(16)}:${fnv(src)}`,blank:false}:{index:i,id:'',blank:true};
+    })};
+  }
   // 详情浮层的关闭控件。`overlay` 与 `found` 是两件事：浮层不在（无需关）与浮层在但关闭控件
   // 没认出来（关不掉），调用方要分开处置。
   if(kind==='detail_close'){
