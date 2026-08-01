@@ -1,4 +1,18 @@
+use crate::error::ErrorCode;
 use crate::protocol::EffectPhase;
+
+/// 写命令带这些错误码时，命令层把它判成 **未开始** —— 也就是告诉上游「一个字都没写出去、
+/// 可以安全重投」。
+///
+/// 这张表是**单一事实源**：命令层的相位映射与「已派发失败」的错误码构造都必须引用它。
+/// 两处各写一份的后果没有任何机械手段会提醒 —— 一个已经派发出去的点击若戴上这里的任一顶帽子，
+/// 上游会当成压根没点而重投，于是同一个赞点两次、同一条评论发两遍。
+pub fn error_code_means_not_started(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::Cancelled | ErrorCode::CommitWindowUnavailable
+    )
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EffectTracker {

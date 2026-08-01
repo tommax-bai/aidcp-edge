@@ -9,9 +9,10 @@
 //!    「控件 → 浮层」走廊、不过冲（过冲会甩出浮层 hover 区致其收起）。
 
 use aidcp_page_engine::command::{CommentParams, NoteInteractionParams};
+use aidcp_page_engine::effect::error_code_means_not_started;
 use aidcp_page_engine::engine::Engine;
 use aidcp_page_engine::protocol::{
-    CommandRecord, NativeCommand, Platform, SessionOpenParams, SessionOpenRecord,
+    CommandRecord, EffectPhase, NativeCommand, Platform, SessionOpenParams, SessionOpenRecord,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -48,8 +49,21 @@ async fn a_failed_press_still_dispatches_its_release_and_never_reports_not_start
         "已派发的提交必须显式禁止被当成「未开始」重投，实得：{}",
         error.message
     );
-    // 已知缺口（不在本轮改动面内）：命令层把任何带错误的写一律记成「未开始」这一步在引擎
-    // 主干里，本轮不动那个文件。真相目前只由上面这条错误文案承载，尚未反映到阶段字段上。
+    // 真相必须落到**回执的相位字段**上，不能只由上面那句文案承载 —— 云端读的是相位。
+    // 「未开始」在协议里就是「一个字都没写出去、可以安全重投」；一次已经派发出去的点击
+    // 戴上它，上游重投就是双发（同一个赞点两次、同一条评论发两遍）。
+    assert_eq!(
+        outcome.effect_phase,
+        EffectPhase::Ambiguous,
+        "按下已派发的失败被记成了「{:?}」—— 那是在告诉上游可以安全重投",
+        outcome.effect_phase,
+    );
+    assert!(
+        !error_code_means_not_started(error.code),
+        "错误码 {:?} 在命令层等同于「未开始」；已派发的提交 MUST NOT 戴这顶帽子，\
+         无论底层 CDP 失败自称是什么",
+        error.code,
+    );
 
     let requests = server.await.expect("pointer fake CDP");
     let pressed = count_mouse(&requests, "mousePressed");

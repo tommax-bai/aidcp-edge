@@ -1,6 +1,7 @@
 use crate::cdp::CdpSession;
 use crate::command::{NoteOpenParams, NoteOpenSelection};
 use crate::commit_window::{CommitWindowRequester, xiaohongshu_commit_window};
+use crate::effect::error_code_means_not_started;
 use crate::endpoint;
 use crate::endpoint_resolver::EndpointResolver;
 use crate::error::{EngineError, ErrorCode};
@@ -68,8 +69,13 @@ const XHS_NEWLINE_STABILIZE_BUDGET_SHARE: u64 = 2;
 /// 写后有界回读窗口与轮询间隔（编辑器常在下一帧才把内容规整完，写完立刻单次读会误判）。
 const XHS_READBACK_BUDGET_MS: u64 = 2_000;
 const XHS_READBACK_INTERVAL_MS: u64 = 80;
-/// 评论提交之后的落定等待，与注入路由同口径。
-const XHS_COMMENT_SETTLE_MS: u64 = 800;
+/// 评论到达确认的有界轮询：每轮间隔 × 轮数上限 = 2000ms 窗口（退役实现的量级）。
+///
+/// 迁移到原生引擎时这里退成了「固定睡 800ms 后单次采样」。单次采样有两个方向都会错：
+/// 平台慢一点就读不到（错报失败），而采样点一旦落在渲染完成之后，剩下的判据就只有
+/// 一条宽松子串扫描（分片侧已补回结构必要条件）。轮询按**迭代次数**限界，不按墙钟裸跑。
+const XHS_COMMENT_ACK_INTERVAL_MS: u64 = 250;
+const XHS_COMMENT_ACK_ROUNDS: u32 = 8;
 /// 正文回读的语义相似度阈值：编辑器的空白规整 / 全半角替换是无害改写，严格等值会误杀。
 const XHS_CONTENT_SIMILARITY_THRESHOLD: f64 = 0.9;
 /// 与注入路由一致的字段级上限（按码点）。
@@ -686,12 +692,7 @@ async fn execute_platform_command(
             }
         }
         Ok(Err(error)) => StoredCommandResult::failed_at(
-            if write
-                && !matches!(
-                    error.code,
-                    ErrorCode::Cancelled | ErrorCode::CommitWindowUnavailable
-                )
-            {
+            if write && !error_code_means_not_started(error.code) {
                 EffectPhase::Ambiguous
             } else {
                 EffectPhase::NotStarted
@@ -1638,28 +1639,49 @@ async fn execute_xhs_comment(
     }
 
     // 提交点已跨过：此后**不再**把取消当成「没提交」——那正是提交窗口存在的理由。
-    tokio::time::sleep(Duration::from_millis(XHS_COMMENT_SETTLE_MS)).await;
-    // 三态：读到「出现了」才 Confirmed；读到「没出现」与「压根读不到」都是 Ambiguous，
-    // 但**病因分开记** —— 前者说明提交很可能没生效，后者说明确认这一层本身瞎了。
-    let ack = probe_xhs_input_target(
-        session,
-        serde_json::json!({"kind":"comment_ack","text":body}),
-    )
-    .await;
-    let ack_verdict = match &ack {
-        Ok(value) => xhs_target_optional_bool(value, "appeared"),
-        Err(_) => None,
-    };
-    Ok(match ack_verdict {
-        Some(true) => xhs_action_outcome(EffectPhase::Confirmed, "comment", true, None, &note_id),
-        Some(false) => xhs_action_outcome(
+    // 确认要两条**独立**证据同时成立：正文出现在评论区（业务结果），且编辑器已被平台清空
+    // （结构必要条件）。只留前者的话，判据退化成一条宽松子串扫描，而我们自己刚写进去的
+    // 正文就在页面上 —— 那是自证，不是证据。
+    let mut appeared = None;
+    let mut cleared = None;
+    for _ in 0..XHS_COMMENT_ACK_ROUNDS {
+        tokio::time::sleep(Duration::from_millis(XHS_COMMENT_ACK_INTERVAL_MS)).await;
+        let ack = probe_xhs_input_target(
+            session,
+            serde_json::json!({"kind":"comment_ack","text":body}),
+        )
+        .await;
+        // 只在读到确定值时覆盖：这一轮读不到 MUST NOT 把上一轮读到的确定值抹回「读不到」。
+        if let Ok(value) = &ack {
+            appeared = xhs_target_optional_bool(value, "appeared").or(appeared);
+            cleared = xhs_target_optional_bool(value, "editorCleared").or(cleared);
+        }
+        if appeared == Some(true) && cleared == Some(true) {
+            break;
+        }
+    }
+    // 三态，病因分开记：读到「没出现」说明提交很可能没生效；读到「出现了、但编辑器没被清空」
+    // 说明两条证据互相矛盾（最可能是扫描读到了编辑器里那份还没发出去的正文）；
+    // 「压根读不到」说明确认这一层本身瞎了。三者都不是确认，但真机上要查的东西完全不同。
+    Ok(match (appeared, cleared) {
+        (Some(true), Some(true)) => {
+            xhs_action_outcome(EffectPhase::Confirmed, "comment", true, None, &note_id)
+        }
+        (Some(true), Some(false)) => xhs_action_outcome(
+            EffectPhase::Ambiguous,
+            "comment",
+            false,
+            Some("submitted_editor_not_cleared"),
+            &note_id,
+        ),
+        (Some(false), _) => xhs_action_outcome(
             EffectPhase::Ambiguous,
             "comment",
             false,
             Some("submitted_unconfirmed"),
             &note_id,
         ),
-        None => xhs_action_outcome(
+        _ => xhs_action_outcome(
             EffectPhase::Ambiguous,
             "comment",
             false,

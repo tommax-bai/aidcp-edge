@@ -202,10 +202,27 @@
     const close=first(['[class*="close"]','button[aria-label*="关闭"]'],modal);
     return close?{found:true,overlay:true,...geometry(close)}:{found:false,overlay:true};
   }
+  // 评论到达确认。**两条独立证据，缺一不可**：
+  // ① 结构必要条件 —— 平台在提交成功后会把编辑器清空（退役实现就是靠它，切到原生引擎时丢了）；
+  // ② 正文出现在评论区里。
+  // 只留 ② 的话，剩下的就是一条宽松子串扫描，而**我们自己刚写进去的那份正文就在页面上**：
+  // 富文本编辑器的 textContent 是活的，它但凡落在某个 class 含 comment 的容器里（或某个这样的
+  // 容器把它包在内），扫描读到的就是自己写的东西 —— 自证循环，从此恒真。今天挡住它的只是
+  // 一个没有任何用例断言过的 DOM 嵌套巧合。故这里主动把「与编辑器有包含关系」的元素剔出扫描面：
+  // 编辑器自身与其子树是污染源，编辑器的**祖先**同样会把编辑器的文本一起收进来。
+  // 细粒度的评论条目与编辑器互不包含，证据不受影响。
+  // 编辑器读不到时 `editorCleared` **缺席**（不写 false）：「读不到」与「读到了、没清空」
+  // 是两态，压成一态就等于替调用方判了「没发出去」。
   if(kind==='comment_ack'){
     const wanted=norm(req.text||'',500);
     const root=detailRoot()||document;
-    return {found:true,appeared:Boolean(wanted)&&all('[class*="comment"]',root).some((el)=>text(el,32000).includes(wanted))};
+    const editor=commentEditor();
+    const contaminated=(el)=>Boolean(editor)&&(el.contains(editor)||editor.contains(el));
+    const appeared=Boolean(wanted)&&all('[class*="comment"]',root)
+      .filter((el)=>!contaminated(el))
+      .some((el)=>text(el,32000).includes(wanted));
+    if(!editor)return {found:true,appeared};
+    return {found:true,appeared,editorCleared:norm(readEditor(editor),32000)===''};
   }
   // 换行后的归尾状态。ProseMirror 的选区落在末段 <p> 内，与外层容器的末端 Range
   // 视觉等价但边界容器不同，**不能**用严格边界相等判断；正确语义是「光标在最后一个顶层块内，

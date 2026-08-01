@@ -1,4 +1,5 @@
 use crate::commit_window::CommitWindowRequester;
+use crate::effect::error_code_means_not_started;
 use crate::engine::{CommandOutput, EngineSession};
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
@@ -1053,8 +1054,18 @@ pub(crate) fn pointer_failure_to_engine_error(failure: PointerInputFailure) -> E
         ),
         PointerInputFailure::MoveFailed(error) => error,
         // 诚实红线：按下已经派发出去了，点击可能已生效。绝不能让上游把它读成「压根没点」而重投。
+        //
+        // 错误码原样继承底层 CDP 失败（诊断需要），**但有一条例外**：命令层认一小撮错误码为
+        // 「未开始 ＝ 可安全重投」（`error_code_means_not_started`）。一个已经派发出去的提交
+        // 若碰巧戴上其中一顶帽子，下面那句文案再明确也没用 —— 云端读的是相位字段，
+        // 它会看到「未开始」，然后重投。这条转译在**两个文件**里各判一次，
+        // 所以判据必须按引用取用，不许再抄一份。
         PointerInputFailure::SubmitDispatched(error) => EngineError::new(
-            error.code,
+            if error_code_means_not_started(error.code) {
+                ErrorCode::CdpError
+            } else {
+                error.code
+            },
             "native pointer submit press was already dispatched before the failure; the click may have taken effect and MUST NOT be replayed as not started",
         ),
     }
@@ -1104,6 +1115,37 @@ pub(crate) fn facebook_scroll_failure_on_surface(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 已派发的提交失败 MUST NOT 带上「命令层等同于未开始」的错误码 —— 不管底层 CDP
+    /// 失败自称是什么。判据按引用取用（`error_code_means_not_started`），不是抄一份码表：
+    /// 抄一份的话，往那张表里新增一个码时这里不会有任何提示，缝会静默重新裂开。
+    #[test]
+    fn a_dispatched_submit_failure_never_wears_a_replayable_error_code() {
+        for code in [ErrorCode::Cancelled, ErrorCode::CommitWindowUnavailable] {
+            assert!(
+                error_code_means_not_started(code),
+                "这一场的前提是 {code:?} 确实在那张表里，否则它什么也没证明",
+            );
+            let translated =
+                pointer_failure_to_engine_error(PointerInputFailure::SubmitDispatched(
+                    EngineError::new(code, "underlying cdp failure"),
+                ));
+            assert!(
+                !error_code_means_not_started(translated.code),
+                "已派发的提交失败被译成了 {:?} —— 上游会当成压根没点而重投",
+                translated.code,
+            );
+        }
+    }
+
+    /// 反向那一半：不在表里的错误码必须原样保留，否则诊断会被抹平成一个笼统的码。
+    #[test]
+    fn a_dispatched_submit_failure_keeps_a_diagnosable_error_code() {
+        let translated = pointer_failure_to_engine_error(PointerInputFailure::SubmitDispatched(
+            EngineError::new(ErrorCode::CdpTimeout, "underlying cdp failure"),
+        ));
+        assert_eq!(translated.code, ErrorCode::CdpTimeout);
+    }
 
     /// 「探到了但没清掉」与「压根没探到」在**观测通道**上必须是两条不同的读数。
     /// 它们在闸里走的是同一条放行出口，只有这三格写下来才分得开。

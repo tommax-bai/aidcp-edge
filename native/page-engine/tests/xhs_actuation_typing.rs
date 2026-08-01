@@ -32,6 +32,8 @@ struct Observed {
     enter_presses: usize,
     /// 编辑器 `op:"probe"` 读了几次（第 1 次是写前定位，第 2 次起才是写后回读）。
     editor_probes: usize,
+    /// 提交之后的到达确认探针读了几次。有界轮询与「单次采样」的差别只能在这里看出来。
+    ack_probes: usize,
 }
 
 impl Observed {
@@ -110,6 +112,13 @@ struct FakePage {
     /// 提交之后那道确认探针的读数。`Some(true)` = 评论出现了；`Some(false)` = 没出现；
     /// `None` = 分片抛异常，**读不到** —— 与「读到了一个否」是两态。
     ack_appeared: Option<bool>,
+    /// 确认探针的**第二条独立证据**：编辑器有没有被平台清空。`Some(true)` = 清空了（提交被
+    /// 平台受理的结构必要条件）；`Some(false)` = 没清空；`None` = 分片连编辑器都定位不到，
+    /// 这一条**读不到** —— 同样与「读到了一个否」分两态。
+    ack_editor_cleared: Option<bool>,
+    /// 平台慢：前 N 次确认探针一律回「没出现、也没清空」，第 N+1 次才给出上面那两条读数。
+    /// 0 = 第一次就绪。用来把「有界轮询」与「固定睡一觉后单次采样」分开。
+    ack_ready_after_probes: usize,
     /// 回读时不给 `paragraphs` 判定：分片认不出段落结构。段落数是换行的**唯一**结构证据 ——
     /// 两道文本比对（归一 / 汉字档）对换行完全免疫。
     omit_paragraphs: bool,
@@ -139,6 +148,8 @@ impl Default for FakePage {
             first_insert_stall_ms: 0,
             throw_at_editor_op: None,
             ack_appeared: Some(true),
+            ack_editor_cleared: Some(true),
+            ack_ready_after_probes: 0,
             omit_paragraphs: false,
             omit_plain_value: false,
             cancel_at_caret_probe: 0,
@@ -1109,6 +1120,164 @@ async fn a_comment_ack_that_is_not_a_clear_yes_stays_ambiguous_with_its_own_caus
     }
 }
 
+/// 评论到达确认要**两条独立证据**，缺一不可（H.1）：正文出现在评论区，且编辑器已被平台清空。
+///
+/// 迁移到原生引擎时丢掉的正是后者 —— 退役实现把它当结构必要条件。丢掉之后判据只剩一条
+/// 宽松子串扫描：详情页内任一 class 含 comment 的元素，整段文本包含本次正文即判确认。
+/// 而**我们自己刚写进去的正文就在页面上**（富文本编辑器的 textContent 是活的），
+/// 它但凡落进那张扫描网，确认就恒真 —— 一条根本没发出去的评论会被回报成已确认。
+/// 今天挡住它的只是一个没有任何用例断言过的 DOM 嵌套巧合。
+///
+/// 「读到了、没清空」与「压根读不到」同样分两态：两者都不是确认，但真机上要查的东西不同。
+#[tokio::test]
+async fn a_comment_ack_needs_the_editor_to_have_been_cleared_by_the_platform() {
+    for (cleared, cause) in [
+        (Some(false), "submitted_editor_not_cleared"),
+        (None, "submitted_ack_unreadable"),
+    ] {
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let (port, server) = spawn_page(
+            FakePage {
+                // 业务结果那一条**读到了「出现了」** —— 单看它，改动前会当场判确认。
+                ack_appeared: Some(true),
+                ack_editor_cleared: cleared,
+                ..FakePage::default()
+            },
+            cancellation.clone(),
+        )
+        .await;
+        let mut engine = Engine::default();
+        engine.open(&session_open(port)).await.expect("open");
+
+        let result = engine
+            .execute_cancellable_with_commit_windows(
+                &write_command(
+                    1,
+                    command(
+                        r#"{"kind":"interaction_comment","params":{"noteId":"note-1","text":"好文，收藏了"}}"#,
+                    ),
+                    12_000,
+                ),
+                cancellation,
+                CommitWindowRequester::in_process(1),
+                EndpointResolver::in_process(1),
+            )
+            .await
+            .expect("command result");
+
+        let CommandOutput::ActionReceipt(receipt) = result.output.expect("receipt") else {
+            panic!("expected an action receipt");
+        };
+        assert!(
+            !receipt.ok,
+            "结构必要条件不成立仍报确认 = 一条宽松子串扫描说了算（cleared={cleared:?}）",
+        );
+        assert_eq!(
+            receipt.reason.as_deref(),
+            Some(cause),
+            "「没清空」与「读不到」的病因被压成一态（cleared={cleared:?}）",
+        );
+        assert_eq!(result.effect_phase, EffectPhase::Ambiguous);
+
+        drop(engine);
+        let _ = server.await.expect("fake page");
+    }
+}
+
+/// 两条证据都成立才配 Confirmed —— 上一条用例只证明了「缺一条会被拦下」，
+/// 不证明「齐了就放行」。少了这一条，把确认闸改成恒假同样全绿。
+#[tokio::test]
+async fn a_comment_ack_with_both_evidences_confirms() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            ack_appeared: Some(true),
+            ack_editor_cleared: Some(true),
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(
+                1,
+                command(
+                    r#"{"kind":"interaction_comment","params":{"noteId":"note-1","text":"好文，收藏了"}}"#,
+                ),
+                12_000,
+            ),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::ActionReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected an action receipt");
+    };
+    assert!(receipt.ok, "两条证据齐了却不确认 = 把成功的评论记成不确定");
+    assert_eq!(result.effect_phase, EffectPhase::Confirmed);
+
+    drop(engine);
+    let _ = server.await.expect("fake page");
+}
+
+/// 到达确认是**有界轮询**，不是「固定睡一觉之后单次采样」（H.1 的另一半）。
+///
+/// 单次采样只有一个采样点，落早了就读不到 —— 一条真的发出去了的评论被回报成不确定，
+/// 上游据此重投就是重复评论。轮询按迭代次数限界（不按墙钟裸跑），命中即收工，
+/// 所以顺利时反而比原来的固定 800ms 更快。
+#[tokio::test]
+async fn a_slow_platform_still_confirms_because_the_ack_is_polled_not_sampled_once() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_page(
+        FakePage {
+            // 前三次探针两条证据都还不成立，第四次才就绪。
+            ack_ready_after_probes: 3,
+            ..FakePage::default()
+        },
+        cancellation.clone(),
+    )
+    .await;
+    let mut engine = Engine::default();
+    engine.open(&session_open(port)).await.expect("open");
+
+    let result = engine
+        .execute_cancellable_with_commit_windows(
+            &write_command(
+                1,
+                command(
+                    r#"{"kind":"interaction_comment","params":{"noteId":"note-1","text":"好文，收藏了"}}"#,
+                ),
+                12_000,
+            ),
+            cancellation,
+            CommitWindowRequester::in_process(1),
+            EndpointResolver::in_process(1),
+        )
+        .await
+        .expect("command result");
+
+    let CommandOutput::ActionReceipt(receipt) = result.output.expect("receipt") else {
+        panic!("expected an action receipt");
+    };
+    assert!(receipt.ok, "平台慢一点就把已发出的评论报成不确定");
+    assert_eq!(result.effect_phase, EffectPhase::Confirmed);
+
+    drop(engine);
+    let observed = server.await.expect("fake page");
+    let probes = observed.evaluated(r#""kind":"comment_ack""#);
+    assert!(
+        probes >= 4,
+        "确认只探了 {probes} 次 —— 那是单次采样，不是轮询"
+    );
+}
+
 /// 归尾确认的最后一轮**连间隔都排不下**时，那次零等待的接管 / 死线检查不是可省的礼节。
 ///
 /// 省掉它直接 `break`，接管就被 `NewlineUnstable` 这条本地结局盖掉：上游收到的是一条
@@ -1425,6 +1594,7 @@ async fn spawn_page(
             editor: String::new(),
             enter_presses: 0,
             editor_probes: 0,
+            ack_probes: 0,
         };
         let mut inserts = 0_usize;
         let mut caret_probes = 0_usize;
@@ -1547,9 +1717,22 @@ fn evaluate(expression: &str, page: &FakePage, observed: &mut Observed) -> Value
         return value(json!({"found": true, "x": 320.0, "y": 460.0}));
     }
     if expression.contains(r#""kind":"comment_ack""#) {
+        observed.ack_probes += 1;
+        // 平台还没渲染出来：两条证据都还不成立。单次采样在这里就收工了。
+        if observed.ack_probes <= page.ack_ready_after_probes {
+            return value(json!({"found": true, "appeared": false, "editorCleared": false}));
+        }
         // `None` = 分片抛异常：连 `/result/value` 都没有，`appeared` 因此**读不到**。
         return match page.ack_appeared {
-            Some(appeared) => value(json!({"found": true, "appeared": appeared})),
+            Some(appeared) => {
+                let mut payload = json!({"found": true, "appeared": appeared});
+                // 编辑器读不到时分片**不写** `editorCleared` 这个键（缺席 = 读不到），
+                // 而不是写一个 false —— 那会把「不知道」说成「读到了、没清空」。
+                if let Some(cleared) = page.ack_editor_cleared {
+                    payload["editorCleared"] = json!(cleared);
+                }
+                value(payload)
+            }
             None => json!({"exceptionDetails": {
                 "text": "Uncaught",
                 "exception": {"className": "TypeError", "description": "boom"},

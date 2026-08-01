@@ -97,6 +97,63 @@ test('提交控件与提交后确认：找不到就诚实报 found=false，不�
   assert.equal(runInputTargets({ kind: 'comment_submit' }).found, false);
 });
 
+test('到达确认的第二条证据：编辑器有没有被平台清空，三态如实作答（H.1）', () => {
+  installXhsDom(DETAIL_HTML, 'https://www.xiaohongshu.com/explore/65f2ab01');
+  const editor = document.querySelector('textarea') as HTMLTextAreaElement;
+
+  editor.value = '';
+  assert.equal(
+    runInputTargets({ kind: 'comment_ack', text: '别人的评论' }).editorCleared,
+    true,
+    '平台在提交成功后会把编辑器清空 —— 这是确认的结构必要条件',
+  );
+
+  editor.value = '这条还躺在编辑器里';
+  assert.equal(
+    runInputTargets({ kind: 'comment_ack', text: '别人的评论' }).editorCleared,
+    false,
+  );
+
+  // 编辑器压根定位不到：这一条**读不到**，键必须缺席。写成 false 就等于把「不知道」
+  // 说成「读到了、没清空」——调用方拿它当确定的坏消息，病因就此指错方向。
+  installXhsDom(
+    `<!doctype html><html><body><div class="note-detail-mask">
+      <div class="comment-list"><div class="comment-item">别人的评论</div></div>
+    </div></body></html>`,
+    'https://www.xiaohongshu.com/explore/65f2ab01',
+  );
+  const blind = runInputTargets({ kind: 'comment_ack', text: '别人的评论' });
+  assert.equal('editorCleared' in blind, false, '读不到时 MUST 缺席，绝不塌成 false');
+  assert.equal(blind.appeared, true);
+});
+
+test('到达确认不许扫到编辑器里那份还没发出去的正文（H.1 的自证循环）', () => {
+  // 现场：富文本评论框被包在一个 class 含 comment 的容器里 —— 这在真实页面上完全正常。
+  // 编辑器的 textContent 是活的，所以「本次正文」在**提交之前**就已经在扫描面里了。
+  // 剔除编辑器及其祖先之前，这一场会回 appeared:true：一条根本没发出去的评论被判确认。
+  installXhsDom(
+    `<!doctype html><html><body><div class="note-detail-mask">
+      <div class="comment-input-wrapper">
+        <div contenteditable="true">这条正文还没发出去</div>
+      </div>
+      <div class="comment-list"></div>
+    </div></body></html>`,
+    'https://www.xiaohongshu.com/explore/65f2ab01',
+  );
+
+  const probed = runInputTargets({ kind: 'comment_ack', text: '这条正文还没发出去' });
+  assert.equal(probed.appeared, false, '扫到的是自己刚写进去的那份 = 自证，不是证据');
+  assert.equal(probed.editorCleared, false, '编辑器里还躺着内容，结构必要条件同样不成立');
+
+  // 反向对照：同一段文字真的出现在评论区里时，证据照常成立 —— 剔除的是污染源，不是证据本身。
+  const list = document.querySelector('.comment-list') as HTMLElement;
+  list.innerHTML = '<div class="comment-item">这条正文还没发出去</div>';
+  assert.equal(
+    runInputTargets({ kind: 'comment_ack', text: '这条正文还没发出去' }).appeared,
+    true,
+  );
+});
+
 test('发布字段：标题走受控框、正文走富文本，两者的换行写法由 plainValue 分流', () => {
   installXhsDom(PUBLISH_HTML, 'https://creator.xiaohongshu.com/publish/publish');
   const title = runInputTargets({ kind: 'publish_field', op: 'probe', fieldType: 'title' });
