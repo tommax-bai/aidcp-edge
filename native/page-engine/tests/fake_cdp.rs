@@ -1166,6 +1166,21 @@ async fn facebook_reel_like_picker_commit_is_bounded_to_one_trusted_pointer_writ
     assert_eq!(pointer_event_count(&requests, "mousePressed"), 1);
     assert_eq!(pointer_event_count(&requests, "mouseReleased"), 1);
     assert!(mouse_dispatch_count(&requests) > 3, "点击必须逐帧移动");
+
+    // 这一次点击打的是**反应浮层**，它只在光标停在帖级 react 控件上时才展开：轨迹必须贴着
+    // 「控件 → 浮层」走廊走。中途离开 hover 区，浮层在半路收起，点击落在空处 ——
+    // 页面上什么都没发生，而回执照报「点了」。
+    // 本路径的主控件提交走的是**注入路由**、不是 CDP 指针，所以浮层这次点击之前没有任何
+    // 真实落点可继承；起点必须由调用方显式给出（夹具：控件 (1010, 525) → 浮层 (955, 485)）。
+    let press = requests
+        .iter()
+        .position(|request| {
+            request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mousePressed"
+        })
+        .expect("picker press");
+    let corridor = pointer_moves_between(&requests, 0, press);
+    assert_pointer_stays_in_corridor(&corridor, (1010.0, 525.0), (955.0, 485.0));
 }
 
 /// 点击之后 `like_probe` 怎么答。这三档正是本组用例要分开的三态。
@@ -1331,6 +1346,81 @@ async fn reel_surface_like_reports_a_readable_miss_as_unconfirmed() {
     // 且**两次点的是不同目标**（帖级主控件 → 反应浮层），绝不是对同一控件重试。
     assert_eq!(router_call_count(&requests, "like_picker_probe"), 1);
     assert_eq!(pointer_event_count(&requests, "mousePressed"), 2);
+}
+
+/// 第二次派发打的是**反应浮层**，而浮层只在光标停在帖级 react 控件上时才展开。
+/// 所以那一段轨迹必须贴着「控件 → 浮层」走廊：中途离开 hover 区，浮层就在半路收起，
+/// 这一次点击于是落在空处 —— **页面上什么都没发生，回执却照报「点了」**。
+///
+/// 接线前这一处走的是默认两参调用：起点回落到「目标左上方随机偏移」（本路径的主控件提交
+/// 走注入路由，根本没留下过真实落点可继承），而且**过冲仍然允许**。
+#[tokio::test]
+async fn reel_surface_like_commits_the_flyout_inside_the_control_to_flyout_corridor() {
+    // 取「读得到、确实没点上」那一档：只有它会走到第二轮的浮层提交。
+    let (_, _, requests) = run_reel_surface_like(ReelSurfaceLikeAfterClick::Unchanged).await;
+
+    // 夹具里的两个落点：帖级主控件 (612, 408) → 浮层「赞」项 (744, 296)。
+    const PRIMARY: (f64, f64) = (612.0, 408.0);
+    const FLYOUT: (f64, f64) = (744.0, 296.0);
+
+    let presses: Vec<usize> = requests
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| {
+            request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mousePressed"
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(presses.len(), 2, "两轮＝两次派发");
+
+    // 第二段轨迹 = 第一次按下之后、第二次按下之前的全部移动帧。
+    let corridor = pointer_moves_between(&requests, presses[0], presses[1]);
+    assert_pointer_stays_in_corridor(&corridor, PRIMARY, FLYOUT);
+}
+
+/// 一段轨迹里的移动帧坐标（`from` 之后、`to` 之前）。
+fn pointer_moves_between(requests: &[Value], from: usize, to: usize) -> Vec<(f64, f64)> {
+    requests
+        .iter()
+        .take(to)
+        .skip(from)
+        .filter(|request| {
+            request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseMoved"
+        })
+        .filter_map(|request| {
+            Some((
+                request["params"]["x"].as_f64()?,
+                request["params"]["y"].as_f64()?,
+            ))
+        })
+        .collect()
+}
+
+/// 「控件 → 浮层」走廊的判据：两点外接框加一圈余量（弧线与落点抖动都落在这圈里），
+/// 且末帧不得越过终点一侧（禁过冲）。
+///
+/// 起点没被显式传下去时，起步点会落在**目标**左上方 40~160px 处 —— 那必然越出这个框，
+/// 所以这条断言真正杀得死「忘了传走廊起点」这个改动。
+fn assert_pointer_stays_in_corridor(moves: &[(f64, f64)], from: (f64, f64), to: (f64, f64)) {
+    assert!(moves.len() > 1, "浮层提交不得瞬移");
+    let margin = 0.35 * (to.0 - from.0).hypot(to.1 - from.1);
+    let min_x = from.0.min(to.0) - margin;
+    let max_x = from.0.max(to.0) + margin;
+    let min_y = from.1.min(to.1) - margin;
+    let max_y = from.1.max(to.1) + margin;
+    for (x, y) in moves {
+        assert!(
+            (min_x..=max_x).contains(x) && (min_y..=max_y).contains(y),
+            "移动路径越出「控件 → 浮层」走廊：({x}, {y})"
+        );
+    }
+    let last = moves.last().copied().expect("landing frame");
+    assert!(
+        last.1 >= to.1 - 4.0,
+        "禁过冲：末帧不得越过浮层项落点（越过就等于甩出 hover 区）"
+    );
 }
 
 #[tokio::test]

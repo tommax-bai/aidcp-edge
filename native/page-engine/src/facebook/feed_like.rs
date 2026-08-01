@@ -11,7 +11,7 @@ use crate::locating::{
     LocatingSteps, Resolution, ResolvedTarget, Verdict, run_locating_gates,
 };
 use crate::protocol::{EffectPhase, NativeCommand};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// 对齐滚动把控件带到视口的这个纵向比例处（与改动前一致）。
@@ -22,6 +22,8 @@ const FACEBOOK_ALIGN_SCROLL_REPROBE_CENTER_MS: f64 = 250.0;
 pub(crate) async fn execute(
     session: &mut EngineSession,
     command: &NativeCommand,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let NativeCommand::InteractionLike(params) = command else {
         return Err(EngineError::new(
@@ -29,19 +31,21 @@ pub(crate) async fn execute(
             "native Facebook Like capability received another owner's command",
         ));
     };
-    execute_facebook_like(session, params, command).await
+    execute_facebook_like(session, params, command, cancellation, deadline_unix_ms).await
 }
 
 pub(crate) async fn execute_facebook_like(
     session: &mut EngineSession,
     params: &crate::command::NoteInteractionParams,
     command: &NativeCommand,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     if let Some(output) = ensure_facebook_action_gate(session, command).await? {
         return Ok((EffectPhase::NotStarted, output));
     }
     if !probe_facebook_reel(session).await?.is_reels_surface() {
-        return execute_facebook_feed_like(session, params).await;
+        return execute_facebook_feed_like(session, params, cancellation, deadline_unix_ms).await;
     }
     execute_facebook_reel_like(session, params).await
 }
@@ -51,6 +55,10 @@ async fn execute_facebook_reel_like(
     params: &crate::command::NoteInteractionParams,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let before = probe_facebook_like(session, &params.note_id).await?;
+    // 帖级 react 控件的坐标，留给后面那次浮层提交当走廊起点。这条路径的主控件提交走的是
+    // 注入路由、不是 CDP 指针，所以浮层那次点击之前**没有任何真实落点可继承** —— 不显式
+    // 传下去，起点就会回落到「目标左上方随机偏移」，与帖级控件毫无关系。
+    let primary_point = before.cx.zip(before.cy);
     if !before.ok {
         return Ok(facebook_action_result(
             EffectPhase::NotStarted,
@@ -132,7 +140,7 @@ async fn execute_facebook_reel_like(
         let picker = probe_facebook_like_picker(session, &params.note_id).await?;
         if picker.ok {
             if let (Some(x), Some(y)) = (picker.cx, picker.cy) {
-                dispatch_facebook_click(session, x, y).await?;
+                dispatch_facebook_flyout_commit(session, primary_point, x, y).await?;
             }
         } else if matches!(
             picker.reason.as_deref(),
@@ -208,6 +216,7 @@ async fn run_reel_surface_like_gates(
         note_id: &params.note_id,
         first_probe: Some(before),
         pending_point: None,
+        primary_point: None,
         primary_dispatched: false,
         attempt: 0,
         last_resolve_reason: None,
@@ -295,6 +304,8 @@ struct ReelSurfaceLikeSteps<'a> {
     first_probe: Option<facebook::FacebookLikeProbe>,
     /// 本轮解析出的落点。`ResolvedTarget` 只带字符串，坐标只能自己拿着。
     pending_point: Option<(f64, f64)>,
+    /// 帖级 react 控件的落点，留给下一轮的浮层提交当走廊起点。
+    primary_point: Option<(f64, f64)>,
     /// 主控件是否已经点过。决定下一轮该解析主控件还是反应浮层。
     primary_dispatched: bool,
     attempt: u32,
@@ -353,6 +364,8 @@ impl LocatingSteps for ReelSurfaceLikeSteps<'_> {
                 return Ok(Resolution::Missing);
             };
             self.pending_point = Some((x, y));
+            // 记住主控件落点：下一轮的浮层提交要拿它当走廊起点。
+            self.primary_point = Some((x, y));
             return Ok(Resolution::Found(ResolvedTarget {
                 key: "facebook.reels.like.primary".to_owned(),
                 anchor: format!("primary@{x},{y}"),
@@ -387,10 +400,14 @@ impl LocatingSteps for ReelSurfaceLikeSteps<'_> {
                 replayable: true,
             });
         };
-        dispatch_facebook_click(self.session, x, y).await?;
         let was_primary = !self.primary_dispatched;
         if was_primary {
+            dispatch_facebook_click(self.session, x, y).await?;
             self.primary_dispatched = true;
+        } else {
+            // 第二轮打的是反应浮层：贴走廊走、禁过冲。过冲会把光标甩出浮层的 hover 区，
+            // 浮层当场收起，这一次点击于是落在空处 —— 页面上什么都没发生，而回执照报「点了」。
+            dispatch_facebook_flyout_commit(self.session, self.primary_point, x, y).await?;
         }
         Ok(Actuation {
             dispatched: true,
@@ -432,13 +449,22 @@ impl LocatingSteps for ReelSurfaceLikeSteps<'_> {
 async fn execute_facebook_feed_like(
     session: &mut EngineSession,
     params: &crate::command::NoteInteractionParams,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let operation_id = format!(
         "feed-like-{}-{}",
         unix_time_ms(),
         FACEBOOK_FEED_LIKE_OPERATION.fetch_add(1, Ordering::Relaxed)
     );
-    let outcome = execute_facebook_feed_like_inner(session, params, &operation_id).await;
+    let outcome = execute_facebook_feed_like_inner(
+        session,
+        params,
+        &operation_id,
+        cancellation,
+        deadline_unix_ms,
+    )
+    .await;
     if let Ok(expression) = facebook::feed_like_clear_expression(&operation_id)
         && let Ok(raw) = session.cdp.evaluate(&expression, true).await
     {
@@ -451,6 +477,8 @@ async fn execute_facebook_feed_like_inner(
     session: &mut EngineSession,
     params: &crate::command::NoteInteractionParams,
     operation_id: &str,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let mut target = probe_facebook_feed_like_target(session, &params.note_id).await?;
     for round in 0..FACEBOOK_FEED_SCROLL_ROUNDS {
@@ -489,8 +517,8 @@ async fn execute_facebook_feed_like_inner(
             target.cx.unwrap_or(720.0).max(1.0),
             (viewport_height * FACEBOOK_ALIGN_SCROLL_VIEW_RATIO).max(1.0),
             baseline_distance_px,
-            None,
-            u64::MAX,
+            cancellation,
+            deadline_unix_ms,
         )
         .await
         .map_err(|failure| match failure {
@@ -502,10 +530,11 @@ async fn execute_facebook_feed_like_inner(
             WheelInputFailure::Cdp(error) => error,
         })?;
         // 固定 250ms 重探间隔本身是机器特征，改为围绕同一中心值的对数正态采样。
-        tokio::time::sleep(Duration::from_millis(sample_pause_ms(
-            FACEBOOK_ALIGN_SCROLL_REPROBE_CENTER_MS,
-        )))
-        .await;
+        //
+        // 这段等待**必须可打断**：它是对齐循环里唯一一段纯等待，本可让位。写成不可打断的
+        // sleep，接管信号就得干等一整拍才被看见——而对齐循环最多跑满轮次，累计起来的
+        // 「不让位窗口」正是任务点名不许塞进这条路径的那种。
+        align_scroll_reprobe_pause(cancellation, deadline_unix_ms).await?;
         target = probe_facebook_feed_like_target(session, &params.note_id).await?;
     }
 
@@ -652,6 +681,36 @@ async fn probe_facebook_feed_like_picker(
     facebook::feed_like_picker_from_cdp(&raw)
 }
 
+/// 对齐滚动两轮之间的重探间隔：可被接管打断、且不越过命令的绝对截止。
+///
+/// 取消返回「未派发」（滚动本身不是不可逆写入，这一刻页面上没有任何该账号名下的新痕迹），
+/// 超截止返回超时——两者都是**诚实终局**，不是「等完再说」。
+async fn align_scroll_reprobe_pause(
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+) -> Result<(), EngineError> {
+    let pause = Duration::from_millis(sample_pause_ms(FACEBOOK_ALIGN_SCROLL_REPROBE_CENTER_MS));
+    match cancellation {
+        Some(flag) => {
+            tokio::select! {
+                _ = wait_for_cancellation(flag) => return Err(cancelled_before_dispatch()),
+                _ = tokio::time::sleep(pause) => {}
+            }
+        }
+        None => tokio::time::sleep(pause).await,
+    }
+    if facebook_command_cancelled(cancellation) {
+        return Err(cancelled_before_dispatch());
+    }
+    if unix_time_ms() >= deadline_unix_ms {
+        return Err(EngineError::new(
+            ErrorCode::CdpTimeout,
+            "native Facebook align scroll exceeded its deadline",
+        ));
+    }
+    Ok(())
+}
+
 /// 反应浮层「赞」项的提交：起点显式取帖级 react 控件坐标、禁用过冲——路径必须紧贴
 /// 「控件 → 浮层」走廊，过冲会甩出浮层 hover 区致其收起（见 design D3 与本轮的走廊断言）。
 async fn dispatch_facebook_picker_click(
@@ -661,15 +720,31 @@ async fn dispatch_facebook_picker_click(
     x: f64,
     y: f64,
 ) -> Result<(), EngineError> {
-    dispatch_facebook_click_with(
-        session,
-        x,
-        y,
-        PointerClickOptions::from_corridor(PointerPoint {
+    dispatch_facebook_flyout_commit(session, Some((from_x, from_y)), x, y).await
+}
+
+/// 三处浮层提交共用的唯一出口（首页两步点赞 + Reels 的两条点赞分支）。
+///
+/// **禁过冲是这条走廊的硬约束，与起点读不读得到无关**：读不到起点只是少了一段可继承的
+/// 光标历史，不构成「可以甩出浮层」的理由。所以起点缺席时仍然禁过冲，只是起步点回落到
+/// 通用规则。把两件事绑在一起（读不到起点就整份用默认选项）正是这三处此前的形态。
+async fn dispatch_facebook_flyout_commit(
+    session: &mut EngineSession,
+    from: Option<(f64, f64)>,
+    x: f64,
+    y: f64,
+) -> Result<(), EngineError> {
+    let options = match from {
+        Some((from_x, from_y)) => PointerClickOptions::from_corridor(PointerPoint {
             x: from_x,
             y: from_y,
         }),
-    )
-    .await
-    .map(|_| ())
+        None => PointerClickOptions {
+            from: None,
+            allow_overshoot: false,
+        },
+    };
+    dispatch_facebook_click_with(session, x, y, options)
+        .await
+        .map(|_| ())
 }

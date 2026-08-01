@@ -1,10 +1,13 @@
 use aidcp_page_engine::command::NoteInteractionParams;
 use aidcp_page_engine::engine::{CommandOutput, Engine};
+use aidcp_page_engine::error::ErrorCode;
 use aidcp_page_engine::protocol::{
     CommandRecord, EffectPhase, NativeCommand, Platform, SessionOpenParams, SessionOpenRecord,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -90,6 +93,110 @@ async fn picker_dispatches_exactly_one_pointer_commit_after_probe() {
     assert!(released[0].0 > pressed[0].0);
 }
 
+/// 对齐滚动此前**零假 CDP 覆盖**：把它改回「单帧精确位移」不会有任何测试变红。
+///
+/// 这里钉的是手势形状——多帧滚轮 + 滚前先把光标移到落点。逐帧延迟的非恒定性由
+/// `input.rs` 的轨迹层单测承担（假 CDP 记录里没有可靠的墙钟间隔可读，在这里断言
+/// 「间隔不相等」等于断言测试机的调度抖动）。
+#[tokio::test]
+async fn align_scroll_uses_a_multi_frame_humanized_wheel_before_the_like() {
+    let (port, server) = spawn_facebook_feed_like_cdp_with(false, 2, None).await;
+    let mut engine = Engine::default();
+    engine
+        .open(&session_open(port))
+        .await
+        .expect("open Facebook session");
+    let outcome = engine
+        .execute(&like_command("facebook-feed-like-align-1"))
+        .await
+        .expect("Facebook Feed like");
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook Feed like fake CDP");
+
+    let wheels: Vec<f64> = requests
+        .iter()
+        .filter(|request| {
+            request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseWheel"
+        })
+        .filter_map(|request| request["params"]["deltaY"].as_f64())
+        .collect();
+    assert!(
+        wheels.len() > 2,
+        "两轮对齐滚动必须逐帧派发滚轮，实际 {} 帧",
+        wheels.len()
+    );
+    // 单帧精确位移的形态是「一轮一帧、位移恰好等于控件偏移」。多帧包络下每帧都是小位移，
+    // 且没有任何一帧等于整段位移 —— 这条断言正是用来杀掉「改回单帧」的。
+    let total: f64 = wheels.iter().sum();
+    assert!(
+        wheels.iter().all(|delta| delta.abs() < total.abs()),
+        "任何一帧都不该等于整段位移：{wheels:?}"
+    );
+    // 滚前先把光标移到可滚区：真人不会在光标停在别处时滚这一段。
+    let first_wheel = requests
+        .iter()
+        .position(|request| {
+            request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseWheel"
+        })
+        .expect("wheel dispatched");
+    assert!(
+        requests
+            .iter()
+            .take(first_wheel)
+            .any(|request| request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseMoved"),
+        "滚动前必须先移动光标"
+    );
+}
+
+/// 对齐循环是**本可让位**的路径：它只是在滚动与重探，页面上还没有该账号名下的任何新痕迹。
+///
+/// 而点赞是**写命令**，宿主对写命令**刻意不做**外层的取消竞速（写到一半被撕断比等它跑完更坏）。
+/// 所以在这条路径上，取消信号能不能被看见，完全取决于它有没有被传进循环里 ——
+/// 接线前传的是 `None`，于是协调器已经叫停、对齐循环仍然一轮轮滚下去，
+/// **并且滚到目标之后真的把赞点了出去**：一次已经被叫停的动作，在平台上留下了新痕迹。
+#[tokio::test]
+async fn align_scroll_yields_to_a_takeover_instead_of_liking_anyway() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    // 第一次目标探针回「不在视口」并**就地置位取消**；第二次就会回「在视口内」——
+    // 接线前的实现会照常滚过去、照常提交。
+    let (port, server) =
+        spawn_facebook_feed_like_cancel_after_first_probe_cdp(cancellation.clone()).await;
+    let mut engine = Engine::default();
+    engine
+        .open(&session_open(port))
+        .await
+        .expect("open Facebook session");
+
+    let outcome = engine
+        .execute_cancellable(
+            &like_command("facebook-feed-like-align-takeover"),
+            cancellation.clone(),
+        )
+        .await
+        .expect("command result");
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook Feed like fake CDP");
+
+    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+    assert_eq!(
+        outcome.error.expect("叫停必须如实报出").code,
+        ErrorCode::Cancelled
+    );
+    // 唯一真正要紧的那条：**叫停之后不许再写页面**。
+    assert!(
+        requests.iter().all(|request| {
+            request["params"]["expression"]
+                .as_str()
+                .is_none_or(|expression| !expression.contains(r#""kind":"feed_like_commit""#))
+        }),
+        "已经叫停了还是把赞点了出去"
+    );
+}
+
 fn session_open(port: u16) -> SessionOpenRecord {
     SessionOpenRecord {
         protocol_version: 2,
@@ -125,6 +232,23 @@ fn like_command(id: &str) -> CommandRecord {
 async fn spawn_facebook_feed_like_cdp(
     with_picker: bool,
 ) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    spawn_facebook_feed_like_cdp_with(with_picker, 0, None).await
+}
+
+/// 目标第一次回「不在视口」并同时置位取消；第二次回「在视口内」。
+async fn spawn_facebook_feed_like_cancel_after_first_probe_cdp(
+    cancellation: Arc<AtomicBool>,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    spawn_facebook_feed_like_cdp_with(false, 1, Some(cancellation)).await
+}
+
+/// `offscreen_rounds` = 前多少次目标探针回报「控件不在视口内」。每回报一次，宿主就会做一轮
+/// 对齐滚动再重探 —— 这正是本文件此前完全没有覆盖到的那段路径。
+async fn spawn_facebook_feed_like_cdp_with(
+    with_picker: bool,
+    offscreen_rounds: usize,
+    cancel_after_first_probe: Option<Arc<AtomicBool>>,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let port = listener.local_addr().expect("address").port();
     let server = tokio::spawn(async move {
@@ -133,6 +257,7 @@ async fn spawn_facebook_feed_like_cdp(
         let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
         let mut requests = Vec::new();
         let mut picker_probed = false;
+        let mut target_probes = 0usize;
         while let Some(message) = websocket.next().await {
             let message = message.expect("valid CDP request");
             let Message::Text(text) = message else {
@@ -176,6 +301,13 @@ async fn spawn_facebook_feed_like_cdp(
             } else if expression.contains(r#""kind":"reel_probe""#) {
                 runtime_value("reel_probe", json!({"ok":false,"reason":"not_reel"}))
             } else if expression.contains(r#""kind":"feed_like_target_probe""#) {
+                target_probes += 1;
+                let offscreen = target_probes <= offscreen_rounds;
+                if target_probes == 1
+                    && let Some(flag) = cancel_after_first_probe.as_ref()
+                {
+                    flag.store(true, Ordering::Release);
+                }
                 runtime_value(
                     "feed_like_target_probe",
                     json!({
@@ -183,11 +315,12 @@ async fn spawn_facebook_feed_like_cdp(
                         "noteId": "https://www.facebook.com/Alice/posts/pfbidTARGET",
                         "state": "neutral",
                         "cx": 320.0,
-                        "cy": 420.0,
-                        "top": 400.0,
-                        "bottom": 440.0,
+                        "cy": if offscreen { 1180.0 } else { 420.0 },
+                        // 控件在视口下方 1160px 处：宿主要把它滚上来才动手。
+                        "top": if offscreen { 1160.0 } else { 400.0 },
+                        "bottom": if offscreen { 1200.0 } else { 440.0 },
                         "viewportHeight": 800.0,
-                        "inViewport": true
+                        "inViewport": !offscreen
                     }),
                 )
             } else if expression.contains(r#""kind":"feed_like_commit""#) {
