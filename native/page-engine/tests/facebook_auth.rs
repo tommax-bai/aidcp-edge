@@ -369,6 +369,19 @@ async fn totp_submit_rejects_a_short_window_then_clicks_once_with_a_bound_postco
 
     engine.shutdown().await;
     let requests = server.await.expect("Facebook TOTP submit fake CDP");
+    let submit_probe_expressions: Vec<_> = requests
+        .iter()
+        .filter_map(|request| request["params"]["expression"].as_str())
+        .filter(|expression| expression.contains(r#""kind":"auth_probe""#))
+        .collect();
+    assert_eq!(submit_probe_expressions.len(), 2);
+    assert!(
+        submit_probe_expressions.iter().all(|expression| {
+            expression.contains(&format!(r#""enteredTotpWindowStartUnixMs":{WINDOW_START}"#))
+                && expression.contains(&format!(r#""enteredTotpWindowEndUnixMs":{WINDOW_END}"#))
+        }),
+        "a submit fresh probe must retain its coordinator-owned window"
+    );
     let first_input = first_input_index(&requests);
     assert_eq!(
         count_auth_probes(&requests[..first_input]),
@@ -399,12 +412,12 @@ async fn totp_submit_rejects_a_short_window_then_clicks_once_with_a_bound_postco
 }
 
 #[tokio::test]
-async fn totp_clear_clicks_the_bound_input_dispatches_bounded_keys_and_confirms_empty_readback() {
+async fn totp_clear_fresh_probes_a_complete_orphan_without_a_submit_window_and_confirms_empty_readback()
+ {
     const WINDOW_START: u64 = 1_800_000_000_000;
     const WINDOW_END: u64 = WINDOW_START + 30_000;
     let clear_signal = signal_id('7');
-    let observations = VecDeque::from([totp_observation(
-        "totp_refresh_required",
+    let observations = VecDeque::from([complete_orphan_observation(
         &clear_signal,
         WINDOW_END - 1_000,
         220.0,
@@ -437,6 +450,16 @@ async fn totp_clear_clicks_the_bound_input_dispatches_bounded_keys_and_confirms_
 
     engine.shutdown().await;
     let requests = server.await.expect("Facebook TOTP clear fake CDP");
+    let clear_probe = requests
+        .iter()
+        .filter_map(|request| request["params"]["expression"].as_str())
+        .find(|expression| expression.contains(r#""kind":"auth_probe""#))
+        .expect("one fresh TOTP clear probe");
+    assert!(
+        clear_probe.contains(r#""enteredTotpWindowStartUnixMs":null"#)
+            && clear_probe.contains(r#""enteredTotpWindowEndUnixMs":null"#),
+        "a clear-only fresh probe must not turn a complete orphan into submit-ready evidence"
+    );
     assert_eq!(
         count_mouse_pressed(&requests),
         1,
@@ -476,6 +499,51 @@ async fn totp_clear_clicks_the_bound_input_dispatches_bounded_keys_and_confirms_
         "clear confirms an empty bounded readback"
     );
     assert_action_probes_allow_auth_actions(&requests);
+}
+
+#[tokio::test]
+async fn totp_clear_refuses_a_changed_refresh_value_signal_before_any_input() {
+    const WINDOW_START: u64 = 1_800_000_000_000;
+    const WINDOW_END: u64 = WINDOW_START + 30_000;
+    let requested_signal = signal_id('8');
+    let changed_value_signal = signal_id('9');
+    let observations = VecDeque::from([complete_orphan_observation(
+        &changed_value_signal,
+        WINDOW_START + 15_000,
+        220.0,
+        180.0,
+    )]);
+    let (port, server) = spawn_auth_cdp(observations, VecDeque::new()).await;
+    let mut engine = Engine::default();
+    engine
+        .open(&session_open(port))
+        .await
+        .expect("open changed Facebook TOTP clear session");
+
+    let refused = execute(
+        &mut engine,
+        1,
+        NativeCommand::FacebookAuthClearTotp(FacebookAuthTotpWindowParams {
+            signal_id: requested_signal,
+            totp_window_start_unix_ms: WINDOW_START,
+            totp_window_end_unix_ms: WINDOW_END,
+        }),
+    )
+    .await;
+    assert_refused(&refused, "stale_auth_signal");
+
+    engine.shutdown().await;
+    let requests = server.await.expect("changed Facebook TOTP clear fake CDP");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"]
+                .as_str()
+                .is_some_and(|method| method.starts_with("Input.")))
+            .count(),
+        0,
+        "a changed value-bound refresh signal must dispatch zero Native input"
+    );
 }
 
 async fn execute(
@@ -608,6 +676,13 @@ fn totp_observation(
         },
         "serverEpochMs": server_epoch_ms
     })
+}
+
+fn complete_orphan_observation(signal_id: &str, server_epoch_ms: u64, cx: f64, cy: f64) -> Value {
+    let mut observation =
+        totp_observation("totp_refresh_required", signal_id, server_epoch_ms, cx, cy);
+    observation["reason"] = json!("entered_totp_window_unavailable");
+    observation
 }
 
 fn blocked_observation(signal: &str, reason: &str) -> Value {

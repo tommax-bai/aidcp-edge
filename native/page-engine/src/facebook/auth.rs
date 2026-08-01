@@ -407,11 +407,9 @@ async fn execute_totp_clear(
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
-    let probe_params = FacebookAuthProbeParams {
-        allow_auth_actions: true,
-        entered_totp_window_start_unix_ms: Some(params.totp_window_start_unix_ms),
-        entered_totp_window_end_unix_ms: Some(params.totp_window_end_unix_ms),
-    };
+    // Clearing must fresh-probe the unchanged field as clear-only evidence. Supplying an entered
+    // window here would turn an arbitrary complete orphan value into submit-ready evidence.
+    let probe_params = action_probe_params();
     let observation = match fresh_action_observation(
         session,
         command,

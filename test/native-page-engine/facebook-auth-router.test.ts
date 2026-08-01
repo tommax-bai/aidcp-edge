@@ -326,6 +326,86 @@ test('TOTP entry, submit, and refresh are separate server-time signals', async (
   assert.notEqual(refresh.signalId, submitReady.signalId);
 });
 
+test('TOTP submit hydration waits while ambiguous or covered controls remain blocked', async () => {
+  const windowStart = 1_800_000_000_000;
+  const params = {
+    enteredTotpWindowStartUnixMs: windowStart,
+    enteredTotpWindowEndUnixMs: windowStart + 30_000,
+  };
+
+  install(`
+    <main>
+      <h1>Two-factor authentication</h1>
+      <input id="code" autocomplete="one-time-code" value="123456">
+    </main>
+  `, 'https://www.facebook.com/two_step_verification/two_factor/', windowStart + 10_000);
+  setRect(document.getElementById('code')!, { left: 100, top: 100, right: 300, bottom: 145 });
+  const hydrating = await probe(params);
+  assert.equal(hydrating.signal, 'none');
+  assert.equal(hydrating.reason, 'totp_submit_hydrating');
+  assert.equal(hydrating.signalId, undefined);
+
+  install(`
+    <main>
+      <h1>Two-factor authentication</h1>
+      <input id="code" autocomplete="one-time-code" value="123456">
+      <button id="first">Continue</button>
+      <button id="second">Continue</button>
+    </main>
+  `, 'https://www.facebook.com/two_step_verification/two_factor/', windowStart + 10_000);
+  setRect(document.getElementById('code')!, { left: 100, top: 100, right: 300, bottom: 145 });
+  setRect(document.getElementById('first')!, { left: 100, top: 200, right: 240, bottom: 245 });
+  setRect(document.getElementById('second')!, { left: 300, top: 200, right: 440, bottom: 245 });
+  const ambiguous = await probe(params);
+  assert.equal(ambiguous.signal, 'blocked_unknown');
+  assert.equal(ambiguous.reason, 'auth_target_ambiguous');
+  assert.equal(ambiguous.signalId, undefined);
+
+  install(`
+    <main>
+      <h1>Two-factor authentication</h1>
+      <input id="code" autocomplete="one-time-code" value="123456">
+      <button id="continue">Continue</button>
+      <div id="cover"></div>
+    </main>
+  `, 'https://www.facebook.com/two_step_verification/two_factor/', windowStart + 10_000);
+  setRect(document.getElementById('code')!, { left: 100, top: 100, right: 300, bottom: 145 });
+  setRect(document.getElementById('continue')!, { left: 100, top: 200, right: 240, bottom: 245 });
+  setRect(document.getElementById('cover')!, { left: 100, top: 200, right: 240, bottom: 245 });
+  const covered = await probe(params);
+  assert.equal(covered.signal, 'blocked_unknown');
+  assert.equal(covered.reason, 'auth_target_not_topmost');
+  assert.equal(covered.signalId, undefined);
+});
+
+test('TOTP refresh signal ids bind the current orphan value without exposing it', async () => {
+  install(`
+    <main>
+      <h1>Two-factor authentication</h1>
+      <input id="code" autocomplete="one-time-code" value="123456">
+      <button id="continue">Continue</button>
+    </main>
+  `, 'https://www.facebook.com/two_step_verification/two_factor/');
+  const input = document.getElementById('code') as HTMLInputElement;
+  setRect(input, { left: 100, top: 100, right: 300, bottom: 145 });
+  setRect(document.getElementById('continue')!, { left: 100, top: 200, right: 240, bottom: 245 });
+
+  const first = await probe();
+  setRect(input, { left: 140, top: 120, right: 360, bottom: 170 });
+  const unchanged = await probe();
+  assert.equal(first.signal, 'totp_refresh_required');
+  assert.equal(first.reason, 'entered_totp_window_unavailable');
+  assert.equal(unchanged.signalId, first.signalId, 'layout-only reflow keeps the value-bound signal stable');
+  assert.equal(JSON.stringify(first).includes('123456'), false);
+
+  input.value = '654321';
+  const changed = await probe();
+  assert.equal(changed.signal, 'totp_refresh_required');
+  assert.equal(changed.reason, 'entered_totp_window_unavailable');
+  assert.notEqual(changed.signalId, first.signalId);
+  assert.equal(JSON.stringify(changed).includes('654321'), false);
+});
+
 test('server Date lower and RTT-adjusted upper bounds must stay in one TOTP window', async () => {
   const windowStart = 1_800_000_000_000;
   install(`

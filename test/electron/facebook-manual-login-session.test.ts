@@ -30,18 +30,46 @@ test('credential fill failure keeps the core attached and waits for identity in 
   );
   assert.equal((retainedWait.match(/reconcileFacebookAuthIfNeeded/g) ?? []).length, 1,
     'manual waiting must install one serialized auth consumer, not parallel watchers');
+  assert.match(retainedWait,
+    /authResult\.kind === 'manual_required'[\s\S]*?manualLoginRequiredReason !== authResult\.reason[\s\S]*?manualLoginRequiredReason = authResult\.reason[\s\S]*?type: 'lifecycle\.auth_required'[\s\S]*?reason: authResult\.reason[\s\S]*?return \{ kind: 'continue' as const \}/,
+    'a retained wait must publish a changed manual reason without terminating or adding another watcher');
   assert.doesNotMatch(retainedWait, /setInterval|setTimeout|Promise\.all/,
     'manual waiting must reuse the identity cadence instead of creating another scheduler');
 });
 
-test('Electron projects the structured reason without releasing browser ownership', () => {
-  assert.match(shell, /message\.type === 'lifecycle\.auth_required'/);
-  assert.match(shell, /message\.reason !== 'credential_fill_unavailable'/);
-  assert.match(shell, /settleLaunchReady\(handle, false\)/,
+test('Electron accepts only enumerated Facebook manual reasons and keeps their browser blocked', () => {
+  const authMessages = shell.slice(
+    shell.indexOf('const FACEBOOK_MANUAL_AUTH_MESSAGES'),
+    shell.indexOf('function facebookManualAuthMessage'),
+  );
+  assert.deepEqual(
+    [...authMessages.matchAll(/^\s{2}([a-z][a-z0-9_]+):/gm)].map((match) => match[1]),
+    [
+      'credential_fill_unavailable',
+      'stale_totp_input_requires_fresh_start',
+      'fresh_start_policy_unavailable',
+      'auth_probe_unavailable',
+    ],
+    'the shell must not accept an open-ended auth reason as manual-safe',
+  );
+  assert.match(shell,
+    /function facebookManualAuthMessage\(reason\)[\s\S]*?hasOwnProperty\.call\(FACEBOOK_MANUAL_AUTH_MESSAGES, key\)[\s\S]*?: null;/,
+    'unknown reasons must resolve to null and remain rejected');
+
+  const authHandler = shell.slice(
+    shell.indexOf("if (message.type === 'lifecycle.auth_required')"),
+    shell.indexOf("if (message.type === 'facebook-totp.request')"),
+  );
+  assert.match(authHandler, /const authMessage = facebookManualAuthMessage\(message\.reason\)/);
+  assert.match(authHandler, /message\.kind !== 'manual_login_required'[\s\S]*?\|\| !authMessage/,
+    'an unknown reason must not enter the manual-attention projection');
+  assert.match(authHandler, /settleLaunchReady\(handle, false\)/,
     'manual attention must release only the serial launch waiter');
-  assert.match(shell, /authReason: message\.reason/);
-  assert.match(shell, /status\.overlayBlocked \|\| status\.authReason === 'credential_fill_unavailable'/,
-    'the retained browser must be shown as waiting for manual handling');
+  assert.match(authHandler, /authReason: message\.reason/);
+  assert.match(authHandler, /lastMessage: authMessage[\s\S]*?presencePatch\(authMessage\)/,
+    'the accepted structured reason must drive the visible manual-attention copy');
+  assert.match(shell, /status\.overlayBlocked \|\| facebookManualAuthMessage\(status\.authReason\)/,
+    'all three retained manual reasons must project the browser as blocked');
   assert.match(shell, /next\.auth = 'logged in';\s*next\.authReason = null;/,
     'the existing stable account event clears the manual reason after in-place login');
   assert.match(shell, /message\.type === 'lifecycle\.close_failed'[\s\S]*?user_close'[\s\S]*?user_pause'/,

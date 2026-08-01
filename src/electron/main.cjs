@@ -163,6 +163,20 @@ let adsRuntimeSessionResetComplete = false;
 // AdsPower 官方下载页（客户端「下载 AdsPower」按钮外链）。
 const ADS_DOWNLOAD_URL = 'https://www.adspower.net/download';
 
+const FACEBOOK_MANUAL_AUTH_MESSAGES = Object.freeze({
+  credential_fill_unavailable: '需要登录：AdsPower 未填充账号密码',
+  stale_totp_input_requires_fresh_start: '需要处理：2FA 输入框中有未确认验证码，请在浏览器完成验证',
+  fresh_start_policy_unavailable: '需要处理：当前浏览器无法安全自动填写 2FA，请在浏览器完成验证',
+  auth_probe_unavailable: '需要处理：暂时无法读取 Facebook 登录页面，请在浏览器检查后继续',
+});
+
+function facebookManualAuthMessage(reason) {
+  const key = typeof reason === 'string' ? reason : '';
+  return Object.prototype.hasOwnProperty.call(FACEBOOK_MANUAL_AUTH_MESSAGES, key)
+    ? FACEBOOK_MANUAL_AUTH_MESSAGES[key]
+    : null;
+}
+
 // ── 边端日志落文件（排障用）──────────────────────────────────────────────
 // 核心子进程 stdout/stderr 除了进 UI 活动流，再逐行 append 到 userData/logs/edge.log，
 // 便于事后精确复盘。多环境下同一文件、每行带 [envId] 前缀（交织输出仍可按环境筛）。
@@ -4754,8 +4768,9 @@ async function spawnEdgeChild(handle, {
     );
     if (!currentGeneration && !currentStopReply) return;
     if (message.type === 'lifecycle.auth_required') {
+      const authMessage = facebookManualAuthMessage(message.reason);
       if (message.kind !== 'manual_login_required'
-          || message.reason !== 'credential_fill_unavailable'
+          || !authMessage
           || handle.platform !== 'facebook') return;
       // 人工登录等待已是稳定终态，不能继续占住串行启动队列；核心、浏览器和槽位仍保持占用。
       settleLaunchReady(handle, false);
@@ -4764,8 +4779,8 @@ async function spawnEdgeChild(handle, {
         auth: 'login required',
         authReason: message.reason,
         session: 'idle',
-        lastMessage: '需要登录：AdsPower 未填充账号密码',
-        ...presencePatch('需要登录：AdsPower 未填充账号密码'),
+        lastMessage: authMessage,
+        ...presencePatch(authMessage),
         ...clearEdgeFailurePatch(handle),
       });
       return;
@@ -6506,7 +6521,7 @@ function lifecycleAxes(handle) {
     && transientRuntime.proofAt >= handle.spawnedAtMs);
   const waitingForResource = handle.launchQueued || handle.startFlowQueued || handle.slotWaitingSince
     || handle.transientBrowserQueued;
-  let browserState = (status.overlayBlocked || status.authReason === 'credential_fill_unavailable')
+  let browserState = (status.overlayBlocked || facebookManualAuthMessage(status.authReason))
     ? 'blocked'
     : handle.browserStateUnconfirmed
       ? 'error'

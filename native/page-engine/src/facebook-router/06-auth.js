@@ -54,12 +54,14 @@
     const candidateKey=await authDigest(stableTotpInput
       ?authTotpElementEvidence(candidate)
       :authElementEvidence(candidate));
-    const signalId=`${facebookAuthSignalPrefix}${await authDigest([
+    const signalEvidence=[
       String(p.targetId||''),
       documentGeneration,
       signal,
       candidateKey,
-    ].join('\n'))}`;
+    ];
+    if(signal==='totp_refresh_required')signalEvidence.push(String(candidate.value||''));
+    const signalId=`${facebookAuthSignalPrefix}${await authDigest(signalEvidence.join('\n'))}`;
     const target=point(candidate);
     return {
       signal,
@@ -201,7 +203,11 @@
     }
     const scope=input.closest('form,[role="main"],main')||document;
     const submit=authUnique(authButtons(scope).filter((button)=>/^(continue|继续|繼續)$/i.test(label(button))));
-    if(!submit.candidate)return authObservation('blocked_unknown',null,submit.reason,time);
+    if(!submit.candidate){
+      return submit.reason==='auth_target_not_found'
+        ?authObservation('none',null,'totp_submit_hydrating',time)
+        :authObservation('blocked_unknown',null,submit.reason,time);
+    }
     return authObservation('totp_submit_ready',submit.candidate,undefined,time);
   };
   const authWarningObservation=async()=>{

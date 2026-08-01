@@ -450,6 +450,18 @@ async function main(): Promise<void> {
                   if (authResult.kind === 'failed') {
                     return { kind: 'failed' as const, reason: authResult.reason };
                   }
+                  if (authResult.kind === 'manual_required') {
+                    if (manualLoginRequiredReason !== authResult.reason) {
+                      manualLoginRequiredReason = authResult.reason;
+                      sendLifecycleIpc({
+                        type: 'lifecycle.auth_required',
+                        kind: 'manual_login_required',
+                        reason: authResult.reason,
+                        platform: platformDriver.platform,
+                      });
+                    }
+                    return { kind: 'continue' as const };
+                  }
                   if (authResult.kind === 'timeout' && authResult.actionAttempts > 0) {
                     // 已确认动作后的协调状态不能跨新实例猜测恢复（尤其 entered TOTP window）。
                     return { kind: 'failed' as const, reason: 'facebook_auth_timeout_after_action' };

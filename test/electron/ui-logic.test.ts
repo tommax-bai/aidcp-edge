@@ -126,6 +126,46 @@ test('凭据未填充显示明确人工登录原因', () => {
   assert.equal(uiLogic.fleetLevel(status, Date.now()).detail, '需要登录：AdsPower 未填充账号密码');
 });
 
+test('Facebook 2FA 与探针人工态显示需处理而非异常', () => {
+  const cases = [
+    {
+      reason: 'stale_totp_input_requires_fresh_start',
+      detail: '2FA 输入框中有未确认验证码，请在浏览器完成验证',
+    },
+    {
+      reason: 'fresh_start_policy_unavailable',
+      detail: '当前浏览器无法安全自动填写 2FA，请在浏览器完成验证',
+    },
+    {
+      reason: 'auth_probe_unavailable',
+      detail: '暂时无法读取 Facebook 登录页面，请在浏览器检查后继续',
+    },
+  ];
+
+  for (const { reason, detail } of cases) {
+    const status = st({
+      auth: 'login required',
+      authReason: reason,
+      automationState: 'starting',
+      engineLinkState: 'connecting',
+      browserState: 'blocked',
+    });
+    const health = uiLogic.synthesizeHealth(status);
+    assert.equal(health.code, 'attention', reason);
+    assert.equal(health.label, '需处理', reason);
+    assert.notEqual(health.label, '异常', reason);
+    assert.equal(health.detail, detail, reason);
+    assert.equal(uiLogic.presenceView(status, Date.now()).text, detail, reason);
+
+    const fleet = uiLogic.fleetLevel(status, Date.now());
+    assert.equal(fleet.level, 'attention', reason);
+    assert.equal(fleet.needsAction, true, reason);
+    assert.equal(fleet.label, '需处理', reason);
+    assert.notEqual(fleet.label, '异常', reason);
+    assert.equal(fleet.detail, detail, reason);
+  }
+});
+
 // ── 首次连接 ≠ 断线重连（change honest-first-connect-label）──
 // 冷启动窗口的真实形状：核心一打印日志 edge 就被翻成 running，spawn 时 session 已乐观写成 running，
 // 而核心 main() 里连云端排在「起浏览器 → CDP attach → 登录闸」之后——于是 cloud 还是 disconnected。

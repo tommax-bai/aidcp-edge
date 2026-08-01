@@ -648,7 +648,7 @@ export async function reconcileFacebookStartupAuth(
 
     if (probe.signal === 'totp_entry_ready') {
       if (!options.freshStartPolicyApplied) {
-        return result({ kind: 'failed', reason: 'fresh_start_policy_unavailable' });
+        return result({ kind: 'manual_required', reason: 'fresh_start_policy_unavailable' });
       }
       if (!validServerEpochMs(probe.serverEpochMs)) {
         return result({ kind: 'failed', reason: 'facebook_server_time_unavailable' });

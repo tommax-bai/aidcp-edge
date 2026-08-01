@@ -149,14 +149,18 @@ function totpBroker(
   };
 }
 
-test('a proven fresh start clears orphan TOTP text before entering a new code', async () => {
+test('a proven fresh start clears a complete orphan TOTP before entering a new code', async () => {
   const broker = totpBroker([
     { code: '654321', windowStartMs: 90_000, windowEndMs: 120_000 },
   ]);
   const runtime = new ScriptedRuntime([
     {
       kind: 'facebook_auth_probe',
-      execution: probe('totp_refresh_required', { signalId: 'orphan-1', serverEpochMs: 90_100 }),
+      execution: probe('totp_refresh_required', {
+        signalId: 'orphan-1',
+        serverEpochMs: 90_100,
+        reason: 'entered_totp_window_unavailable',
+      }),
     },
     { kind: 'facebook_auth_clear_totp', execution: action('facebook_auth_clear_totp', 'orphan-1') },
     {
@@ -219,6 +223,32 @@ test('an unproven active browser retains orphan TOTP text for manual handling', 
     actionAttempts: 0,
   });
   assert.deepEqual(runtime.calls.map((call) => call.kind), ['facebook_auth_probe']);
+  runtime.assertDone();
+});
+
+test('an unproven active browser retains an empty TOTP field for manual completion', async () => {
+  const runtime = new ScriptedRuntime([
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('totp_entry_ready', { signalId: 'entry-manual', serverEpochMs: 90_100 }),
+    },
+  ]);
+  const broker = totpBroker();
+
+  const result = await reconcileFacebookStartupAuth({
+    runtime,
+    totpBroker: broker,
+    freshStartPolicyApplied: false,
+    timeoutMs: 5_000,
+  });
+
+  assert.deepEqual(result, {
+    kind: 'manual_required',
+    reason: 'fresh_start_policy_unavailable',
+    actionAttempts: 0,
+  });
+  assert.deepEqual(runtime.calls.map((call) => call.kind), ['facebook_auth_probe']);
+  assert.deepEqual(broker.requests, []);
   runtime.assertDone();
 });
 
@@ -732,7 +762,7 @@ test('TOTP entry waits below ten seconds, requests the new window, and re-probes
   runtime.assertDone();
 });
 
-test('stale entered TOTP is cleared as its own action before a new entry and submit', async () => {
+test('TOTP expiring while Continue hydrates is cleared before a new entry and submit', async () => {
   const broker = totpBroker([
     { code: '111111', windowStartMs: 90_000, windowEndMs: 120_000 },
     { code: '222222', windowStartMs: 120_000, windowEndMs: 150_000 },
@@ -749,6 +779,10 @@ test('stale entered TOTP is cleared as its own action before a new entry and sub
     {
       kind: 'facebook_auth_enter_totp',
       execution: action('facebook_auth_enter_totp', 'entry-1-fresh'),
+    },
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('none', { reason: 'totp_submit_hydrating', serverEpochMs: 110_100 }),
     },
     {
       kind: 'facebook_auth_probe',
@@ -786,6 +820,8 @@ test('stale entered TOTP is cleared as its own action before a new entry and sub
     totpBroker: broker,
     freshStartPolicyApplied: true,
     timeoutMs: 30_000,
+    now: () => 0,
+    sleep: async () => undefined,
   });
 
   assert.deepEqual(result, { kind: 'authenticated', actionAttempts: 4 });
@@ -801,6 +837,11 @@ test('stale entered TOTP is cleared as its own action before a new entry and sub
     ],
   );
   assert.deepEqual(broker.requests, [100_000, 120_200]);
+  const ownedWindowProbes = runtime.calls.filter((call) =>
+    call.kind === 'facebook_auth_probe'
+      && call.params.enteredTotpWindowStartUnixMs === 90_000
+  );
+  assert.equal(ownedWindowProbes.length, 2, 'hydration and expiry probes retain the owned window');
   runtime.assertDone();
 });
 

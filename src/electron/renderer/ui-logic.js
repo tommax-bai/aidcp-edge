@@ -30,13 +30,27 @@
 
   // ── 健康合成：客户会话 + 自动化 + 浏览器 → 一句结论。core/cloud 仅作旧版兼容，不参与主结论。──
   const AUTH_ATTENTION = { 'login required': '需要登录小红书', 'chrome missing': '本机缺少 Chrome', 'config required': '需要完成初始设置' };
-  const CREDENTIAL_FILL_UNAVAILABLE_DETAIL = '需要登录：AdsPower 未填充账号密码';
+  const FACEBOOK_AUTH_ATTENTION = {
+    credential_fill_unavailable: '需要登录：AdsPower 未填充账号密码',
+    stale_totp_input_requires_fresh_start: '2FA 输入框中有未确认验证码，请在浏览器完成验证',
+    fresh_start_policy_unavailable: '当前浏览器无法安全自动填写 2FA，请在浏览器完成验证',
+    auth_probe_unavailable: '暂时无法读取 Facebook 登录页面，请在浏览器检查后继续',
+  };
 
   function authAttentionDetail(status) {
-    if (status.auth === 'login required' && status.authReason === 'credential_fill_unavailable') {
-      return CREDENTIAL_FILL_UNAVAILABLE_DETAIL;
+    if (status.auth === 'login required'
+        && Object.prototype.hasOwnProperty.call(FACEBOOK_AUTH_ATTENTION, status.authReason)) {
+      return FACEBOOK_AUTH_ATTENTION[status.authReason];
     }
     return AUTH_ATTENTION[status.auth] || '';
+  }
+
+  function isFacebookManualAttention(status) {
+    return status.auth === 'login required' && (
+      status.authReason === 'stale_totp_input_requires_fresh_start'
+      || status.authReason === 'fresh_start_policy_unavailable'
+      || status.authReason === 'auth_probe_unavailable'
+    );
   }
 
   function lifecycleView(status) {
@@ -792,7 +806,8 @@
     // 绝不呈现为绿色在线（多环境跨窗盯验证码是本控制台核心目的）。置于 running 判定之前。
     if (s.overlayBlocked) return result('attention', true, '需处理', 'attention', 'attention', '等待你处理');
     if (s.auth === 'login required') {
-      return result('attention', true, '需登录', 'attention', 'attention', authAttentionDetail(s) || '需要登录平台');
+      const label = isFacebookManualAttention(s) ? '需处理' : '需登录';
+      return result('attention', true, label, 'attention', 'attention', authAttentionDetail(s) || '需要登录平台');
     }
     if (s.auth === 'config required') return result('attention', true, '待配置', 'attention', 'attention', '需要完成初始设置');
     if (s.auth === 'chrome missing') return result('attention', true, '待配置', 'attention', 'attention', '缺少 Chrome');
