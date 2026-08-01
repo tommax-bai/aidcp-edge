@@ -3,7 +3,7 @@ use super::shared::*;
 use crate::commit_window::CommitWindowRequester;
 use crate::engine::{CommandOutput, EngineSession, validate_publish_file};
 use crate::error::{EngineError, ErrorCode};
-use crate::input::{TextInputFailure, type_text_humanized_guarded};
+use crate::input::{GuardedTextInputFailure, TextInputFailure, type_text_humanized_guarded};
 use crate::protocol::{EffectPhase, NativeCommand};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -609,16 +609,23 @@ pub(crate) async fn execute_facebook_publish_fill(
     .await;
     if let Err(failure) = typing {
         let cleanup = clear_bound_facebook_publish_editor(session).await;
-        if matches!(failure, TextInputFailure::Cancelled) {
+        if matches!(
+            failure,
+            GuardedTextInputFailure::Input(TextInputFailure::Cancelled)
+        ) {
             return Err(cancelled_before_dispatch());
         }
         let reason = match failure {
-            TextInputFailure::Deadline => "fill_deadline_exceeded",
-            TextInputFailure::Engine => "engine_error",
-            TextInputFailure::TargetLost => "composer_focus_lost",
+            // 焦点守卫**这一次没读到**焦点状态。既不是「引擎的通道坏了」也不是「焦点真丢了」，
+            // 单列一条原因码：压进 engine_error 会让排障往引擎方向找，压进 composer_focus_lost
+            // 则是把不知道说成知道、让人去追一次可能根本没发生的失焦。
+            GuardedTextInputFailure::GuardUnreadable => "composer_focus_unreadable",
+            GuardedTextInputFailure::Input(TextInputFailure::Deadline) => "fill_deadline_exceeded",
+            GuardedTextInputFailure::Input(TextInputFailure::Engine) => "engine_error",
+            GuardedTextInputFailure::Input(TextInputFailure::TargetLost) => "composer_focus_lost",
             // 逐字原语不含换行单元，这一态在本路径上结构上不可达。
-            TextInputFailure::NewlineUnstable => "engine_error",
-            TextInputFailure::Cancelled => unreachable!(),
+            GuardedTextInputFailure::Input(TextInputFailure::NewlineUnstable) => "engine_error",
+            GuardedTextInputFailure::Input(TextInputFailure::Cancelled) => unreachable!(),
         };
         let error = facebook_publish_fill_cleanup_error(reason, cleanup);
         return Ok(facebook_publish_result(

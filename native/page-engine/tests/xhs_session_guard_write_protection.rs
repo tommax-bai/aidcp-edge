@@ -5,14 +5,15 @@
 //! 提交前闸，会一路在验证码墙上按下去，且没有一个诚实的原因码可回。
 //!
 //! 三条本组用例钉死的语义：
-//!  ① 四条窗口契约的标签与预算是迁前实测值，**发布提交是 15s、不是 Facebook 的 20s**；
+//!  ① 四条窗口契约的**标签**（预算的事实源在宿主 `NATIVE_COMMIT_WINDOW_BUDGETS`，
+//!     引擎按标签请求、不再自带数字；数字的对账在 `runtime-contracts-commit-window.test.ts`）；
 //!  ② 拿不到窗口 ⇒ 一个字节都不写页面，终局是**未开始**（而不是 ambiguous，更不是先写了再说）；
 //!  ③ 提交前闸只认验证码与登录墙两桶；**页面类型未识别 MUST NOT 拒绝**；探测**本身**失败按「有挑战」保守拒绝。
 
 use aidcp_page_engine::commit_window::xiaohongshu_commit_window;
 use aidcp_page_engine::commit_window::{CommitWindowRequest, CommitWindowRequester};
 use aidcp_page_engine::endpoint_resolver::EndpointResolver;
-use aidcp_page_engine::engine::{CommandOutput, DEFAULT_COMMAND_TIMEOUT_MS, Engine};
+use aidcp_page_engine::engine::{CommandOutput, Engine};
 use aidcp_page_engine::error::ErrorCode;
 use aidcp_page_engine::protocol::{
     CommandRecord, EffectPhase, NativeCommand, Platform, SessionOpenParams, SessionOpenRecord,
@@ -36,15 +37,14 @@ fn comment_command() -> NativeCommand {
 }
 
 #[test]
-fn xiaohongshu_commit_window_contracts_keep_the_pre_migration_labels_and_budgets() {
+fn xiaohongshu_commit_window_contracts_keep_the_pre_migration_labels() {
+    // 预算不在引擎侧声明了（change `harden-native-engine-runtime-contracts` 3.2）：
+    // 引擎按标签请求，宿主按 `NATIVE_COMMIT_WINDOW_BUDGETS` 发放。
+    // 这里能钉、也只该钉的是**标签**——标签写错的后果不是「窗口短了」而是宿主认不出、
+    // 这条写入直接拒发，所以逐条钉死。
     // 评论回车：点下即进入「已提交、结果未知」区，取消 = 把一条可能已发出的评论当成没发生。
     let comment = xiaohongshu_commit_window(&comment_command()).expect("comment window");
     assert_eq!(comment.label, "xhs_comment_submit");
-    // 硬件级逐字输入整段落在窗口内之后，4s 必被打穿；预算抬到命令墙钟上限。
-    // 打穿的后果实测是「窗口静默过期 ⇒ 抢占可以落在提交那一刻」，不是「写入被拒发」。
-    // 判据是**这条恒等式**、不是某个具体毫秒数：命令上限是会被调的（曾整体 ×1.5），
-    // 在这里手抄一个字面量等于把同一颗雷原样往后推一次。
-    assert_eq!(comment.budget_ms, DEFAULT_COMMAND_TIMEOUT_MS);
 
     // 三条通知分类栏：点击**消费未读、无回滚**，窗口 MUST 覆盖点击那一刻。
     let comments = xiaohongshu_commit_window(&command(
@@ -52,30 +52,27 @@ fn xiaohongshu_commit_window_contracts_keep_the_pre_migration_labels_and_budgets
     ))
     .expect("notification comments window");
     assert_eq!(comments.label, "xhs_notification_comments");
-    assert_eq!(comments.budget_ms, 20_000);
 
     let likes = xiaohongshu_commit_window(&command(
         r#"{"kind":"notification_browse_likes","params":{}}"#,
     ))
     .expect("notification likes window");
     assert_eq!(likes.label, "xhs_notification_likes");
-    assert_eq!(likes.budget_ms, 20_000);
 
     let follows = xiaohongshu_commit_window(&command(
         r#"{"kind":"notification_browse_follows","params":{}}"#,
     ))
     .expect("notification follows window");
     assert_eq!(follows.label, "xhs_notification_follows");
-    assert_eq!(follows.budget_ms, 20_000);
 
-    // 发布提交：迁前实测 15s。20s 是 Facebook 的 `fb_publish_submit`，两者 MUST NOT 混用。
+    // 发布提交用小红书自己的标签，MUST NOT 复用 Facebook 的 `fb_publish_submit`：
+    // 两个平台的预算按各自真实提交时长定，混用标签就是混用预算。
     let publish = xiaohongshu_commit_window(&command(
         r#"{"kind":"publish_submit","params":{"recordId":7,"seq":3}}"#,
     ))
     .expect("publish window");
     assert_eq!(publish.label, "xhs_publish_submit");
-    assert_eq!(publish.budget_ms, 15_000);
-    assert_ne!(publish.budget_ms, 20_000, "发布提交的预算不得照抄 Facebook");
+    assert_ne!(publish.label, "fb_publish_submit");
 
     // 读命令与可重放的导航不占窗口：把整条命令包进窗口等于把「不可逆写入保护」
     // 偷换成「命令期间禁抢占」，抢占能力会事实上失效。
@@ -109,11 +106,7 @@ async fn comment_submit_requests_its_commit_window_before_any_write_dispatch() {
     let arbiter = tokio::spawn(async move {
         let request = receiver.recv().await.expect("commit window request");
         // 引擎此刻正阻塞等确认，计数在这一瞬是稳定的。
-        let observed = (
-            request.label,
-            request.budget_ms,
-            seen_at_window.load(Ordering::Acquire),
-        );
+        let observed = (request.label, seen_at_window.load(Ordering::Acquire));
         request.acknowledgement.send(true).expect("ack");
         observed
     });
@@ -128,11 +121,9 @@ async fn comment_submit_requests_its_commit_window_before_any_write_dispatch() {
         .await
         .expect("command result");
 
-    let (label, budget_ms, requests_before_window) = arbiter.await.expect("arbiter");
+    let (label, requests_before_window) = arbiter.await.expect("arbiter");
+    // 线路上到达宿主的**只有标签**：预算由宿主按这个标签查自己的事实源发放。
     assert_eq!(label, "xhs_comment_submit");
-    // 逐字输入整段落在窗口内，预算随之抬到命令墙钟上限（推导见 commit_window.rs）。
-    // 同上：钉的是恒等式，不是字面量。
-    assert_eq!(budget_ms, DEFAULT_COMMAND_TIMEOUT_MS);
     assert_eq!(
         requests_before_window - baseline,
         1,

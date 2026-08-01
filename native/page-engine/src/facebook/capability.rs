@@ -12,10 +12,15 @@ pub enum FacebookCapability {
     Publish,
 }
 
+/// 一条不可逆写入的提交窗口契约。**只有标签，没有预算数字。**
+///
+/// 预算的事实源在宿主（`src/native-page-engine/client.ts` 的 `NATIVE_COMMIT_WINDOW_BUDGETS`），
+/// 引擎按标签请求、宿主按标签发放。引擎侧曾镜像一份数字并随请求发出，靠一条机械对账防漂——
+/// 那份数字运行期已经不作数，留着只是给下一次调预算的人多一处可以改漏的地方，
+/// 而改漏的后果既没有文本冲突也没有编译错误。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommitWindowContract {
     pub label: &'static str,
-    pub budget_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,25 +57,21 @@ pub struct FacebookParityEntry {
 const TEXT_CONTAINS_WITH_TOLERANCE: &str =
     "normalized containment within the shared extra-character tolerance";
 
-/// 三条提交窗口。**标签在引擎侧定义，预算的事实源在宿主**
-/// （`src/native-page-engine/client.ts` 的 `NATIVE_COMMIT_WINDOW_BUDGETS`）：
-/// 宿主按标签发放预算；这里的数字只是那张表的镜像，运行期不再作数——报大了只授宿主上限，
-/// 标签不认识则拒发这一次窗口并把结论绑到当前命令上（不再终止引擎进程）。
-/// 两侧由 `test/native-page-engine/runtime-contracts-commit-window.test.ts` 机械对账：
-/// 单边改一个数字，仓库检查当场失败。改预算请改宿主那张表，再让对账把这里带上。
-// 提交窗预算随整体 ×1.5（2026-07-29）：它喂给宿主守卫，划定「这段不可被抢占」的时长。
-// 命令预算变长后这段也要相应变长，否则抢占闸会在提交段中途放行别的任务。
+/// 三条提交窗口的**标签**。预算不在这里，也不在引擎任何地方：
+/// 引擎按标签请求，宿主按标签发放（`src/native-page-engine/client.ts` 的
+/// `NATIVE_COMMIT_WINDOW_BUDGETS` 是唯一事实源，同时也是**准入白名单**）。
+///
+/// ⚠️ 宿主那张表里没有的标签会被判成契约违规并否决这一次窗口 —— 后果不是「少一层保护」，
+/// 而是这三处写入**全部拒发**（回执诚实，但功能停摆）。新增 / 改名标签必须同批改宿主那张表；
+/// `test/native-page-engine/runtime-contracts-commit-window.test.ts` 双向对账，漏改当场失败。
 const JOIN_WINDOW: Option<CommitWindowContract> = Some(CommitWindowContract {
     label: "fb_join_click",
-    budget_ms: 27_750,
 });
 const COMMENT_WINDOW: Option<CommitWindowContract> = Some(CommitWindowContract {
     label: "fb_comment_enter",
-    budget_ms: 30_000,
 });
 const PUBLISH_WINDOW: Option<CommitWindowContract> = Some(CommitWindowContract {
     label: "fb_publish_submit",
-    budget_ms: 30_000,
 });
 
 macro_rules! entry {
@@ -703,8 +704,10 @@ mod tests {
                     || entry.deadline_ms == 90_000
                     || entry.deadline_ms == 400_000
             );
+            // 窗口只声明标签：预算的事实源在宿主，引擎这边没有数字可校。
+            // 标签空掉 = 宿主认不出 = 这条写入全部拒发，所以这一条必须响亮。
             if let Some(window) = entry.commit_window {
-                assert!(window.budget_ms > 0 && window.budget_ms <= entry.deadline_ms);
+                assert!(!window.label.is_empty(), "{}", entry.command_kind);
             }
         }
         assert_eq!(kinds.len(), FACEBOOK_PARITY_LEDGER.len());

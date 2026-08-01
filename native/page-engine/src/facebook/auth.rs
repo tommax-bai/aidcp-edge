@@ -6,8 +6,8 @@ use crate::engine::{CommandOutput, EngineSession};
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
 use crate::input::{
-    PointerClickOptions, PointerInputFailure, TextInputFailure, dispatch_pointer_click,
-    insert_text_guarded,
+    GuardedTextInputFailure, PointerClickOptions, PointerInputFailure, TextInputFailure,
+    dispatch_pointer_click, insert_text_guarded,
 };
 use crate::model::{FacebookAuthActionReceipt, FacebookAuthProbeReceipt, FacebookAuthSignal};
 use crate::protocol::{EffectPhase, NativeCommand};
@@ -913,14 +913,24 @@ fn pointer_failure_result(
 fn text_failure_result(
     command: &NativeCommand,
     signal_id: &str,
-    failure: TextInputFailure,
+    failure: GuardedTextInputFailure,
 ) -> (EffectPhase, CommandOutput) {
     let reason = match failure {
-        TextInputFailure::Cancelled => "totp_entry_cancelled_after_focus",
-        TextInputFailure::Deadline => "totp_entry_deadline_after_focus",
-        TextInputFailure::TargetLost => "totp_entry_target_lost",
-        TextInputFailure::Engine => "totp_entry_input_failed",
-        TextInputFailure::NewlineUnstable => "totp_entry_input_failed",
+        // 焦点守卫这一次读不出焦点状态：与「守卫读到了目标丢失」（totp_entry_target_lost）
+        // 和「通道 / 写入失败」（totp_entry_input_failed）都分开。六位码这条路径上
+        // 把三者混成一条，等于让人拿着一个错误的方向去看真机。
+        GuardedTextInputFailure::GuardUnreadable => "totp_entry_focus_unreadable",
+        GuardedTextInputFailure::Input(TextInputFailure::Cancelled) => {
+            "totp_entry_cancelled_after_focus"
+        }
+        GuardedTextInputFailure::Input(TextInputFailure::Deadline) => {
+            "totp_entry_deadline_after_focus"
+        }
+        GuardedTextInputFailure::Input(TextInputFailure::TargetLost) => "totp_entry_target_lost",
+        GuardedTextInputFailure::Input(TextInputFailure::Engine) => "totp_entry_input_failed",
+        GuardedTextInputFailure::Input(TextInputFailure::NewlineUnstable) => {
+            "totp_entry_input_failed"
+        }
     };
     action_result(
         command,

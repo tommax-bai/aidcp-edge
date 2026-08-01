@@ -466,6 +466,15 @@ pub struct CommandResultRecord<'a, T: Serialize> {
     pub error: Option<ErrorRecord>,
 }
 
+/// 引擎在不可逆写入之前向宿主要一次提交窗口。**线路上只带标签，不带预算数字。**
+///
+/// 预算的单一事实源在宿主（`NATIVE_COMMIT_WINDOW_BUDGETS`），它同时也是准入白名单：
+/// 标签认识就按表授予，不认识就否决这一次窗口并把结论绑到当前命令上。
+/// 引擎自报的预算曾经在线路上跑过一段（宿主取 `min(请求, 事实源)`），那时它已经不作数了；
+/// 现在连字段一起去掉，免得下一个人以为改引擎那个数字能改到实际窗口。
+///
+/// 兼容性：旧宿主收到不带该字段的请求会按事实源发放，新宿主收到旧引擎带的该字段会忽略它 ——
+/// 两个方向都不破，故不动协议版本。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitWindowRequestRecord<'a> {
@@ -478,7 +487,6 @@ pub struct CommitWindowRequestRecord<'a> {
     pub command_id: u64,
     pub token: &'a str,
     pub label: &'a str,
-    pub budget_ms: u64,
 }
 
 /// 引擎在**重连**时主动向宿主要一次当前端点。与提交窗口请求同一形状：
@@ -511,7 +519,7 @@ impl<'a> EndpointRequestRecord<'a> {
 }
 
 impl<'a> CommitWindowRequestRecord<'a> {
-    pub fn new(request: &'a CommandRecord, token: &'a str, label: &'a str, budget_ms: u64) -> Self {
+    pub fn new(request: &'a CommandRecord, token: &'a str, label: &'a str) -> Self {
         Self {
             record_type: "commit_window_request",
             protocol_version: PROTOCOL_VERSION,
@@ -521,7 +529,6 @@ impl<'a> CommitWindowRequestRecord<'a> {
             command_id: request.command_id,
             token,
             label,
-            budget_ms,
         }
     }
 }

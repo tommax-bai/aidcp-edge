@@ -167,7 +167,6 @@ async fn main() {
                     &active_command.request,
                     &request.token,
                     request.label,
-                    request.budget_ms,
                 );
                 if write_record(&mut stdout, &record).await.is_err() {
                     let _ = request.acknowledgement.send(false);

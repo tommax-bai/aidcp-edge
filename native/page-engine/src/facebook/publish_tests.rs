@@ -56,6 +56,9 @@ enum PublishScenario {
     FillRejected,
     FillFocusRejected,
     FillFocusLost,
+    /// 打字途中焦点守卫**读不出**焦点状态（分片回来了，但布尔字段不是布尔）。
+    /// 与 `FillFocusLost`（守卫明确回「没聚焦」）是两件事，回执必须能区分。
+    FillFocusUnreadable,
     UploadConfirmed,
 }
 
@@ -74,6 +77,9 @@ struct FakeCalls {
     editor_focused: bool,
     editor_selected: bool,
     bound_editor_probes: usize,
+    /// `FillFocusUnreadable` 只把**一次**守卫读数弄成读不出：清场那一次仍须正常，
+    /// 否则断言就分不清「回执对不对」和「清场顺带坏了」。
+    guard_unreadable_served: bool,
     upload_target_probes: usize,
     upload_preview_probes: usize,
     file_sets: usize,
@@ -223,6 +229,7 @@ fn evaluated_result(scenario: PublishScenario, calls: &mut FakeCalls, expression
                     | PublishScenario::FillRejected
                     | PublishScenario::FillFocusRejected
                     | PublishScenario::FillFocusLost
+                    | PublishScenario::FillFocusUnreadable
                     | PublishScenario::UploadConfirmed
             ) || (matches!(
                 scenario,
@@ -267,6 +274,26 @@ fn evaluated_result(scenario: PublishScenario, calls: &mut FakeCalls, expression
                 && calls.inserted_texts.len() >= 2
             {
                 calls.editor_focused = false;
+            }
+            // 守卫**这一次读不出**：分片求值回来了、结构也在，但 `focused` 不是布尔。
+            // 这是「不知道」，不是「知道焦点丢了」，更不是「通道坏了」。
+            if matches!(scenario, PublishScenario::FillFocusUnreadable)
+                && !focus_requested
+                && calls.inserted_texts.len() >= 2
+                && !calls.guard_unreadable_served
+            {
+                calls.guard_unreadable_served = true;
+                return browser_result(
+                    "text_target",
+                    json!({
+                        "ok": true,
+                        "cx": 180.0,
+                        "cy": 140.0,
+                        "value": calls.editor_value,
+                        "focused": "unknown",
+                        "selected": calls.editor_selected
+                    }),
+                );
             }
             if focus_requested {
                 calls.editor_focused = true;
@@ -935,6 +962,42 @@ async fn fill_focus_loss_stops_before_the_next_character_and_cleans_the_bound_ed
         assert_eq!(calls.inserted_texts, ["a", "b"]);
         assert!(calls.editor_value.is_empty());
         assert!(calls.bound_editor_probes >= 3);
+    }
+    session.cdp.close().await;
+    server.await.expect("server");
+}
+
+/// 焦点守卫**读不到**焦点状态时，回执必须与「读到焦点丢了」区分开
+/// （change `harden-native-engine-runtime-contracts` 任务 7.4）。
+///
+/// 此前这一态被压进 `engine_error`：外面看到的与「求值根本发不出去 / 连接断了」完全一样，
+/// 于是排障方向被指向引擎通道，而真正坏掉的是页面里那段守卫分片。
+/// 停手行为与 `FillFocusLost` 那条完全一致（写在第 3 个字符之前停、清场、未开始），
+/// 唯一的差别就是这条原因码——所以这条断言就是**归因诚实**本身。
+#[tokio::test]
+async fn fill_unreadable_focus_guard_is_reported_apart_from_a_real_focus_loss() {
+    let (mut session, calls, server) = fake_session(PublishScenario::FillFocusUnreadable).await;
+    let (params, command) = fill_command("abcdef");
+
+    let (phase, output) = execute_facebook_publish_fill(
+        &mut session,
+        &params,
+        &command,
+        None,
+        unix_time_ms() + 30_000,
+    )
+    .await
+    .expect("unreadable focus guard");
+    let receipt = receipt(output);
+
+    assert_eq!(phase, EffectPhase::NotStarted);
+    assert_eq!(receipt.error.as_deref(), Some("composer_focus_unreadable"));
+    {
+        let calls = calls.lock().expect("calls");
+        // 与真丢焦点同样在下一个字符之前停手、同样清场：差别只在结论，不在行为。
+        assert_eq!(calls.inserted_texts, ["a", "b"]);
+        assert!(calls.editor_value.is_empty());
+        assert!(calls.guard_unreadable_served);
     }
     session.cdp.close().await;
     server.await.expect("server");

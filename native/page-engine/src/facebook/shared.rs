@@ -392,12 +392,7 @@ pub(crate) async fn enter_facebook_commit_window(
             )
         })?;
     requester
-        .enter(
-            contract.label,
-            contract.budget_ms,
-            deadline_unix_ms,
-            cancellation,
-        )
+        .enter(contract.label, deadline_unix_ms, cancellation)
         .await
 }
 

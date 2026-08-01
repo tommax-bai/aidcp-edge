@@ -412,7 +412,14 @@ interface CommandResponse {
   error?: ErrorRecord;
 }
 
-interface CommitWindowRequestRecord extends NativeCommitWindowRequest {
+/**
+ * 引擎发来的开窗请求，**线路形状**：只有标签，没有预算数字。
+ *
+ * 预算由宿主按标签发放（{@link NATIVE_COMMIT_WINDOW_BUDGETS}），所以它不在这个类型里；
+ * 带上预算的那个形状是 {@link NativeCommitWindowRequest}，由宿主授予之后才组装出来。
+ * 两个形状分开写，是为了让「谁说了算」在类型上就看得见：读进来的没有数字，能读到数字的都是授予后的。
+ */
+interface CommitWindowRequestRecord extends Omit<NativeCommitWindowRequest, 'budgetMs'> {
   type: 'commit_window_request';
   protocolVersion: number;
   id: string;
@@ -681,12 +688,12 @@ class NativeProcessTransport {
         this.terminate();
         return;
       }
-      const budgetMs = grantCommitWindowBudget(commitWindow.label, commitWindow.budgetMs);
+      const budgetMs = grantCommitWindowBudget(commitWindow.label);
       if (budgetMs === undefined) {
         this.rejectCommitWindowContract(commitWindow, 'commit_window_label_unknown');
         return;
       }
-      this.handleCommitWindowRequest(record.id, { ...commitWindow, budgetMs });
+      this.handleCommitWindowRequest(record.id, commitWindow, budgetMs);
       return;
     }
     if (record.type === 'endpoint_request') {
@@ -711,6 +718,7 @@ class NativeProcessTransport {
   private handleCommitWindowRequest(
     id: string,
     request: CommitWindowRequestRecord,
+    budgetMs: number,
   ): void {
     const pending = this.pending.get(id);
     if (!pending || pending.disposeCommitWindow) {
@@ -720,7 +728,8 @@ class NativeProcessTransport {
     let accepted = false;
     if (pending.commitWindowHandler) {
       try {
-        pending.disposeCommitWindow = pending.commitWindowHandler(request);
+        // 交给守卫的是**宿主授予的**预算，不是引擎说的：引擎这条线上根本没有数字可说。
+        pending.disposeCommitWindow = pending.commitWindowHandler({ ...request, budgetMs });
         accepted = true;
       } catch {
         accepted = false;
@@ -1247,16 +1256,20 @@ function parseEndpointRequest(value: unknown): EndpointRequestRecord | undefined
 }
 
 /**
- * 按标签发放预算。上限恒为事实源的数字：引擎报大了只授上限（引擎侧一个笔误不得放大成
- * 不受控的写保护窗口），报小了按它报的授（引擎可以要更短，不能要更长），没报 / 报了非法值
- * 按事实源发放。标签不认识时返回 undefined —— 那是契约违规，不是「按默认放行」。
+ * 按**标签**发放预算。请求里不带数字，这里也不看数字。
+ *
+ * 曾经的口径是 `min(引擎请求, 事实源)`。那一版是从「两边各写一份 + 相等断言 + 不等就终止引擎」
+ * 往回收的中间态：数字已经不作数，但字段还在线路上。字段留着的唯一效果，是让下一个调预算的人
+ * 以为改引擎那份也能改到实际窗口——改了不报错、不冲突、也不生效。现在线路上只有标签。
+ *
+ * 旧引擎二进制仍可能带一个 `budgetMs` 过来：**忽略**，不拒。拒了等于让一次版本错配把
+ * 那几处不可逆写入全部停摆，而这个字段本来就已经不作数了。
+ *
+ * 标签不认识时返回 undefined —— 那是契约违规，不是「按默认放行」。
  */
-function grantCommitWindowBudget(label: string, requestedMs: unknown): number | undefined {
+function grantCommitWindowBudget(label: string): number | undefined {
   if (!Object.hasOwn(NATIVE_COMMIT_WINDOW_BUDGETS, label)) return undefined;
-  const authoritative = NATIVE_COMMIT_WINDOW_BUDGETS[label as NativeCommitWindowLabel];
-  return Number.isSafeInteger(requestedMs) && Number(requestedMs) > 0
-    ? Math.min(Number(requestedMs), authoritative)
-    : authoritative;
+  return NATIVE_COMMIT_WINDOW_BUDGETS[label as NativeCommitWindowLabel];
 }
 
 function parseSessionInfo(value: unknown): NativePageSessionInfo {

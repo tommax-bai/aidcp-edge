@@ -775,12 +775,7 @@ async fn execute_xhs_command_once(
     //    MUST NOT 先写了再说。
     if let Some(contract) = xiaohongshu_commit_window(command) {
         commit_windows
-            .enter(
-                contract.label,
-                contract.budget_ms,
-                deadline_unix_ms,
-                cancellation,
-            )
+            .enter(contract.label, deadline_unix_ms, cancellation)
             .await?;
     }
     use NativeCommand::*;

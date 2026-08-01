@@ -366,7 +366,6 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     this.active = active;
     try {
       await active;
-      if (env.type === 'session.end') this.stop('cloud_session_end');
     } catch (error) {
       const detail = error as { code?: string; detail?: { effectPhase?: string; reasonCode?: string } };
       const reported = detail.detail?.effectPhase;
@@ -392,6 +391,13 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     } finally {
       if (this.active === active) this.active = undefined;
       if (this.activeAbort === controller) this.activeAbort = undefined;
+      // 会话结束的收尾**必须**落在 finally，不能挂在成功路径上。
+      // 结束命令自己失败（引擎已死 / 中途退出 / 页面规则报错）时，收尾照样得做：
+      // 收尾不做 = owner 位不释放 + 周期观测不停 —— 下一次开始拿到的还是同一场死会话，
+      // 而云端只看到一条普通失败，没有任何东西指向「这个环境已经变砖」。
+      // 顺序上放在 active / activeAbort 复位之后：此刻这条命令已经落定，
+      // stop() 里的中止信号不会打到一条还在跑的命令上。
+      if (env.type === 'session.end') this.stop('cloud_session_end');
     }
   }
 

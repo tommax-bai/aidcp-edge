@@ -155,7 +155,9 @@ pub(crate) async fn type_text_humanized(
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
 ) -> Result<usize, TextInputFailure> {
-    type_text_humanized_inner(cdp, value, cancellation, deadline_unix_ms, None).await
+    type_text_humanized_inner(cdp, value, cancellation, deadline_unix_ms, None)
+        .await
+        .map_err(GuardedTextInputFailure::into_unguarded)
 }
 
 pub(crate) async fn type_text_humanized_guarded(
@@ -164,7 +166,7 @@ pub(crate) async fn type_text_humanized_guarded(
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
     target_guard_expression: &str,
-) -> Result<usize, TextInputFailure> {
+) -> Result<usize, GuardedTextInputFailure> {
     type_text_humanized_inner(
         cdp,
         value,
@@ -186,16 +188,15 @@ pub(crate) async fn insert_text_guarded(
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
     target_guard_expression: &str,
-) -> Result<(), TextInputFailure> {
+) -> Result<(), GuardedTextInputFailure> {
     ensure_text_input_active(cancellation, deadline_unix_ms)?;
+    // 通道失败（求值发不出去 / 连接断了）单列为 Engine，保持不变。
     let result = cdp
         .evaluate(target_guard_expression, true)
         .await
         .map_err(|_| TextInputFailure::Engine)?;
-    match focus_guard_verdict(&result) {
-        FocusGuardVerdict::Focused => {}
-        FocusGuardVerdict::Lost => return Err(TextInputFailure::TargetLost),
-        FocusGuardVerdict::Unreadable => return Err(TextInputFailure::Engine),
+    if let Some(failure) = guarded_focus_failure(focus_guard_verdict(&result)) {
+        return Err(failure);
     }
     ensure_text_input_active(cancellation, deadline_unix_ms)?;
     cdp.insert_text(value)
@@ -215,6 +216,66 @@ pub(crate) enum FocusGuardVerdict {
     Focused,
     Lost,
     Unreadable,
+}
+
+/// 带焦点守卫的文本写入的失败面。比 `TextInputFailure` 多一态，而且**只多在守卫路径上**。
+///
+/// 为什么不是往 `TextInputFailure` 里加一个变体：那一态只可能由焦点守卫的读数产生，
+/// 而共享枚举被 7 处穷举匹配消费，其中 5 处根本不带守卫。加变体等于逼那 5 处各写一条
+/// 「此路不可达」的分支——每一条都是一次把不存在的状态映射成某个原因码的机会，
+/// 也就是把「结构上不会发生」变成「发生了我就随便报一个」。用类型把它圈在守卫路径里，
+/// 不带守卫的调用方连看见它的机会都没有。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GuardedTextInputFailure {
+    Input(TextInputFailure),
+    /// 焦点守卫**这一次没读到**焦点状态：守卫在页面里抛了异常、输出缺失、kind 不对、
+    /// 或布尔字段不是布尔。
+    ///
+    /// 三件事必须分开，谁也不许冒充谁：
+    ///  - `Input(TextInputFailure::Engine)` —— 通道本身失败（求值发不出去 / 连接断了）；
+    ///  - `Input(TextInputFailure::TargetLost)` —— 守卫**读到了**坏消息：目标不在 / 没聚焦；
+    ///  - `GuardUnreadable` —— 读不到。
+    ///
+    /// 压成前两者之一都是撒谎：压成 `TargetLost` 是把不知道说成知道（真机上按图索骥去找一次
+    /// 根本没发生的失焦）；压成 `Engine` 是把「页面里那段守卫自己坏了」说成「引擎的通道坏了」，
+    /// 排障方向正好指反。
+    GuardUnreadable,
+}
+
+impl From<TextInputFailure> for GuardedTextInputFailure {
+    fn from(failure: TextInputFailure) -> Self {
+        Self::Input(failure)
+    }
+}
+
+impl GuardedTextInputFailure {
+    /// 折回不带守卫的失败面。
+    ///
+    /// 只给**不传守卫表达式**的那条路径用：那里 `focus_guard_verdict` 一次都不会被调用，
+    /// 所以 `GuardUnreadable` 结构上产生不出来。万一将来有人给那条路径接上守卫却忘了改回执，
+    /// 这里回落到 `Engine`（引擎侧失败）而**绝不**回落到 `TargetLost` ——
+    /// 方向是「说不清」，不是「谎称目标丢了」。
+    fn into_unguarded(self) -> TextInputFailure {
+        match self {
+            Self::Input(failure) => failure,
+            Self::GuardUnreadable => TextInputFailure::Engine,
+        }
+    }
+}
+
+/// 焦点守卫读数 → 写入失败面的**唯一**翻译点。
+///
+/// 收成一处而不是在两个守卫入口各写一遍 `match`：这三态一旦在某一处被合并，
+/// 合并的那一处不会报错、只会安静地少报一种结论，而两处各写一遍就有两次合错的机会。
+/// `Focused` 回 `None`（继续写），其余两态各自单列。
+pub(crate) fn guarded_focus_failure(verdict: FocusGuardVerdict) -> Option<GuardedTextInputFailure> {
+    match verdict {
+        FocusGuardVerdict::Focused => None,
+        FocusGuardVerdict::Lost => {
+            Some(GuardedTextInputFailure::Input(TextInputFailure::TargetLost))
+        }
+        FocusGuardVerdict::Unreadable => Some(GuardedTextInputFailure::GuardUnreadable),
+    }
 }
 
 pub(crate) fn focus_guard_verdict(result: &serde_json::Value) -> FocusGuardVerdict {
@@ -250,7 +311,7 @@ async fn type_text_humanized_inner(
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
     target_guard_expression: Option<&str>,
-) -> Result<usize, TextInputFailure> {
+) -> Result<usize, GuardedTextInputFailure> {
     let mut rhythm = KeyboardRhythm::new();
     let mut typed = 0;
     for character in value.chars() {
@@ -266,12 +327,11 @@ async fn type_text_humanized_inner(
                 .evaluate(expression, true)
                 .await
                 .map_err(|_| TextInputFailure::Engine)?;
-            match focus_guard_verdict(&result) {
-                FocusGuardVerdict::Focused => {}
-                FocusGuardVerdict::Lost => return Err(TextInputFailure::TargetLost),
-                // 「守卫求值本身失败 / 输出缺失」不是「焦点确实丢了」：前者是读不到，后者是读到了坏消息。
-                // 把读不到当成读到，就是把不知道说成知道。这里按引擎侧失败归因，绝不冒充目标丢失。
-                FocusGuardVerdict::Unreadable => return Err(TextInputFailure::Engine),
+            // 「守卫求值本身失败 / 输出缺失」不是「焦点确实丢了」：前者是读不到，后者是读到了坏消息。
+            // 也不是「通道坏了」：守卫这一次的求值**回来了**，只是回来的东西读不出焦点状态。
+            // 三态各自单列、谁也不许冒充谁，翻译收在 guarded_focus_failure 一处。
+            if let Some(failure) = guarded_focus_failure(focus_guard_verdict(&result)) {
+                return Err(failure);
             }
         }
         cdp.insert_text(&character.to_string())
@@ -1591,6 +1651,31 @@ mod tests {
                 "{unreadable}"
             );
         }
+    }
+
+    /// 三态读数必须翻成**三个不同**的结论。
+    ///
+    /// 此前 `Unreadable` 与通道失败一起压成 `Engine`：外面看到的原因码只有两种，
+    /// 「守卫读不到」和「求值根本发不出去」长得一模一样，排障方向被指反。
+    #[test]
+    fn focus_guard_verdicts_translate_into_three_distinct_conclusions() {
+        assert_eq!(guarded_focus_failure(FocusGuardVerdict::Focused), None);
+        assert_eq!(
+            guarded_focus_failure(FocusGuardVerdict::Lost),
+            Some(GuardedTextInputFailure::Input(TextInputFailure::TargetLost)),
+        );
+        let unreadable =
+            guarded_focus_failure(FocusGuardVerdict::Unreadable).expect("unreadable is a failure");
+        assert_eq!(unreadable, GuardedTextInputFailure::GuardUnreadable);
+        // 「读不到」既不许冒充「读到了目标丢失」，也不许冒充「通道坏了」。
+        assert_ne!(
+            unreadable,
+            GuardedTextInputFailure::Input(TextInputFailure::TargetLost)
+        );
+        assert_ne!(
+            unreadable,
+            GuardedTextInputFailure::Input(TextInputFailure::Engine)
+        );
     }
 
     #[test]
