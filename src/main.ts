@@ -1208,6 +1208,19 @@ async function main(): Promise<void> {
         }
         return;
       }
+      // 云端可以带一份运营真机鼠标轨迹下来（`trajectory`）。**引擎今天收不下它** ——
+      // 验证码点击参数结构体带「拒绝未知字段」，多塞一个字段会让整条命令变成非法请求。
+      // 所以这里不转发；但**丢弃必须留痕**：不留痕的话，运营在后台画完轨迹、
+      // 回执报「合成路径」，两件事之间没有任何一处说得清「你画的那份去哪了」。
+      // 轨迹回放通道本身是另一条 change 的活（本 change 的 7.10 已具名交接）。
+      const suppliedTrajectory = (payload as { trajectory?: unknown }).trajectory;
+      const trajectoryForwarded = false;
+      if (suppliedTrajectory !== undefined && !trajectoryForwarded) {
+        console.warn(
+          `[aidcp-edge] 验证码协助收到运营轨迹但未转发给引擎 incident=${incidentId} `
+          + 'reason=native_command_rejects_unknown_fields；本次按合成路径执行，回执 replayMode=synthetic',
+        );
+      }
       const execution = await nativePageRuntime.execute(ownerId, {
         kind: 'captcha_click',
         params: {
@@ -1227,7 +1240,8 @@ async function main(): Promise<void> {
         snapshotId: String(payload.snapshotId ?? ''),
         edgeId,
         ...(accountId ? { accountId } : {}),
-        ...buildCaptchaClickResultFacts(payload, receipt),
+        // 回放模式按**实际走的那条路**派生，不写常量：轨迹没转发出去就是合成路径。
+        ...buildCaptchaClickResultFacts(payload, receipt, trajectoryForwarded ? 'trajectory' : 'synthetic'),
         checkedAt: Date.now(),
       });
     })().catch((err) => {

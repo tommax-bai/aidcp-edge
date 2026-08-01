@@ -39,7 +39,7 @@ const FULL_REPORT: CaptchaAssistTypeReportPayload = {
 // ── 3.1：取证缺席时，绝不谎报「点击并键入」 ────────────────────────────────────
 
 test('captcha click result: 下发了文本但回执不带任何键入取证时，MUST NOT 标 click_type', () => {
-  const facts = buildCaptchaClickResultFacts({ text: 'ab12' }, { ok: false, reason: 'captcha_type_failed' });
+  const facts = buildCaptchaClickResultFacts({ text: 'ab12' }, { ok: false, reason: 'captcha_type_failed' }, 'synthetic');
   // 正向不变量而非 `notEqual(..., 'click_type')`：否定式在 inputMode 整格消失时**恒真**（假绿）。
   // 钉死具体取值，实现被删光就会红。
   assert.equal(
@@ -66,6 +66,7 @@ test('captcha click result: 点位没点中输入框（零派发）MUST NOT 被�
       reason: 'captcha_input_not_focused',
       typeReport: { focus: 'none', typed: 0, submitted: false },
     },
+    'synthetic',
   );
   assert.equal(
     facts.inputMode,
@@ -94,6 +95,7 @@ test('captcha click result: 焦点档读不到时不编取证、也不升级成 
   const facts = buildCaptchaClickResultFacts(
     { text: 'ab12' },
     { ok: false, reason: 'captcha_input_focus_probe_failed' },
+    'synthetic',
   );
   assert.equal(facts.typeReport, undefined, '读不到就整份缺席，MUST NOT 补一个看着确定的 none');
   assert.equal(
@@ -110,6 +112,7 @@ test('captcha click result: 取证六字段逐字段透传，键入路径跑过�
   const facts = buildCaptchaClickResultFacts(
     { text: 'ab12' },
     { ok: true, reason: 'cleared', typeReport: { ...FULL_REPORT } },
+    'synthetic',
   );
   assert.equal(facts.status, 'cleared');
   assert.equal(facts.inputMode, 'click_type');
@@ -126,6 +129,7 @@ test('captcha click result: 打包出的载荷绝不携带答案本身', () => {
       reason: 'cleared',
       typeReport: { ...FULL_REPORT, text: 'ab12', answer: 'ab12' } as unknown as CaptchaAssistTypeReportPayload,
     },
+    'synthetic',
   );
   assert.deepEqual(Object.keys(facts.typeReport ?? {}).sort(), [
     'cleared',
@@ -139,7 +143,7 @@ test('captcha click result: 打包出的载荷绝不携带答案本身', () => {
 });
 
 test('captcha click result: 纯点击（未下发文本）不带取证，inputMode 为 click', () => {
-  const facts = buildCaptchaClickResultFacts({}, { ok: true, reason: 'cleared' });
+  const facts = buildCaptchaClickResultFacts({}, { ok: true, reason: 'cleared' }, 'synthetic');
   assert.equal(facts.inputMode, 'click');
   assert.equal(facts.typeReport, undefined);
   assert.equal(facts.replayMode, 'synthetic');
@@ -149,13 +153,14 @@ test('captcha click result: 纯点击（未下发文本）不带取证，inputMo
 
 test('captcha click result: 云端版本偏斜探测器只在「键入路径整段没跑」时触发', () => {
   // 老边缘忽略 text ⇒ 根本不产出 typeReport ⇒ 探测器如实响：这才是它要抓的那件事。
-  const missing = buildCaptchaClickResultFacts({ text: 'ab12' }, { ok: false, reason: 'captcha_type_failed' });
+  const missing = buildCaptchaClickResultFacts({ text: 'ab12' }, { ok: false, reason: 'captcha_type_failed' }, 'synthetic');
   assert.equal(cloudTextNotExecuted(4, missing), true);
 
   // 最新边缘、键入路径跑过但零派发 ⇒ **不是**版本偏斜，绝不触发。
   const zeroDispatch = buildCaptchaClickResultFacts(
     { text: 'ab12' },
     { ok: false, reason: 'captcha_input_not_focused', typeReport: { focus: 'none', typed: 0, submitted: false } },
+    'synthetic',
   );
   assert.equal(
     cloudTextNotExecuted(4, zeroDispatch),
@@ -166,11 +171,12 @@ test('captcha click result: 云端版本偏斜探测器只在「键入路径整�
   const dispatched = buildCaptchaClickResultFacts(
     { text: 'ab12' },
     { ok: true, reason: 'cleared', typeReport: { ...FULL_REPORT } },
+    'synthetic',
   );
   assert.equal(cloudTextNotExecuted(4, dispatched), false);
 
   // 纯点击的协助从来没下发过文本，探测器 MUST NOT 因为它是 'click' 就误报。
-  const clickOnly = buildCaptchaClickResultFacts({}, { ok: true, reason: 'cleared' });
+  const clickOnly = buildCaptchaClickResultFacts({}, { ok: true, reason: 'cleared' }, 'synthetic');
   assert.equal(cloudTextNotExecuted(0, clickOnly), false);
 });
 
@@ -184,6 +190,7 @@ test('captcha click result: 中途中断的部分派发照实回报，不得回�
       reason: 'preempted_by_task',
       typeReport: { focus: 'editable', focusTag: 'INPUT', cleared: 'verified', typed: 3, submitted: false },
     },
+    'synthetic',
   );
   assert.equal(facts.typeReport?.typed, 3);
   assert.equal(facts.typeReport?.submitted, false);

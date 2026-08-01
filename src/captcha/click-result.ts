@@ -74,13 +74,25 @@ function sanitizeTypeReport(raw: unknown): CaptchaAssistTypeReportPayload | unde
  * `_request` 只为可读性保留在签名里：**本函数刻意不从它推导任何一格**。参数留着而不删，
  * 是为了让「打包不看请求」这件事在调用点也看得见；一旦有人想按请求补一格，会先撞到这段注释。
  */
+/**
+ * 这次协助**实际上**是被哪条路径驱动的。
+ *
+ * 由调用方按「轨迹到底有没有被转发给执行层」如实给出，MUST NOT 由本函数猜、
+ * 更 MUST NOT 写成常量：回执里的回放模式是运营判断「我画的轨迹到底用上没有」的唯一依据，
+ * 写死之后它就永远说同一句话，而那句话恰好在轨迹通道接通的那一天开始变成谎话 ——
+ * 且没有任何东西会响。
+ */
+export type CaptchaActuationPath = 'synthetic' | 'trajectory';
+
 export function buildCaptchaClickResultFacts(
   _request: { text?: unknown },
   receipt: NativeCaptchaClickReceipt | undefined,
+  actuationPath: CaptchaActuationPath,
 ): CaptchaClickResultFacts {
   if (!receipt) {
     // 引擎没回一份认得出的回执：什么都不知道，就什么都不声称（连 inputMode 都不给）。
-    return { status: 'failed', reason: 'native_captcha_receipt_missing', replayMode: 'synthetic' };
+    // 回放模式仍按**实际走的那条路**报——这一格说的是「怎么驱动的」，与「结果如何」无关。
+    return { status: 'failed', reason: 'native_captcha_receipt_missing', replayMode: actuationPath };
   }
   const typeReport = sanitizeTypeReport(receipt.typeReport);
   const status: CaptchaAssistClickResultPayload['status'] =
@@ -95,7 +107,7 @@ export function buildCaptchaClickResultFacts(
   return {
     status,
     ...(receipt.reason ? { reason: receipt.reason } : {}),
-    replayMode: 'synthetic',
+    replayMode: actuationPath,
     // 唯一判据：**键入执行路径真的跑过**（回执带取证即为跑过），与 `typed` 是否为 0 无关。
     // 取证缺席 ⇒ 这次协助根本没走键入路径（老边缘忽略 text 就是这个形态），回落 'click'，
     // 让云端「客户端太旧」的版本偏斜探测器如实响。
