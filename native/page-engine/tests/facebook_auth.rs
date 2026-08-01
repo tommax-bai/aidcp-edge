@@ -412,6 +412,65 @@ async fn totp_submit_rejects_a_short_window_then_clicks_once_with_a_bound_postco
 }
 
 #[tokio::test]
+async fn totp_submit_hydration_waits_without_consuming_the_later_enabled_signal() {
+    const WINDOW_START: u64 = 1_800_000_000_000;
+    const WINDOW_END: u64 = WINDOW_START + 30_000;
+    let signal = signal_id('9');
+    let observations = VecDeque::from([
+        blocked_observation("none", "totp_submit_hydrating"),
+        totp_observation(
+            "totp_submit_ready",
+            &signal,
+            WINDOW_START + 15_000,
+            420.0,
+            360.0,
+        ),
+    ]);
+    let (port, server) = spawn_auth_cdp(observations, VecDeque::new()).await;
+    let mut engine = Engine::default();
+    engine
+        .open(&session_open(port))
+        .await
+        .expect("open Facebook hydrating TOTP submit session");
+
+    let refused = execute(
+        &mut engine,
+        1,
+        NativeCommand::FacebookAuthSubmitTotp(FacebookAuthTotpWindowParams {
+            signal_id: signal.clone(),
+            totp_window_start_unix_ms: WINDOW_START,
+            totp_window_end_unix_ms: WINDOW_END,
+        }),
+    )
+    .await;
+    assert_refused(&refused, "stale_auth_signal");
+
+    let confirmed = execute(
+        &mut engine,
+        2,
+        NativeCommand::FacebookAuthSubmitTotp(FacebookAuthTotpWindowParams {
+            signal_id: signal,
+            totp_window_start_unix_ms: WINDOW_START,
+            totp_window_end_unix_ms: WINDOW_END,
+        }),
+    )
+    .await;
+    assert_confirmed(&confirmed, "facebook_auth_submit_totp");
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook hydrating TOTP fake CDP");
+    assert_eq!(count_auth_probes(&requests), 2);
+    let first_input = first_input_index(&requests);
+    assert_eq!(
+        count_auth_probes(&requests[..first_input]),
+        2,
+        "hydration must dispatch zero input and leave the signal available for one fresh enabled probe"
+    );
+    assert_eq!(count_mouse_pressed(&requests), 1);
+    assert_action_probes_allow_auth_actions(&requests);
+}
+
+#[tokio::test]
 async fn totp_clear_fresh_probes_a_complete_orphan_without_a_submit_window_and_confirms_empty_readback()
  {
     const WINDOW_START: u64 = 1_800_000_000_000;

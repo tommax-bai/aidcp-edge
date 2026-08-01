@@ -378,6 +378,161 @@ test('TOTP submit hydration waits while ambiguous or covered controls remain blo
   assert.equal(covered.signalId, undefined);
 });
 
+test('TOTP submit binds one enabled outer-footer Continue and waits while it is disabled', async () => {
+  const windowStart = 1_800_000_000_000;
+  const params = {
+    enteredTotpWindowStartUnixMs: windowStart,
+    enteredTotpWindowEndUnixMs: windowStart + 30_000,
+  };
+  install(`
+    <div id="checkpoint">
+      <h1>Two-factor authentication</h1>
+      <form id="code-form">
+        <input id="code" autocomplete="one-time-code" value="123456">
+      </form>
+      <div id="footer">
+        <button id="continue">Continue</button>
+        <button id="hidden-template" style="display:none">Continue</button>
+      </div>
+    </div>
+  `, 'https://www.facebook.com/two_step_verification/two_factor/', windowStart + 10_000);
+  const input = document.getElementById('code')!;
+  const continueButton = document.getElementById('continue') as HTMLButtonElement;
+  setRect(input, { left: 100, top: 100, right: 300, bottom: 145 });
+  setRect(continueButton, { left: 100, top: 200, right: 240, bottom: 245 });
+
+  const enabled = await probe(params);
+  assert.equal(enabled.signal, 'totp_submit_ready');
+  assert.match(String(enabled.signalId), /^aidcp:facebook-auth:v1:[0-9a-f]{64}$/);
+  assert.equal((enabled.candidate as Record<string, unknown>).cx, 170);
+
+  continueButton.disabled = true;
+  document.body.insertAdjacentHTML('beforeend', '<div id="disabled-hit-surface"></div>');
+  const disabledHitSurface = document.getElementById('disabled-hit-surface')!;
+  setRect(disabledHitSurface, { left: 100, top: 200, right: 240, bottom: 245 });
+  const nativeDisabled = await probe(params);
+  assert.equal(nativeDisabled.signal, 'none');
+  assert.equal(nativeDisabled.reason, 'totp_submit_hydrating');
+  assert.equal(nativeDisabled.signalId, undefined);
+  disabledHitSurface.remove();
+
+  continueButton.disabled = false;
+  continueButton.setAttribute('aria-disabled', 'true');
+  document.body.insertAdjacentHTML('beforeend', '<div id="aria-disabled-hit-surface"></div>');
+  const ariaDisabledHitSurface = document.getElementById('aria-disabled-hit-surface')!;
+  setRect(ariaDisabledHitSurface, { left: 100, top: 200, right: 240, bottom: 245 });
+  const ariaDisabled = await probe(params);
+  assert.equal(ariaDisabled.signal, 'none');
+  assert.equal(ariaDisabled.reason, 'totp_submit_hydrating');
+  assert.equal(ariaDisabled.signalId, undefined);
+  ariaDisabledHitSurface.remove();
+
+  continueButton.setAttribute('aria-disabled', 'false');
+  const reenabled = await probe(params);
+  assert.equal(reenabled.signal, 'totp_submit_ready');
+  assert.equal(reenabled.signalId, enabled.signalId);
+
+  setRect(continueButton, { left: 320, top: 240, right: 480, bottom: 285 });
+  const reflowed = await probe(params);
+  assert.equal(reflowed.signal, 'totp_submit_ready');
+  assert.equal(reflowed.signalId, enabled.signalId);
+
+  continueButton.style.display = 'none';
+  const hidden = await probe(params);
+  assert.equal(hidden.signal, 'none');
+  assert.equal(hidden.reason, 'totp_submit_hydrating');
+  assert.equal(hidden.signalId, undefined);
+  continueButton.style.display = '';
+});
+
+test('TOTP submit refuses page-root-only and page-wide ambiguous Continue controls', async () => {
+  const windowStart = 1_800_000_000_000;
+  const params = {
+    enteredTotpWindowStartUnixMs: windowStart,
+    enteredTotpWindowEndUnixMs: windowStart + 30_000,
+  };
+  install(`
+    <form id="code-form">
+      <input id="code" autocomplete="one-time-code" value="123456">
+    </form>
+    <button id="continue">Continue</button>
+  `, 'https://www.facebook.com/two_step_verification/two_factor/', windowStart + 10_000);
+  setRect(document.getElementById('code')!, { left: 100, top: 100, right: 300, bottom: 145 });
+  setRect(document.getElementById('continue')!, { left: 100, top: 200, right: 240, bottom: 245 });
+  const rootOnly = await probe(params);
+  assert.equal(rootOnly.signal, 'blocked_unknown');
+  assert.equal(rootOnly.reason, 'auth_target_out_of_scope');
+  assert.equal(rootOnly.signalId, undefined);
+
+  install(`
+    <div id="checkpoint">
+      <form id="code-form">
+        <input id="code" autocomplete="one-time-code" value="123456">
+      </form>
+      <form id="other-form"></form>
+      <button id="continue" form="other-form">Continue</button>
+    </div>
+  `, 'https://www.facebook.com/two_step_verification/two_factor/', windowStart + 10_000);
+  setRect(document.getElementById('code')!, { left: 100, top: 100, right: 300, bottom: 145 });
+  setRect(document.getElementById('continue')!, { left: 100, top: 200, right: 240, bottom: 245 });
+  const otherForm = await probe(params);
+  assert.equal(otherForm.signal, 'blocked_unknown');
+  assert.equal(otherForm.reason, 'auth_target_out_of_scope');
+  assert.equal(otherForm.signalId, undefined);
+
+  install(`
+    <div id="checkpoint">
+      <form id="code-form">
+        <input id="code" autocomplete="one-time-code" value="123456">
+      </form>
+      <div role="dialog"><button id="continue">Continue</button></div>
+    </div>
+  `, 'https://www.facebook.com/two_step_verification/two_factor/', windowStart + 10_000);
+  setRect(document.getElementById('code')!, { left: 100, top: 100, right: 300, bottom: 145 });
+  setRect(document.getElementById('continue')!, { left: 100, top: 200, right: 240, bottom: 245 });
+  const otherDialog = await probe(params);
+  assert.equal(otherDialog.signal, 'blocked_unknown');
+  assert.equal(otherDialog.reason, 'auth_target_out_of_scope');
+  assert.equal(otherDialog.signalId, undefined);
+
+  install(`
+    <div id="checkpoint">
+      <div id="continue" role="button" aria-label="Continue">
+        <input id="code" autocomplete="one-time-code" value="123456">
+      </div>
+    </div>
+  `, 'https://www.facebook.com/two_step_verification/two_factor/', windowStart + 10_000);
+  setRect(document.getElementById('code')!, { left: 100, top: 100, right: 300, bottom: 145 });
+  setRect(document.getElementById('continue')!, { left: 100, top: 200, right: 240, bottom: 245 });
+  const nestedInteractive = await probe(params);
+  assert.equal(nestedInteractive.signal, 'blocked_unknown');
+  assert.equal(nestedInteractive.reason, 'auth_target_out_of_scope');
+  assert.equal(nestedInteractive.signalId, undefined);
+
+  install(`
+    <div id="checkpoint">
+      <form id="code-form">
+        <input id="code" autocomplete="one-time-code" value="123456">
+      </form>
+      <button id="first">Continue</button>
+    </div>
+    <button id="second">Continue</button>
+  `, 'https://www.facebook.com/two_step_verification/two_factor/', windowStart + 10_000);
+  setRect(document.getElementById('code')!, { left: 100, top: 100, right: 300, bottom: 145 });
+  setRect(document.getElementById('first')!, { left: 100, top: 200, right: 240, bottom: 245 });
+  setRect(document.getElementById('second')!, { left: 300, top: 200, right: 440, bottom: 245 });
+  const ambiguous = await probe(params);
+  assert.equal(ambiguous.signal, 'blocked_unknown');
+  assert.equal(ambiguous.reason, 'auth_target_ambiguous');
+  assert.equal(ambiguous.signalId, undefined);
+
+  (document.getElementById('second') as HTMLButtonElement).disabled = true;
+  const mixedAmbiguous = await probe(params);
+  assert.equal(mixedAmbiguous.signal, 'blocked_unknown');
+  assert.equal(mixedAmbiguous.reason, 'auth_target_ambiguous');
+  assert.equal(mixedAmbiguous.signalId, undefined);
+});
+
 test('TOTP refresh signal ids bind the current orphan value without exposing it', async () => {
   install(`
     <main>
@@ -731,11 +886,14 @@ test('login and TOTP postconditions stay bound to the original target without re
 
   const windowStart = 1_800_000_000_000;
   install(`
-    <main>
+    <div id="checkpoint">
       <h1>Two-factor authentication</h1>
-      <input id="code" autocomplete="one-time-code" value="123456">
-      <button id="continue">Continue</button>
-    </main>
+      <form><input id="code" autocomplete="one-time-code" value="123456"></form>
+      <div id="footer">
+        <button id="continue">Continue</button>
+        <button id="replacement" style="display:none">Continue</button>
+      </div>
+    </div>
   `, 'https://www.facebook.com/two_step_verification/two_factor/', windowStart + 10_000);
   setRect(document.getElementById('code')!, { left: 100, top: 100, right: 300, bottom: 145 });
   setRect(document.getElementById('continue')!, { left: 100, top: 200, right: 240, bottom: 245 });
@@ -753,7 +911,87 @@ test('login and TOTP postconditions stay bound to the original target without re
   });
   assert.equal(totpUnchanged.output.value.satisfied, false);
 
-  document.getElementById('continue')!.remove();
+  const continueButton = document.getElementById('continue') as HTMLButtonElement;
+  setRect(continueButton, { left: 320, top: 240, right: 480, bottom: 285 });
+  const totpReflowed = await run({
+    kind: 'auth_postcondition',
+    params: {
+      documentGeneration: totp.documentGeneration,
+      expectedSignal: 'totp_submit_ready',
+      candidateKey: (totp.candidate as Record<string, unknown>).candidateKey,
+    },
+  });
+  assert.deepEqual(totpReflowed.output.value, {
+    satisfied: false,
+    documentChanged: false,
+    signalGone: false,
+  });
+
+  continueButton.style.display = 'none';
+  const totpHidden = await run({
+    kind: 'auth_postcondition',
+    params: {
+      documentGeneration: totp.documentGeneration,
+      expectedSignal: 'totp_submit_ready',
+      candidateKey: (totp.candidate as Record<string, unknown>).candidateKey,
+    },
+  });
+  assert.deepEqual(totpHidden.output.value, {
+    satisfied: false,
+    documentChanged: false,
+    signalGone: false,
+  });
+  const replacement = document.getElementById('replacement') as HTMLButtonElement;
+  replacement.style.display = '';
+  setRect(replacement, { left: 100, top: 200, right: 240, bottom: 245 });
+  const totpHiddenWithReplacement = await run({
+    kind: 'auth_postcondition',
+    params: {
+      documentGeneration: totp.documentGeneration,
+      expectedSignal: 'totp_submit_ready',
+      candidateKey: (totp.candidate as Record<string, unknown>).candidateKey,
+    },
+  });
+  assert.deepEqual(totpHiddenWithReplacement.output.value, {
+    satisfied: false,
+    documentChanged: false,
+    signalGone: false,
+  });
+  replacement.remove();
+  continueButton.style.display = '';
+
+  continueButton.disabled = true;
+  const totpDisabled = await run({
+    kind: 'auth_postcondition',
+    params: {
+      documentGeneration: totp.documentGeneration,
+      expectedSignal: 'totp_submit_ready',
+      candidateKey: (totp.candidate as Record<string, unknown>).candidateKey,
+    },
+  });
+  assert.deepEqual(totpDisabled.output.value, {
+    satisfied: false,
+    documentChanged: false,
+    signalGone: false,
+  });
+
+  continueButton.disabled = false;
+  continueButton.setAttribute('aria-disabled', 'true');
+  const totpAriaDisabled = await run({
+    kind: 'auth_postcondition',
+    params: {
+      documentGeneration: totp.documentGeneration,
+      expectedSignal: 'totp_submit_ready',
+      candidateKey: (totp.candidate as Record<string, unknown>).candidateKey,
+    },
+  });
+  assert.deepEqual(totpAriaDisabled.output.value, {
+    satisfied: false,
+    documentChanged: false,
+    signalGone: false,
+  });
+
+  continueButton.remove();
   const totpGone = await run({
     kind: 'auth_postcondition',
     params: {

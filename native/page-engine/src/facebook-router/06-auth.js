@@ -50,8 +50,10 @@
         ...extra,
       };
     }
-    const stableTotpInput=signal==='totp_entry_ready'||signal==='totp_refresh_required';
-    const candidateKey=await authDigest(stableTotpInput
+    const stableTotpTarget=signal==='totp_entry_ready'
+      ||signal==='totp_refresh_required'
+      ||signal==='totp_submit_ready';
+    const candidateKey=await authDigest(stableTotpTarget
       ?authTotpElementEvidence(candidate)
       :authElementEvidence(candidate));
     const signalEvidence=[
@@ -79,6 +81,54 @@
     return {candidate:candidates[0],reason:''};
   };
   const authButtons=(root)=>all('button,[role="button"],input[type="submit"]',root).filter(visible);
+  const authTargetDisabled=(candidate)=>Boolean(
+    candidate
+    &&(
+      candidate.disabled
+      ||candidate.hasAttribute('disabled')
+      ||String(candidate.getAttribute('aria-disabled')||'').toLowerCase()==='true'
+    )
+  );
+  const authFormOwner=(candidate)=>candidate&&(candidate.form||candidate.closest('form'));
+  const authSharesNonRootScope=(input,candidate)=>{
+    if(candidate&&candidate.contains(input))return false;
+    const inputForm=authFormOwner(input);
+    const candidateForm=authFormOwner(candidate);
+    if(candidateForm&&candidateForm!==inputForm)return false;
+    const inputDialog=input&&input.closest('[role="dialog"],[aria-modal="true"]');
+    const candidateDialog=candidate&&candidate.closest('[role="dialog"],[aria-modal="true"]');
+    if(inputDialog!==candidateDialog&&(inputDialog||candidateDialog))return false;
+    let scope=input&&input.parentElement;
+    while(scope&&scope!==document.body&&scope!==document.documentElement){
+      if(scope.contains(candidate))return true;
+      scope=scope.parentElement;
+    }
+    return false;
+  };
+  const authTotpSubmitInventory=()=>[...new Set(
+    all('button,[role="button"],input[type="submit"]',document).filter((button)=>
+      /^(continue|继续|繼續)$/i.test(label(button))
+    )
+  )];
+  const authTotpSubmitTarget=(input)=>{
+    const inventory=authTotpSubmitInventory();
+    const candidates=inventory.filter(visible);
+    if(candidates.length!==1){
+      const reason=candidates.length>1
+        ?'auth_target_ambiguous'
+        :inventory.length>0?'auth_target_not_visible':'auth_target_not_found';
+      return {candidate:null,reason,inventory};
+    }
+    const candidate=candidates[0];
+    if(!authSharesNonRootScope(input,candidate)){
+      return {candidate:null,reason:'auth_target_out_of_scope',inventory};
+    }
+    if(authTargetDisabled(candidate)){
+      return {candidate:null,reason:'auth_target_disabled',inventory};
+    }
+    if(!authTopHit(candidate))return {candidate:null,reason:'auth_target_not_topmost',inventory};
+    return {candidate,reason:'',inventory};
+  };
   const authTotpContext=()=>(
     /\/two_step_verification\/two_factor\/?/i.test(location.pathname)
     ||/two-factor authentication|authentication app|enter (?:the )?(?:login|security) code|双重验证|双重驗證|验证码|驗證碼/i.test(text(document.body,5000))
@@ -201,10 +251,13 @@
       if(!authTopHit(input))return authObservation('blocked_unknown',null,'auth_target_not_topmost',time);
       return authObservation('totp_refresh_required',input,undefined,time);
     }
-    const scope=input.closest('form,[role="main"],main')||document;
-    const submit=authUnique(authButtons(scope).filter((button)=>/^(continue|继续|繼續)$/i.test(label(button))));
+    const submit=authTotpSubmitTarget(input);
     if(!submit.candidate){
-      return submit.reason==='auth_target_not_found'
+      return [
+        'auth_target_not_found',
+        'auth_target_not_visible',
+        'auth_target_disabled',
+      ].includes(submit.reason)
         ?authObservation('none',null,'totp_submit_hydrating',time)
         :authObservation('blocked_unknown',null,submit.reason,time);
     }
@@ -383,12 +436,22 @@
         if(!/^\d{6}$/.test(String(inputs[0].value||'').trim())){
           determinate=false;
         }else{
-          const scope=inputs[0].closest('form,[role="main"],main')||document;
-          const submit=authUnique(authButtons(scope).filter((button)=>
-            /^(continue|继续|繼續)$/i.test(label(button))
-          ));
-          if(submit.reason==='auth_target_ambiguous'||submit.reason==='auth_target_not_topmost')determinate=false;
-          if(submit.candidate)candidateKey=await authDigest(authElementEvidence(submit.candidate));
+          const submit=authTotpSubmitTarget(inputs[0]);
+          const originalStillPresent=(await Promise.all(
+            submit.inventory.map((candidate)=>authDigest(authTotpElementEvidence(candidate)))
+          )).includes(expectedCandidateKey);
+          if([
+            'auth_target_ambiguous',
+            'auth_target_not_topmost',
+            'auth_target_out_of_scope',
+            'auth_target_not_visible',
+            'auth_target_disabled',
+          ].includes(submit.reason))determinate=false;
+          if(originalStillPresent){
+            candidateKey=expectedCandidateKey;
+          }else if(submit.candidate){
+            candidateKey=await authDigest(authTotpElementEvidence(submit.candidate));
+          }
         }
       }
     }else if([
