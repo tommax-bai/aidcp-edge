@@ -209,6 +209,49 @@ async function(input){
       await sleep(stepMs);
     }
   };
+  // ── 发布定时真态 ──────────────────────────────────────────────────────────
+  // 「定时发布」同时会出现在设置行标签和最终提交按钮上。设置行只从非提交控件中找，
+  // 再要求同一有界行里确有可读开关；提交按钮则反过来只认真正的 button / role=button / a 叶子。
+  // 两者绝不共用 findByWords：全页文本回落会把标签当按钮，或者把按钮当开关。
+  const scheduleContext=()=>{
+    const labels=all('label,span,p,div').filter(visible).filter((el)=>{
+      if(el.closest&&el.closest('button,[role="button"],a'))return false;
+      return /^定时发布(?:[:：])?$/.test(text(el,32).replace(/\s+/g,''));
+    });
+    const controlSelectors=[SWITCH_SELECTOR,'[class*="switch-simulator" i]','[class*="checkbox" i]'];
+    for(const label of labels){
+      const roots=[];
+      const scoped=label.closest&&label.closest('[class*="post-time-wrapper" i],[class*="custom-switch-wrapper" i],[class*="form" i],[class*="item" i],[class*="row" i]');
+      if(scoped)roots.push(scoped);
+      if(label.parentElement)roots.push(label.parentElement);
+      if(label.parentElement&&label.parentElement.parentElement)roots.push(label.parentElement.parentElement);
+      for(const root of roots){
+        const controls=[];
+        if(root.matches&&controlSelectors.some((selector)=>root.matches(selector))&&visible(root))controls.push(root);
+        controls.push(...controlSelectors.flatMap((selector)=>all(selector,root).filter(visible)));
+        const control=controls.find((candidate)=>Boolean(stateOf(candidate)))||controls[0]||null;
+        if(!control)continue;
+        const fields=all('input',root).filter((candidate)=>visible(candidate)&&!/^(checkbox|radio)$/i.test(String(candidate.type||'')));
+        const field=fields.find((candidate)=>/时间|日期|date|time/i.test(String(candidate.placeholder||'')+' '+String(candidate.getAttribute('aria-label')||'')+' '+String(candidate.type||'')))||fields[0]||null;
+        return {label,root,control,field};
+      }
+    }
+    return {label:labels[0]||null,root:null,control:null,field:null};
+  };
+  const scheduleMinute=(field)=>String(field&&('value' in field?field.value:field.getAttribute&&field.getAttribute('value'))||'').trim().replace('T',' ').slice(0,16);
+  const beijingMinute=(epoch)=>{
+    const date=new Date(Number(epoch));
+    if(!Number.isFinite(date.getTime()))return '';
+    const parts=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(date);
+    const part=(kind)=>parts.find((entry)=>entry.type===kind)?.value||'';
+    const value=part('year')+'-'+part('month')+'-'+part('day')+' '+part('hour')+':'+part('minute');
+    return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(value)?value:'';
+  };
+  const submitLeaves=(label)=>{
+    const candidates=all('button,[role="button"],a').filter(visible)
+      .filter((el)=>text(el,32)===label&&!/暂存|离开|草稿/.test(text(el,32)));
+    return candidates.filter((el)=>!candidates.some((other)=>other!==el&&el.contains&&el.contains(other)));
+  };
   const engageBar=async(root)=>{
     const pick=()=>first(ENGAGE_BAR_SELECTORS,root);
     const early=pick();
@@ -985,19 +1028,55 @@ async function(input){
     return settled?done(action('set_option',true)):ambiguous('set_option','publish_option_unconfirmed');
   }
   if(kind==='publish_set_schedule'){
-    const schedule=findByWords(['定时发布','定时','schedule']);if(!schedule)return fail('set_schedule','schedule_control_not_found');click(schedule);await sleep(200);const field=first(['input[type="datetime-local"]','input[placeholder*="时间"]']);if(!field)return fail('set_schedule','schedule_input_not_found');const date=new Date(Number(p.publishTime));if(!Number.isFinite(date.getTime()))return fail('set_schedule','invalid_schedule_time');const local=new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16);dispatchInput(field,local);return String(field.value||'').startsWith(local.slice(0,13))?done(action('set_schedule',true)):ambiguous('set_schedule','schedule_readback_mismatch');
+    const wanted=beijingMinute(p.publishTime);
+    if(!wanted)return fail('set_schedule','invalid_schedule_time');
+    let schedule=scheduleContext();
+    if(!schedule.control)return fail('set_schedule','schedule_control_not_found');
+    const before=stateOf(schedule.control);
+    // 读不到状态绝不猜：尤其不能把「读不到」当 off，再靠自己的一次 click 猜它已经 on。
+    if(!before)return fail('set_schedule','schedule_control_not_found');
+    if(before==='off'){
+      if(!click(schedule.control))return ambiguous('set_schedule','schedule_readback_mismatch');
+      const enabled=await waitFor(()=>{
+        const next=scheduleContext();
+        return Boolean(next.control)&&stateOf(next.control)==='on';
+      },1500,60);
+      if(!enabled)return ambiguous('set_schedule','schedule_readback_mismatch');
+    }
+    // 已经是 on 时保持幂等，绝不再点一次把它关掉。开关翻转后页面会重绘时间框，必须重新解析。
+    schedule=scheduleContext();
+    if(!schedule.control||stateOf(schedule.control)!=='on')return ambiguous('set_schedule','schedule_readback_mismatch');
+    if(!schedule.field)return fail('set_schedule','schedule_input_not_found');
+    const writeValue=String(schedule.field.type||'').toLowerCase()==='datetime-local'?wanted.replace(' ','T'):wanted;
+    dispatchInput(schedule.field,writeValue);
+    if(schedule.field.blur)schedule.field.blur();
+    // 三项正证据必须在同一个有界窗口内同时成立：开关仍开、目标分钟逐字相等、
+    // 精确「定时发布」叶子提交控件唯一可解析。只回读自己刚写的小时前缀不算平台接受。
+    const confirmed=await waitFor(()=>{
+      const next=scheduleContext();
+      return Boolean(next.control)&&stateOf(next.control)==='on'&&Boolean(next.field)
+        &&scheduleMinute(next.field)===wanted&&submitLeaves('定时发布').length===1;
+    },1500,60);
+    return confirmed?done(action('set_schedule',true)):ambiguous('set_schedule','schedule_readback_mismatch');
   }
   if(kind==='publish_submit'){
     const receipt=(value,phase)=>done({kind:'publish_receipt',value:{recordId:Number(p.recordId),seq:Number(p.seq),kind:'submit',...value}},phase);
-    // 目标只在「发布」/「定时发布」两种精确文案里挑，并排除左侧的「暂存离开」。
-    // 「首个含『发布』二字的可见元素」常是定时发布开关一类，点它等于改了模式而不是提交。
-    const SUBMIT_LABEL=/^(定时发布|发布)$/;
-    const candidates=all('button,[role="button"],a,span,div').filter(visible)
-      .filter((el)=>SUBMIT_LABEL.test(text(el,32))&&!/暂存|离开|草稿/.test(text(el,32)));
-    // 只取叶子：包着按钮的容器文本同样恰等于「发布」，点它等于没点中。
-    const leaves=candidates.filter((el)=>!candidates.some((other)=>other!==el&&el.contains&&el.contains(other)));
-    // 同时命中多个叶子时取最靠右的：发布在右、暂存离开在左。
-    const submit=leaves.sort((a,b)=>a.getBoundingClientRect().x-b.getBoundingClientRect().x).pop()||null;
+    // 期望模式由 Native 会话真态注入，不接受 Cloud 自报，也不在页面写 marker。
+    // unknown 说明本会话没有确认进入这张发布页，猜 immediate 会把一次恢复/重连变成立即发布。
+    const expectedMode=String(p.expectedScheduleMode||'');
+    if(expectedMode!=='immediate'&&expectedMode!=='scheduled')return receipt({ok:false,submitDispatched:false,error:'publish_mode_unconfirmed'},'not_started');
+    const schedule=scheduleContext();
+    const actualState=stateOf(schedule.control);
+    const expectedState=expectedMode==='scheduled'?'on':'off';
+    if(!actualState||actualState!==expectedState)return receipt({ok:false,submitDispatched:false,error:'publish_mode_unconfirmed'},'not_started');
+    if(expectedMode==='scheduled'){
+      const wanted=beijingMinute(p.expectedScheduleTime);
+      if(!wanted||!schedule.field||scheduleMinute(schedule.field)!==wanted)return receipt({ok:false,submitDispatched:false,error:'publish_mode_unconfirmed'},'not_started');
+    }
+    // 模式已复读后只取与之逐字对应的真实提交控件。不得再把两种文案混在一起按横坐标取最右。
+    const label=expectedMode==='scheduled'?'定时发布':'发布';
+    const leaves=submitLeaves(label);
+    const submit=leaves.length===1?leaves[0]:null;
     // 没找到目标就压根没点：submitDispatched 必须保持假，否则云端按「已提交」不重投 → 稿子静默丢失。
     if(!submit)return receipt({ok:false,submitDispatched:false,error:'publish_submit_not_found'},'not_started');
     if(submit.disabled||submit.getAttribute('aria-disabled')==='true')return receipt({ok:false,submitDispatched:false,error:'publish_submit_disabled'},'not_started');

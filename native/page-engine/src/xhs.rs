@@ -30,13 +30,39 @@ pub struct BrowserCommandResult {
 }
 
 pub fn command_expression(command: &NativeCommand) -> Result<String, EngineError> {
+    command_expression_with_internal_params(command, None)
+}
+
+/// 给页面规则追加仅由 Native 会话持有的执行上下文。
+///
+/// 这些字段不进入 `NativeCommand` / Cloud 协议：上游的发布意图不是平台真态，不能拿它直接决定
+/// 不可逆提交按钮。当前只用于把本会话已经确认的 immediate / scheduled(target minute) 绑定给
+/// `publish_submit`，由页面规则在点击前重新复读平台状态。
+pub fn command_expression_with_internal_params(
+    command: &NativeCommand,
+    internal_params: Option<&Value>,
+) -> Result<String, EngineError> {
     let decoded: Vec<u8> = XHS_COMMAND_ROUTER_BYTES
         .iter()
         .enumerate()
         .map(|(index, byte)| byte ^ EMBEDDED_ASSET_KEY[index % EMBEDDED_ASSET_KEY.len()])
         .collect();
     let source = String::from_utf8(decoded).map_err(|_| invalid_result())?;
-    let command = serde_json::to_string(command).map_err(|_| invalid_result())?;
+    let mut command = serde_json::to_value(command).map_err(|_| invalid_result())?;
+    if let Some(internal) = internal_params {
+        let target = command
+            .get_mut("params")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(invalid_result)?;
+        let values = internal.as_object().ok_or_else(invalid_result)?;
+        for (name, value) in values {
+            if target.contains_key(name) {
+                return Err(invalid_result());
+            }
+            target.insert(name.clone(), value.clone());
+        }
+    }
+    let command = serde_json::to_string(&command).map_err(|_| invalid_result())?;
     Ok(format!("({source})({command})"))
 }
 
@@ -228,5 +254,26 @@ mod tests {
         assert!(expression.contains("search_execute"));
         assert!(expression.contains("coffee"));
         assert!(!expression.contains("runtime_evaluate"));
+    }
+
+    #[test]
+    fn internal_publish_mode_is_injected_without_changing_the_typed_command() {
+        let command: NativeCommand =
+            serde_json::from_str(r#"{"kind":"publish_submit","params":{"recordId":7,"seq":8}}"#)
+                .expect("command");
+        let expression = command_expression_with_internal_params(
+            &command,
+            Some(&serde_json::json!({
+                "expectedScheduleMode": "scheduled",
+                "expectedScheduleTime": 1_785_729_240_000_u64
+            })),
+        )
+        .expect("expression");
+        assert!(expression.contains("expectedScheduleMode"));
+        assert!(expression.contains("scheduled"));
+        assert!(expression.contains("expectedScheduleTime"));
+        assert!(expression.contains("1785729240000"));
+        let typed = serde_json::to_value(command).expect("typed command");
+        assert!(typed.pointer("/params/expectedScheduleMode").is_none());
     }
 }

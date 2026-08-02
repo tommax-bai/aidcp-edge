@@ -3,7 +3,7 @@ import test from 'node:test';
 import { installXhsDom, runXhsRouter as run } from './xhs-dom-fixture.js';
 
 /**
- * 小红书发布原子的行为契约（change restore-native-xiaohongshu-action-honesty，任务 3.1 / 3.2）。
+ * 小红书发布原子的行为契约（change restore-native-xiaohongshu-action-honesty，任务 3.1 / 3.2 / 3.4）。
  *
  * 覆盖两条红线：
  *  · 正文填写——增量写入 + 每个换行独立派发回车 + 有界确认 + 失败清场，绝不留半截草稿；
@@ -13,6 +13,8 @@ import { installXhsDom, runXhsRouter as run } from './xhs-dom-fixture.js';
  */
 
 const PUBLISH_URL = 'https://creator.xiaohongshu.com/publish/publish';
+const SCHEDULE_TIME = Date.parse('2026-08-03T12:34:00+08:00');
+const SCHEDULE_VALUE = '2026-08-03T12:34';
 
 function receiptOf(result: { output: { kind: string; value: Record<string, unknown> } }): Record<string, unknown> {
   return result.output.value;
@@ -94,11 +96,244 @@ test('3.1 编辑器做无害的标点改写时不判失败', async () => {
   assert.equal(body.textContent, value.replace(/,/g, '，'));
 });
 
+// ── 1.20 / 3.4 定时模式绑定 ────────────────────────────────────────────────
+
+function scheduleSurface(checked: boolean): ReturnType<typeof installXhsDom> & { switchEl: HTMLInputElement; time: HTMLInputElement } {
+  const fixture = installXhsDom(
+    `<main>
+       <section class="post-time-wrapper">
+         <span id="schedule-label">定时发布</span>
+         <input id="schedule-switch" type="checkbox" ${checked ? 'checked' : ''}>
+         <input id="schedule-time" type="datetime-local" placeholder="发布时间">
+       </section>
+       <button id="submit-now">发布</button>
+       <button id="submit-scheduled">定时发布</button>
+     </main>`,
+    PUBLISH_URL,
+  );
+  const { dom } = fixture;
+  return {
+    ...fixture,
+    dom,
+    switchEl: dom.window.document.querySelector('#schedule-switch') as HTMLInputElement,
+    time: dom.window.document.querySelector('#schedule-time') as HTMLInputElement,
+  };
+}
+
+test('1.20 定时开关已开启时保持幂等，不得再点一次把它关掉', async () => {
+  const { dom, switchEl } = scheduleSurface(true);
+  const clicked: string[] = [];
+  dom.window.document.addEventListener('click', (event) => clicked.push((event.target as Element).id), true);
+
+  const result = await run({
+    kind: 'publish_set_schedule',
+    params: { recordId: 5, seq: 8, publishTime: SCHEDULE_TIME },
+  });
+
+  assert.equal(switchEl.checked, true);
+  assert.deepEqual(clicked, [], '开关本来已开：任何点击都可能把定时模式关掉');
+  assert.equal(result.effectPhase, 'confirmed');
+  assert.equal(receiptOf(result).ok, true);
+});
+
+test('1.20 定时开关关闭时只点真实开关，并等平台状态翻为开启', async () => {
+  const { dom, switchEl } = scheduleSurface(false);
+  const clicked: string[] = [];
+  dom.window.document.addEventListener('click', (event) => clicked.push((event.target as Element).id), true);
+  switchEl.addEventListener('click', () => { switchEl.checked = true; });
+
+  const result = await run({
+    kind: 'publish_set_schedule',
+    params: { recordId: 5, seq: 8, publishTime: SCHEDULE_TIME },
+  });
+
+  assert.deepEqual(clicked, ['schedule-switch']);
+  assert.equal(switchEl.checked, true);
+  assert.equal(result.effectPhase, 'confirmed');
+  assert.equal(receiptOf(result).ok, true);
+});
+
+test('1.20 定时开关状态读不到时不猜开或关', async () => {
+  const { dom } = installXhsDom(
+    `<main>
+       <section class="post-time-wrapper">
+         <span>定时发布</span><div id="opaque-switch" class="schedule-toggle"></div>
+         <input type="datetime-local" placeholder="发布时间">
+       </section>
+       <button>定时发布</button>
+     </main>`,
+    PUBLISH_URL,
+  );
+  const clicked: string[] = [];
+  dom.window.document.addEventListener('click', (event) => clicked.push((event.target as Element).id), true);
+
+  const result = await run({
+    kind: 'publish_set_schedule',
+    params: { recordId: 5, seq: 8, publishTime: SCHEDULE_TIME },
+  });
+
+  assert.deepEqual(clicked, []);
+  assert.equal(result.effectPhase, 'not_started');
+  assert.equal(receiptOf(result).reason, 'schedule_control_not_found');
+});
+
+test('1.20 开关点击已派发但状态不翻转时保持 ambiguous', async () => {
+  const { switchEl } = scheduleSurface(false);
+  switchEl.addEventListener('click', () => { switchEl.checked = false; });
+
+  const result = await run({
+    kind: 'publish_set_schedule',
+    params: { recordId: 5, seq: 8, publishTime: SCHEDULE_TIME },
+  });
+
+  assert.equal(switchEl.checked, false);
+  assert.equal(result.effectPhase, 'ambiguous');
+  assert.equal(receiptOf(result).ok, false);
+  assert.equal(receiptOf(result).reason, 'schedule_readback_mismatch');
+});
+
+test('1.20 平台把 12:34 吸附成 12:00 时不得用小时前缀冒充分钟确认', async () => {
+  const { time } = scheduleSurface(true);
+  time.addEventListener('input', () => { time.value = '2026-08-03T12:00'; });
+
+  const result = await run({
+    kind: 'publish_set_schedule',
+    params: { recordId: 5, seq: 8, publishTime: SCHEDULE_TIME },
+  });
+
+  assert.equal(receiptOf(result).ok, false);
+  assert.equal(result.effectPhase, 'ambiguous');
+  assert.equal(receiptOf(result).reason, 'schedule_readback_mismatch');
+});
+
+test('1.20 缺精确的定时提交按钮时 set_schedule 不能成功', async () => {
+  const { dom } = scheduleSurface(true);
+  dom.window.document.querySelector('#submit-scheduled')?.remove();
+
+  const result = await run({
+    kind: 'publish_set_schedule',
+    params: { recordId: 5, seq: 8, publishTime: SCHEDULE_TIME },
+  });
+
+  assert.equal(receiptOf(result).ok, false);
+  assert.equal(result.effectPhase, 'ambiguous');
+  assert.equal(receiptOf(result).reason, 'schedule_readback_mismatch');
+});
+
+test('1.20 scheduled submit 只点定时发布，不能按横坐标选最右的立即发布', async () => {
+  const fixture = scheduleSurface(true);
+  fixture.time.value = SCHEDULE_VALUE;
+  fixture.setRect('#submit-scheduled', { x: 100 });
+  fixture.setRect('#submit-now', { x: 500 });
+  const clicked: string[] = [];
+  fixture.dom.window.document.addEventListener('click', (event) => {
+    const target = event.target as Element;
+    clicked.push(target.id);
+    if (target.id === 'submit-scheduled') {
+      const toast = fixture.dom.window.document.createElement('div');
+      toast.className = 'toast';
+      toast.textContent = '发布成功';
+      fixture.dom.window.document.body.appendChild(toast);
+    }
+  }, true);
+
+  const result = await run({
+    kind: 'publish_submit',
+    params: {
+      recordId: 5,
+      seq: 9,
+      expectedScheduleMode: 'scheduled',
+      expectedScheduleTime: SCHEDULE_TIME,
+    },
+  });
+
+  assert.deepEqual(clicked, ['submit-scheduled']);
+  assert.equal(receiptOf(result).ok, true);
+  assert.equal(receiptOf(result).submitDispatched, true);
+});
+
+test('1.20 scheduled submit 前发现开关已关时零点击、已派发位保持假', async () => {
+  const { dom, time } = scheduleSurface(false);
+  time.value = SCHEDULE_VALUE;
+  const clicked: string[] = [];
+  dom.window.document.addEventListener('click', (event) => clicked.push((event.target as Element).id), true);
+
+  const result = await run({
+    kind: 'publish_submit',
+    params: {
+      recordId: 5,
+      seq: 9,
+      expectedScheduleMode: 'scheduled',
+      expectedScheduleTime: SCHEDULE_TIME,
+    },
+  });
+
+  assert.deepEqual(clicked, []);
+  assert.equal(result.effectPhase, 'not_started');
+  assert.equal(receiptOf(result).ok, false);
+  assert.equal(receiptOf(result).submitDispatched, false);
+  assert.equal(receiptOf(result).error, 'publish_mode_unconfirmed');
+});
+
+test('1.20 scheduled submit 前目标分钟漂移时零点击', async () => {
+  const { dom, time } = scheduleSurface(true);
+  time.value = '2026-08-03T12:35';
+  const clicked: string[] = [];
+  dom.window.document.addEventListener('click', (event) => clicked.push((event.target as Element).id), true);
+
+  const result = await run({
+    kind: 'publish_submit',
+    params: {
+      recordId: 5,
+      seq: 9,
+      expectedScheduleMode: 'scheduled',
+      expectedScheduleTime: SCHEDULE_TIME,
+    },
+  });
+
+  assert.deepEqual(clicked, []);
+  assert.equal(result.effectPhase, 'not_started');
+  assert.equal(receiptOf(result).submitDispatched, false);
+  assert.equal(receiptOf(result).error, 'publish_mode_unconfirmed');
+});
+
+test('1.20 immediate submit 前发现定时开关已开时不得跨模式提交', async () => {
+  const { dom } = scheduleSurface(true);
+  const clicked: string[] = [];
+  dom.window.document.addEventListener('click', (event) => clicked.push((event.target as Element).id), true);
+
+  const result = await run({
+    kind: 'publish_submit',
+    params: { recordId: 5, seq: 9, expectedScheduleMode: 'immediate' },
+  });
+
+  assert.deepEqual(clicked, []);
+  assert.equal(result.effectPhase, 'not_started');
+  assert.equal(receiptOf(result).submitDispatched, false);
+  assert.equal(receiptOf(result).error, 'publish_mode_unconfirmed');
+});
+
+test('1.20 Native 会话模式未知时 submit 不得猜立即发布', async () => {
+  const { dom } = scheduleSurface(false);
+  const clicked: string[] = [];
+  dom.window.document.addEventListener('click', (event) => clicked.push((event.target as Element).id), true);
+
+  const result = await run({ kind: 'publish_submit', params: { recordId: 5, seq: 9 } });
+
+  assert.deepEqual(clicked, []);
+  assert.equal(result.effectPhase, 'not_started');
+  assert.equal(receiptOf(result).submitDispatched, false);
+  assert.equal(receiptOf(result).error, 'publish_mode_unconfirmed');
+});
+
 // ── 3.2 提交判据 ───────────────────────────────────────────────────────────
 
 test('3.2 提交目标取严格文案的叶子按钮，不点包裹容器也不点暂存离开', async () => {
   const { dom } = installXhsDom(
     `<main>
+       <section class="post-time-wrapper">
+         <span>定时发布</span><input id="schedule-switch" type="checkbox">
+       </section>
        <div class="publish-bar" data-test-rect="400,60">
          <button id="save-draft" data-test-rect="80,40">暂存离开</button>
          <div id="submit-wrap" data-test-rect="120,40"><button id="submit" data-test-rect="80,40">发布</button></div>
@@ -125,7 +360,10 @@ test('3.2 提交目标取严格文案的叶子按钮，不点包裹容器也不�
     doc.body.appendChild(toast);
   });
 
-  const result = await run({ kind: 'publish_submit', params: { recordId: 5, seq: 9 } });
+  const result = await run({
+    kind: 'publish_submit',
+    params: { recordId: 5, seq: 9, expectedScheduleMode: 'immediate' },
+  });
 
   assert.deepEqual(clicked, ['submit'], `只应点中叶子发布按钮，实点：${clicked.join(',')}`);
   assert.equal(result.effectPhase, 'confirmed');
@@ -134,8 +372,14 @@ test('3.2 提交目标取严格文案的叶子按钮，不点包裹容器也不�
 });
 
 test('3.2 找不到发布按钮时已派发位保持假', async () => {
-  installXhsDom('<main><button id="save">暂存离开</button></main>', PUBLISH_URL);
-  const result = await run({ kind: 'publish_submit', params: { recordId: 5, seq: 9 } });
+  installXhsDom(
+    '<main><section class="post-time-wrapper"><span>定时发布</span><input type="checkbox"></section><button id="save">暂存离开</button></main>',
+    PUBLISH_URL,
+  );
+  const result = await run({
+    kind: 'publish_submit',
+    params: { recordId: 5, seq: 9, expectedScheduleMode: 'immediate' },
+  });
   assert.equal(result.effectPhase, 'not_started');
   assert.equal(receiptOf(result).ok, false);
   assert.equal(receiptOf(result).error, 'publish_submit_not_found');
@@ -151,13 +395,17 @@ test('3.2 地址像成功、页面上早有同款文案，都不算本次提交�
   // 点击前就在页面上的「发布成功」同样不是本次的证据（草稿箱提示、历史浮层都可能含它）。
   installXhsDom(
     `<main>
+       <section class="post-time-wrapper"><span>定时发布</span><input type="checkbox"></section>
        <div class="draft-hint">上一篇发布成功</div>
        <button id="submit">发布</button>
      </main>`,
     'https://creator.xiaohongshu.com/publish/success?published=1',
   );
 
-  const result = await run({ kind: 'publish_submit', params: { recordId: 5, seq: 9 } });
+  const result = await run({
+    kind: 'publish_submit',
+    params: { recordId: 5, seq: 9, expectedScheduleMode: 'immediate' },
+  });
 
   assert.equal(receiptOf(result).ok, false, '地址与陈旧文案都不得被当成本次提交的成功证据');
   assert.equal(result.effectPhase, 'ambiguous');

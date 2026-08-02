@@ -214,7 +214,24 @@ pub(crate) struct EngineSession {
     captcha_snapshots: VecDeque<CaptchaSnapshotState>,
     wechat_capture_initialized: bool,
     wechat_request_context: Option<wechat::WechatRequestContext>,
+    xiaohongshu: XiaohongshuSessionState,
     pub(crate) facebook: FacebookSessionState,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum XiaohongshuPublishMode {
+    /// 没有证据证明当前页属于哪一篇发布序列。恢复 / 重连后也回到这一态；猜 immediate 会误发。
+    #[default]
+    Unknown,
+    /// `publish_navigate_entry` 已确认新发布页，且本序列尚未确认开启定时。
+    Immediate,
+    /// `publish_set_schedule` 的开关、分钟、定时提交按钮三项正证据已同时成立。
+    Scheduled { publish_time: u64 },
+}
+
+#[derive(Default)]
+struct XiaohongshuSessionState {
+    publish_mode: XiaohongshuPublishMode,
 }
 
 pub(crate) struct FacebookSessionState {
@@ -264,6 +281,7 @@ impl EngineSession {
             captcha_snapshots: VecDeque::new(),
             wechat_capture_initialized: false,
             wechat_request_context: None,
+            xiaohongshu: XiaohongshuSessionState::default(),
             facebook: FacebookSessionState::default(),
         }
     }
@@ -355,6 +373,11 @@ impl EngineSession {
         self.port = port;
         self.target_id = target_id;
         self.cdp = cdp;
+        if self.platform == Platform::Xiaohongshu {
+            // 重连证明的是「仍是同一个浏览器实例」，不是「页面仍停在同一张已确认发布表单」。
+            // 不复跑页面证据就沿用 scheduled 会让一次恢复直接跨到不可逆提交。
+            self.xiaohongshu.publish_mode = XiaohongshuPublishMode::Unknown;
+        }
         Ok(())
     }
 }
@@ -413,6 +436,7 @@ impl Engine {
             captcha_snapshots: VecDeque::new(),
             wechat_capture_initialized: false,
             wechat_request_context: None,
+            xiaohongshu: XiaohongshuSessionState::default(),
             facebook: FacebookSessionState::default(),
         };
         let info = session.info();
@@ -899,6 +923,8 @@ async fn execute_xhs_command_once(
         }
         PublishUploadImage(params) => execute_xhs_publish_upload_image(session, params).await,
         PublishNavigateEntry(params) => {
+            // 新稿 / 重进发布页先撤销上一稿的模式证明；导航失败时绝不能遗留 scheduled。
+            session.xiaohongshu.publish_mode = XiaohongshuPublishMode::Unknown;
             session
                 .cdp
                 .navigate("https://creator.xiaohongshu.com/publish/publish")
@@ -918,6 +944,7 @@ async fn execute_xhs_command_once(
                     }),
                 ));
             }
+            session.xiaohongshu.publish_mode = XiaohongshuPublishMode::Immediate;
             Ok((
                 EffectPhase::Confirmed,
                 CommandOutput::PublishReceipt(PublishReceipt {
@@ -932,6 +959,42 @@ async fn execute_xhs_command_once(
                 }),
             ))
         }
+        PublishSetSchedule(params) => {
+            // 失败的定时设置不能把上一稿的 scheduled 证明带给 submit；先撤销，再只由成功回执推进。
+            session.xiaohongshu.publish_mode = XiaohongshuPublishMode::Unknown;
+            let result = evaluate_router(session, command).await?;
+            if matches!(
+                &result,
+                (
+                    EffectPhase::Confirmed,
+                    CommandOutput::PublishReceipt(PublishReceipt { ok: true, .. })
+                )
+            ) {
+                session.xiaohongshu.publish_mode = XiaohongshuPublishMode::Scheduled {
+                    publish_time: params.publish_time,
+                };
+            }
+            Ok(result)
+        }
+        PublishSubmit(params) => {
+            let Some(context) = xhs_submit_mode_context(session.xiaohongshu.publish_mode) else {
+                return Ok(xhs_publish_mode_unconfirmed(params.record_id, params.seq));
+            };
+            let result = evaluate_router_with_internal_params(session, command, &context).await;
+            // 已派发（成功或未知）以后，这份模式证明完成使命；求值本身抛错时无法证明点击未发生，
+            // 同样撤销，阻止后续把一次不明提交当成安全的同页重试。
+            let clear_mode = match &result {
+                Ok((_, CommandOutput::PublishReceipt(receipt))) => {
+                    receipt.ok || receipt.submit_dispatched == Some(true)
+                }
+                Ok(_) => true,
+                Err(_) => true,
+            };
+            if clear_mode {
+                session.xiaohongshu.publish_mode = XiaohongshuPublishMode::Unknown;
+            }
+            result
+        }
         PublishCaptureScheduled(_) | PublishReconcileScheduled(_) => {
             session
                 .cdp
@@ -942,6 +1005,35 @@ async fn execute_xhs_command_once(
         }
         _ => evaluate_router(session, command).await,
     }
+}
+
+fn xhs_submit_mode_context(mode: XiaohongshuPublishMode) -> Option<serde_json::Value> {
+    match mode {
+        XiaohongshuPublishMode::Unknown => None,
+        XiaohongshuPublishMode::Immediate => Some(serde_json::json!({
+            "expectedScheduleMode": "immediate",
+        })),
+        XiaohongshuPublishMode::Scheduled { publish_time } => Some(serde_json::json!({
+            "expectedScheduleMode": "scheduled",
+            "expectedScheduleTime": publish_time,
+        })),
+    }
+}
+
+fn xhs_publish_mode_unconfirmed(record_id: u64, seq: u32) -> (EffectPhase, CommandOutput) {
+    (
+        EffectPhase::NotStarted,
+        CommandOutput::PublishReceipt(PublishReceipt {
+            record_id,
+            seq,
+            kind: "submit".to_owned(),
+            ok: false,
+            submit_dispatched: Some(false),
+            value: None,
+            post_url: None,
+            error: Some("publish_mode_unconfirmed".to_owned()),
+        }),
+    )
 }
 
 /// 小红书高危写动作在派发之前的即席新鲜复检（fail-closed）。
@@ -3109,6 +3201,23 @@ async fn evaluate_router(
     command: &NativeCommand,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let expression = xhs::command_expression(command)?;
+    evaluate_router_expression(session, command, expression).await
+}
+
+async fn evaluate_router_with_internal_params(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+    internal_params: &serde_json::Value,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let expression = xhs::command_expression_with_internal_params(command, Some(internal_params))?;
+    evaluate_router_expression(session, command, expression).await
+}
+
+async fn evaluate_router_expression(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+    expression: String,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let raw = session.cdp.evaluate(&expression, true).await?;
     let result = xhs::result_from_cdp(&raw)?;
     let output = xhs::typed_output(command, result.output)?;
@@ -3748,6 +3857,37 @@ mod tests {
             result.error.expect("error").code,
             ErrorCode::DeadlineExpired
         );
+    }
+
+    #[test]
+    fn xhs_publish_mode_context_is_tri_state_and_keeps_the_exact_scheduled_minute() {
+        assert!(xhs_submit_mode_context(XiaohongshuPublishMode::Unknown).is_none());
+        assert_eq!(
+            xhs_submit_mode_context(XiaohongshuPublishMode::Immediate).expect("immediate context"),
+            serde_json::json!({"expectedScheduleMode":"immediate"})
+        );
+        assert_eq!(
+            xhs_submit_mode_context(XiaohongshuPublishMode::Scheduled {
+                publish_time: 1_785_729_240_000,
+            })
+            .expect("scheduled context"),
+            serde_json::json!({
+                "expectedScheduleMode":"scheduled",
+                "expectedScheduleTime":1_785_729_240_000_u64,
+            })
+        );
+    }
+
+    #[test]
+    fn xhs_publish_mode_unknown_refuses_before_submit_dispatch() {
+        let (phase, output) = xhs_publish_mode_unconfirmed(7, 9);
+        assert_eq!(phase, EffectPhase::NotStarted);
+        let CommandOutput::PublishReceipt(receipt) = output else {
+            panic!("expected publish receipt");
+        };
+        assert!(!receipt.ok);
+        assert_eq!(receipt.submit_dispatched, Some(false));
+        assert_eq!(receipt.error.as_deref(), Some("publish_mode_unconfirmed"));
     }
 
     #[test]
