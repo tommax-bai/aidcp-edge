@@ -442,6 +442,9 @@ interface PendingResponse {
   timer: NodeJS.Timeout;
   commitWindowHandler?: NativeCommitWindowHandler;
   disposeCommitWindow?: () => void;
+  /** `undefined` for lifecycle requests; command requests start false and flip only in stdin's success callback. */
+  commandDispatched?: boolean;
+  onCommandDispatched?: () => void;
 }
 
 class NativeProcessTransport {
@@ -520,6 +523,7 @@ class NativeProcessTransport {
     record: Record<string, unknown>,
     timeoutMs?: number,
     commitWindowHandler?: NativeCommitWindowHandler,
+    onCommandDispatched?: () => void,
   ): Promise<unknown> {
     if (!this.ready || this.exited) {
       throw new NativePageEngineError('engine_exited', 'Native Page Engine is not available', {
@@ -536,26 +540,54 @@ class NativeProcessTransport {
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         const pending = this.pending.get(id);
+        if (!pending) return;
         pending?.disposeCommitWindow?.();
         this.pending.delete(id);
-        reject(new NativePageEngineError(
+        pending.reject(new NativePageEngineError(
           'engine_timeout',
           'Native Page Engine did not return before the IPC deadline',
-          { stderr: this.stderr || undefined },
+          {
+            stderr: this.stderr || undefined,
+            ...(pending.commandDispatched !== undefined
+              // A command request entered the write path. If the IPC deadline wins before the
+              // write callback, bytes may still be buffered/in flight; that is not proof of zero dispatch.
+              ? { effectPhase: 'ambiguous' as const }
+              : {}),
+          },
         ));
       }, timeoutMs ?? this.processTimeoutMs);
-      this.pending.set(id, { resolve, reject, timer, commitWindowHandler });
+      const pending: PendingResponse = {
+        resolve,
+        reject,
+        timer,
+        commitWindowHandler,
+        ...(onCommandDispatched
+          ? { commandDispatched: false, onCommandDispatched }
+          : {}),
+      };
+      this.pending.set(id, pending);
       this.child.stdin.write(serialized, (error) => {
-        if (!error) return;
-        const pending = this.pending.get(id);
-        if (!pending) return;
-        clearTimeout(pending.timer);
-        pending.disposeCommitWindow?.();
+        if (!error) {
+          if (pending.commandDispatched === false) {
+            pending.commandDispatched = true;
+            pending.onCommandDispatched?.();
+          }
+          return;
+        }
+        const active = this.pending.get(id);
+        if (!active) return;
+        clearTimeout(active.timer);
+        active.disposeCommitWindow?.();
         this.pending.delete(id);
-        pending.reject(new NativePageEngineError(
+        active.reject(new NativePageEngineError(
           'engine_exited',
           `Native Page Engine stdin failed: ${describeError(error)}`,
-          { stderr: this.stderr || undefined },
+          {
+            stderr: this.stderr || undefined,
+            ...(active.commandDispatched !== undefined
+              ? { effectPhase: active.commandDispatched ? 'ambiguous' : 'not_started' }
+              : {}),
+          },
         ));
       });
     });
@@ -844,7 +876,14 @@ class NativeProcessTransport {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.disposeCommitWindow?.();
-      pending.reject(error);
+      pending.reject(pending.commandDispatched === undefined || error.detail?.effectPhase
+        ? error
+        : new NativePageEngineError(error.code, error.message, {
+          ...error.detail,
+          // Process death while a command write is pending cannot prove that zero bytes reached
+          // the child. The explicit stdin-write error path above is the only pre-dispatch proof.
+          effectPhase: 'ambiguous',
+        }));
     }
     this.pending.clear();
   }
@@ -892,6 +931,7 @@ export class NativePageEngineSession {
     timeoutMs = DEFAULT_NATIVE_TIMEOUT_MS,
     signal?: AbortSignal,
     commitWindowHandler?: NativeCommitWindowHandler,
+    onCommandDispatched?: () => void,
   ): Promise<NativePageCommandExecution> {
     this.assertOpen();
     validateCommandTimeout(this.platform, command, timeoutMs);
@@ -920,7 +960,9 @@ export class NativePageEngineSession {
       }
       return commitWindowHandler(request);
     }
-      : undefined);
+      : undefined,
+    // Always register command dispatch tracking, even when the caller only needs effect-phase truth.
+    onCommandDispatched ?? (() => undefined));
     const abort = (): void => { void this.cancel(commandId, 'caller_aborted').catch(() => undefined); };
     signal?.addEventListener('abort', abort, { once: true });
     let raw: unknown;

@@ -178,6 +178,7 @@ pub fn typed_output(command: &NativeCommand, output: Value) -> Result<CommandOut
                     .bounded(),
             )))
         }
+        "action_receipt" if requires_typed_publish_receipt(command) => Err(invalid_result()),
         "action_receipt" if publish_identity(command).is_none() => {
             Ok(CommandOutput::ActionReceipt(Box::new(
                 serde_json::from_value::<ActionReceipt>(value)
@@ -232,6 +233,19 @@ fn publish_identity(command: &NativeCommand) -> Option<(u64, u32, String)> {
         _ => return None,
     };
     Some((record_id, seq, kind.to_owned()))
+}
+
+/// These terminals require evidence that a generic action receipt cannot carry: submit dispatch
+/// state, or the captured platform identity and URL. Reject them at the typed output boundary
+/// instead of filling the missing evidence with `None` and preserving a possibly-successful `ok`.
+fn requires_typed_publish_receipt(command: &NativeCommand) -> bool {
+    matches!(
+        command,
+        NativeCommand::PublishSubmit(_)
+            | NativeCommand::PublishCapturePostId(_)
+            | NativeCommand::PublishCaptureScheduled(_)
+            | NativeCommand::PublishReconcileScheduled(_)
+    )
 }
 
 fn invalid_result() -> EngineError {

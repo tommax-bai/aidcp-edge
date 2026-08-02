@@ -396,7 +396,7 @@ test('3.2 地址像成功、页面上早有同款文案，都不算本次提交�
   installXhsDom(
     `<main>
        <section class="post-time-wrapper"><span>定时发布</span><input type="checkbox"></section>
-       <div class="draft-hint">上一篇发布成功</div>
+       <div class="toast draft-hint">上一篇发布成功</div>
        <button id="submit">发布</button>
      </main>`,
     'https://creator.xiaohongshu.com/publish/success?published=1',
@@ -414,5 +414,34 @@ test('3.2 地址像成功、页面上早有同款文案，都不算本次提交�
     receiptOf(result).submitDispatched,
     true,
     '点已经发出去了：未确认必须如实带上已派发位，否则云端按提交前失败重投 → 双发',
+  );
+});
+
+test('3.2 点击后无关区域新增发布中文案不得给本次提交自证', { timeout: 40_000 }, async () => {
+  const { dom } = installXhsDom(
+    `<main>
+       <section class="post-time-wrapper"><span>定时发布</span><input type="checkbox"></section>
+       <button id="submit">发布</button>
+       <aside id="unrelated-help">发布帮助</aside>
+     </main>`,
+    PUBLISH_URL,
+  );
+  dom.window.document.querySelector('#submit')?.addEventListener('click', () => {
+    const unrelated = dom.window.document.querySelector('#unrelated-help');
+    if (unrelated) unrelated.textContent = '内容正在发布中时，请勿重复编辑帮助页设置';
+  });
+
+  const result = await run({
+    kind: 'publish_submit',
+    params: { recordId: 5, seq: 9, expectedScheduleMode: 'immediate' },
+  });
+
+  assert.equal(result.effectPhase, 'ambiguous');
+  assert.equal(receiptOf(result).ok, false, '全页任意位置新增“发布中”不是真实平台成功信号');
+  assert.equal(receiptOf(result).error, 'post_validate_failed');
+  assert.equal(
+    receiptOf(result).submitDispatched,
+    true,
+    '点击已经派发，未确认时仍须保留已派发位以阻止盲目重投',
   );
 });

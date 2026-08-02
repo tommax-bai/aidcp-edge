@@ -140,6 +140,7 @@ export class NativePageRuntime {
     timeoutMs = 30_000,
     signal?: AbortSignal,
     commitWindowHandler?: NativeCommitWindowHandler,
+    onCommandDispatched?: () => void,
   ): Promise<NativePageCommandExecution> {
     return this.serial(async () => {
       const session = await this.sessionFor(ownerId);
@@ -148,7 +149,13 @@ export class NativePageRuntime {
       const forwardAbort = (): void => controller.abort();
       signal?.addEventListener('abort', forwardAbort, { once: true });
       try {
-        return await session.execute(command, timeoutMs, controller.signal, commitWindowHandler);
+        return await session.execute(
+          command,
+          timeoutMs,
+          controller.signal,
+          commitWindowHandler,
+          onCommandDispatched,
+        );
       } finally {
         signal?.removeEventListener('abort', forwardAbort);
         if (this.activeAbort === controller) this.activeAbort = undefined;

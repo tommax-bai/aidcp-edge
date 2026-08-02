@@ -162,6 +162,20 @@ test('首页入口存在但不可见时同样是未开始，不当成找到了',
   assert.equal(counter.clicks, 0);
 });
 
+test('★ 通知页只有笔记详情链接时不得把它当首页入口', async () => {
+  const dom = install(`<body>
+    <a href="/explore/${NOTE_ID_A}" id="note-link">查看相关笔记</a>
+    ${NOTIFICATION_SHELL}
+  </body>`);
+  const counter = navigateOnClick(dom, '#note-link', `/explore/${NOTE_ID_A}`);
+
+  const result = await runRouter({ kind: 'notification_back_home', params: {} });
+
+  assert.equal(counter.clicks, 0, '笔记详情链接不是首页入口，必须零点击');
+  assert.equal(result.effectPhase, 'not_started');
+  assert.equal(receipt(result).reason, 'home_entry_not_found');
+});
+
 test('点中首页入口并真的跳到 explore 才算确认，并带回本次看到的卡片', async () => {
   const dom = install(`<body>
     <a href="/explore" id="home">首页</a>
@@ -199,6 +213,21 @@ test('★ 点了但页面没跳成时是 ambiguous，绝不回确认', async () 
   assert.equal(value.reason, 'home_navigation_unconfirmed');
   // 未确认时不得夹带卡片：那会让上游把通知页上的东西当成 feed 内容。
   assert.equal(result.output.kind, 'action_receipt');
+});
+
+test('★ 首页入口点击后落到 explore 详情页时不得 confirmed', async () => {
+  const dom = install(`<body>
+    <a href="/explore" id="home">首页</a>
+    ${NOTIFICATION_SHELL}
+  </body>`);
+  const counter = navigateOnClick(dom, '#home', `/explore/${NOTE_ID_A}`);
+
+  const result = await runRouter({ kind: 'notification_back_home', params: {} });
+
+  assert.equal(counter.clicks, 1);
+  assert.equal(result.effectPhase, 'ambiguous');
+  assert.notEqual(result.effectPhase, 'confirmed');
+  assert.equal(receipt(result).reason, 'home_navigation_unconfirmed');
 });
 
 test('用文字识别到的首页入口走同一条三态判据', async () => {

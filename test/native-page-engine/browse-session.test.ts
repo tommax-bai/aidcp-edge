@@ -27,6 +27,7 @@ function harness(execute: (
   timeoutMs?: number,
   signal?: AbortSignal,
   commitWindowHandler?: NativeCommitWindowHandler,
+  onDispatched?: () => void,
 ) => Promise<NativePageCommandExecution>, options: {
   platform?: 'xiaohongshu' | 'facebook';
   accountId?: string;
@@ -51,9 +52,10 @@ function harness(execute: (
       timeoutMs?: number,
       signal?: AbortSignal,
       commitWindowHandler?: NativeCommitWindowHandler,
+      onDispatched?: () => void,
     ) {
       executions.push({ ownerId, command, timeoutMs });
-      return execute(ownerId, command, timeoutMs, signal, commitWindowHandler);
+      return execute(ownerId, command, timeoutMs, signal, commitWindowHandler, onDispatched);
     },
     async closeOwner(ownerId: string) { closedOwners.push(ownerId); },
   } as unknown as NativePageRuntime;
@@ -506,6 +508,43 @@ test('Native empty search cards report no_results exactly once', async () => {
     searchOutcome: 'no_results',
     resultCount: 0,
   }]);
+});
+
+test('Native non-confirmed search cards never upgrade the action to success', async () => {
+  const h = harness(async () => ({
+    ok: false,
+    effectPhase: 'ambiguous',
+    reasonCode: 'search_submit_unconfirmed',
+    output: { kind: 'page_cards', value: { cards: [{ index: 0, title: 'unconfirmed result' }] } },
+  }));
+  await h.session.quiesceForTask();
+
+  await h.session.onCloudCommand(envelope('search.execute', searchPayload));
+
+  assert.equal(h.cards.length, 1, 'observed cards may still be forwarded as observations');
+  assert.deepEqual(h.actions, [{
+    action: 'search',
+    ok: false,
+    reason: 'search_submit_unconfirmed',
+    activityId: searchPayload.activityId,
+    purpose: searchPayload.purpose,
+    scope: searchPayload.scope,
+    actuated: true,
+    searchOutcome: 'failed_after_submit',
+  }]);
+});
+
+test('Native action receipt failure falls back to the execution reason code', async () => {
+  const h = harness(async () => ({
+    ok: false,
+    effectPhase: 'ambiguous',
+    reasonCode: 'submitted_unconfirmed',
+    output: { kind: 'action_receipt', value: { action: 'like', ok: true } },
+  }));
+
+  await h.session.onCloudCommand(envelope('interaction.like', { noteId: 'note-1' }));
+
+  assert.deepEqual(h.actions, [{ action: 'like', ok: false, reason: 'submitted_unconfirmed' }]);
 });
 
 test('Native search execution error preserves effect-phase honesty and correlation', async () => {

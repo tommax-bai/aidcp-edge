@@ -6,7 +6,9 @@
 //! ① 线上 kind 与两段载荷的字段名不漂；② 没有观测时不凭空造出空壳字段；
 //! ③ 发布命令用不了这个 kind（用了就诚实报无效结果，绝不静默降级成发布回执）。
 
-use aidcp_page_engine::command::{NativeCommand, PublishIdentity};
+use aidcp_page_engine::command::{
+    NativeCommand, PublishCaptureParams, PublishCoverParams, PublishIdentity,
+};
 use aidcp_page_engine::engine::CommandOutput;
 use aidcp_page_engine::xhs::typed_output;
 use serde_json::{Value, json};
@@ -93,4 +95,73 @@ fn refuses_the_observed_receipt_for_publish_commands() {
         }),
     );
     assert!(result.is_err(), "publish commands must not use this kind");
+}
+
+#[test]
+fn refuses_generic_receipts_for_typed_publish_terminals() {
+    let capture = PublishCaptureParams {
+        record_id: 7,
+        seq: 3,
+        scheduled_title: Some("scheduled title".to_owned()),
+        scheduled_platform_id: Some("note-7".to_owned()),
+        publish_time: Some(1_785_729_240_000),
+    };
+    let commands = [
+        NativeCommand::PublishSubmit(PublishIdentity {
+            record_id: 7,
+            seq: 3,
+        }),
+        NativeCommand::PublishCapturePostId(capture.clone()),
+        NativeCommand::PublishCaptureScheduled(capture.clone()),
+        NativeCommand::PublishReconcileScheduled(capture),
+    ];
+
+    let accepted = commands
+        .iter()
+        .filter_map(|command| {
+            typed_output(
+                command,
+                json!({
+                    "kind": "action_receipt",
+                    "value": { "action": command.kind(), "ok": true },
+                }),
+            )
+            .is_ok()
+            .then_some(command.kind())
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        accepted.is_empty(),
+        "typed publish terminals accepted generic receipts: {accepted:?}"
+    );
+}
+
+#[test]
+fn still_adapts_generic_receipts_for_draft_writes() {
+    let command = NativeCommand::PublishSetCover(PublishCoverParams {
+        record_id: 7,
+        seq: 3,
+        image_index: 1,
+    });
+
+    let output = typed_output(
+        &command,
+        json!({
+            "kind": "action_receipt",
+            "value": { "action": "set_cover", "ok": true },
+        }),
+    )
+    .expect("draft writes may use generic action receipts");
+
+    let CommandOutput::PublishReceipt(receipt) = output else {
+        panic!("expected a publish receipt");
+    };
+    assert_eq!(receipt.record_id, 7);
+    assert_eq!(receipt.seq, 3);
+    assert_eq!(receipt.kind, "set_cover");
+    assert!(receipt.ok);
+    assert_eq!(receipt.submit_dispatched, None);
+    assert_eq!(receipt.value, None);
+    assert_eq!(receipt.post_url, None);
 }

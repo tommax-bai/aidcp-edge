@@ -136,7 +136,7 @@
     {
       "nativeKind": "notification_back_home",
       "status": "confirmed",
-      "evidence": "点击后复核地址真落在 /explore（`xhs-command-router.js:678`），不落回 ambiguous home_navigation_unconfirmed；找不到入口回 fail。三态已由行为契约用例锁住（`xhs-navigation-command-contracts.test.ts`）。**它是出口命令**：假成功不体现在自己身上，体现在它之后的每一条命令上。"
+      "evidence": "入口与后置都严格限定同源 `/explore` 根路径（允许尾斜杠）：`/explore/<noteId>` 详情链接既不能被选成首页入口，点击后落到详情也只能回 ambiguous + home_navigation_unconfirmed；找不到入口 / 点不动分别 fail。两条反例与既有三态由 `xhs-navigation-command-contracts.test.ts` 锁住。**它是出口命令**：假成功不体现在自己身上，体现在它之后的每一条命令上。"
     },
     {
       "nativeKind": "interaction_like",
@@ -222,12 +222,12 @@
     {
       "nativeKind": "publish_set_schedule",
       "status": "confirmed",
-      "evidence": "分段控件回读设定值（原生赋值路径，见 8.1 的具名收窄）"
+      "evidence": "先读真实开关三态：已开幂等、已关才点击并有界等翻转、读不到不猜；写入后同一窗口内必须同时确认开关仍开、Asia/Shanghai 目标分钟精确相等、唯一精确 `定时发布` 叶子提交控件存在。Native 会话只在这三证成功后保存 scheduled(target minute)，submit 前再复读模式与分钟。"
     },
     {
       "nativeKind": "publish_submit",
       "status": "confirmed",
-      "evidence": "只认页面上的成功文案这条正证据；地址判据已明令删除（抢占 / 恢复导航会伪造它）"
+      "evidence": "模式由 Native 会话真态绑定并在点击前复读，unknown / 漂移零点击且 submitDispatched=false；点击后只认结果 / 提示作用域内相对点击前节点+文本基线新增的终态成功文案。地址、全页正文、进行态 `发布中` 与陈旧 toast 都不确认；命令记录写入后若 transport 丢终局，宿主保守回 submitDispatched=true，禁止安全重投。"
     }
   ]
 }

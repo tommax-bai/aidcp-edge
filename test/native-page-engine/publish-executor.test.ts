@@ -111,3 +111,65 @@ test('passes through the Facebook composer and fill deadlines without widening o
 
   assert.deepEqual(timeouts, [40_000, 30_000, 30_000, 400_000, 30_000]);
 });
+
+test('keeps the Native publish failure reason instead of replacing it with the effect phase', async () => {
+  const runtime = {
+    execute: async () => ({
+      ok: false,
+      effectPhase: 'ambiguous' as const,
+      reasonCode: 'post_validate_failed',
+      output: {
+        kind: 'publish_receipt',
+        value: { ok: false, error: 'draft_success_signal_missing', submitDispatched: true },
+      },
+    }),
+  } as unknown as NativePageRuntime;
+  const executor = new NativePublishExecutor(runtime, 'aidcp-native-publish-test-');
+
+  const result = await executor.dispatch(command('submit_publish', 1));
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'draft_success_signal_missing');
+  assert.equal(result.submitDispatched, true);
+});
+
+test('a dispatched submit that loses the engine stays non-retryable and preserves its reason', async () => {
+  const runtime = {
+    execute: async (
+      _owner: string,
+      _nativeCommand: NativePageCommand,
+      _timeoutMs: number,
+      _signal?: AbortSignal,
+      _commitWindowHandler?: unknown,
+      onDispatched?: () => void,
+    ) => {
+      onDispatched?.();
+      throw Object.assign(new Error('engine timed out after accepting the command'), {
+        code: 'engine_timeout',
+        detail: { reasonCode: 'publish_result_lost' },
+      });
+    },
+  } as unknown as NativePageRuntime;
+  const executor = new NativePublishExecutor(runtime, 'aidcp-native-publish-test-');
+
+  const result = await executor.dispatch(command('submit_publish', 1));
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'publish_result_lost');
+  assert.equal(result.submitDispatched, true);
+});
+
+test('a submit rejected while acquiring its Native session remains pre-dispatch', async () => {
+  const runtime = {
+    execute: async () => {
+      throw Object.assign(new Error('Native session could not be opened'), { code: 'engine_exited' });
+    },
+  } as unknown as NativePageRuntime;
+  const executor = new NativePublishExecutor(runtime, 'aidcp-native-publish-test-');
+
+  const result = await executor.dispatch(command('submit_publish', 1));
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'engine_exited');
+  assert.equal(result.submitDispatched, undefined);
+});

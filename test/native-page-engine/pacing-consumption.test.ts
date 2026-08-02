@@ -88,14 +88,27 @@ function harness(options: {
   platform: 'xiaohongshu' | 'facebook';
   clock?: () => number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
-} & { execute?: (command: NativePageCommand) => Promise<NativePageCommandExecution> }) {
+} & {
+  execute?: (
+    command: NativePageCommand,
+    onDispatched?: () => void,
+  ) => Promise<NativePageCommandExecution>;
+}) {
   const executions: NativePageCommand[] = [];
   const actions: ActionCompletedPayload[] = [];
   const logs: string[] = [];
   const runtime = {
-    async execute(_ownerId: string, command: NativePageCommand) {
+    async execute(
+      _ownerId: string,
+      command: NativePageCommand,
+      _timeoutMs?: number,
+      _signal?: AbortSignal,
+      _commitWindowHandler?: unknown,
+      onDispatched?: () => void,
+    ) {
       executions.push(command);
-      if (options.execute) return options.execute(command);
+      if (options.execute) return options.execute(command, onDispatched);
+      onDispatched?.();
       if (command.kind === 'note_open') {
         return {
           ok: true,
@@ -460,7 +473,10 @@ test('节奏等待期间被接管：零派发的命令报「未开始」，绝�
 test('已经交给执行器之后再失败，仍然是「已提交、结果未知」', async () => {
   const h = harness({
     platform: 'xiaohongshu',
-    execute: async () => { throw new Error('engine died mid-command'); },
+    execute: async (_command, onDispatched) => {
+      onDispatched?.();
+      throw new Error('engine died mid-command');
+    },
   });
   await h.session.onCloudCommand(envelope('interaction.like', { noteId: 'note-1' }));
 
@@ -469,4 +485,25 @@ test('已经交给执行器之后再失败，仍然是「已提交、结果未�
   const failure = h.logs.find((line) => line.includes('event=command_failed'));
   assert.ok(failure);
   assert.match(failure, /effectPhase=ambiguous/, `派发之后的失败被收窄成了未开始：${failure}`);
+});
+
+test('运行时在开会话阶段失败：零命令写入仍报「未开始」', async () => {
+  const h = harness({
+    platform: 'xiaohongshu',
+    execute: async () => {
+      throw Object.assign(new Error('engine could not open a session'), { code: 'engine_exited' });
+    },
+  });
+
+  await h.session.onCloudCommand(envelope('interaction.like', { noteId: 'note-1' }));
+
+  assert.equal(h.actions.length, 1);
+  assert.deepEqual(h.actions[0], {
+    action: 'like',
+    ok: false,
+    reason: 'engine_exited',
+  });
+  const failure = h.logs.find((line) => line.includes('event=command_failed'));
+  assert.ok(failure);
+  assert.match(failure, /effectPhase=not_started/, `开会话失败被误报成已派发：${failure}`);
 });

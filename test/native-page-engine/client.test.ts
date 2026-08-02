@@ -71,6 +71,85 @@ test('executes only a typed high-level command and preserves the tagged result',
   await session.close();
 });
 
+test('marks a command dispatched only after stdin accepts the serialized request', async () => {
+  const session = await client('success').openSession({
+    ...input,
+    sessionId: 'session-command-dispatch',
+    taskId: 'task-command-dispatch',
+  });
+  let dispatches = 0;
+  try {
+    await session.execute(
+      { kind: 'browse_scroll', params: { reason: 'dispatch-proof' } },
+      500,
+      undefined,
+      undefined,
+      () => { dispatches += 1; },
+    );
+
+    assert.equal(dispatches, 1);
+  } finally {
+    await session.close();
+  }
+});
+
+test('process exit after a successful command write preserves ambiguous effect truth', async () => {
+  const session = await client('cancel').openSession({
+    ...input,
+    sessionId: 'session-command-exit',
+    taskId: 'task-command-exit',
+  });
+  let dispatches = 0;
+  const pending = session.execute(
+    { kind: 'browse_scroll', params: { reason: 'exit-after-write' } },
+    500,
+    undefined,
+    undefined,
+    () => { dispatches += 1; },
+  );
+  const observed = pending.then(
+    () => assert.fail('the held command must fail when the transport shuts down'),
+    (error: unknown) => error,
+  );
+  await new Promise((resolve) => { setTimeout(resolve, 50); });
+  await session.close();
+
+  const error = await observed;
+  assert.ok(error instanceof NativePageEngineError);
+  assert.equal(error.code, 'engine_exited');
+  assert.equal(error.detail?.effectPhase, 'ambiguous');
+  assert.equal(dispatches, 1);
+});
+
+test('command timeout after a successful write preserves ambiguous effect truth', async () => {
+  const session = await client('cancel', 2_000).openSession({
+    ...input,
+    sessionId: 'session-command-timeout',
+    taskId: 'task-command-timeout',
+  });
+  let dispatches = 0;
+  try {
+    await assert.rejects(
+      session.execute(
+        { kind: 'browse_scroll', params: { reason: 'timeout-after-write' } },
+        50,
+        undefined,
+        undefined,
+        () => { dispatches += 1; },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof NativePageEngineError);
+        assert.equal(error.code, 'engine_timeout');
+        assert.equal(error.detail?.effectPhase, 'ambiguous');
+        return true;
+      },
+    );
+    assert.equal(dispatches, 1);
+  } finally {
+    await session.close();
+  }
+});
+
 test('permits only the capability-specific Facebook long command ceilings', async () => {
   const session = await client('success').openSession({
     ...input,

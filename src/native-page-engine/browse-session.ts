@@ -523,9 +523,6 @@ export class NativeBrowseSession implements EdgeBrowseSession {
         ? (this.options.clock ?? monotonicNow)()
         : 0;
     const timeoutMs = this.facebookCommandTimeoutMs(command);
-    // 越过这一行即「已经交给执行器」。取消缝仍在这之前：`runtime.execute` 自己的失败会带
-    // 具名的 effectPhase，用不到这个标记。
-    if (dispatch) dispatch.started = true;
     const result = await this.options.runtime.execute(
       ownerId,
       command,
@@ -538,6 +535,9 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       this.options.commitWindow
         ? (request) => this.options.commitWindow!.enter(request.budgetMs, request.label)
         : undefined,
+      // `runtime.execute` 先获取 / 打开会话，随后才把命令写入引擎 stdin。只有写入成功回调
+      // 能区分「开会话失败、零派发」与「命令已交付但进程在回执前死亡」。
+      dispatch ? () => { dispatch.started = true; } : undefined,
     );
     // 逐命令留证：不是每条命令都以「动作回执」终结（滚动与开帖的终局是结构化上报），
     // 少了这一行，一次浏览闭环里那几条命令在日志里就完全没有痕迹。
@@ -700,6 +700,10 @@ export class NativeBrowseSession implements EdgeBrowseSession {
           });
         }
         if (env?.type === 'search.execute') {
+          if (!execution.ok || execution.effectPhase !== 'confirmed') {
+            this.reportFailure(env, execution.reasonCode, execution.effectPhase);
+            return;
+          }
           const cards = Array.isArray(value.cards) ? value.cards : [];
           this.options.client.reportActionCompleted({
             action: 'search',
@@ -845,6 +849,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       });
       return;
     }
+    const ok = receipt.ok && execution.effectPhase === 'confirmed';
     const completed = {
       ...receipt,
       ...((receipt.observation === undefined || receipt.observation === null)
@@ -852,7 +857,10 @@ export class NativeBrowseSession implements EdgeBrowseSession {
         && receipt.groupObservation !== null
         ? { observation: receipt.groupObservation }
         : {}),
-      ok: receipt.ok && execution.effectPhase === 'confirmed',
+      ok,
+      ...(!ok && receipt.reason === undefined && execution.reasonCode
+        ? { reason: execution.reasonCode }
+        : {}),
     } as ActionCompletedPayload;
     delete (completed as ActionCompletedPayload & { groupObservation?: unknown }).groupObservation;
     this.options.client.reportActionCompleted(completed);

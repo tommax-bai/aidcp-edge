@@ -760,7 +760,23 @@ async function(input){
     return done(observed(action(actionName,true,'viewed'),items.length?{notificationItems:{items}}:undefined));
   }
   if(kind==='notification_back_home'){
-    const home=first(['a[href="/explore"]','a[href*="/explore"]'])||findByWords(['首页','发现','home']);if(!home)return fail('notification_back_home','home_entry_not_found');click(home);await sleep(700);return /\/explore/.test(location.pathname)?done(cards()):ambiguous('notification_back_home','home_navigation_unconfirmed');
+    const onHome=()=>/^\/explore\/?$/.test(location.pathname);
+    const pointsHome=(el)=>{
+      try{
+        const url=new URL(String(el&&el.href||''),location.href);
+        return url.origin===location.origin&&/^\/explore\/?$/.test(url.pathname);
+      }catch{return false;}
+    };
+    const link=all('a[href]').filter(visible).find(pointsHome);
+    const words=findByWords(['首页','发现','home']);
+    // 文案回落只接受非链接控件。通知页天然含 `/explore/<noteId>` 笔记链接，
+    // 把它（或它的子节点 / 包裹容器）当首页入口会直接打开详情页。
+    const linked=words&&(words.closest&&words.closest('a[href]')||first(['a[href]'],words));
+    const home=link||(!linked?words:null);
+    if(!home)return fail('notification_back_home','home_entry_not_found');
+    if(!click(home))return fail('notification_back_home','home_entry_not_actuated');
+    await sleep(700);
+    return onHome()?done(cards()):ambiguous('notification_back_home','home_navigation_unconfirmed');
   }
   if(kind==='interaction_like'||kind==='interaction_collect'||kind==='interaction_follow'){
     const name=kind.replace('interaction_','');
@@ -1080,16 +1096,21 @@ async function(input){
     // 没找到目标就压根没点：submitDispatched 必须保持假，否则云端按「已提交」不重投 → 稿子静默丢失。
     if(!submit)return receipt({ok:false,submitDispatched:false,error:'publish_submit_not_found'},'not_started');
     if(submit.disabled||submit.getAttribute('aria-disabled')==='true')return receipt({ok:false,submitDispatched:false,error:'publish_submit_disabled'},'not_started');
-    // 后置校验只认页面上的成功文案这条正证据。地址判据被明令删除：抢占方 / 恢复导航会在
-    // 提交窗口内把发布页导走，一篇可能根本没发出去的稿会因此被记成已发布。
-    const SUCCESS_COPY=/发布成功|发布中|笔记已发布|笔记发布成功|成功发布|稍后可在/;
-    const toastHit=()=>all('[class*="toast"],[class*="message"],[class*="notice"],[class*="tip"],[class*="success"],[class*="result"],[role="alert"],[role="status"]').filter(visible).some((el)=>SUCCESS_COPY.test(text(el,800)));
-    const bodyHit=()=>SUCCESS_COPY.test(text(document.body,20000));
-    // 绑定本次提交：点击前就在页面上的同款文案不是本次的证据（草稿箱文案、历史提示都可能含它）。
-    const copyBefore=bodyHit();
+    // 后置校验只认提交后在结果 / 提示作用域里新增的终态正证据。地址和全页文案都不能证明发布：
+    // 抢占导航会改地址，正文帮助或其他任务也可能出现「发布中」；后者只是进行态，本身也不是成功。
+    const SUCCESS_COPY=/发布成功|笔记已发布|笔记发布成功|成功发布|稍后可在/;
+    const RESULT_SCOPE='[class*="toast"],[class*="message"],[class*="notice"],[class*="tip"],[class*="success"],[class*="result"],[role="alert"],[role="status"]';
+    const successState=(el)=>visible(el)?text(el,800):'';
+    // 绑定本次提交：既有节点及其点击前状态都入基线；历史 toast、隐藏旧提示都不能自证本次点击。
+    // 同一提示容器在点击后从普通文案变成成功文案，或新建成功提示，才算新增正证据。
+    const successBefore=new Map(all(RESULT_SCOPE).map((el)=>[el,successState(el)]));
+    const freshSuccess=()=>all(RESULT_SCOPE).some((el)=>{
+      const current=successState(el);
+      return SUCCESS_COPY.test(current)&&(!successBefore.has(el)||successBefore.get(el)!==current);
+    });
     if(!click(submit))return receipt({ok:false,submitDispatched:false,error:'publish_submit_not_actuated'},'not_started');
     // 提交点已跨过：15s 有界轮询，只认正证据；未确认也必须如实带上「已派发」。
-    const confirmed=await waitFor(()=>toastHit()||(!copyBefore&&bodyHit()),15000,500);
+    const confirmed=await waitFor(freshSuccess,15000,500);
     return confirmed
       ?receipt({ok:true,submitDispatched:true,postUrl:String(location.href).slice(0,4096)},'confirmed')
       :receipt({ok:false,submitDispatched:true,error:'post_validate_failed'},'ambiguous');

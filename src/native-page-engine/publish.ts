@@ -20,6 +20,7 @@ export class NativePublishExecutor {
 
   async dispatch(payload: PublishCommandPayload, signal?: AbortSignal): Promise<PublishCommandResultPayload> {
     let tempDir: string | undefined;
+    let commandDispatched = false;
     try {
       let localImagePath: string | undefined;
       let imageIndex: number | undefined;
@@ -59,6 +60,7 @@ export class NativePublishExecutor {
         this.commitWindow
           ? (request) => this.commitWindow!.enter(request.budgetMs, request.label)
           : undefined,
+        () => { commandDispatched = true; },
       );
       const value = execution.output?.kind === 'publish_receipt'
         ? execution.output.value as Record<string, unknown>
@@ -80,24 +82,44 @@ export class NativePublishExecutor {
         ...(typeof value.value === 'string' ? { value: value.value } : {}),
         ...(typeof value.postUrl === 'string' ? { postUrl: value.postUrl } : {}),
         ...(!confirmed ? {
-          error: execution.effectPhase === 'ambiguous'
-            ? 'native_effect_ambiguous'
-            : typeof value.error === 'string' ? value.error : 'native_postcondition_failed',
+          error: typeof value.error === 'string' && value.error
+            ? value.error
+            : execution.reasonCode || (execution.effectPhase === 'ambiguous'
+              ? 'native_effect_ambiguous'
+              : 'native_postcondition_failed'),
         } : {}),
       };
     } catch (error) {
-      const native = error as { code?: string; detail?: { effectPhase?: string } };
+      const native = error as { code?: string; detail?: { effectPhase?: string; reasonCode?: string } };
+      const phase = native.detail?.effectPhase;
+      const submitDispatched = payload.kind === 'submit_publish'
+        && phase !== 'not_started'
+        && (commandDispatched || phase === 'dispatched' || phase === 'confirmed' || phase === 'ambiguous');
       return this.failed(
         payload,
-        native.detail?.effectPhase === 'ambiguous' ? 'native_effect_ambiguous' : native.code ?? 'native_dispatch_failed',
+        native.detail?.reasonCode
+          ?? native.code
+          ?? (phase === 'ambiguous' ? 'native_effect_ambiguous' : 'native_dispatch_failed'),
+        submitDispatched,
       );
     } finally {
       if (tempDir) setTimeout(() => void rm(tempDir!, { recursive: true, force: true }), 5 * 60_000).unref?.();
     }
   }
 
-  private failed(payload: PublishCommandPayload, error: string): PublishCommandResultPayload {
-    return { recordId: payload.recordId, seq: payload.seq, kind: payload.kind, ok: false, error };
+  private failed(
+    payload: PublishCommandPayload,
+    error: string,
+    submitDispatched = false,
+  ): PublishCommandResultPayload {
+    return {
+      recordId: payload.recordId,
+      seq: payload.seq,
+      kind: payload.kind,
+      ok: false,
+      error,
+      ...(submitDispatched ? { submitDispatched: true } : {}),
+    };
   }
 }
 
