@@ -1022,27 +1022,33 @@ async function(input){
   }
   if(kind==='publish_add_with_candidate'){
     const candidateWords=(p.candidates||[]).concat([String(p.value||'')]);
-    if(p.candidateKind==='topic'||p.candidateKind==='mention'){
-      const editor=first(['[contenteditable="true"]','textarea[placeholder*="正文"]']);if(!editor)return fail('add_with_candidate','publish_editor_not_found');const prefix=p.candidateKind==='topic'?'#':'@';const value=prefix+String(p.value||'');const before='value' in editor?String(editor.value||''):text(editor,32000);dispatchInput(editor,(before+' '+value).trim());await sleep(300);const candidate=findByWords(candidateWords);if(!candidate)return fail('add_with_candidate','publish_candidate_not_found');click(candidate);await sleep(200);const read='value' in editor?String(editor.value||''):text(editor,32000);return norm(read,32000).includes(norm(p.value,1000))?done(action('add_with_candidate',true)):ambiguous('add_with_candidate','publish_candidate_unconfirmed');
+    // topic 的现役路径由 Rust 特化截获并按真话题 token 校验；此处保留兼容实现，不改它的所有权。
+    if(p.candidateKind==='topic'){
+      const editor=first(['[contenteditable="true"]','textarea[placeholder*="正文"]']);if(!editor)return fail('add_with_candidate','publish_editor_not_found');const value='#'+String(p.value||'');const before='value' in editor?String(editor.value||''):text(editor,32000);dispatchInput(editor,(before+' '+value).trim());await sleep(300);const candidate=findByWords(candidateWords);if(!candidate)return fail('add_with_candidate','publish_candidate_not_found');click(candidate);await sleep(200);const read='value' in editor?String(editor.value||''):text(editor,32000);return norm(read,32000).includes(norm(p.value,1000))?done(action('add_with_candidate',true)):ambiguous('add_with_candidate','publish_candidate_unconfirmed');
+    }
+    if(p.candidateKind==='mention'){
+      const editor=first(['[contenteditable="true"]','textarea[placeholder*="正文"]']);
+      if(!editor)return fail('add_with_candidate','publish_editor_not_found');
+      const before='value' in editor?String(editor.value||''):text(editor,32000);
+      dispatchInput(editor,(before+' @'+String(p.value||'')).trim());
+      await sleep(300);
+      const candidate=findByWords(candidateWords);
+      if(!candidate)return fail('add_with_candidate','publish_candidate_not_found');
+      if(!click(candidate))return fail('add_with_candidate','publish_candidate_not_actuated');
+      // 正文里的 `@字面值` 是本命令自己写进去的，候选文本也是定位输入；两者都不是平台绑定了账号实体的证据。
+      return ambiguous('add_with_candidate','publish_candidate_unconfirmed');
     }
     const entryWords=p.candidateKind==='location'?['地点','位置','location']:p.candidateKind==='collection'?['合集','专辑','collection']:[String(p.candidateKind||'')];
     const entry=findByWords(entryWords);
     if(!entry)return fail('add_with_candidate','publish_candidate_entry_not_found');
-    click(entry);
+    if(!click(entry))return fail('add_with_candidate','publish_candidate_entry_not_actuated');
     await sleep(300);
-    const locate=()=>findByWords(candidateWords);
-    const candidate=locate();
+    const candidate=findByWords(candidateWords);
     if(!candidate)return fail('add_with_candidate','publish_candidate_not_found');
-    if(!click(candidate))return ambiguous('add_with_candidate','publish_candidate_unconfirmed');
-    // 入口行回显（选中的地点 / 合集名写回入口那一行）是独立于「候选项自己长什么样」的证据，
-    // 但回溯必须有界、且不能把候选列表本身圈进来：候选项文本恒等于目标值，
-    // 拿它当证据就是自证——点开列表即「确认成功」。旧写法的 `.closest(…,'div')` 正是这个形态。
-    const echoRoot=entry.contains&&entry.contains(candidate)?null:(rowOf(entry,['[role="button"]','label','[class*="item"]','[class*="option"]','[class*="field"]'],3,candidate)||entry);
-    const confirmed=await waitFor(()=>{
-      if(selected(locate()))return true;
-      return Boolean(echoRoot&&echoes(text(echoRoot,2000),p.value));
-    },1000,60);
-    return confirmed?done(action('add_with_candidate',true)):ambiguous('add_with_candidate','publish_candidate_unconfirmed');
+    if(!click(candidate))return fail('add_with_candidate','publish_candidate_not_actuated');
+    // location / collection 尚无真机标定的结构接受信号。候选自身的 selected 外观与入口文案回显
+    // 都是这次点击直接造成的 UI 状态，不能证明它已绑定到草稿；标定前宁可悲观，不制造成功。
+    return ambiguous('add_with_candidate','publish_candidate_unconfirmed');
   }
   if(kind==='publish_set_option'){
     const kindWords={visibility:['可见范围','谁可以看','visibility'],comment_permission:['评论权限','允许评论','comment'],save_permission:['保存权限','允许保存','save'],declaration_ai:['AI创作','AI生成','AI'],declaration_ad:['商业合作','广告','ad'],declaration_origin:['原创声明','原创','original']}[p.optionKind]||[String(p.optionKind||'')];

@@ -11,7 +11,7 @@
     "disposition 两种形态：kind=fix 须写 action（消除动作）与 owner（谁来做）；kind=exception 须写 reason（为什么现在做不到）、blockedBy（前置是什么）与 owner（前置解除后谁来解）。**没有处置的 below_bar 与 confirmed 的区别只存在于读者的记忆里**，而这张表存在的全部理由就是不再依赖任何人的记忆。"
   ],
   "unreadBudget": 0,
-  "belowBarBudget": 1,
+  "belowBarBudget": 0,
   "commands": [
     {
       "nativeKind": "facebook_auth_submit_login",
@@ -205,14 +205,8 @@
     },
     {
       "nativeKind": "publish_add_with_candidate",
-      "status": "below_bar",
-      "evidence": "仅 topic 一支达标（正文里的真话题 token + 剔隐藏后缀 + 精确相等）；mention / location / collection 仍走注入路由，判据是「打进去再读回来」＝自证。前置是真机标定各自的结构信号（backlog 簇 123.34）",
-      "disposition": {
-        "kind": "exception",
-        "reason": "mention / location / collection 三支的结构接受信号在真机上长什么样，今天**没有任何证据**。凭猜写判据只会得到第二个自证判据",
-        "blockedBy": "真机标定，docs/real-machine-acceptance-backlog.md 簇 123.34（与簇 122 / 123 / 125 共用同一台机器与分身，随下一次真机 session 连着做）",
-        "owner": "标定完成后由本 change 或其后继按标定结果补判据。**标定前 MUST NOT 记 confirmed（无证据），也 MUST NOT 记 not_applicable**——它们结构上有可读回的业务结果，用「读不出来」冒充「本来就没有」是另一种假成功"
-      }
+      "status": "confirmed",
+      "evidence": "所有成功出口均达到强度条或被 fail-closed：topic 由 Rust 特化按正文里的真话题 token + 剔隐藏后缀 + 精确相等确认；mention / location / collection 在真机结构信号完成标定前没有 confirmed 出口，找不到编辑器/入口/候选或点不着均回具体 not_started，候选点击已派发后固定回 ambiguous + publish_candidate_unconfirmed。正文中的 @ 字面值、候选自身 selected 外观与入口文案回显均不再构成成功证据。"
     },
     {
       "nativeKind": "publish_set_option",

@@ -332,10 +332,109 @@ test('H.2 候选列表被圈在入口容器里时不得靠「行文本含目标�
   dom.window.document.querySelector('#cand')?.addEventListener('click', (event) => {
     (event.currentTarget as Element).setAttribute('aria-selected', 'true');
   });
-  const confirmed = await run({
+  const candidateOnly = await run({
     kind: 'publish_add_with_candidate',
     params: { recordId: 1, seq: 7, candidateKind: 'location', value: '上海中心大厦' },
   });
-  assert.equal(confirmed.effectPhase, 'confirmed');
-  assert.equal(receiptOf(confirmed, '候选已选中').ok, true);
+  assert.equal(candidateOnly.effectPhase, 'ambiguous', '未标定的候选 aria-selected 不能证明地点已绑定到草稿');
+  assert.equal(receiptOf(candidateOnly, '候选自身状态').reason, 'publish_candidate_unconfirmed');
+});
+
+test('E2 mention 不能用自己刚写进正文的字面值确认平台实体', async () => {
+  const { dom } = installXhsDom(
+    `<main>
+       <div id="editor" contenteditable="true">原正文</div>
+       <button id="candidate">Alice</button>
+     </main>`,
+    PUBLISH_URL,
+  );
+  const clicked = trackClicks(dom);
+
+  const result = await run({
+    kind: 'publish_add_with_candidate',
+    params: { recordId: 1, seq: 8, candidateKind: 'mention', value: 'Alice' },
+  });
+
+  assert.ok(clicked.includes('candidate'), '候选仍应真点一次');
+  assert.match(dom.window.document.querySelector('#editor')?.textContent ?? '', /@Alice/);
+  assert.equal(result.effectPhase, 'ambiguous', '正文回读只能证明字写进去了，不能证明 mention 实体已绑定');
+  assert.equal(receiptOf(result, 'mention 正文自证').reason, 'publish_candidate_unconfirmed');
+});
+
+test('E2 collection 不能用点击后入口出现候选文案确认平台绑定', async () => {
+  const { dom } = installXhsDom(
+    `<main>
+       <button id="entry">合集</button>
+       <div class="dropdown"><button id="candidate">夏日合集</button></div>
+     </main>`,
+    PUBLISH_URL,
+  );
+  const clicked = trackClicks(dom);
+  dom.window.document.querySelector('#candidate')?.addEventListener('click', () => {
+    const entry = dom.window.document.querySelector('#entry');
+    if (entry) entry.textContent = '合集 夏日合集';
+  });
+
+  const result = await run({
+    kind: 'publish_add_with_candidate',
+    params: { recordId: 1, seq: 9, candidateKind: 'collection', value: '夏日合集' },
+  });
+
+  assert.ok(clicked.includes('candidate'), '候选仍应真点一次');
+  assert.match(dom.window.document.querySelector('#entry')?.textContent ?? '', /夏日合集/);
+  assert.equal(result.effectPhase, 'ambiguous', '未标定的入口文案回显不能证明合集已绑定到草稿');
+  assert.equal(receiptOf(result, 'collection 入口自证').reason, 'publish_candidate_unconfirmed');
+});
+
+test('E2 未标定候选在找不到或点不着时保留具体 not_started', async (t) => {
+  await t.test('location 入口点不着', async () => {
+    const { dom } = installXhsDom('<main><button id="entry">地点</button></main>', PUBLISH_URL);
+    const entry = dom.window.document.querySelector('#entry') as HTMLElement;
+    let reads = 0;
+    Object.defineProperty(entry, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => (++reads === 1
+        ? { x: 0, y: 0, top: 0, left: 0, right: 100, bottom: 40, width: 100, height: 40 }
+        : { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }),
+    });
+
+    const result = await run({
+      kind: 'publish_add_with_candidate',
+      params: { recordId: 1, seq: 10, candidateKind: 'location', value: '上海中心大厦' },
+    });
+    assert.equal(result.effectPhase, 'not_started');
+    assert.equal(receiptOf(result, '入口点不着').reason, 'publish_candidate_entry_not_actuated');
+  });
+
+  await t.test('collection 找不到候选', async () => {
+    installXhsDom('<main><button id="entry">合集</button></main>', PUBLISH_URL);
+    const result = await run({
+      kind: 'publish_add_with_candidate',
+      params: { recordId: 1, seq: 11, candidateKind: 'collection', value: '夏日合集' },
+    });
+    assert.equal(result.effectPhase, 'not_started');
+    assert.equal(receiptOf(result, '候选找不到').reason, 'publish_candidate_not_found');
+  });
+
+  await t.test('mention 候选点不着', async () => {
+    const { dom } = installXhsDom(
+      '<main><div contenteditable="true">原正文</div><button id="candidate">Alice</button></main>',
+      PUBLISH_URL,
+    );
+    const candidate = dom.window.document.querySelector('#candidate') as HTMLElement;
+    let reads = 0;
+    Object.defineProperty(candidate, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => (++reads === 1
+        ? { x: 0, y: 0, top: 0, left: 0, right: 100, bottom: 40, width: 100, height: 40 }
+        : { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }),
+    });
+
+    const result = await run({
+      kind: 'publish_add_with_candidate',
+      params: { recordId: 1, seq: 12, candidateKind: 'mention', value: 'Alice' },
+    });
+    assert.equal(result.effectPhase, 'not_started');
+    assert.equal(receiptOf(result, '候选点不着').reason, 'publish_candidate_not_actuated');
+  });
 });
