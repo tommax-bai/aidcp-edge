@@ -49,6 +49,11 @@
       "evidence": "点击后按**导航代际 + 候选指纹**复核（`facebook/auth.rs:797` verify_postcondition → `facebook-router/06-auth.js:392` authPostcondition）：文档代际变了（timeOrigin+URL 摘要，只有真换文档才变，页内重渲染不变）即算生效；否则重新结构化观测该信号，按候选指纹判它是否已消失。**读不出来时 determinate=false，绝不折成成功、也绝不折成「确实没发生」**，有界轮询到顶回 Ambiguous，且 unconfirmed 与 unreadable 两个原因码分开。 本条走 `execute_click`，期望信号 remember_password_confirm。"
     },
     {
+      "nativeKind": "facebook_auth_start_ad_data_review",
+      "status": "confirmed",
+      "evidence": "本条只接受新鲜的 `ad_data_review_get_started` 候选并走 Native `execute_click`（`facebook/auth.rs:160-170`）；派发后由 `verify_postcondition`（`:840-897`）有界复核。路由器仅在精确的订阅或免费广告选择后继结构出现时设置 `successorObserved + satisfied + signalGone`（`facebook-router/06-auth.js:478-499`），Native 才回 Confirmed。只有按钮变化、加载迹象、文档变化或读回失败均不算成功，分别保持有界等待或回 `auth_successor_unconfirmed` / `auth_postcondition_unreadable` 的 Ambiguous。"
+    },
+    {
       "nativeKind": "plan_execute",
       "status": "confirmed",
       "evidence": "两支都有实测判据：page.scroll 按**实测位移**回报（`xhs-command-router.js:777-784`，无位移即 no_scroll，不再无条件 success）；点击支用与主路径**同源的硬判据** compatVerifier（图标状态位 / 关注文案 / 焦点落位，`:806`），有界重试，且区分「点了但没确认」(escalated) 与「根本没点上」(no_target)，attempts 如实回报。输入支带**自证闸**：非可编辑元素直接判 no_target（`:790`）——在 div 上 dispatchInput 会改 textContent、回读必然相等，那不是证据。⚠️ **本条在活路径上已死**（云端 createEnvelope 出口没有它，唯一产出方是云端联调脚本）：这条分类是「读过了、判据够强」，不是「它在跑」。"
