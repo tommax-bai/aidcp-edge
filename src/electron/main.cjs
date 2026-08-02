@@ -88,6 +88,7 @@ const {
   clientAlignedBrowserBounds,
   parkingEnv,
 } = require('./browser-parking.cjs');
+const { createExclusiveBrowserRecallCoordinator } = require('./exclusive-browser-recall.cjs');
 const {
   DEFAULT_BROWSER_COLD_STANDBY_ENABLED,
   DEFAULT_BROWSER_COLD_STANDBY_WARMUP_MS,
@@ -142,11 +143,11 @@ let personaSeq = 0;
 // 稿件预览审批桥：渲染层动作经目标环境 core stdin → cloud WS → stdout 回执。
 const publishApprovalPending = new Map(); // id -> { resolve, timer }
 let publishApprovalSeq = 0;
-// 环境头像“显示在 AIDCP 下方”桥：core 完成 setBounds + bringToFront 后回一条关联回执，
-// Electron 再把自己的主窗抬回最前。固定 sleep 会与不同机器/CDP 时序竞态，故只认具名完成回执。
-const browserShowPending = new Map(); // id -> { envId, resolve, timer }
+// 浏览器窗口控制桥：core 完成 setBounds / configured parking 后回一条关联回执。
+// 环境头像显示还会在 show 回执后把 Electron 主窗抬回最前；固定 sleep 会与不同机器/CDP 时序竞态。
+const browserControlPending = new Map(); // id -> { envId, resolve, timer }
 const BROWSER_PARKING_REPLY_PREFIX = '[browser-parking-reply]';
-const BROWSER_SHOW_COMPLETION_TIMEOUT_MS = 3000;
+const BROWSER_CONTROL_COMPLETION_TIMEOUT_MS = 3000;
 let isQuitting = false;
 // 优雅全停已完成、允许本次 quit 直落（before-quit 二次进入不再拦截）。
 let quitFinal = false;
@@ -3536,24 +3537,48 @@ function handleBrowserParkingReply(handle, raw) {
     return false;
   }
   const id = reply && typeof reply.id === 'string' ? reply.id : '';
-  const pending = id ? browserShowPending.get(id) : null;
+  const pending = id ? browserControlPending.get(id) : null;
   if (!pending || pending.envId !== handle?.envId) return false;
-  browserShowPending.delete(id);
+  browserControlPending.delete(id);
   clearTimeout(pending.timer);
   if (reply.ok !== true) {
     pending.resolve({ ok: false, error: String(reply.error || '浏览器窗口移动失败') });
     return true;
   }
-  pending.resolve(focusAidcpAboveDrivenBrowser());
+  pending.resolve({ ok: true });
   return true;
 }
 
-function showDrivenBrowserBelowClient(handle) {
-  if (!handle || !handle.child || !handle.browserParkingReady || !handle.child.stdin || handle.child.stdin.destroyed) {
-    return Promise.resolve({ ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' });
-  }
+function sendCorrelatedBrowserControlCommand(handle, type, payload, timeoutError) {
+  const action = type === 'browser.park' ? 'park' : 'show';
+  const id = `browser-${action}-${crypto.randomUUID()}`;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      browserControlPending.delete(id);
+      resolve({ ok: false, error: timeoutError || '浏览器窗口控制超时，AIDCP 未收到完成确认' });
+    }, BROWSER_CONTROL_COMPLETION_TIMEOUT_MS);
+    browserControlPending.set(id, { envId: handle?.envId, resolve, timer });
+    const sent = writeBrowserControlCommand(handle, type, { ...(payload || {}), requestId: id });
+    if (!sent.ok) {
+      browserControlPending.delete(id);
+      clearTimeout(timer);
+      resolve(sent);
+    }
+  });
+}
+
+function parkDrivenBrowserUsingConfiguredBounds(handle) {
+  return sendCorrelatedBrowserControlCommand(
+    handle,
+    'browser.park',
+    undefined,
+    '浏览器窗口归位超时，AIDCP 未收到完成确认',
+  );
+}
+
+async function showDrivenBrowserBelowClient(handle) {
   if (!mainWindow || mainWindow.isDestroyed()) {
-    return Promise.resolve({ ok: false, error: 'AIDCP 主窗口已关闭，无法计算浏览器正后方位置' });
+    return { ok: false, error: 'AIDCP 主窗口已关闭，无法计算浏览器正后方位置' };
   }
   let targetBounds;
   try {
@@ -3561,26 +3586,33 @@ function showDrivenBrowserBelowClient(handle) {
     const display = screen.getDisplayMatching(clientBounds);
     targetBounds = clientAlignedBrowserBounds(clientBounds, display);
   } catch (error) {
-    return Promise.resolve({ ok: false, error: error?.message || '读取 AIDCP 窗口位置失败' });
+    return { ok: false, error: error?.message || '读取 AIDCP 窗口位置失败' };
   }
   if (!targetBounds) {
-    return Promise.resolve({ ok: false, error: 'AIDCP 窗口位置无效，未移动浏览器' });
+    return { ok: false, error: 'AIDCP 窗口位置无效，未移动浏览器' };
   }
-  const id = `browser-show-${crypto.randomUUID()}`;
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      browserShowPending.delete(id);
-      resolve({ ok: false, error: '浏览器窗口移动超时，AIDCP 未收到完成确认' });
-    }, BROWSER_SHOW_COMPLETION_TIMEOUT_MS);
-    browserShowPending.set(id, { envId: handle.envId, resolve, timer });
-    const sent = writeBrowserControlCommand(handle, 'browser.show', { requestId: id, bounds: targetBounds });
-    if (!sent.ok) {
-      browserShowPending.delete(id);
-      clearTimeout(timer);
-      resolve(sent);
-    }
-  });
+  const moved = await sendCorrelatedBrowserControlCommand(
+    handle,
+    'browser.show',
+    { bounds: targetBounds },
+    '浏览器窗口移动超时，AIDCP 未收到完成确认',
+  );
+  return moved.ok ? focusAidcpAboveDrivenBrowser() : moved;
 }
+
+function browserHandleControllable(handle) {
+  return Boolean(handle && !handle.removed && handle.child && handle.browserParkingReady
+    && handle.child.stdin && !handle.child.stdin.destroyed);
+}
+
+const exclusiveBrowserRecallCoordinator = createExclusiveBrowserRecallCoordinator({
+  listHandles: () => envs.values(),
+  isControllable: browserHandleControllable,
+  parkBrowser: parkDrivenBrowserUsingConfiguredBounds,
+  showBrowser: showDrivenBrowserBelowClient,
+  idOf: (handle) => String(handle?.envId || ''),
+  labelOf: (handle) => String(handle?.name || handle?.profileId || handle?.envId || '未知环境'),
+});
 
 // 建号自助人设：把带 correlation id 的 persona 命令写进**目标环境**（envId 路由，缺省选中环境）的 core stdin，
 // 返回按 [persona-reply] 命中的 Promise。不 gate 在 browserParkingReady（persona 与 parking 独立）。
@@ -7546,6 +7578,10 @@ ipcMain.handle('browser:showDriven', (_event, envId, opts) => {
   return opts && opts.keepClientForeground === true
     ? showDrivenBrowserBelowClient(handle)
     : sendBrowserParkingCommand(handle, 'browser.show');
+});
+ipcMain.handle('browser:recallExclusive', (_event, envId) => {
+  const target = envId ? envs.get(envId) : null;
+  return exclusiveBrowserRecallCoordinator.recall(target);
 });
 ipcMain.handle('browser:resetParking', (_event, envId) => sendBrowserParkingCommand(resolveHandle(envId), 'browser.park'));
 // 账号人设（change offline-account-persona-management）：这三条具名 IPC 只接收本地 envId，并在 main

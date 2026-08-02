@@ -36,14 +36,14 @@ export interface BrowserPersonaNoticeController {
   dispose(): void;
 }
 
-interface BrowserShowControlPayload {
+interface BrowserParkingControlPayload {
   requestId?: string;
   bounds?: BrowserWindowBounds;
 }
 
 type BrowserParkingControlMessage = {
   type?: string;
-  payload?: BrowserPersonaNotice | BrowserShowControlPayload;
+  payload?: BrowserPersonaNotice | BrowserParkingControlPayload;
 };
 
 export const BROWSER_PARKING_REPLY_PREFIX = '[browser-parking-reply]';
@@ -294,7 +294,7 @@ export function installBrowserParkingStdinControl(
   rl.on('close', () => personaNotice.dispose());
 }
 
-function browserShowRequestId(payload: BrowserParkingControlMessage['payload']): string {
+function browserControlRequestId(payload: BrowserParkingControlMessage['payload']): string {
   if (!payload || typeof payload !== 'object' || !('requestId' in payload)) return '';
   const id = String(payload.requestId || '').trim();
   return /^[a-zA-Z0-9_-]{1,120}$/.test(id) ? id : '';
@@ -321,7 +321,7 @@ function emitBrowserParkingReply(
   })}`);
 }
 
-/** 单行控制处理单独导出，便于用真实异步顺序测试 show 完成回执；stdin 只负责逐行投递。 */
+/** 单行控制处理单独导出，便于用真实异步顺序测试 show/park 完成回执；stdin 只负责逐行投递。 */
 export async function handleBrowserParkingControlLine(
   cdp: CdpClient,
   config: BrowserParkingConfig | null,
@@ -336,7 +336,7 @@ export async function handleBrowserParkingControlLine(
     return;
   }
   if (msg.type === 'browser.show') {
-    const requestId = browserShowRequestId(msg.payload);
+    const requestId = browserControlRequestId(msg.payload);
     try {
       const requestedBounds = browserShowBounds(msg.payload);
       await showBrowserWindow(cdp, config, logger, requestedBounds);
@@ -346,11 +346,16 @@ export async function handleBrowserParkingControlLine(
       logger(`[browser-parking] browser.show failed: ${error}`);
       emitBrowserParkingReply(requestId, false, logger, error);
     }
-  } else if (msg.type === 'browser.park' && config) {
+  } else if (msg.type === 'browser.park') {
+    const requestId = browserControlRequestId(msg.payload);
     try {
+      if (!config) throw new Error('未配置浏览器窗口位置');
       await applyBrowserParking(cdp, config, logger);
+      emitBrowserParkingReply(requestId, true, logger);
     } catch (e) {
-      logger(`[browser-parking] browser.park failed: ${(e as Error).message}`);
+      const error = (e as Error).message;
+      logger(`[browser-parking] browser.park failed: ${error}`);
+      emitBrowserParkingReply(requestId, false, logger, error);
     }
   } else if (msg.type === 'browser.personaNotice') {
     try {

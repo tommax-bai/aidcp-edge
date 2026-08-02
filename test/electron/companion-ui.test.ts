@@ -18,6 +18,7 @@ const rendererSrc = readFileSync(join(electronDir, 'renderer/renderer.js'), 'utf
 const rendererCss = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8');
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+const gestureTick = () => new Promise((r) => setTimeout(r, 240));
 
 const openWindows: DOMWindow[] = [];
 after(() => {
@@ -1180,6 +1181,7 @@ test('账号切换会使旧账号在途待审列表应答失效', async () => {
   }));
   await tick();
   (w.document.querySelector('.rail-row[data-env-id="u2"]') as HTMLElement).dispatchEvent(new w.Event('click'));
+  await gestureTick();
   await tick();
   releaseList?.({
     ok: true,
@@ -1265,6 +1267,7 @@ test('洗稿稿件审核：旧账号审批应答不得改写切换后的账号�
   await tick();
   (w.document.querySelector('.rail-row[data-env-id="u2"]') as unknown as HTMLElement)
     .dispatchEvent(new w.Event('click'));
+  await gestureTick();
   await tick();
   releaseApproval?.({ ok: true, state: 'approved' });
   await tick();
@@ -1906,6 +1909,7 @@ test('Feed 视频浏览活动只进入所属环境缓冲，切换后显示读记
   assert.equal(w.document.querySelectorAll('#activity-stream .ev').length, 0, '非选中环境只入缓冲，不串到账号 A');
 
   ($(w, '[data-env-id="u2"]') as HTMLElement).click();
+  await gestureTick();
   for (let i = 0; i < 5; i += 1) await tick();
   const row = w.document.querySelector('#activity-stream .ev') as HTMLElement;
   assert.match(row.textContent ?? '', /账号 B 的视频/);
@@ -2081,6 +2085,7 @@ test('切换当前环境会关闭委派浮层并清空旧环境任务指示', as
   assert.equal(hidden($(w, '#delegated-indicator')), false);
 
   ($(w, '[data-env-id="u2"]') as unknown as HTMLElement).click();
+  await gestureTick();
   assert.equal(hidden($(w, '#delegated-card')), true);
   assert.equal(trigger.getAttribute('aria-expanded'), 'false');
   assert.equal(hidden($(w, '#delegated-indicator')), true, '切换后不得短暂沿用旧环境指示');
@@ -2238,6 +2243,7 @@ test('Facebook 切到小红书时清除单稿表面和平台标记残留', async
   });
   assert.ok($(w, '#pub-card').classList.contains('single-surface'));
   ($(w, '[data-env-id="xhs1"]') as HTMLElement).click();
+  await gestureTick();
   for (let i = 0; i < 5; i += 1) await tick();
   assert.equal($(w, '#daily-summary').dataset.platform, 'xiaohongshu');
   assert.equal($(w, '#pub-card').dataset.platform, 'xiaohongshu');
@@ -2291,6 +2297,7 @@ test('Facebook 未启动时隐藏缓存获得感卡片，切换平台不残留�
   assert.equal(hidden($(w, '#runtime-guidance')), false);
   assert.equal($(w, '#runtime-guidance').dataset.mode, 'first-post');
   ($(w, '[data-env-id="fb1"]') as HTMLElement).click();
+  await gestureTick();
   for (let i = 0; i < 5; i += 1) await tick();
   assert.equal($(w, '#daily-summary').dataset.platform, 'facebook');
   assert.equal(hidden($(w, '#runtime-guidance')), true);
@@ -2300,6 +2307,7 @@ test('Facebook 未启动时隐藏缓存获得感卡片，切换平台不残留�
   assert.equal(hidden($(w, '#pub-card')), false, '内容发布卡不受获得感隐藏规则影响');
 
   ($(w, '[data-env-id="xhs1"]') as HTMLElement).click();
+  await gestureTick();
   for (let i = 0; i < 5; i += 1) await tick();
   assert.equal($(w, '#daily-summary').dataset.platform, 'xiaohongshu');
   assert.equal(hidden($(w, '#runtime-guidance')), false);
@@ -2673,9 +2681,11 @@ test('小红书首页发布稿切换按稳定身份保持，切换账号复位�
   assert.equal($(w, '#pub-title').textContent, '账号 A 创作稿');
 
   ($(w, '[data-env-id="u2"]') as unknown as HTMLElement).click();
+  await gestureTick();
   for (let i = 0; i < 5; i += 1) await tick();
   assert.equal($(w, '#pub-title').textContent, '账号 B 待确认稿');
   ($(w, '[data-env-id="u1"]') as unknown as HTMLElement).click();
+  await gestureTick();
   for (let i = 0; i < 5; i += 1) await tick();
   assert.equal($(w, '#pub-title').textContent, '账号 A 待确认稿', '切回账号后应从该账号优先项开始');
 

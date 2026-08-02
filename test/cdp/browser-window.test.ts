@@ -154,6 +154,68 @@ test('correlated browser.show reports failure while uncorrelated show emits no r
   assert.equal(plainLogs.some((line) => line.startsWith(BROWSER_PARKING_REPLY_PREFIX)), false);
 });
 
+test('correlated browser.park replies after configured parking while legacy park remains uncorrelated', async () => {
+  const cfg = browserParkingConfigFromEnv(env);
+  const persona = { update: async () => undefined, dispose: () => undefined };
+  const correlated = fakeCdp([{ hidden: false, visibility: 'visible', w: 1280, h: 720 }]);
+  const correlatedLogs: string[] = [];
+  await handleBrowserParkingControlLine(
+    correlated.cdp,
+    cfg,
+    persona,
+    JSON.stringify({ type: 'browser.park', payload: { requestId: 'browser-park-test-1' } }),
+    (line) => correlatedLogs.push(line),
+  );
+  assert.deepEqual(correlated.calls.map((call) => call.method), [
+    'Browser.getWindowForTarget',
+    'Browser.setWindowBounds',
+    'Runtime.evaluate',
+  ]);
+  assert.equal(correlatedLogs.at(-1), `${BROWSER_PARKING_REPLY_PREFIX} {"id":"browser-park-test-1","ok":true}`);
+
+  const plain = fakeCdp([{ hidden: false, visibility: 'visible', w: 1280, h: 720 }]);
+  const plainLogs: string[] = [];
+  await handleBrowserParkingControlLine(
+    plain.cdp,
+    cfg,
+    persona,
+    JSON.stringify({ type: 'browser.park' }),
+    (line) => plainLogs.push(line),
+  );
+  assert.equal(plainLogs.some((line) => line.startsWith(BROWSER_PARKING_REPLY_PREFIX)), false);
+});
+
+test('correlated browser.park reports configured parking and missing-config failures', async () => {
+  const cfg = browserParkingConfigFromEnv(env);
+  const persona = { update: async () => undefined, dispose: () => undefined };
+  const failedLogs: string[] = [];
+  const failedCdp = {
+    send: async (method: string) => {
+      if (method === 'Browser.getWindowForTarget') return { windowId: 7 };
+      if (method === 'Browser.setWindowBounds') throw new Error('park bounds denied');
+      return {};
+    },
+  };
+  await handleBrowserParkingControlLine(
+    failedCdp as never,
+    cfg,
+    persona,
+    JSON.stringify({ type: 'browser.park', payload: { requestId: 'browser-park-test-2' } }),
+    (line) => failedLogs.push(line),
+  );
+  assert.match(failedLogs.at(-1) || '', /\[browser-parking-reply\].*"ok":false.*park bounds denied/);
+
+  const missingLogs: string[] = [];
+  await handleBrowserParkingControlLine(
+    fakeCdp([]).cdp,
+    null,
+    persona,
+    JSON.stringify({ type: 'browser.park', payload: { requestId: 'browser-park-test-3' } }),
+    (line) => missingLogs.push(line),
+  );
+  assert.match(missingLogs.at(-1) || '', /\[browser-parking-reply\].*"ok":false.*未配置浏览器窗口位置/);
+});
+
 test('browserParkingConfigFromEnv accepts the primary-screen mode', () => {
   const cfg = browserParkingConfigFromEnv({
     ...env,
