@@ -232,6 +232,127 @@ enum XiaohongshuPublishMode {
 #[derive(Default)]
 struct XiaohongshuSessionState {
     publish_mode: XiaohongshuPublishMode,
+    immediate_publish_identity: Option<XiaohongshuPublishedIdentity>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct XiaohongshuPublishedIdentity {
+    record_id: u64,
+    post_id: String,
+    post_url: Option<String>,
+}
+
+impl XiaohongshuSessionState {
+    fn clear_immediate_publish_identity(&mut self) {
+        self.immediate_publish_identity = None;
+    }
+
+    /// 只接收本条 immediate submit 的确认终局。页面上的链接不是代际证据；绑定完成以后，
+    /// capture 只能按同一个 recordId 读取这里的身份，绝不重新扫 DOM 猜一条旧帖。
+    fn remember_immediate_publish_receipt(
+        &mut self,
+        effect_phase: EffectPhase,
+        expected_record_id: u64,
+        expected_seq: u32,
+        receipt: &PublishReceipt,
+    ) {
+        self.immediate_publish_identity = None;
+        if effect_phase != EffectPhase::Confirmed
+            || !receipt.ok
+            || receipt.submit_dispatched != Some(true)
+            || receipt.error.is_some()
+            || receipt.record_id != expected_record_id
+            || receipt.seq != expected_seq
+            || receipt.kind != "submit"
+        {
+            return;
+        }
+        let Some(post_id) = receipt.value.as_deref() else {
+            return;
+        };
+        if post_id.is_empty()
+            || post_id.len() > 256
+            || !post_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return;
+        }
+        let post_url = match receipt.post_url.as_deref() {
+            Some(raw) if is_bound_immediate_publish_url(raw, post_id) => Some(raw.to_owned()),
+            Some(_) => return,
+            None => None,
+        };
+        self.immediate_publish_identity = Some(XiaohongshuPublishedIdentity {
+            record_id: expected_record_id,
+            post_id: post_id.to_owned(),
+            post_url,
+        });
+    }
+
+    fn capture_post_id(&self, record_id: u64, seq: u32) -> (EffectPhase, CommandOutput) {
+        let Some(identity) = self
+            .immediate_publish_identity
+            .as_ref()
+            .filter(|identity| identity.record_id == record_id)
+        else {
+            return (
+                EffectPhase::Ambiguous,
+                CommandOutput::PublishReceipt(PublishReceipt {
+                    record_id,
+                    seq,
+                    kind: "capture_post_id".to_owned(),
+                    ok: false,
+                    submit_dispatched: None,
+                    value: None,
+                    post_url: None,
+                    error: Some("publish_evidence_not_found".to_owned()),
+                }),
+            );
+        };
+        (
+            EffectPhase::Confirmed,
+            CommandOutput::PublishReceipt(PublishReceipt {
+                record_id,
+                seq,
+                kind: "capture_post_id".to_owned(),
+                ok: true,
+                submit_dispatched: None,
+                value: Some(identity.post_id.clone()),
+                post_url: identity.post_url.clone(),
+                error: None,
+            }),
+        )
+    }
+}
+
+fn is_bound_immediate_publish_url(raw: &str, expected_post_id: &str) -> bool {
+    let Ok(url) = Url::parse(raw) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let segments = url
+        .path_segments()
+        .map(|segments| segments.collect::<Vec<_>>())
+        .unwrap_or_default();
+    let post_id = match segments.as_slice() {
+        ["explore", post_id] => *post_id,
+        ["discovery", "item", post_id] => *post_id,
+        _ => return false,
+    };
+    let has_token = url
+        .query_pairs()
+        .find(|(key, _)| key == "xsec_token")
+        .is_some_and(|(_, value)| !value.is_empty());
+    url.scheme() == "https"
+        && matches!(host, "xiaohongshu.com" | "www.xiaohongshu.com")
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && post_id == expected_post_id
+        && has_token
 }
 
 pub(crate) struct FacebookSessionState {
@@ -925,6 +1046,7 @@ async fn execute_xhs_command_once(
         PublishNavigateEntry(params) => {
             // 新稿 / 重进发布页先撤销上一稿的模式证明；导航失败时绝不能遗留 scheduled。
             session.xiaohongshu.publish_mode = XiaohongshuPublishMode::Unknown;
+            session.xiaohongshu.clear_immediate_publish_identity();
             session
                 .cdp
                 .navigate("https://creator.xiaohongshu.com/publish/publish")
@@ -977,10 +1099,24 @@ async fn execute_xhs_command_once(
             Ok(result)
         }
         PublishSubmit(params) => {
-            let Some(context) = xhs_submit_mode_context(session.xiaohongshu.publish_mode) else {
+            let publish_mode = session.xiaohongshu.publish_mode;
+            // 新 submit 开始的是新一代证据。即使模式未确认或求值失败，也不能让上一条记录留下的
+            // postId 被后续 capture 当成本次结果。
+            session.xiaohongshu.clear_immediate_publish_identity();
+            let Some(context) = xhs_submit_mode_context(publish_mode) else {
                 return Ok(xhs_publish_mode_unconfirmed(params.record_id, params.seq));
             };
             let result = evaluate_router_with_internal_params(session, command, &context).await;
+            if publish_mode == XiaohongshuPublishMode::Immediate
+                && let Ok((effect_phase, CommandOutput::PublishReceipt(receipt))) = &result
+            {
+                session.xiaohongshu.remember_immediate_publish_receipt(
+                    *effect_phase,
+                    params.record_id,
+                    params.seq,
+                    receipt,
+                );
+            }
             // 已派发（成功或未知）以后，这份模式证明完成使命；求值本身抛错时无法证明点击未发生，
             // 同样撤销，阻止后续把一次不明提交当成安全的同页重试。
             let clear_mode = match &result {
@@ -995,6 +1131,9 @@ async fn execute_xhs_command_once(
             }
             result
         }
+        PublishCapturePostId(params) => Ok(session
+            .xiaohongshu
+            .capture_post_id(params.record_id, params.seq)),
         PublishCaptureScheduled(_) | PublishReconcileScheduled(_) => {
             session
                 .cdp
@@ -3888,6 +4027,119 @@ mod tests {
         assert!(!receipt.ok);
         assert_eq!(receipt.submit_dispatched, Some(false));
         assert_eq!(receipt.error.as_deref(), Some("publish_mode_unconfirmed"));
+    }
+
+    fn immediate_submit_receipt(post_id: &str, post_url: Option<&str>) -> PublishReceipt {
+        PublishReceipt {
+            record_id: 7,
+            seq: 9,
+            kind: "submit".to_owned(),
+            ok: true,
+            submit_dispatched: Some(true),
+            value: Some(post_id.to_owned()),
+            post_url: post_url.map(str::to_owned),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn xhs_immediate_publish_identity_is_record_bound_and_typed() {
+        let mut state = XiaohongshuSessionState::default();
+        let receipt = immediate_submit_receipt(
+            "note_123",
+            Some("https://www.xiaohongshu.com/explore/note_123?xsec_token=opaque"),
+        );
+        state.remember_immediate_publish_receipt(EffectPhase::Confirmed, 7, 9, &receipt);
+
+        let (phase, output) = state.capture_post_id(7, 10);
+        assert_eq!(phase, EffectPhase::Confirmed);
+        let CommandOutput::PublishReceipt(receipt) = output else {
+            panic!("expected typed publish receipt");
+        };
+        assert!(receipt.ok);
+        assert_eq!(receipt.record_id, 7);
+        assert_eq!(receipt.seq, 10);
+        assert_eq!(receipt.kind, "capture_post_id");
+        assert_eq!(receipt.value.as_deref(), Some("note_123"));
+        assert_eq!(
+            receipt.post_url.as_deref(),
+            Some("https://www.xiaohongshu.com/explore/note_123?xsec_token=opaque")
+        );
+        assert!(receipt.error.is_none());
+
+        let (phase, output) = state.capture_post_id(8, 11);
+        assert_eq!(phase, EffectPhase::Ambiguous);
+        let CommandOutput::PublishReceipt(receipt) = output else {
+            panic!("expected typed publish receipt");
+        };
+        assert!(!receipt.ok);
+        assert!(receipt.value.is_none());
+        assert!(receipt.post_url.is_none());
+        assert_eq!(receipt.error.as_deref(), Some("publish_evidence_not_found"));
+
+        let receipt = immediate_submit_receipt(
+            "note-456",
+            Some("https://xiaohongshu.com/discovery/item/note-456?xsec_token=discovery-token"),
+        );
+        state.remember_immediate_publish_receipt(EffectPhase::Confirmed, 7, 9, &receipt);
+        let (_, output) = state.capture_post_id(7, 12);
+        let CommandOutput::PublishReceipt(receipt) = output else {
+            panic!("expected typed publish receipt");
+        };
+        assert_eq!(receipt.value.as_deref(), Some("note-456"));
+    }
+
+    #[test]
+    fn xhs_immediate_publish_identity_accepts_fresh_post_id_without_url() {
+        let mut state = XiaohongshuSessionState::default();
+        let receipt = immediate_submit_receipt("note_123", None);
+        state.remember_immediate_publish_receipt(EffectPhase::Confirmed, 7, 9, &receipt);
+
+        let (phase, output) = state.capture_post_id(7, 10);
+        assert_eq!(phase, EffectPhase::Confirmed);
+        let CommandOutput::PublishReceipt(receipt) = output else {
+            panic!("expected typed publish receipt");
+        };
+        assert_eq!(receipt.value.as_deref(), Some("note_123"));
+        assert!(receipt.post_url.is_none());
+    }
+
+    #[test]
+    fn xhs_immediate_publish_identity_rejects_unconfirmed_or_unbound_receipts() {
+        let invalid_urls = [
+            "https://www.xiaohongshu.com/explore/note_123",
+            "https://www.xiaohongshu.com/explore/another?xsec_token=opaque",
+            "https://www.xiaohongshu.com/explore/note_123?xsec_token=",
+            "https://creator.xiaohongshu.com/explore/note_123?xsec_token=opaque",
+            "https://www.xiaohongshu.com/explore/note_123/extra?xsec_token=opaque",
+            "https://www.xiaohongshu.com.evil.test/explore/note_123?xsec_token=opaque",
+        ];
+        for post_url in invalid_urls {
+            let mut state = XiaohongshuSessionState::default();
+            let receipt = immediate_submit_receipt("note_123", Some(post_url));
+            state.remember_immediate_publish_receipt(EffectPhase::Confirmed, 7, 9, &receipt);
+            assert_eq!(state.capture_post_id(7, 10).0, EffectPhase::Ambiguous);
+        }
+
+        let mut state = XiaohongshuSessionState::default();
+        let receipt = immediate_submit_receipt("note_123", None);
+        state.remember_immediate_publish_receipt(EffectPhase::Confirmed, 7, 9, &receipt);
+        state.remember_immediate_publish_receipt(EffectPhase::Ambiguous, 7, 9, &receipt);
+        assert_eq!(state.capture_post_id(7, 10).0, EffectPhase::Ambiguous);
+
+        let mut failed = immediate_submit_receipt("note_123", None);
+        failed.ok = false;
+        state.remember_immediate_publish_receipt(EffectPhase::Confirmed, 7, 9, &failed);
+        assert_eq!(state.capture_post_id(7, 10).0, EffectPhase::Ambiguous);
+
+        let mismatched = immediate_submit_receipt("note_123", None);
+        state.remember_immediate_publish_receipt(EffectPhase::Confirmed, 8, 9, &mismatched);
+        assert_eq!(state.capture_post_id(7, 10).0, EffectPhase::Ambiguous);
+
+        state.remember_immediate_publish_receipt(EffectPhase::Confirmed, 7, 9, &receipt);
+        assert_eq!(state.capture_post_id(7, 10).0, EffectPhase::Confirmed);
+        state.clear_immediate_publish_identity();
+        assert_eq!(state.capture_post_id(7, 10).0, EffectPhase::Ambiguous);
     }
 
     #[test]

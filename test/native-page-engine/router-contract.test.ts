@@ -146,15 +146,15 @@ test('does not let the page router claim a native-specialized image upload succe
   });
 });
 
-test('scheduled capture requires one exact title, scheduled state, platform id, and target time', async () => {
-  const publishTime = new Date(2026, 6, 22, 18, 45).getTime();
+test('scheduled capture requires one exact title, scheduled state, platform id, and target date-minute', async () => {
+  const publishTime = Date.parse('2026-07-22T18:45:00+08:00');
   install(`
     <main>
       <div class="note-card" data-note-id="scheduled-1">
-        <span class="title">Exact title</span><span>定时发布 18:45</span>
+        <span class="title">Exact title</span><span>定时发布 2026-07-22 18:45</span>
       </div>
       <div class="note-card" data-note-id="scheduled-2">
-        <span class="title">Other title</span><span>定时发布 18:45</span>
+        <span class="title">Other title</span><span>定时发布 2026-07-22 18:45</span>
       </div>
     </main>
   `, 'https://creator.xiaohongshu.com/new/note-manager');

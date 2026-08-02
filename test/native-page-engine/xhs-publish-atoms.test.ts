@@ -445,3 +445,109 @@ test('3.2 点击后无关区域新增发布中文案不得给本次提交自证'
     '点击已经派发，未确认时仍须保留已派发位以阻止盲目重投',
   );
 });
+
+test('E7 submit only binds the unique note identity inside this fresh success result', async () => {
+  const { dom } = installXhsDom(
+    `<main>
+       <section class="post-time-wrapper"><span>定时发布</span><input type="checkbox"></section>
+       <a href="https://www.xiaohongshu.com/explore/old-note?xsec_token=old-token">旧帖</a>
+       <button id="submit">发布</button>
+     </main>`,
+    PUBLISH_URL,
+  );
+  dom.window.document.querySelector('#submit')?.addEventListener('click', () => {
+    const toast = dom.window.document.createElement('div');
+    toast.className = 'toast success-result';
+    toast.innerHTML = '发布成功 <a href="https://www.xiaohongshu.com/explore/new-note?xsec_token=new-token">查看笔记</a>';
+    dom.window.document.body.appendChild(toast);
+  });
+
+  const result = await run({
+    kind: 'publish_submit',
+    params: { recordId: 5, seq: 9, expectedScheduleMode: 'immediate' },
+  });
+
+  assert.equal(receiptOf(result).ok, true);
+  assert.equal(receiptOf(result).value, 'new-note');
+  assert.equal(
+    receiptOf(result).postUrl,
+    'https://www.xiaohongshu.com/explore/new-note?xsec_token=new-token',
+  );
+});
+
+test('E7 fresh result with a bare detail link binds the id but does not manufacture a public URL', async () => {
+  const { dom } = installXhsDom(
+    `<main>
+       <section class="post-time-wrapper"><span>定时发布</span><input type="checkbox"></section>
+       <button id="submit">发布</button>
+     </main>`,
+    PUBLISH_URL,
+  );
+  dom.window.document.querySelector('#submit')?.addEventListener('click', () => {
+    const toast = dom.window.document.createElement('div');
+    toast.className = 'toast';
+    toast.innerHTML = '发布成功 <a href="https://www.xiaohongshu.com/explore/new-note">查看笔记</a>';
+    dom.window.document.body.appendChild(toast);
+  });
+
+  const result = await run({
+    kind: 'publish_submit',
+    params: { recordId: 5, seq: 9, expectedScheduleMode: 'immediate' },
+  });
+
+  assert.equal(receiptOf(result).ok, true);
+  assert.equal(receiptOf(result).value, 'new-note');
+  assert.equal(receiptOf(result).postUrl, undefined);
+});
+
+test('E7 fresh result with two different note identities stays unbound', async () => {
+  const { dom } = installXhsDom(
+    `<main>
+       <section class="post-time-wrapper"><span>定时发布</span><input type="checkbox"></section>
+       <button id="submit">发布</button>
+     </main>`,
+    PUBLISH_URL,
+  );
+  dom.window.document.querySelector('#submit')?.addEventListener('click', () => {
+    const toast = dom.window.document.createElement('div');
+    toast.className = 'toast';
+    toast.innerHTML = `发布成功
+      <a href="https://www.xiaohongshu.com/explore/note-a?xsec_token=a">A</a>
+      <a href="https://www.xiaohongshu.com/explore/note-b?xsec_token=b">B</a>`;
+    dom.window.document.body.appendChild(toast);
+  });
+
+  const result = await run({
+    kind: 'publish_submit',
+    params: { recordId: 5, seq: 9, expectedScheduleMode: 'immediate' },
+  });
+
+  assert.equal(receiptOf(result).ok, true, '提交本身已有 fresh success，身份抓不到不能反向否定提交');
+  assert.equal(receiptOf(result).value, undefined);
+  assert.equal(receiptOf(result).postUrl, undefined);
+});
+
+test('E7 fresh result never binds a lookalike non-Xiaohongshu detail link', async () => {
+  const { dom } = installXhsDom(
+    `<main>
+       <section class="post-time-wrapper"><span>定时发布</span><input type="checkbox"></section>
+       <button id="submit">发布</button>
+     </main>`,
+    PUBLISH_URL,
+  );
+  dom.window.document.querySelector('#submit')?.addEventListener('click', () => {
+    const toast = dom.window.document.createElement('div');
+    toast.className = 'toast';
+    toast.innerHTML = '发布成功 <a href="https://xiaohongshu.com.evil.test/explore/fake-note?xsec_token=fake">查看笔记</a>';
+    dom.window.document.body.appendChild(toast);
+  });
+
+  const result = await run({
+    kind: 'publish_submit',
+    params: { recordId: 5, seq: 9, expectedScheduleMode: 'immediate' },
+  });
+
+  assert.equal(receiptOf(result).ok, true);
+  assert.equal(receiptOf(result).value, undefined);
+  assert.equal(receiptOf(result).postUrl, undefined);
+});

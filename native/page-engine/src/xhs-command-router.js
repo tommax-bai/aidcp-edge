@@ -41,8 +41,42 @@ async function(input){
     return Math.max(0,Math.round(base*(unit==='万'||unit==='w'?10000:unit==='千'||unit==='k'?1000:1)));
   };
   const noteIdFrom=(value)=>{
-    const hit=String(value||'').match(/\/(?:explore|discovery\/item)\/([A-Za-z0-9]+)/);
+    const hit=String(value||'').match(/\/(?:explore|discovery\/item)\/([A-Za-z0-9_-]+)/);
     return hit?hit[1]:'';
+  };
+  // 发布公开身份必须来自小红书详情路径。任意 query `id` 是 creator 会话 / UI 行 id 的常见形态，
+  // 绝不能兜底成笔记号；可点 URL 还须是公开 host 且带非空 xsec_token。
+  const publishIdentityFromUrl=(raw)=>{
+    const value=String(raw||'').trim();if(!value)return null;
+    let url;try{url=new URL(value,String(location.href));}catch{return null;}
+    if(url.protocol!=='https:')return null;
+    const parts=url.pathname.split('/').filter(Boolean);
+    const id=parts.length===2&&parts[0]==='explore'?parts[1]
+      :parts.length===3&&parts[0]==='discovery'&&parts[1]==='item'?parts[2]:'';
+    if(!id||!/^[A-Za-z0-9_-]+$/.test(id))return null;
+    const host=String(url.hostname||'').toLowerCase();
+    if(!(host==='xiaohongshu.com'||host.endsWith('.xiaohongshu.com')))return null;
+    const publicHost=host==='xiaohongshu.com'||host==='www.xiaohongshu.com';
+    const token=String(url.searchParams.get('xsec_token')||'');
+    return {id,postUrl:publicHost&&token?url.href.slice(0,4096):undefined};
+  };
+  const identityCandidates=(roots,extraUrls=[])=>{
+    const candidates=[];
+    const add=(raw)=>{const hit=publishIdentityFromUrl(raw);if(hit)candidates.push(hit);};
+    for(const root of roots||[]){
+      if(!root)continue;
+      if(root.matches&&root.matches('a[href]'))add(root.getAttribute('href')||root.href);
+      for(const el of all('a[href],[data-share-url],[data-url],input[value]',root)){
+        add(el.getAttribute('href')||el.getAttribute('data-share-url')||el.getAttribute('data-url')||el.getAttribute('value'));
+      }
+    }
+    for(const value of extraUrls)add(value);
+    const byId=new Map();
+    for(const candidate of candidates){
+      const previous=byId.get(candidate.id);
+      if(!previous||(!previous.postUrl&&candidate.postUrl))byId.set(candidate.id,candidate);
+    }
+    return byId.size===1?Array.from(byId.values())[0]:null;
   };
   const dispatchInput=(el,value)=>{
     el.focus();
@@ -246,6 +280,12 @@ async function(input){
     const part=(kind)=>parts.find((entry)=>entry.type===kind)?.value||'';
     const value=part('year')+'-'+part('month')+'-'+part('day')+' '+part('hour')+':'+part('minute');
     return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(value)?value:'';
+  };
+  const scheduleDateSignals=(epoch)=>{
+    const wanted=beijingMinute(epoch);if(!wanted)return [];
+    const [date,hm]=wanted.split(' ');const [year,month,day]=date.split('-');
+    return [wanted,year+'/'+month+'/'+day+' '+hm,year+'年'+month+'月'+day+'日 '+hm,
+      Number(month)+'月'+Number(day)+'日 '+hm].map((value)=>norm(value,64));
   };
   const submitLeaves=(label)=>{
     const candidates=all('button,[role="button"],a').filter(visible)
@@ -1104,25 +1144,83 @@ async function(input){
     // 绑定本次提交：既有节点及其点击前状态都入基线；历史 toast、隐藏旧提示都不能自证本次点击。
     // 同一提示容器在点击后从普通文案变成成功文案，或新建成功提示，才算新增正证据。
     const successBefore=new Map(all(RESULT_SCOPE).map((el)=>[el,successState(el)]));
-    const freshSuccess=()=>all(RESULT_SCOPE).some((el)=>{
+    const locationBefore=String(location.href);
+    const freshSuccessScopes=()=>all(RESULT_SCOPE).filter((el)=>{
       const current=successState(el);
       return SUCCESS_COPY.test(current)&&(!successBefore.has(el)||successBefore.get(el)!==current);
     });
+    const freshSuccess=()=>freshSuccessScopes().length>0;
     if(!click(submit))return receipt({ok:false,submitDispatched:false,error:'publish_submit_not_actuated'},'not_started');
     // 提交点已跨过：15s 有界轮询，只认正证据；未确认也必须如实带上「已派发」。
     const confirmed=await waitFor(freshSuccess,15000,500);
+    let identity=null;
+    if(confirmed&&expectedMode==='immediate'){
+      // 身份是提交成功之外的第二份证据：只在本次 fresh success 作用域或点击后新落到的详情地址里找。
+      // 全页第一条笔记链、creator URL 的任意 id 参数、陈旧提示都不在候选面里。
+      await waitFor(()=>{
+        const current=String(location.href);
+        identity=identityCandidates(freshSuccessScopes(),current!==locationBefore?[current]:[]);
+        return Boolean(identity);
+      },1200,100);
+    }
     return confirmed
-      ?receipt({ok:true,submitDispatched:true,postUrl:String(location.href).slice(0,4096)},'confirmed')
+      ?receipt({ok:true,submitDispatched:true,...(identity?{value:identity.id,...(identity.postUrl?{postUrl:identity.postUrl}:{})}:{})},'confirmed')
       :receipt({ok:false,submitDispatched:true,error:'post_validate_failed'},'ambiguous');
   }
   if(kind==='publish_capture_post_id'){
-    const link=first(['a[href*="/explore/"]','a[href*="/discovery/item/"]']);const href=link&&link.href||location.href;const id=noteIdFrom(href)||norm((String(href).match(/[?&](?:note_id|id)=([^&]+)/)||[])[1]||'',256);return done({kind:'publish_receipt',value:{recordId:Number(p.recordId),seq:Number(p.seq),kind:'capture_post_id',ok:Boolean(id),value:id||undefined,postUrl:id?String(href).slice(0,4096):undefined,error:id?undefined:'publish_evidence_not_found'}});
+    // 该命令的现役成功终局由 Rust session 中以 recordId 绑定的 submit 证据产出；页面规则本身
+    // 没有提交代际，重新扫 DOM 只能拿到“现在第一条旧帖”，所以直接调用一律 typed fail-closed。
+    return done({kind:'publish_receipt',value:{recordId:Number(p.recordId),seq:Number(p.seq),kind:'capture_post_id',ok:false,error:'publish_evidence_not_found'}},'ambiguous');
   }
   if(kind==='publish_capture_scheduled'||kind==='publish_reconcile_scheduled'){
-    const expectedTitle=norm(p.scheduledTitle,2000);const expectedId=norm(p.scheduledPlatformId,256);if(!expectedTitle&&!expectedId)return fail(kind.replace('publish_',''),'scheduled_identity_missing');
-    const rows=all('[class*="note-card"],[class*="publish-item"],[class*="note-item"],tr').filter(visible);const matches=rows.filter((row)=>{const title=text(first(['[class*="title"]','[data-title]','a'],row),2000);const href=(first(['a[href]'],row)||{}).href||'';const id=norm(row.getAttribute('data-note-id')||row.getAttribute('data-id')||noteIdFrom(href),256);return (!expectedTitle||title===expectedTitle)&&(!expectedId||id===expectedId);});
-    if(matches.length!==1)return done({kind:'publish_receipt',value:{recordId:Number(p.recordId),seq:Number(p.seq),kind:kind.replace('publish_',''),ok:false,error:matches.length?'scheduled_match_ambiguous':'scheduled_record_not_found'}},matches.length?'ambiguous':'not_started');
-    const row=matches[0];const raw=text(row,4000);const href=(first(['a[href]'],row)||{}).href||'';const id=norm(row.getAttribute('data-note-id')||row.getAttribute('data-id')||noteIdFrom(href),256);const scheduled=/定时|待发布|scheduled/i.test(raw);let timeConfirmed=true;if(Number(p.publishTime)){const date=new Date(Number(p.publishTime));const hh=String(date.getHours()).padStart(2,'0');const mm=String(date.getMinutes()).padStart(2,'0');timeConfirmed=raw.includes(hh+':'+mm);}const ok=scheduled&&timeConfirmed&&Boolean(id);return done({kind:'publish_receipt',value:{recordId:Number(p.recordId),seq:Number(p.seq),kind:kind.replace('publish_',''),ok,value:id||undefined,postUrl:href||undefined,error:ok?undefined:!scheduled?'scheduled_state_unconfirmed':!timeConfirmed?'scheduled_time_unconfirmed':'scheduled_platform_id_unavailable'}});
+    const receiptKind=kind.replace('publish_','');
+    const scheduledReceipt=(value,phase='not_started')=>done({kind:'publish_receipt',value:{recordId:Number(p.recordId),seq:Number(p.seq),kind:receiptKind,...value}},phase);
+    const expectedTitle=norm(p.scheduledTitle,2000);const expectedId=norm(p.scheduledPlatformId,256);const timeSignals=scheduleDateSignals(p.publishTime);
+    if(!expectedId&&(!expectedTitle||!timeSignals.length))return scheduledReceipt({ok:false,error:'scheduled_identity_missing'});
+    const rows=all('[class*="note-card"],[class*="publish-item"],[class*="note-item"],tr,li').filter(visible);
+    const rowEvidence=(row)=>{
+      const raw=text(row,4000);const rawNorm=norm(raw,4000);
+      const titleEl=first(['[class*="title"]','[data-title]'],row);
+      const title=norm((titleEl&&titleEl.getAttribute&&titleEl.getAttribute('data-title'))||text(titleEl,2000),2000);
+      const links=all('a[href]',row);const detailLinks=links.map((link)=>publishIdentityFromUrl(link.getAttribute('href')||link.href)).filter(Boolean);
+      const impression=all('[data-impression]',row).concat(row.matches&&row.matches('[data-impression]')?[row]:[])
+        .map((el)=>String(el.getAttribute('data-impression')||'')).join(' ');
+      const impressionId=(impression.match(/["'](?:note_id|noteId)["']\s*:\s*["']([A-Za-z0-9_-]+)["']/)||[])[1]||'';
+      // `data-id` 属于通用 UI 行 id；只有平台具名的 data-note-id / data-impression note_id / 详情路径可作身份。
+      const internalId=norm(row.getAttribute('data-note-id')||impressionId||(detailLinks[0]&&detailLinks[0].id)||'',256);
+      const status=text(first(['[class*="status"]','[data-status]'],row),500)||raw;
+      return {row,raw,rawNorm,title,internalId,detailLinks,
+        scheduled:/定时发布|待发布|scheduled/i.test(status),
+        published:/已发布|发布成功|published/i.test(status),
+        timeOk:timeSignals.some((signal)=>signal&&rawNorm.includes(signal))};
+    };
+    const evidence=rows.map(rowEvidence);
+    const select=(wantedStatus)=>{
+      const statusRows=evidence.filter((item)=>item[wantedStatus]);
+      const byId=expectedId?statusRows.filter((item)=>item.internalId===expectedId):[];
+      if(byId.length)return byId;
+      return statusRows.filter((item)=>expectedTitle&&item.title===expectedTitle&&item.timeOk);
+    };
+    if(kind==='publish_capture_scheduled'){
+      const matches=select('scheduled');
+      if(matches.length!==1)return scheduledReceipt({ok:false,error:matches.length?'scheduled_match_ambiguous':'scheduled_record_not_found'},matches.length?'ambiguous':'not_started');
+      const match=matches[0];
+      if(!match.internalId)return scheduledReceipt({ok:false,error:'scheduled_platform_id_unavailable'});
+      return scheduledReceipt({ok:true,value:match.internalId},'confirmed');
+    }
+    const pending=select('scheduled');
+    if(pending.length>1)return scheduledReceipt({ok:false,error:'scheduled_match_ambiguous'},'ambiguous');
+    if(pending.length===1)return scheduledReceipt({ok:false,error:'scheduled_pending'});
+    const published=select('published');
+    if(published.length!==1)return scheduledReceipt({ok:false,error:published.length?'published_match_ambiguous':'published_record_not_found'},published.length?'ambiguous':'not_started');
+    const match=published[0];
+    const publicIds=Array.from(new Set(match.detailLinks.map((candidate)=>candidate.id)));
+    if(publicIds.length!==1)return scheduledReceipt({ok:false,error:publicIds.length?'public_post_id_ambiguous':'public_post_id_unavailable'},publicIds.length?'ambiguous':'not_started');
+    const publicId=publicIds[0];
+    const publicLinks=match.detailLinks.filter((candidate)=>candidate.id===publicId&&candidate.postUrl);
+    const urls=Array.from(new Set(publicLinks.map((candidate)=>candidate.postUrl)));
+    if(urls.length!==1)return scheduledReceipt({ok:false,error:urls.length?'public_link_ambiguous':'public_link_unavailable'},urls.length?'ambiguous':'not_started');
+    return scheduledReceipt({ok:true,value:publicId,postUrl:urls[0]},'confirmed');
   }
   if(kind==='publish_set_cover'){
     const previews=all('.img-preview-area img,img[id*="creator-preview"],[class*="preview"] img,[class*="upload"] img').filter(visible);

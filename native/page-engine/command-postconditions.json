@@ -227,7 +227,7 @@
     {
       "nativeKind": "publish_submit",
       "status": "confirmed",
-      "evidence": "模式由 Native 会话真态绑定并在点击前复读，unknown / 漂移零点击且 submitDispatched=false；点击后只认结果 / 提示作用域内相对点击前节点+文本基线新增的终态成功文案。地址、全页正文、进行态 `发布中` 与陈旧 toast 都不确认；命令记录写入后若 transport 丢终局，宿主保守回 submitDispatched=true，禁止安全重投。"
+      "evidence": "模式由 Native 会话真态绑定并在点击前复读，unknown / 漂移零点击且 submitDispatched=false；点击后只认结果 / 提示作用域内相对点击前节点+文本基线新增的终态成功文案。地址、全页正文、进行态 `发布中` 与陈旧 toast 都不确认；立即发布身份也只从该 fresh success 作用域的唯一详情候选提取，由 Native session 按 recordId 绑定，后续 capture 不再全页猜旧帖。命令记录写入后若 transport 丢终局，宿主保守回 submitDispatched=true，禁止安全重投。"
     }
   ]
 }
