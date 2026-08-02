@@ -111,6 +111,29 @@ test('waitForLoginIdentity: 每个读身份拍点前串行运行认证协调拍�
   assert.deepEqual(order, ['auth', 'identity', 'auth', 'identity']);
 });
 
+test('waitForLoginIdentity: 登录后页面未稳定时 defer 身份读取，清除后才接纳身份', async () => {
+  const order: string[] = [];
+  let authPasses = 0;
+  const res = await waitForLoginIdentity(DUMMY_CDP, {
+    timeoutMs: 10_000,
+    intervalMs: 1,
+    interruptPollMs: 1,
+    sleep: immediateSleep,
+    beforeIdentityRead: async () => {
+      authPasses += 1;
+      order.push('auth');
+      return authPasses < 3 ? { kind: 'defer' } : { kind: 'continue' };
+    },
+    readIdentity: async () => {
+      order.push('identity');
+      return okRes();
+    },
+  });
+
+  assert.equal(res.kind, 'identified');
+  assert.deepEqual(order, ['auth', 'auth', 'auth', 'identity']);
+});
+
 test('waitForLoginIdentity: 生命周期中断先于认证协调拍点', async () => {
   let authPasses = 0;
   let identityReads = 0;

@@ -476,6 +476,7 @@ export type LoginWaitResult =
 
 export type LoginWaitPreflightResult =
   | { kind: 'continue' }
+  | { kind: 'defer' }
   | { kind: 'interrupted'; reason: string }
   | { kind: 'failed'; reason: string };
 
@@ -541,6 +542,7 @@ export async function waitForLoginIdentity(
       return { kind: 'interrupted', reason: interrupt };
     }
     if (tick % readEveryTicks === 0) {
+      let deferIdentityRead = false;
       if (beforeIdentityRead) {
         const preflight = await beforeIdentityRead().catch(
           (): LoginWaitPreflightResult => ({ kind: 'failed', reason: 'login_wait_preflight_failed' }),
@@ -553,13 +555,16 @@ export async function waitForLoginIdentity(
           log(`[self-identity] 登录等待协调拍点安全停手（${preflight.reason}）`);
           return preflight;
         }
+        deferIdentityRead = preflight.kind === 'defer';
       }
-      const idRes = await readIdentity(cdp).catch(
-        (): SelfIdentityResult => ({ ok: false, reason: '等待期就地重读异常' }),
-      );
-      if (idRes.ok) {
-        log(`[self-identity] 等待期读出稳定 id=${idRes.identity.accountId}（source=${idRes.identity.source}）`);
-        return { kind: 'identified', identity: idRes.identity };
+      if (!deferIdentityRead) {
+        const idRes = await readIdentity(cdp).catch(
+          (): SelfIdentityResult => ({ ok: false, reason: '等待期就地重读异常' }),
+        );
+        if (idRes.ok) {
+          log(`[self-identity] 等待期读出稳定 id=${idRes.identity.accountId}（source=${idRes.identity.source}）`);
+          return { kind: 'identified', identity: idRes.identity };
+        }
       }
     }
     if (tick < totalTicks - 1) await sleep(interruptPollMs);

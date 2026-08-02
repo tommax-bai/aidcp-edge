@@ -169,6 +169,8 @@ const FACEBOOK_MANUAL_AUTH_MESSAGES = Object.freeze({
   stale_totp_input_requires_fresh_start: '需要处理：2FA 输入框中有未确认验证码，请在浏览器完成验证',
   fresh_start_policy_unavailable: '需要处理：当前浏览器无法安全自动填写 2FA，请在浏览器完成验证',
   auth_probe_unavailable: '需要处理：暂时无法读取 Facebook 登录页面，请在浏览器检查后继续',
+  facebook_ad_data_review_requires_fresh_start: '需要处理：请在 Facebook 中开始广告数据使用确认',
+  facebook_ad_data_choice_required: '需要处理：请在 Facebook 中选择广告数据使用方式',
 });
 
 function facebookManualAuthMessage(reason) {

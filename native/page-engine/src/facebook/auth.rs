@@ -24,6 +24,7 @@ const MAX_CONSUMED_AUTH_SIGNALS: usize = 64;
 const TOTP_VALIDITY_FLOOR_MS: u64 = 10_000;
 const POSTCONDITION_POLL_MS: u64 = 200;
 const POSTCONDITION_MAX_POLLS: usize = 35;
+const AD_DATA_REVIEW_POSTCONDITION_MAX_POLLS: usize = 150;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -63,6 +64,18 @@ struct FacebookAuthPostcondition {
     satisfied: bool,
     document_changed: bool,
     signal_gone: bool,
+    #[serde(default)]
+    successor_observed: bool,
+    #[serde(default)]
+    loading_observed: bool,
+    #[serde(default)]
+    button_state_changed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FacebookAuthPostconditionVerification {
+    confirmed: bool,
+    transition_observed: bool,
 }
 
 pub(crate) async fn execute(
@@ -144,6 +157,18 @@ pub(crate) async fn execute(
             )
             .await
         }
+        NativeCommand::FacebookAuthStartAdDataReview(params) => {
+            execute_click(
+                session,
+                command,
+                params,
+                FacebookAuthSignal::AdDataReviewGetStarted,
+                action_probe_params(),
+                cancellation,
+                deadline_unix_ms,
+            )
+            .await
+        }
         _ => Err(EngineError::new(
             ErrorCode::EngineInternal,
             "native Facebook auth capability received another owner's command",
@@ -209,20 +234,31 @@ async fn execute_click(
     )
     .await
     {
-        Ok(true) => Ok(action_result(
+        Ok(FacebookAuthPostconditionVerification {
+            confirmed: true, ..
+        }) => Ok(action_result(
             command,
             &params.signal_id,
             EffectPhase::Confirmed,
             true,
             None,
         )),
-        Ok(false) => Ok(action_result(
-            command,
-            &params.signal_id,
-            EffectPhase::Ambiguous,
-            false,
-            Some("auth_postcondition_unconfirmed"),
-        )),
+        Ok(verification) => {
+            let reason = if expected_signal == FacebookAuthSignal::AdDataReviewGetStarted
+                && verification.transition_observed
+            {
+                "auth_successor_unconfirmed"
+            } else {
+                "auth_postcondition_unconfirmed"
+            };
+            Ok(action_result(
+                command,
+                &params.signal_id,
+                EffectPhase::Ambiguous,
+                false,
+                Some(reason),
+            ))
+        }
         Err(_) => Ok(action_result(
             command,
             &params.signal_id,
@@ -572,19 +608,25 @@ async fn execute_click_with_observation(
     )
     .await
     {
-        Ok(true) => Ok(action_result(
+        Ok(FacebookAuthPostconditionVerification {
+            confirmed: true, ..
+        }) => Ok(action_result(
             command,
             signal_id,
             EffectPhase::Confirmed,
             true,
             None,
         )),
-        Ok(false) => Ok(action_result(
+        Ok(verification) => Ok(action_result(
             command,
             signal_id,
             EffectPhase::Ambiguous,
             false,
-            Some("auth_postcondition_unconfirmed"),
+            Some(if verification.transition_observed {
+                "auth_successor_unconfirmed"
+            } else {
+                "auth_postcondition_unconfirmed"
+            }),
         )),
         Err(_) => Ok(action_result(
             command,
@@ -734,6 +776,7 @@ fn is_actionable(signal: FacebookAuthSignal) -> bool {
             | FacebookAuthSignal::AutomationWarningDismiss
             | FacebookAuthSignal::PushBlockerClose
             | FacebookAuthSignal::RememberPasswordConfirm
+            | FacebookAuthSignal::AdDataReviewGetStarted
     )
 }
 
@@ -801,11 +844,21 @@ async fn verify_postcondition(
     candidate_key: &str,
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
-) -> Result<bool, EngineError> {
+) -> Result<FacebookAuthPostconditionVerification, EngineError> {
+    let ad_data_review = expected_signal == FacebookAuthSignal::AdDataReviewGetStarted;
     let expected_signal = signal_name(expected_signal);
-    for _ in 0..POSTCONDITION_MAX_POLLS {
+    let max_polls = if ad_data_review {
+        AD_DATA_REVIEW_POSTCONDITION_MAX_POLLS
+    } else {
+        POSTCONDITION_MAX_POLLS
+    };
+    let mut transition_observed = false;
+    for _ in 0..max_polls {
         if action_cancelled_or_expired(cancellation, deadline_unix_ms) {
-            return Ok(false);
+            return Ok(FacebookAuthPostconditionVerification {
+                confirmed: false,
+                transition_observed,
+            });
         }
         let expression = facebook::auth_postcondition_expression(
             document_generation,
@@ -826,13 +879,22 @@ async fn verify_postcondition(
                 .ok_or_else(invalid_auth_result)?,
         )
         .map_err(|_| invalid_auth_result())?;
+        transition_observed |= postcondition.successor_observed
+            || postcondition.loading_observed
+            || postcondition.button_state_changed;
         if postcondition.satisfied && (postcondition.document_changed || postcondition.signal_gone)
         {
-            return Ok(true);
+            return Ok(FacebookAuthPostconditionVerification {
+                confirmed: true,
+                transition_observed,
+            });
         }
         tokio::time::sleep(Duration::from_millis(POSTCONDITION_POLL_MS)).await;
     }
-    Ok(false)
+    Ok(FacebookAuthPostconditionVerification {
+        confirmed: false,
+        transition_observed,
+    })
 }
 
 fn signal_name(signal: FacebookAuthSignal) -> &'static str {
@@ -845,6 +907,7 @@ fn signal_name(signal: FacebookAuthSignal) -> &'static str {
         FacebookAuthSignal::AutomationWarningDismiss => "automation_warning_dismiss",
         FacebookAuthSignal::PushBlockerClose => "push_blocker_close",
         FacebookAuthSignal::RememberPasswordConfirm => "remember_password_confirm",
+        FacebookAuthSignal::AdDataReviewGetStarted => "ad_data_review_get_started",
         FacebookAuthSignal::ManualLoginRequired => "manual_login_required",
         FacebookAuthSignal::BlockedHumanVerification => "blocked_human_verification",
         FacebookAuthSignal::BlockedUnknown => "blocked_unknown",
@@ -985,6 +1048,14 @@ mod tests {
         assert_eq!(
             POSTCONDITION_POLL_MS * POSTCONDITION_MAX_POLLS as u64,
             7_000
+        );
+    }
+
+    #[test]
+    fn ad_data_review_successor_window_is_thirty_seconds() {
+        assert_eq!(
+            POSTCONDITION_POLL_MS * AD_DATA_REVIEW_POSTCONDITION_MAX_POLLS as u64,
+            30_000
         );
     }
 }

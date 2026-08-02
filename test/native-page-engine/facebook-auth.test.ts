@@ -495,6 +495,46 @@ test('optional post-login signals may arrive reordered and each action is follow
   runtime.assertDone();
 });
 
+test('authenticated quiet window catches a late Remember Password card before startup completes', async () => {
+  let nowMs = 0;
+  const runtime = new ScriptedRuntime([
+    { kind: 'facebook_auth_probe', execution: probe('authenticated') },
+    { kind: 'facebook_auth_probe', execution: probe('remember_password_confirm', { signalId: 'remember-late' }) },
+    {
+      kind: 'facebook_auth_confirm_remember_password',
+      execution: action('facebook_auth_confirm_remember_password', 'remember-late'),
+    },
+    { kind: 'facebook_auth_probe', execution: probe('authenticated') },
+    { kind: 'facebook_auth_probe', execution: probe('authenticated') },
+    { kind: 'facebook_auth_probe', execution: probe('authenticated') },
+    { kind: 'facebook_auth_probe', execution: probe('authenticated') },
+  ]);
+
+  const result = await reconcileFacebookStartupAuth({
+    runtime,
+    totpBroker: totpBroker(),
+    freshStartPolicyApplied: true,
+    timeoutMs: 30_000,
+    authenticatedQuietWindowMs: 15_000,
+    pollIntervalMs: 5_000,
+    now: () => nowMs,
+    sleep: async (ms) => { nowMs += ms; },
+  });
+
+  assert.deepEqual(result, { kind: 'authenticated', actionAttempts: 1 });
+  assert.equal(nowMs, 20_000, 'the late prompt resets the full authenticated quiet window');
+  assert.deepEqual(runtime.calls.map((call) => call.kind), [
+    'facebook_auth_probe',
+    'facebook_auth_probe',
+    'facebook_auth_confirm_remember_password',
+    'facebook_auth_probe',
+    'facebook_auth_probe',
+    'facebook_auth_probe',
+    'facebook_auth_probe',
+  ]);
+  runtime.assertDone();
+});
+
 test('hydrated warning is independently dismissed after transitional probes', async () => {
   const automaticProgress: Array<{ signal: string; action: string }> = [];
   const runtime = new ScriptedRuntime([

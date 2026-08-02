@@ -656,6 +656,78 @@ test('supported post-login prompts are independent exact topmost signals', async
   `, 'https://www.facebook.com/');
   setRect(document.getElementById('ok')!, { left: 500, top: 500, right: 620, bottom: 545 });
   assert.equal((await probe()).signal, 'remember_password_confirm');
+  (document.getElementById('ok') as HTMLButtonElement).disabled = true;
+  const disabledRemember = await probe();
+  assert.equal(disabledRemember.signal, 'blocked_unknown');
+  assert.equal(disabledRemember.reason, 'auth_target_disabled');
+});
+
+test('live-shaped ad-data review is independent from its successor, loading shell, and Feed card', async () => {
+  const reviewUrl = 'https://www.facebook.com/privacy/consent/?flow=ad_free_subscription'
+    + '&params%5Bafs_variant%5D=first_time&source=ad_free_subscription_blocking_flow';
+  install(`
+    <main>
+      <h1>Review whether we can process your data for ads</h1>
+      <p>We previously asked whether you consent to us processing your personal data for personalized ads.</p>
+      <div id="start" role="button" aria-label="Get started">Get started</div>
+    </main>
+  `, reviewUrl);
+  setRect(document.getElementById('start')!, { left: 386, top: 643, right: 1_054, bottom: 679 });
+  const introduction = await probe({ authenticated: true, allowAuthActions: true });
+  assert.equal(introduction.signal, 'ad_data_review_get_started');
+  assert.match(String(introduction.signalId), /^aidcp:facebook-auth:v1:[0-9a-f]{64}$/);
+
+  install(`
+    <div role="dialog">
+      <h1>Want to subscribe or continue using our products free of charge with ads?</h1>
+      <label>Subscribe to use without ads<input type="radio" name="choice"></label>
+      <label>Use free of charge with ads<input type="radio" name="choice"></label>
+      <div role="button">Continue</div>
+    </div>
+  `, reviewUrl);
+  const choice = await probe({ authenticated: true, allowAuthActions: true });
+  assert.equal(choice.signal, 'manual_login_required');
+  assert.equal(choice.reason, 'facebook_ad_data_choice_required');
+  assert.equal(choice.signalId, undefined);
+
+  install('<main aria-busy="true"></main>', reviewUrl, 1_800_000_015_000, 0, 14_999);
+  const loading = await probe({ authenticated: true, allowAuthActions: true });
+  assert.equal(loading.signal, 'none');
+  assert.equal(loading.reason, 'ad_data_review_hydrating');
+
+  install(`
+    <main>
+      <h2>You can manage your ad experience</h2>
+      <p>Adjust whether you see personalized or less-personalized ads.</p>
+      <a id="feed-start" aria-label="Get started" href="/privacy/consent/">Get started</a>
+      <a href="#">Remind me later</a>
+    </main>
+  `, 'https://www.facebook.com/');
+  setRect(document.getElementById('feed-start')!, { left: 396, top: 190, right: 716, bottom: 226 });
+  const feed = await probe({ authenticated: true, allowAuthActions: true });
+  assert.equal(feed.signal, 'authenticated');
+  assert.equal(feed.signalId, undefined);
+});
+
+test('ad-data review requires a fresh action policy and fails closed on unsafe targets', async () => {
+  const reviewUrl = 'https://www.facebook.com/privacy/consent/?flow=ad_free_subscription'
+    + '&params%5Bafs_variant%5D=first_time';
+  install(`
+    <main>
+      <h1>Review whether we can process your data for ads</h1>
+      <p>We previously asked whether you consent to us processing your personal data for personalized ads.</p>
+      <button id="start">Get started</button>
+    </main>
+  `, reviewUrl);
+  setRect(document.getElementById('start')!, { left: 386, top: 643, right: 1_054, bottom: 679 });
+  const unproven = await probe({ authenticated: true, allowAuthActions: false });
+  assert.equal(unproven.signal, 'manual_login_required');
+  assert.equal(unproven.reason, 'facebook_ad_data_review_requires_fresh_start');
+
+  (document.getElementById('start') as HTMLButtonElement).disabled = true;
+  const disabled = await probe({ authenticated: true, allowAuthActions: true });
+  assert.equal(disabled.signal, 'blocked_unknown');
+  assert.equal(disabled.reason, 'auth_target_disabled');
 });
 
 test('new checkpoint waits up to fifteen seconds for the automation warning to hydrate', async () => {
@@ -952,7 +1024,31 @@ test('postcondition accepts only document movement or disappearance of the obser
   });
   assert.equal(unchanged.output.value.satisfied, false);
 
-  document.getElementById('remember')!.remove();
+  (document.getElementById('ok') as HTMLButtonElement).disabled = true;
+  const disabled = await run({
+    kind: 'auth_postcondition',
+    params: {
+      documentGeneration: observation.documentGeneration,
+      expectedSignal: 'remember_password_confirm',
+      candidateKey: (observation.candidate as Record<string, unknown>).candidateKey,
+    },
+  });
+  assert.equal(disabled.output.value.satisfied, false);
+  assert.equal(disabled.output.value.buttonStateChanged, true);
+
+  document.body.innerHTML = '<main aria-busy="true"></main>';
+  const loading = await run({
+    kind: 'auth_postcondition',
+    params: {
+      documentGeneration: observation.documentGeneration,
+      expectedSignal: 'remember_password_confirm',
+      candidateKey: (observation.candidate as Record<string, unknown>).candidateKey,
+    },
+  });
+  assert.equal(loading.output.value.satisfied, false);
+  assert.equal(loading.output.value.loadingObserved, true);
+
+  document.body.innerHTML = `<main><h1>Facebook Feed</h1><p>${'settled feed content '.repeat(12)}</p></main>`;
   const gone = await run({
     kind: 'auth_postcondition',
     params: {
@@ -963,6 +1059,72 @@ test('postcondition accepts only document movement or disappearance of the obser
   });
   assert.equal(gone.output.value.satisfied, true);
   assert.equal(gone.output.value.signalGone, true);
+});
+
+test('ad-data review postcondition observes loading and button changes but confirms only the exact choice', async () => {
+  const reviewUrl = 'https://www.facebook.com/privacy/consent/?flow=ad_free_subscription'
+    + '&params%5Bafs_variant%5D=first_time';
+  install(`
+    <main>
+      <h1>Review whether we can process your data for ads</h1>
+      <p>We previously asked whether you consent to us processing your personal data for personalized ads.</p>
+      <button id="start">Get started</button>
+    </main>
+  `, reviewUrl);
+  const start = document.getElementById('start') as HTMLButtonElement;
+  setRect(start, { left: 386, top: 643, right: 1_054, bottom: 679 });
+  const observation = await probe({ authenticated: true, allowAuthActions: true });
+  const params = {
+    documentGeneration: observation.documentGeneration,
+    expectedSignal: 'ad_data_review_get_started',
+    candidateKey: (observation.candidate as Record<string, unknown>).candidateKey,
+  };
+
+  start.disabled = true;
+  const disabled = await run({ kind: 'auth_postcondition', params });
+  assert.deepEqual(disabled.output.value, {
+    satisfied: false,
+    documentChanged: false,
+    signalGone: false,
+    successorObserved: false,
+    loadingObserved: false,
+    buttonStateChanged: true,
+  });
+
+  document.body.innerHTML = '<main aria-busy="true"></main>';
+  const loading = await run({ kind: 'auth_postcondition', params });
+  assert.deepEqual(loading.output.value, {
+    satisfied: false,
+    documentChanged: false,
+    signalGone: false,
+    successorObserved: false,
+    loadingObserved: true,
+    buttonStateChanged: true,
+  });
+
+  document.body.innerHTML = `
+    <div role="dialog">
+      <h1>Want to subscribe or continue using our products free of charge with ads?</h1>
+      <label>Subscribe to use without ads<input type="radio"></label>
+      <label>Use free of charge with ads<input type="radio"></label>
+    </div>
+  `;
+  const choice = await run({ kind: 'auth_postcondition', params });
+  assert.deepEqual(choice.output.value, {
+    satisfied: true,
+    documentChanged: false,
+    signalGone: true,
+    successorObserved: true,
+    loadingObserved: false,
+    buttonStateChanged: true,
+  });
+
+  history.pushState({}, '', '/');
+  document.body.innerHTML = '<main><h2>You can manage your ad experience</h2><a>Get started</a></main>';
+  const unsupportedDestination = await run({ kind: 'auth_postcondition', params });
+  assert.equal(unsupportedDestination.output.value.satisfied, false);
+  assert.equal(unsupportedDestination.output.value.documentChanged, true);
+  assert.equal(unsupportedDestination.output.value.successorObserved, false);
 });
 
 test('login and TOTP postconditions stay bound to the original target without reusing probe eligibility', async () => {

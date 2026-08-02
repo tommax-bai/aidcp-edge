@@ -27,7 +27,7 @@ test('startup assembly runs Facebook auth after Native runtime construction and 
     startupBlockAt,
   );
   const identityAt = mainSource.indexOf(
-    'const idRes = await readPlatformIdentity(firstReadOpts)',
+    'const idRes: SelfIdentityResult = requiresFacebookAdDataReview(manualLoginRequiredReason)',
     startupBlockAt,
   );
 
@@ -67,6 +67,7 @@ test('TypeScript coordinator routes page semantics and input only through Native
     'facebook_auth_dismiss_warning',
     'facebook_auth_close_push_blocker',
     'facebook_auth_confirm_remember_password',
+    'facebook_auth_start_ad_data_review',
   ]) {
     assert.match(coordinatorSource, new RegExp(`['"]${command}['"]`));
   }

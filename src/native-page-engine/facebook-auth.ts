@@ -50,6 +50,7 @@ const ACTION_FOR_SIGNAL: Record<ActionableFacebookAuthSignal, FacebookAuthAction
   automation_warning_dismiss: 'facebook_auth_dismiss_warning',
   push_blocker_close: 'facebook_auth_close_push_blocker',
   remember_password_confirm: 'facebook_auth_confirm_remember_password',
+  ad_data_review_get_started: 'facebook_auth_start_ad_data_review',
 };
 
 const AUTH_SIGNALS = new Set<FacebookAuthSignal>(NATIVE_FACEBOOK_AUTH_SIGNALS);
@@ -75,6 +76,8 @@ export interface FacebookAuthCoordinatorOptions {
   now?: () => number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   pollIntervalMs?: number;
+  /** Additional authenticated quiet window used by the AdsPower startup gate. */
+  authenticatedQuietWindowMs?: number;
   onAutomaticProgress?: (progress: {
     signal: FacebookAuthSignal;
     action: NativeFacebookAuthActionKind;
@@ -236,6 +239,9 @@ export async function reconcileFacebookStartupAuth(
   const pollIntervalMs = Number.isFinite(options.pollIntervalMs)
     ? Math.max(1, Math.floor(options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS))
     : DEFAULT_POLL_INTERVAL_MS;
+  const authenticatedQuietWindowMs = Number.isFinite(options.authenticatedQuietWindowMs)
+    ? Math.max(0, Math.floor(options.authenticatedQuietWindowMs ?? 0))
+    : 0;
   const deadlineMs = now() + timeoutMs;
   const dispatchedSignalIds = new Set<string>();
   const maxPasses = Math.max(
@@ -245,6 +251,7 @@ export async function reconcileFacebookStartupAuth(
   let actionAttempts = 0;
   let enteredWindow: EnteredTotpWindow | undefined;
   let pendingProbe: FacebookAuthProbe | undefined;
+  let authenticatedQuietStartedAt: number | undefined;
 
   const result = (
     value: FacebookAuthCoordinatorResultWithoutAttempts,
@@ -629,8 +636,22 @@ export async function reconcileFacebookStartupAuth(
     log(`[facebook-auth] observed signal=${probe.signal}`);
 
     if (probe.signal === 'authenticated') {
+      if (authenticatedQuietWindowMs > 0) {
+        authenticatedQuietStartedAt ??= now();
+        const quietElapsedMs = Math.max(0, now() - authenticatedQuietStartedAt);
+        if (quietElapsedMs < authenticatedQuietWindowMs) {
+          const waited = await waitWithinBudget(Math.min(
+            pollIntervalMs,
+            authenticatedQuietWindowMs - quietElapsedMs,
+            remainingBudgetMs(),
+          ));
+          if (waited) return waited;
+          continue;
+        }
+      }
       return result({ kind: 'authenticated' });
     }
+    authenticatedQuietStartedAt = undefined;
     if (probe.signal === 'manual_login_required') {
       return result({
         kind: 'manual_required',

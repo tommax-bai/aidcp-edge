@@ -117,6 +117,16 @@ import {
   type NativeCaptchaClickReceipt,
 } from './captcha/click-result.js';
 
+const FACEBOOK_AUTHENTICATED_QUIET_WINDOW_MS = 15_000;
+const FACEBOOK_AD_DATA_REVIEW_MANUAL_REASONS = new Set([
+  'facebook_ad_data_review_requires_fresh_start',
+  'facebook_ad_data_choice_required',
+]);
+
+function requiresFacebookAdDataReview(reason: string | undefined): boolean {
+  return reason !== undefined && FACEBOOK_AD_DATA_REVIEW_MANUAL_REASONS.has(reason);
+}
+
 function verifiedAccountNickname(idRes: SelfIdentityResult, decision: IdentityDecision): string | undefined {
   if (!idRes.ok || decision.kind !== 'use') return undefined;
   if (decision.accountId !== idRes.identity.accountId) return undefined;
@@ -355,7 +365,10 @@ async function main(): Promise<void> {
       runtime: nativePageRuntime,
       totpBroker: facebookTotpBroker,
       freshStartPolicyApplied: policyApplied,
-      timeoutMs,
+      // The login budget and the post-auth quiet window are separate: a login that consumes its
+      // whole budget must still get a complete chance to surface late Facebook-owned prompts.
+      timeoutMs: timeoutMs > 0 ? timeoutMs + FACEBOOK_AUTHENTICATED_QUIET_WINDOW_MS : 0,
+      authenticatedQuietWindowMs: FACEBOOK_AUTHENTICATED_QUIET_WINDOW_MS,
       logger: (message) => console.log(message),
       pollInterrupt: () => lifecycleAuthInterrupts.current(),
       onAutomaticProgress: (progress) => sendLifecycleIpc({
@@ -413,7 +426,9 @@ async function main(): Promise<void> {
             reason: authResult.reason,
             platform: platformDriver.platform,
           });
-          console.log(`[aidcp-edge] Facebook 需要人工登录（${authResult.reason}）；保留浏览器与 CDP，等待登录完成。`);
+          console.log(requiresFacebookAdDataReview(authResult.reason)
+            ? `[aidcp-edge] Facebook 广告数据选择待人工确认（${authResult.reason}）；保留浏览器与 CDP，等待页面完成。`
+            : `[aidcp-edge] Facebook 需要人工登录（${authResult.reason}）；保留浏览器与 CDP，等待登录完成。`);
         } else if (authResult.kind === 'timeout') {
           reportFacebookAuthFailure('facebook_auth_timeout');
           console.error(
@@ -436,7 +451,11 @@ async function main(): Promise<void> {
       ...startupIdentityReadPolicy(platformDriver.platform, provider.kind),
       logger: (m) => console.log(m),
     };
-    const idRes = await readPlatformIdentity(firstReadOpts);
+    // A Facebook privacy choice can coexist with a valid account identity. Do not let that identity
+    // bypass the retained review flow before its exact destination is cleared.
+    const idRes: SelfIdentityResult = requiresFacebookAdDataReview(manualLoginRequiredReason)
+      ? { ok: false, reason: 'Facebook 广告数据选择待人工确认' }
+      : await readPlatformIdentity(firstReadOpts);
     const decision = platformDriver.decideIdentity(idRes, overrideAccountId);
 
     const action = await resolveStartupIdentity({
@@ -449,7 +468,9 @@ async function main(): Promise<void> {
       logger: (m) => console.log(m),
       waitForLogin: async () => {
         console.log(manualLoginRequiredReason
-          ? '[aidcp-edge] 请在保留的浏览器里完成登录；检测到稳定身份后将原地继续。'
+          ? requiresFacebookAdDataReview(manualLoginRequiredReason)
+            ? '[aidcp-edge] 请在保留的 Facebook 浏览器里完成广告数据选择；页面稳定后将原地继续。'
+            : '[aidcp-edge] 请在保留的浏览器里完成登录；检测到稳定身份后将原地继续。'
           : `[aidcp-edge] 请在浏览器里完成登录并等待稳定身份（剩余最长 ${Math.round(remainingLoginWaitMs / 1000)}s）…`);
         console.log('[browser-parking] awaiting-login'); // 外壳可识别的等待态状态行（task 1.4 / 4.1）
         while (true) {
@@ -479,11 +500,16 @@ async function main(): Promise<void> {
                         platform: platformDriver.platform,
                       });
                     }
-                    return { kind: 'continue' as const };
+                    return requiresFacebookAdDataReview(authResult.reason)
+                      ? { kind: 'defer' as const }
+                      : { kind: 'continue' as const };
                   }
                   if (authResult.kind === 'timeout' && authResult.actionAttempts > 0) {
                     // 已确认动作后的协调状态不能跨新实例猜测恢复（尤其 entered TOTP window）。
                     return { kind: 'failed' as const, reason: 'facebook_auth_timeout_after_action' };
+                  }
+                  if (authResult.kind === 'authenticated') {
+                    manualLoginRequiredReason = undefined;
                   }
                   return { kind: 'continue' as const };
                 }

@@ -565,6 +565,7 @@ pub enum FacebookAuthSignal {
     AutomationWarningDismiss,
     PushBlockerClose,
     RememberPasswordConfirm,
+    AdDataReviewGetStarted,
     ManualLoginRequired,
     BlockedHumanVerification,
     BlockedUnknown,

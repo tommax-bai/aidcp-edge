@@ -8,6 +8,11 @@ const shell = readFileSync(new URL('../../src/electron/main.cjs', import.meta.ur
 test('credential fill failure keeps the core attached and waits for identity in place', () => {
   assert.match(core, /authResult\.kind === 'manual_required'[\s\S]*?type: 'lifecycle\.auth_required'/);
   assert.match(core, /kind: 'manual_login_required'[\s\S]*?reason: authResult\.reason/);
+  assert.match(core, /authenticatedQuietWindowMs: FACEBOOK_AUTHENTICATED_QUIET_WINDOW_MS/,
+    'production assembly must keep probing after the first authenticated observation');
+  assert.match(core,
+    /requiresFacebookAdDataReview\(manualLoginRequiredReason\)[\s\S]*?Facebook 广告数据选择待人工确认/,
+    'a stable account identity must not bypass an unresolved post-login privacy choice');
   assert.match(core, /unbounded: Boolean\(manualLoginRequiredReason\)/);
   assert.match(core, /beforeIdentityRead: manualLoginRequiredReason[\s\S]*?reconcileFacebookAuthIfNeeded\(firstLoginPolicyApplied, loginWaitMs\)/,
     'the retained session must serially re-enter the existing coordinator with the original policy proof');
@@ -31,8 +36,8 @@ test('credential fill failure keeps the core attached and waits for identity in 
   assert.equal((retainedWait.match(/reconcileFacebookAuthIfNeeded/g) ?? []).length, 1,
     'manual waiting must install one serialized auth consumer, not parallel watchers');
   assert.match(retainedWait,
-    /authResult\.kind === 'manual_required'[\s\S]*?manualLoginRequiredReason !== authResult\.reason[\s\S]*?manualLoginRequiredReason = authResult\.reason[\s\S]*?type: 'lifecycle\.auth_required'[\s\S]*?reason: authResult\.reason[\s\S]*?return \{ kind: 'continue' as const \}/,
-    'a retained wait must publish a changed manual reason without terminating or adding another watcher');
+    /authResult\.kind === 'manual_required'[\s\S]*?manualLoginRequiredReason !== authResult\.reason[\s\S]*?manualLoginRequiredReason = authResult\.reason[\s\S]*?type: 'lifecycle\.auth_required'[\s\S]*?reason: authResult\.reason[\s\S]*?requiresFacebookAdDataReview\(authResult\.reason\)[\s\S]*?kind: 'defer'/,
+    'a retained wait must publish a changed review reason and defer identity until the review clears');
   assert.doesNotMatch(retainedWait, /setInterval|setTimeout|Promise\.all/,
     'manual waiting must reuse the identity cadence instead of creating another scheduler');
   assert.match(core, /onAutomaticProgress:[\s\S]*?type: 'lifecycle\.auth_progress'[\s\S]*?kind: 'automatic_login'/,
@@ -53,6 +58,8 @@ test('Electron accepts only enumerated Facebook manual reasons and keeps their b
       'stale_totp_input_requires_fresh_start',
       'fresh_start_policy_unavailable',
       'auth_probe_unavailable',
+      'facebook_ad_data_review_requires_fresh_start',
+      'facebook_ad_data_choice_required',
     ],
     'the shell must not accept an open-ended auth reason as manual-safe',
   );

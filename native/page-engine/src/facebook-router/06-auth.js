@@ -1,6 +1,7 @@
   const facebookAuthSignalPrefix='aidcp:facebook-auth:v1:';
   const facebookAuthCredentialFillGraceMs=25000;
   const facebookAuthCheckpointHydrationGraceMs=15000;
+  const facebookAdDataReviewHydrationGraceMs=15000;
   const authWithinHydrationGrace=(graceMs)=>{
     const documentAge=Number(window.performance&&window.performance.now&&window.performance.now());
     return Number.isFinite(documentAge)&&documentAge<graceMs;
@@ -317,11 +318,58 @@
     if(dialogs.length===0)return null;
     if(dialogs.length!==1)return authObservation('blocked_unknown',null,'remember_password_ambiguous');
     const ok=authUnique(authButtons(dialogs[0]).filter((button)=>/^ok$/i.test(label(button))));
+    if(ok.candidate&&authTargetDisabled(ok.candidate)){
+      return authObservation('blocked_unknown',null,'auth_target_disabled');
+    }
     return ok.candidate
       ?authObservation('remember_password_confirm',ok.candidate)
       :authObservation('blocked_unknown',null,ok.reason||'remember_password_target_unavailable');
   };
+  const authAdDataReviewContext=()=>{
+    if(location.hostname!=='www.facebook.com'||location.pathname!=='/privacy/consent/')return false;
+    const query=new URLSearchParams(location.search);
+    return query.get('flow')==='ad_free_subscription'
+      &&query.get('params[afs_variant]')==='first_time';
+  };
+  const authAdDataReviewState=()=>{
+    if(!authAdDataReviewContext())return {kind:'absent'};
+    const body=text(document.body,12000);
+    const introduction=/review whether we can process your data for ads/i.test(body)
+      &&/we previously asked whether you consent to us processing your personal data for personalized ads/i.test(body);
+    if(introduction){
+      const start=authUnique(authButtons(document).filter((button)=>/^get started$/i.test(label(button))));
+      if(!start.candidate)return {kind:'intro_blocked',reason:start.reason||'ad_data_review_target_unavailable'};
+      if(authTargetDisabled(start.candidate))return {kind:'intro_blocked',reason:'auth_target_disabled'};
+      return {kind:'intro',candidate:start.candidate};
+    }
+    const choice=/want to subscribe or continue using our products free of charge with ads\?/i.test(body)
+      &&/subscribe to use without ads/i.test(body)
+      &&/use free of charge with ads/i.test(body)
+      &&all('input[type="radio"]',document).filter(visible).length===2;
+    if(choice)return {kind:'choice'};
+    const loading=String(document.readyState||'')!=='complete'
+      ||body.length<160
+      ||all('[aria-busy="true"]',document).some(visible);
+    return {kind:loading?'loading':'manual'};
+  };
+  const authAdDataReviewObservation=async()=>{
+    const state=authAdDataReviewState();
+    if(state.kind==='absent')return null;
+    if(state.kind==='intro'){
+      if(Boolean(p.authenticated)&&!Boolean(p.allowAuthActions)){
+        return authObservation('manual_login_required',null,'facebook_ad_data_review_requires_fresh_start');
+      }
+      return authObservation('ad_data_review_get_started',state.candidate);
+    }
+    if(state.kind==='intro_blocked')return authObservation('blocked_unknown',null,state.reason);
+    if(state.kind==='loading'&&authWithinHydrationGrace(facebookAdDataReviewHydrationGraceMs)){
+      return authObservation('none',null,'ad_data_review_hydrating');
+    }
+    return authObservation('manual_login_required',null,'facebook_ad_data_choice_required');
+  };
   const authProbeBase=async(sampleServerTime=true)=>{
+    const adDataReview=await authAdDataReviewObservation();
+    if(adDataReview)return adDataReview;
     const blocking=blockingProbe();
     if(blocking.kind==='captcha'){
       return authObservation('blocked_human_verification',null,'human_verification_required');
@@ -421,14 +469,56 @@
     const expectedSignal=String(p.expectedSignal||'');
     const expectedCandidateKey=String(p.candidateKey||'');
     const documentChanged=(await authDocumentGeneration())!==expectedDocument;
-    if(documentChanged){
+    const tracksRememberState=expectedSignal==='remember_password_confirm';
+    const loadingObserved=tracksRememberState&&(
+      String(document.readyState||'')!=='complete'
+      ||text(document.body,1000).length<160
+      ||all('[aria-busy="true"]',document).some(visible)
+    );
+    if(expectedSignal==='ad_data_review_get_started'){
+      const state=authAdDataReviewState();
+      const successorObserved=state.kind==='choice';
+      const original=state.kind==='intro'?state.candidate:null;
+      const candidateKey=original?await authDigest(authElementEvidence(original)):null;
+      const buttonStateChanged=!original
+        ||authTargetDisabled(original)
+        ||candidateKey!==expectedCandidateKey;
+      const loadingObserved=state.kind==='loading'
+        ||String(document.readyState||'')!=='complete'
+        ||all('[aria-busy="true"]',document).some(visible);
+      return {
+        kind:'facebook_auth_postcondition',
+        value:{
+          satisfied:successorObserved,
+          documentChanged,
+          signalGone:successorObserved,
+          successorObserved,
+          loadingObserved,
+          buttonStateChanged,
+        },
+      };
+    }
+    if(documentChanged&&!loadingObserved){
       return {
         kind:'facebook_auth_postcondition',
         value:{satisfied:true,documentChanged:true,signalGone:false},
       };
     }
+    if(documentChanged){
+      return {
+        kind:'facebook_auth_postcondition',
+        value:{
+          satisfied:false,
+          documentChanged:true,
+          signalGone:false,
+          loadingObserved:true,
+          buttonStateChanged:false,
+        },
+      };
+    }
     let candidateKey=null;
     let determinate=true;
+    let buttonStateChanged=false;
     if(expectedSignal==='login_submit_ready'){
       const forms=all('form').filter(visible).filter((form)=>{
         const emails=all('input[name="email"],input[type="email"],input#email',form).filter(visible);
@@ -491,9 +581,12 @@
           ?await authPushObservation()
           :await authRememberObservation();
       if(current&&current.signal==='blocked_unknown'){
+        if(tracksRememberState&&current.reason==='auth_target_disabled')buttonStateChanged=true;
         determinate=false;
       }else if(current&&current.signal===expectedSignal){
         candidateKey=current.candidate&&current.candidate.candidateKey||null;
+      }else if(tracksRememberState&&loadingObserved){
+        determinate=false;
       }
     }else{
       determinate=false;
@@ -505,6 +598,7 @@
         satisfied:signalGone,
         documentChanged:false,
         signalGone,
+        ...(tracksRememberState?{loadingObserved,buttonStateChanged}:{}),
       },
     };
   };

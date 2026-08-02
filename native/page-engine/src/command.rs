@@ -48,6 +48,10 @@ pub const MANIFEST_EXCLUDED_COMMAND_KINDS: &[(&str, &str)] = &[
         "facebook_auth_confirm_remember_password",
         "startup-only Facebook remember-password stage: never dispatched from Cloud",
     ),
+    (
+        "facebook_auth_start_ad_data_review",
+        "startup-only Facebook ad-data review introduction stage: never dispatched from Cloud",
+    ),
 ];
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -516,6 +520,7 @@ native_commands! {
     FacebookAuthDismissWarning(FacebookAuthSignalParams) => "facebook_auth_dismiss_warning",
     FacebookAuthClosePushBlocker(FacebookAuthSignalParams) => "facebook_auth_close_push_blocker",
     FacebookAuthConfirmRememberPassword(FacebookAuthSignalParams) => "facebook_auth_confirm_remember_password",
+    FacebookAuthStartAdDataReview(FacebookAuthSignalParams) => "facebook_auth_start_ad_data_review",
     PlanExecute(PlanExecuteParams) => "plan_execute",
     SessionStop(ReasonParams) => "session_stop",
     BrowseNext(ReasonParams) => "browse_next",
@@ -578,6 +583,7 @@ impl NativeCommand {
                     | FacebookAuthDismissWarning(_)
                     | FacebookAuthClosePushBlocker(_)
                     | FacebookAuthConfirmRememberPassword(_)
+                    | FacebookAuthStartAdDataReview(_)
             ),
             Platform::Facebook => crate::facebook::capability::owner(self).is_some(),
             Platform::WechatChannels => matches!(self, WechatCaptureSession(_)),
@@ -622,7 +628,8 @@ impl NativeCommand {
             Self::FacebookAuthSubmitLogin(params)
             | Self::FacebookAuthDismissWarning(params)
             | Self::FacebookAuthClosePushBlocker(params)
-            | Self::FacebookAuthConfirmRememberPassword(params) => {
+            | Self::FacebookAuthConfirmRememberPassword(params)
+            | Self::FacebookAuthStartAdDataReview(params) => {
                 validate_facebook_auth_signal_id(&params.signal_id)
             }
             Self::FacebookAuthEnterTotp(params) => {
@@ -1266,6 +1273,7 @@ mod tests {
                 "facebook_auth_dismiss_warning",
                 "facebook_auth_close_push_blocker",
                 "facebook_auth_confirm_remember_password",
+                "facebook_auth_start_ad_data_review",
             ]),
             "the exclusion table changed; record the reason and update this assertion"
         );
@@ -1398,7 +1406,8 @@ mod tests {
             "facebook_auth_submit_login"
             | "facebook_auth_dismiss_warning"
             | "facebook_auth_close_push_blocker"
-            | "facebook_auth_confirm_remember_password" => serde_json::json!({
+            | "facebook_auth_confirm_remember_password"
+            | "facebook_auth_start_ad_data_review" => serde_json::json!({
                 "signalId": format!("aidcp:facebook-auth:v1:{}", "a".repeat(64))
             }),
             "facebook_auth_enter_totp" => serde_json::json!({
