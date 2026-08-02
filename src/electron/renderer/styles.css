@@ -5431,6 +5431,30 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
   margin-top: 0; padding-top: 0; border-top: 1px solid var(--line);
 }
 .slow-start-row .parking-hint { flex-basis: 100%; }
+
+/* 运行方式 / 主浏览入口是「今日节奏」里的紧凑配置，不沿用创建表单的 42px 大控件。
+   自绘箭头让右侧留白在 macOS / Windows Electron 中保持一致，避免贴边。 */
+#facebook-operation-policy-row { align-items: flex-end; column-gap: 10px; }
+#facebook-operation-policy-row .create-field { gap: 4px; }
+#facebook-operation-policy-row .ads-template {
+  height: 34px;
+  min-height: 34px;
+  padding: 5px 34px 5px 10px;
+  border-radius: 8px;
+  -webkit-appearance: none;
+  appearance: none;
+  background-color: #fff;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='m1 1.5 5 5 5-5' fill='none' stroke='%2333475f' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 12px 8px;
+  line-height: 1.2;
+}
+#facebook-operation-policy-row .ads-template:focus-visible {
+  border-color: var(--accent);
+  outline: 3px solid rgba(59, 111, 240, .16);
+  outline-offset: 1px;
+}
 .slow-start-row .switch-track { width: 30px; height: 16.5px; }
 .slow-start-row .switch-thumb { top: 1.5px; left: 1.5px; width: 13.5px; height: 13.5px; }
 .slow-start-row .switch input:checked + .switch-track .switch-thumb { transform: translateX(13.5px); }
