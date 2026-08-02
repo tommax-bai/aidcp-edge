@@ -36,6 +36,7 @@ after(() => {
 });
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+const gestureTick = () => new Promise((r) => setTimeout(r, 240));
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -389,6 +390,7 @@ test('开发者详情：命令按当前环境隔离，非法或过期状态不�
   const rowB = w.document.querySelector('.rail-row[data-env-id="B"]') as unknown as HTMLElement;
   assert.ok(rowB);
   rowB.dispatchEvent(new w.Event('click', { bubbles: true }));
+  await gestureTick();
   assert.match($(w, '#command-diagnostic-list').textContent || '', /B 环境命令/);
   assert.doesNotMatch($(w, '#command-diagnostic-list').textContent || '', /A 环境命令/);
 });
@@ -2250,14 +2252,14 @@ test('解除受限：风险读缓存和按钮随环境切换隔离，不从 A �
   assert.equal(($(w, '#risk-recovery-confirm') as unknown as HTMLDialogElement).open, true);
   assert.equal($(w, '#risk-recovery-confirm-env').textContent, '环境 A');
   $(w, '.rail-row[data-env-id="b"]').click();
-  for (let i = 0; i < 5; i++) await tick();
+  await gestureTick();
   assert.equal(($(w, '#risk-recovery-confirm') as unknown as HTMLDialogElement).open, false, '切环境必须关闭旧环境确认层');
   $(w, '#risk-recovery-confirm-submit').click();
   await tick();
   assert.deepEqual(recoverCalls, [], '旧弹层即使被脚本触发确认也不得跨环境请求');
   assert.ok(hidden($(w, '#risk-recovery-row')), 'B normal → 隐藏');
   $(w, '.rail-row[data-env-id="a"]').click();
-  await tick();
+  await gestureTick();
   assert.ok(!hidden($(w, '#risk-recovery-row')), '切回 A 仍使用 A 自己的 restricted 真态');
   assert.deepEqual([...new Set(reads)].sort(), ['a', 'b']);
 });
@@ -2514,6 +2516,7 @@ test('慢启动行：A 环境写入反馈不串到 B，A 回执也不改写当�
   const rowB = w.document.querySelector('.rail-row[data-env-id="B"]') as unknown as HTMLElement;
   assert.ok(rowB, 'B 环境应进入左栏');
   rowB.dispatchEvent(new w.Event('click', { bubbles: true }));
+  await gestureTick();
   assert.equal($(w, '#facebook-operation-policy-row').classList.contains('is-pending'), false);
   assert.equal(mode.value, 'persona');
   assert.equal(toggle.checked, false);
@@ -2529,6 +2532,7 @@ test('慢启动行：A 环境写入反馈不串到 B，A 回执也不改写当�
 
   const rowA = w.document.querySelector('.rail-row[data-env-id="A"]') as unknown as HTMLElement;
   rowA.dispatchEvent(new w.Event('click', { bubbles: true }));
+  await gestureTick();
   assert.equal(mode.value, 'slow_start');
   assert.equal(toggle.checked, true, '切回 A 后应看到 A 的成功写后真态');
   assert.match($(w, '#slow-start-badge').textContent || '', /第 1\/7 天/);
@@ -2862,7 +2866,7 @@ test('运行方式：A 写入期间切到 B，A 晚到回执不改写 B', async 
   const rowB = w.document.querySelector('.rail-row[data-env-id="B"]') as unknown as HTMLElement;
   assert.ok(rowB);
   rowB.dispatchEvent(new w.Event('click', { bubbles: true }));
-  for (let i = 0; i < 3; i++) await tick();
+  await gestureTick();
   assert.equal(select.value, 'persona');
   assert.equal($(w, '#facebook-operation-policy-row').classList.contains('is-pending'), false);
 
@@ -2873,6 +2877,7 @@ test('运行方式：A 写入期间切到 B，A 晚到回执不改写 B', async 
 
   const rowA = w.document.querySelector('.rail-row[data-env-id="A"]') as unknown as HTMLElement;
   rowA.dispatchEvent(new w.Event('click', { bubbles: true }));
+  await gestureTick();
   assert.equal(select.value, 'rule', '切回 A 才显示 A 的写后真态');
 });
 

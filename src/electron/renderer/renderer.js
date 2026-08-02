@@ -544,7 +544,8 @@ const fleetView = {
   envs: new Map(), // envId -> { envId, name, platform, status }
   order: [], // 花名册顺序
   selected: null, // 当前选中 envId
-  shownEnv: null, // 头像三态：已把浏览器抬到主屏前台的那个 envId（null=无）。切换选中即清，见 selectEnv
+  shownEnv: null, // 独占召回完成后位于 AIDCP 正后方的 envId（null=无）；与右侧当前选中环境相互独立
+  browserRecallEpoch: 0, // renderer 侧最后一次头像双击代际；迟到 IPC 结果不得覆盖较新的用户意图
   collapsed: true, // 环境栏默认收起为窄图标条
   platformFilter: 'all', // 平台分类筛选为会话内视图态；每次启动默认全部，不落设置
   closeAllPending: false, // 只表达批量关闭 IPC 在途；逐环境终态仍由真实状态投影
@@ -5907,7 +5908,6 @@ function selectEnv(envId) {
   closeDelegatedPopover(false);
   syncDelegatedTriggerTasks([]);
   fleetView.selected = envId;
-  fleetView.shownEnv = null; // 切到另一个环境：头像三态从头开始，绝不留着旧环境的「已显示」指针
   pubManualOpen = false;
   resetPubCarouselSelection();
   closePublishPreview();
@@ -6238,18 +6238,17 @@ function makeRailRow(row) {
   btn.tabIndex = 0;
   btn.setAttribute('role', 'button');
   const displayName = railDisplayName(row);
-  // 收起态悬停出名字与状态 + 头像三态的下一步提示（收起态整卡即头像；点整卡=点头像）。
-  const nextHint = !isSelected
-    ? '点击选中'
-    : isShown
-      ? '再次点击：浏览器归位'
-      : '再次点击：显示浏览器（AIDCP 保持在前）';
+  // 单击只选中，双击头像始终召回；shown 与 selected 独立，避免把选中切换冒充物理窗口归位。
+  const nextHint = isShown
+    ? '浏览器已在 AIDCP 后方；双击头像可重新召回'
+    : '单击选中；双击头像召回浏览器';
   const queueText = row.state === 'queued' && Number.isInteger(row.queuePosition) ? ` #${row.queuePosition}` : '';
   const reasonText = row.detail && row.detail !== row.label ? ` · ${row.detail}` : '';
   btn.title = `${displayName} · ${row.label}${queueText}${reasonText} · ${nextHint}`;
   const ava = document.createElement('span');
   ava.className = 'rail-ava';
   ava.textContent = displayName.slice(0, 1);
+  ava.title = '双击召回浏览器';
   if (row.state === 'queued' && Number.isInteger(row.queuePosition)) {
     const queueBadge = document.createElement('span');
     queueBadge.className = 'rail-queue-badge';
@@ -6332,18 +6331,32 @@ function makeRailRow(row) {
   if (row.detail) stateEl.title = row.detail;
   meta.appendChild(stateEl);
   btn.appendChild(meta);
+  let rowClickTimer = null;
   btn.addEventListener('click', (e) => {
-    // A physical double-click emits click(detail=1), click(detail=2), then dblclick.
-    // Only the first click may advance the ordinary three-state control; otherwise an
-    // already-selected row would show and immediately re-park the browser.
-    if (e.detail > 1) return;
-    void onRailRowActivate(row.envId);
+    if (e.detail > 1) {
+      if (rowClickTimer) clearTimeout(rowClickTimer);
+      rowClickTimer = null;
+      return;
+    }
+    // 第一击不能立刻重绘环境栏，否则会替换头像 DOM，使浏览器无法在同一节点上完成 dblclick。
+    if (rowClickTimer) clearTimeout(rowClickTimer);
+    rowClickTimer = setTimeout(() => {
+      rowClickTimer = null;
+      selectEnv(row.envId); // 单击只选中；已选中时是 no-op，绝不控制浏览器窗口。
+    }, 220);
+  });
+  ava.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (rowClickTimer) clearTimeout(rowClickTimer);
+    rowClickTimer = null;
+    void onRailAvatarRecall(row.envId);
   });
   btn.addEventListener('keydown', (e) => {
     // 只在整行本身聚焦时响应键盘：焦点在行内的人设 ✦ 按钮上时 e.target≠btn，放行让按钮原生激活（开人设浮层），
     // 否则本处 preventDefault 会吞掉按钮激活、还把三态切换误触发在人设图标上。
     if (e.target !== btn) return;
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRailRowActivate(row.envId); }
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectEnv(row.envId); }
   });
   return btn;
 }
@@ -6527,29 +6540,35 @@ function beginRailNameEdit(row, nameEl) {
   input.addEventListener('blur', () => { void commit(); });
 }
 
-// 环境头像三态（用户要求）：①未选中→选中（红高亮）②已选中且浏览器未显示→先把浏览器抬到可见位，
-// 再由主进程把 AIDCP 抬回最前，使浏览器落在客户端下方；③已显示→让浏览器归位（回背景停放位）。
-// 引导登录仍调用不带 keepClientForeground 的 showDrivenBrowser，浏览器保持前台供人工处理。
-// 诚实边界：指令失败（引擎未起 / 浏览器未就绪）绝不推进相位，把回执文案如实显示在环境栏消息位。
-// 人设 ✦ 图标自带 stopPropagation（见 makeRailRow），不会误触发本三态。
-async function onRailRowActivate(envId) {
+// 环境头像三态已收敛为双击独占召回：主进程把其他可控浏览器按各自配置归位，再把目标放到 AIDCP 正后方。
+// 单击环境行只做选择；同一头像重复双击仍是召回，绝不反向触发目标归位。
+// 引导登录仍调用 showDrivenBrowser，浏览器保持前台供人工处理，不进入本互斥编排。
+async function onRailAvatarRecall(envId) {
   if (!envId || !fleetView.envs.has(envId)) return;
-  if (envId !== fleetView.selected) { selectEnv(envId); return; } // ① 选中
-  const showing = fleetView.shownEnv !== envId; // 目标动作：未显示→显示；已显示→归位
-  const api = showing ? window.aidcpEdge.showDrivenBrowser : window.aidcpEdge.resetBrowserParking;
+  const epoch = ++fleetView.browserRecallEpoch;
+  if (envId !== fleetView.selected) selectEnv(envId);
+  const api = window.aidcpEdge.recallExclusiveBrowser;
   if (typeof api !== 'function') return;
-  const label = showing ? '显示浏览器' : '浏览器归位';
   try {
-    const r = await api(envId, showing ? { keepClientForeground: true } : undefined);
+    const r = await api(envId);
+    if (epoch !== fleetView.browserRecallEpoch || (r && r.superseded)) return;
     if (r && r.ok) {
-      fleetView.shownEnv = showing ? envId : null; // 仅成功才推进相位
-      setRailMsg('');
+      fleetView.shownEnv = envId;
+      const failures = Array.isArray(r.parkFailures) ? r.parkFailures : [];
+      const count = Number.isInteger(r.parkFailureCount) ? r.parkFailureCount : failures.length;
+      const names = failures.map((failure) => String(failure?.name || failure?.envId || '')).filter(Boolean);
+      setRailMsg(count > 0
+        ? `目标浏览器已调出，但 ${count} 个其他环境未能归位${names.length > 0 ? `：${names.join('、')}` : ''}`
+        : '');
       renderRail();
     } else {
-      setRailMsg(`${label}失败：${(r && r.error) || '引擎未运行或浏览器尚未就绪'}`);
+      if (r && r.otherParkingAttempted) fleetView.shownEnv = null;
+      setRailMsg(`显示浏览器失败：${(r && r.error) || '引擎未运行或浏览器尚未就绪'}`);
+      renderRail();
     }
   } catch (e) {
-    setRailMsg(`${label}失败：${(e && e.message) || e}`);
+    if (epoch !== fleetView.browserRecallEpoch) return;
+    setRailMsg(`显示浏览器失败：${(e && e.message) || e}`);
   }
 }
 

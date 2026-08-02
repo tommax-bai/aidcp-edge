@@ -25,6 +25,7 @@ const rendererCss = readFileSync(join(electronDir, 'renderer/styles.css'), 'utf8
 const environmentLoadingAsset = join(electronDir, 'renderer/assets/environment-loading-wireframe-execute.webp');
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+const gestureTick = () => new Promise((r) => setTimeout(r, 240));
 
 const openWindows: DOMWindow[] = [];
 after(() => {
@@ -71,7 +72,7 @@ async function boot(
   let pushActivity: (e: unknown) => void = () => undefined;
   let pushFleet: (snap: unknown) => void = () => undefined;
   let pushBatchProxyProgress: (progress: unknown) => void = () => undefined;
-  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], showDrivenOptions: [], resetParking: [], startAll: [], closeAll: [], personaPreview: [], personaFill: [], select: [], close: [], browserOpen: [], browserClose: [], notify: [], start: [], resume: [], saveNickname: [], updateProxies: [] };
+  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], showDrivenOptions: [], recallExclusive: [], resetParking: [], startAll: [], closeAll: [], personaPreview: [], personaFill: [], select: [], close: [], browserOpen: [], browserClose: [], notify: [], start: [], resume: [], saveNickname: [], updateProxies: [] };
   const personaStatusByEnv = new Map<string, Record<string, unknown>>();
   const settings = {
     provider: 'adspower',
@@ -151,6 +152,7 @@ async function boot(
     relogin: async (envId: string) => { calls.relogin.push(envId); return makeStatus({ envId }); },
     notify: async (payload: unknown) => { calls.notify.push(payload); return { ok: true }; },
     showDrivenBrowser: async (envId: string, opts?: unknown) => { calls.showDriven.push(envId); calls.showDrivenOptions.push(opts); return { ok: true }; },
+    recallExclusiveBrowser: async (envId: string) => { calls.recallExclusive.push(envId); return { ok: true, parkFailureCount: 0, parkFailures: [] }; },
     resetBrowserParking: async (envId: string) => { calls.resetParking.push(envId); return { ok: true }; },
     pause: async () => makeStatus(),
     resume: async (envId: string) => { calls.resume.push(envId); return makeStatus({ envId }); },
@@ -343,7 +345,7 @@ test('环境栏：fleet 快照建行、默认收起、点选切换主区域并�
   // 点选环境二 → fleetSelect 回写 + 行选中态
   const rowB = [...rows].find((r) => (r as HTMLElement).dataset.envId === 'ads-p2') as HTMLElement;
   rowB.click();
-  await tick();
+  await gestureTick();
   assert.deepEqual(calls.select, ['ads-p2']);
   assert.equal(
     (w.document.querySelector('.rail-row[data-env-id="ads-p2"]') as HTMLElement).classList.contains('selected'),
@@ -472,39 +474,93 @@ test('增量心跳保留完整投影，待机与真实排队不会退化为运�
   assert.match(queued.title, /排队中 #3/);
 });
 
-test('环境头像三态：①未选中→选中 ②再点→抬前显示（shown 态）③再点→归位（撤 shown）', async () => {
+test('环境头像：单击只选中，双击未选中环境即可独占召回，重复双击不反向归位', async () => {
   const { w, calls, pushStatus } = await boot();
-  // 抬前/归位只对在跑环境有意义（离线环境的显示态会被清）：先让环境二在运行。
   pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二' }));
   await tick();
   const rowOf = (id: string) => w.document.querySelector(`.rail-row[data-env-id="${id}"]`) as HTMLElement;
-  // ① 未选中 → 仅选中，绝不触发浏览器指令
+  const doubleClickAvatar = (id: string) => {
+    const avatar = rowOf(id).querySelector('.rail-ava') as HTMLElement;
+    avatar.dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 1 }));
+    avatar.dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 2 }));
+    avatar.dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+  };
+
+  // 单击未选中环境只选择；手势判定后也不能发任何窗口指令。
   rowOf('ads-p2').click();
-  await tick();
+  await gestureTick();
   assert.ok(calls.select.includes('ads-p2'));
   assert.equal(rowOf('ads-p2').classList.contains('selected'), true);
-  assert.equal(calls.showDriven.length, 0, '仅选中不抬浏览器');
-  // ② 已选中 → 抬前显示该环境浏览器，行进入 shown 态
-  rowOf('ads-p2').click();
+  assert.deepEqual(calls.recallExclusive, [], '单击只选择，不召回浏览器');
+  assert.deepEqual(calls.resetParking, [], '单击只选择，不归位浏览器');
+
+  // 已选中头像双击 → 一次独占召回。
+  doubleClickAvatar('ads-p2');
   await tick();
-  assert.deepEqual(calls.showDriven, ['ads-p2'], '第二次点击抬前该环境浏览器');
-  assert.equal(
-    (calls.showDrivenOptions[0] as { keepClientForeground?: boolean } | undefined)
-      ?.keepClientForeground,
-    true,
-    '头像显示必须要求 AIDCP 最终保持在前',
-  );
-  assert.equal(rowOf('ads-p2').classList.contains('shown'), true, '抬前后行进入 shown 态');
+  assert.deepEqual(calls.recallExclusive, ['ads-p2']);
+  assert.equal(rowOf('ads-p2').classList.contains('shown'), true);
   assert.equal(w.document.querySelector('#rail-msg')!.textContent, '', '窗口前置成功不展示说明文案');
-  // ③ 已显示 → 归位，撤 shown
-  rowOf('ads-p2').click();
+
+  // 同一目标重复双击仍是召回，绝不能把目标作为 toggle 归位。
+  doubleClickAvatar('ads-p2');
   await tick();
-  assert.deepEqual(calls.resetParking, ['ads-p2'], '第三次点击让该环境浏览器归位');
-  assert.equal(rowOf('ads-p2').classList.contains('shown'), false, '归位后撤 shown 态');
-  // 切到另一个环境即重置三态相位（shownEnv 清空）
-  rowOf('ads-p1').click();
+  assert.deepEqual(calls.recallExclusive, ['ads-p2', 'ads-p2']);
+  assert.deepEqual(calls.resetParking, []);
+  assert.equal(rowOf('ads-p2').classList.contains('shown'), true);
+
+  // 未选中的环境无需先单击再补一次：同一双击同时选中并召回。
+  doubleClickAvatar('ads-p1');
   await tick();
+  assert.equal(rowOf('ads-p1').classList.contains('selected'), true);
+  assert.equal(rowOf('ads-p1').classList.contains('shown'), true);
   assert.equal(rowOf('ads-p2').classList.contains('shown'), false);
+  assert.deepEqual(calls.recallExclusive, ['ads-p2', 'ads-p2', 'ads-p1']);
+});
+
+test('环境头像独占召回：其他环境部分归位失败时保留目标 shown 并诚实提示', async () => {
+  const { w } = await boot({
+    recallExclusiveBrowser: async () => ({
+      ok: true,
+      parkFailureCount: 1,
+      parkFailures: [{ envId: 'ads-p2', name: '环境二', error: '归位超时' }],
+    }),
+  });
+  const avatar = w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-ava') as HTMLElement;
+  avatar.dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+  await tick();
+  assert.equal(w.document.querySelector('.rail-row[data-env-id="ads-p1"]')?.classList.contains('shown'), true);
+  assert.match(w.document.querySelector('#rail-msg')?.textContent || '', /1 个其他环境未能归位.*环境二/);
+});
+
+test('环境头像独占召回：迟到结果不得覆盖较新的双击目标', async () => {
+  let finishFirst: (value: unknown) => void = () => undefined;
+  const first = new Promise((resolve) => { finishFirst = resolve; });
+  let callCount = 0;
+  const { w, pushStatus } = await boot({
+    recallExclusiveBrowser: async () => {
+      callCount += 1;
+      return callCount === 1 ? first : { ok: true, parkFailureCount: 0, parkFailures: [] };
+    },
+  });
+  pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二' }));
+  await tick();
+  const doubleClickAvatar = (id: string) => {
+    const avatar = w.document.querySelector(`.rail-row[data-env-id="${id}"] .rail-ava`) as HTMLElement;
+    avatar.dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 1 }));
+    avatar.dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 2 }));
+    avatar.dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+  };
+
+  doubleClickAvatar('ads-p1');
+  await tick();
+  doubleClickAvatar('ads-p2');
+  await tick();
+  assert.equal(w.document.querySelector('.rail-row[data-env-id="ads-p2"]')?.classList.contains('shown'), true);
+
+  finishFirst({ ok: true, parkFailureCount: 0, parkFailures: [] });
+  await tick();
+  assert.equal(w.document.querySelector('.rail-row[data-env-id="ads-p2"]')?.classList.contains('shown'), true);
+  assert.equal(w.document.querySelector('.rail-row[data-env-id="ads-p1"]')?.classList.contains('shown'), false);
 });
 
 test('环境昵称双击进入编辑并持久化人工来源，不同时触发浏览器三态', async () => {
@@ -524,6 +580,7 @@ test('环境昵称双击进入编辑并持久化人工来源，不同时触发�
   nicknameOf('ads-p1').dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true, detail: 2 }));
   await tick();
   assert.deepEqual(calls.showDriven, []);
+  assert.deepEqual(calls.recallExclusive, []);
   assert.deepEqual(calls.resetParking, []);
   const input = rowOf('ads-p1').querySelector('.rail-name-editor') as HTMLInputElement;
   assert.ok(input, '双击后应原位出现昵称输入框');
@@ -884,34 +941,40 @@ test('人工昵称先乐观显示 pending，写盘失败后恢复原昵称与来
   assert.match(w.document.querySelector('#rail-msg')?.textContent || '', /保存失败.*已恢复.*磁盘只读/);
 });
 
-test('环境头像三态：验证码浮层态（core 仍在跑）保留 shown，第三态仍可归位', async () => {
+test('环境头像独占召回：验证码浮层态保留 shown，重复双击仍召回而不归位目标', async () => {
   const { w, calls, pushStatus } = await boot();
   const rowOf = (id: string) => w.document.querySelector(`.rail-row[data-env-id="${id}"]`) as HTMLElement;
   pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二' }));
   await tick();
-  rowOf('ads-p2').click(); await tick(); // 选中
-  rowOf('ads-p2').click(); await tick(); // 抬前 → shown
-  assert.deepEqual(calls.showDriven, ['ads-p2']);
+  const doubleClickAvatar = () => {
+    const avatar = rowOf('ads-p2').querySelector('.rail-ava') as HTMLElement;
+    avatar.dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 1 }));
+    avatar.dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 2 }));
+    avatar.dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+  };
+  doubleClickAvatar(); await tick();
+  assert.deepEqual(calls.recallExclusive, ['ads-p2']);
   assert.equal(rowOf('ads-p2').classList.contains('shown'), true);
   // 进入验证码浮层态：needsAction/attention 但 core 仍 running、浏览器仍可控 → 不得清 shown。
   pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二', overlayBlocked: true }));
   await tick();
-  assert.equal(rowOf('ads-p2').classList.contains('shown'), true, 'attention 态（core 在跑）保留 shown，否则盯验证码环境的第三态不可达');
-  // 第三态可达：再点 → 归位（resetBrowserParking），而非又一次抬前。
-  rowOf('ads-p2').click(); await tick();
-  assert.deepEqual(calls.resetParking, ['ads-p2'], 'attention 态第三次点击应归位而非再次抬前');
-  assert.equal(rowOf('ads-p2').classList.contains('shown'), false);
+  assert.equal(rowOf('ads-p2').classList.contains('shown'), true, 'attention 态（core 在跑）保留 shown');
+  doubleClickAvatar(); await tick();
+  assert.deepEqual(calls.recallExclusive, ['ads-p2', 'ads-p2']);
+  assert.deepEqual(calls.resetParking, [], '重复双击不得把目标作为 toggle 归位');
+  assert.equal(rowOf('ads-p2').classList.contains('shown'), true);
 });
 
-test('环境头像三态：键盘落在人设 ✦ 图标上不触发浏览器抬前/归位', async () => {
+test('环境头像独占召回：键盘落在人设 ✦ 图标上不触发浏览器窗口动作', async () => {
   const { w, calls, pushStatus } = await boot();
   pushStatus(makeStatus({ envId: 'ads-p1', envName: '环境一' }));
   await tick();
   const pIcon = (w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-persona') as HTMLElement);
-  // ads-p1 已是选中环境；焦点在其 ✦ 上按 Enter：整行 keydown 必须放行（e.target≠行），绝不触发三态切换。
+  // ads-p1 已是选中环境；焦点在其 ✦ 上按 Enter：整行 keydown 必须放行（e.target≠行）。
   pIcon.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
   await tick();
   assert.equal(calls.showDriven.length, 0, '键盘落在 ✦ 上不得抬前浏览器');
+  assert.equal(calls.recallExclusive.length, 0, '键盘落在 ✦ 上不得独占召回浏览器');
   assert.equal(calls.resetParking.length, 0, '键盘落在 ✦ 上不得归位浏览器');
 });
 
@@ -1153,7 +1216,7 @@ test('红线：并发环境的状态与活动按 envId 归属，切换环境不�
   assert.doesNotMatch(stream1, /环境二给/, '环境二的活动 MUST NOT 混入环境一的流');
   // 切到环境二：整块投影切换、不残留环境一数据
   ([...w.document.querySelectorAll('.rail-row')].find((r) => (r as HTMLElement).dataset.envId === 'ads-p2') as HTMLElement).click();
-  await tick();
+  await gestureTick();
   assert.equal(w.document.querySelector('#views')!.textContent, '99');
   const stream2 = w.document.querySelector('#activity-stream')!.textContent!;
   assert.match(stream2, /环境二给/);
@@ -1454,7 +1517,7 @@ test('红线：人设草稿绑定生成时的环境，中途切换环境后确�
   assert.deepEqual(calls.gen, ['ads-p1'], '生成打到当前环境');
   // 切到环境二
   ([...w.document.querySelectorAll('.rail-row')].find((r) => (r as HTMLElement).dataset.envId === 'ads-p2') as HTMLElement).click();
-  await tick();
+  await gestureTick();
   // 切换后草稿被清（向导每环境独立），确认按钮此时无草稿 → 不会误 persist 到环境二
   (w.document.querySelector('#persona-confirm') as HTMLElement).click();
   await tick();

@@ -88,22 +88,25 @@ test('successful foreground and parking requests no longer emit explanatory copy
   assert.doesNotMatch(block, /hint|currentParkingPlan/);
 });
 
-test('environment-avatar show waits for core completion then restores AIDCP above the browser', () => {
+test('environment-avatar exclusive recall uses correlated park/show completion and restores AIDCP above the target', () => {
   assert.match(preload, /showDrivenBrowser: \(envId, opts\) => ipcRenderer\.invoke\('browser:showDriven', envId, opts\)/);
-  assert.match(renderer, /showDrivenBrowser[\s\S]{0,260}keepClientForeground: true/);
-  assert.match(main, /const browserShowPending = new Map\(\)/);
+  assert.match(preload, /recallExclusiveBrowser: \(envId\) => ipcRenderer\.invoke\('browser:recallExclusive', envId\)/);
+  assert.match(renderer, /window\.aidcpEdge\.recallExclusiveBrowser/);
+  assert.match(main, /const browserControlPending = new Map\(\)/);
   assert.match(main, /mainWindow\.getBounds\(\)/);
   assert.match(main, /screen\.getDisplayMatching\(clientBounds\)/);
   assert.match(main, /clientAlignedBrowserBounds\(clientBounds, display\)/);
-  assert.match(main, /writeBrowserControlCommand\(handle, 'browser\.show', \{ requestId: id, bounds: targetBounds \}\)/);
+  assert.match(main, /sendCorrelatedBrowserControlCommand\([\s\S]{0,180}'browser\.show'[\s\S]{0,180}bounds: targetBounds/);
+  assert.match(main, /parkDrivenBrowserUsingConfiguredBounds[\s\S]{0,180}'browser\.park'/);
   assert.match(main, /message\.startsWith\(BROWSER_PARKING_REPLY_PREFIX\)/);
   const focus = functionBlock('focusAidcpAboveDrivenBrowser', 'handleBrowserParkingReply');
   assert.match(focus, /mainWindow\.show\(\)/);
   assert.match(focus, /mainWindow\.focus\(\)/);
   assert.match(focus, /mainWindow\.moveTop\(\)/);
-  const show = functionBlock('showDrivenBrowserBelowClient', 'sendPersonaCommand');
-  assert.match(show, /BROWSER_SHOW_COMPLETION_TIMEOUT_MS/);
+  const show = functionBlock('showDrivenBrowserBelowClient', 'browserHandleControllable');
   assert.match(show, /浏览器窗口移动超时/);
+  assert.match(main, /createExclusiveBrowserRecallCoordinator\(\{[\s\S]{0,500}parkBrowser: parkDrivenBrowserUsingConfiguredBounds[\s\S]{0,160}showBrowser: showDrivenBrowserBelowClient/);
+  assert.match(main, /ipcMain\.handle\('browser:recallExclusive'[\s\S]{0,180}envs\.get\(envId\)[\s\S]{0,120}exclusiveBrowserRecallCoordinator\.recall/);
   assert.match(main, /opts && opts\.keepClientForeground === true[\s\S]{0,120}showDrivenBrowserBelowClient/);
   assert.match(renderer, /showDrivenBrowser\(envId\)/, '登录引导保留不带 client-foreground policy 的浏览器前台调用');
 });
