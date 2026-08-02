@@ -563,6 +563,22 @@ test('环境头像独占召回：迟到结果不得覆盖较新的双击目标',
   assert.equal(w.document.querySelector('.rail-row[data-env-id="ads-p1"]')?.classList.contains('shown'), false);
 });
 
+test('环境昵称单击只选中环境，不触发编辑或浏览器窗口控制', async () => {
+  const { w, calls } = await boot();
+  const nickname = w.document.querySelector('.rail-row[data-env-id="ads-p2"] .rail-name') as HTMLElement;
+
+  nickname.dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 1 }));
+  await gestureTick();
+
+  const selectedRow = w.document.querySelector('.rail-row[data-env-id="ads-p2"]') as HTMLElement;
+  assert.deepEqual(calls.select, ['ads-p2']);
+  assert.equal(selectedRow.classList.contains('selected'), true);
+  assert.equal(selectedRow.querySelector('.rail-name-editor'), null);
+  assert.deepEqual(calls.showDriven, []);
+  assert.deepEqual(calls.recallExclusive, []);
+  assert.deepEqual(calls.resetParking, []);
+});
+
 test('环境昵称双击进入编辑并持久化人工来源，不同时触发浏览器三态', async () => {
   const saved: Array<{ profileId: string; nickname: string }> = [];
   const { w, calls } = await boot({

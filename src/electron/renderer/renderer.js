@@ -6280,11 +6280,11 @@ function makeRailRow(row) {
       nameClickTimer = null;
       return;
     }
-    // 昵称单击仍沿用整行三态；短暂等待第二击，避免双击编辑同时把浏览器抬前或归位。
+    // 昵称单击与整行一致，只做选择；短暂等待第二击，避免双击编辑同时触发环境切换。
     if (nameClickTimer) clearTimeout(nameClickTimer);
     nameClickTimer = setTimeout(() => {
       nameClickTimer = null;
-      void onRailRowActivate(row.envId);
+      selectEnv(row.envId);
     }, 220);
   });
   nameEl.addEventListener('dblclick', (e) => {
