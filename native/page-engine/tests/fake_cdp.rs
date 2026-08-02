@@ -5276,6 +5276,8 @@ enum FacebookReelsEntryScenario {
     DocumentDrifts,
 }
 
+const FACEBOOK_REELS_ENTRY_TEST_TIMEOUT_MS: u64 = 30_000;
+
 #[derive(Clone, Copy)]
 enum FacebookEntryPageState {
     Feed,
@@ -5291,7 +5293,7 @@ async fn run_facebook_reels_entry(
     let mut engine = Engine::default();
     let mut open = session_open(port);
     open.params.platform = Platform::Facebook;
-    open.params.timeout_ms = 15_000;
+    open.params.timeout_ms = FACEBOOK_REELS_ENTRY_TEST_TIMEOUT_MS;
     engine.open(&open).await.expect("open Facebook session");
     let outcome = engine
         .execute(&CommandRecord {
@@ -5300,7 +5302,7 @@ async fn run_facebook_reels_entry(
             session_id: "session-1".to_owned(),
             task_id: "browse-1".to_owned(),
             command_id: 1,
-            deadline_unix_ms: unix_time_ms() + 15_000,
+            deadline_unix_ms: unix_time_ms() + FACEBOOK_REELS_ENTRY_TEST_TIMEOUT_MS,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("facebook_reels_primary".to_owned()),
                 dwell_ms: None,

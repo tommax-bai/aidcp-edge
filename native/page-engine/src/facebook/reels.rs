@@ -11,6 +11,9 @@ use std::time::Duration;
 /// 短视频兜底滚轮的基线位移。共享手势会在此基线上下 ±20% 采样，落在改动前的 70~100px 区间内。
 const FACEBOOK_REEL_FALLBACK_WHEEL_BASELINE_PX: f64 = 85.0;
 
+/// Reels 已到达或活动视频已切换后，等待规范身份与卡片完成水合的有界窗口。
+const FACEBOOK_REEL_IDENTITY_HYDRATION_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub(crate) async fn execute(
     session: &mut EngineSession,
     command: &NativeCommand,
@@ -386,7 +389,7 @@ pub(crate) async fn finish_facebook_reel_transition(
     command: &NativeCommand,
     previous: &facebook::FacebookReelProbe,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + FACEBOOK_REEL_IDENTITY_HYDRATION_TIMEOUT;
     loop {
         let expression = facebook::reel_cards_expression()?;
         let raw = session.cdp.evaluate(&expression, true).await?;
@@ -506,4 +509,17 @@ pub(crate) fn reel_identity_moved(
         } else {
             note_id != previous.note_id.as_deref() || video_moved
         }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reel_identity_hydration_window_is_fifteen_seconds() {
+        assert_eq!(
+            FACEBOOK_REEL_IDENTITY_HYDRATION_TIMEOUT,
+            Duration::from_secs(15)
+        );
+    }
 }
