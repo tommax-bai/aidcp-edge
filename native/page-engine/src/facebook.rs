@@ -119,6 +119,8 @@ pub struct FacebookReelNextTarget {
     #[serde(default)]
     pub video_rect: Option<FacebookReelRect>,
     #[serde(default)]
+    pub input_safe: Option<bool>,
+    #[serde(default)]
     pub found: bool,
     #[serde(default)]
     pub ambiguous: bool,
@@ -130,6 +132,12 @@ pub struct FacebookReelNextTarget {
     pub label: Option<String>,
     #[serde(default)]
     pub axis: Option<FacebookReelAxis>,
+}
+
+impl FacebookReelNextTarget {
+    pub fn is_keyboard_input_safe(&self) -> bool {
+        self.input_safe != Some(false)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -1386,6 +1394,7 @@ mod tests {
             "ok": true,
             "noteId": "https://www.facebook.com/reel/1",
             "videoKey": "video-1@element:1",
+            "inputSafe": true,
             "found": true,
             "ambiguous": false,
             "cx": 1200.0,
@@ -1395,16 +1404,19 @@ mod tests {
         }))
         .expect("vertical target");
         assert_eq!(vertical.axis, Some(FacebookReelAxis::Vertical));
+        assert!(vertical.is_keyboard_input_safe());
 
         let horizontal: FacebookReelNextTarget = serde_json::from_value(json!({
             "ok": true,
             "videoKey": "video-1@element:1",
+            "inputSafe": false,
             "found": false,
             "ambiguous": false,
             "axis": "horizontal"
         }))
         .expect("horizontal target");
         assert_eq!(horizontal.axis, Some(FacebookReelAxis::Horizontal));
+        assert!(!horizontal.is_keyboard_input_safe());
 
         assert!(
             serde_json::from_value::<FacebookReelNextTarget>(json!({

@@ -424,6 +424,7 @@ fn reel_navigation_probe_matches_active(
     // exact active Reel binding matters here; pointer safety remains in
     // `reel_navigation_target_matches` below.
     target.ok
+        && target.is_keyboard_input_safe()
         && target.video_key == previous.video_key
         && (previous.note_id.is_none() || target.note_id == previous.note_id)
 }
@@ -441,6 +442,7 @@ fn reel_navigation_target_matches(
         target.reason.as_deref() == Some("next_control_not_click_safe")
     };
     target.ok
+        && target.is_keyboard_input_safe()
         && !target.ambiguous
         && input_eligible
         && target.video_key == previous.video_key

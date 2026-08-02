@@ -901,6 +901,15 @@ async fn facebook_reel_unsafe_keyboard_focus_blocks_active_probe_before_input() 
 }
 
 #[tokio::test]
+async fn facebook_reel_newly_unsafe_next_target_blocks_keys_before_dispatch() {
+    let (outcome, requests) =
+        run_facebook_reel_active_key_probe(FacebookReelKeyScenario::UnsafeNextTarget).await;
+
+    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+    assert!(dispatched_keys(&requests).is_empty());
+}
+
+#[tokio::test]
 async fn facebook_reel_scroll_uses_one_active_video_wheel_after_both_keys_miss() {
     let (outcome, requests) =
         run_facebook_reel_active_key_probe(FacebookReelKeyScenario::VerticalWheelMoves).await;
@@ -5446,6 +5455,7 @@ enum FacebookReelKeyScenario {
     RightMovesLate,
     NeitherMoves,
     UnsafeFocus,
+    UnsafeNextTarget,
     VerticalWheelMoves,
     VerticalNeitherMoves,
 }
@@ -5550,7 +5560,20 @@ async fn spawn_facebook_reel_active_key_probe_cdp(
                         reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1")
                     }
                 } else if expression.contains("\"kind\":\"reel_next_target\"") {
-                    if matches!(
+                    if matches!(scenario, FacebookReelKeyScenario::UnsafeNextTarget) {
+                        router_cdp(
+                            "reel_next_target",
+                            json!({
+                                "ok": true,
+                                "noteId": "https://www.facebook.com/reel/1",
+                                "videoKey": "video-1@element:1",
+                                "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
+                                "inputSafe": false,
+                                "found": false,
+                                "ambiguous": false
+                            }),
+                        )
+                    } else if matches!(
                         scenario,
                         FacebookReelKeyScenario::VerticalWheelMoves
                             | FacebookReelKeyScenario::VerticalNeitherMoves
@@ -5569,6 +5592,7 @@ async fn spawn_facebook_reel_active_key_probe_cdp(
                                 "noteId": "https://www.facebook.com/reel/1",
                                 "videoKey": "video-1@element:1",
                                 "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
+                                "inputSafe": true,
                                 "found": false,
                                 "ambiguous": true
                             }),
@@ -5660,6 +5684,7 @@ fn reel_axis_only_target_cdp(
             "noteId": note_id,
             "videoKey": video_key,
             "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
+            "inputSafe": true,
             "found": false,
             "ambiguous": false,
             "axis": axis,
@@ -5676,6 +5701,7 @@ fn reel_next_target_cdp(note_id: &str, video_key: &str, axis: &str, found: bool)
             "noteId": note_id,
             "videoKey": video_key,
             "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
+            "inputSafe": true,
             "found": found,
             "ambiguous": false,
             "axis": axis,
