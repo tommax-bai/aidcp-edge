@@ -2314,6 +2314,91 @@ test('Facebook 未启动时隐藏缓存获得感卡片，切换平台不残留�
   assert.equal($(w, '#runtime-guidance').dataset.mode, 'first-post');
 });
 
+test('Facebook 首作寻找、首作生成与普通运行都隐藏整张获得感卡，XHS 保持原卡', async () => {
+  const now = Date.now();
+  const xhs = makeStatus({
+    envId: 'xhs-active',
+    account: { id: 'xhs-active', name: '小红书账号' },
+    dailyUsage: {
+      totals: { view: 4 },
+      quotas: { view: 120 },
+      firstPost: { state: 'searching', viewed: 4, target: 20, startedAt: now - 60_000 },
+    },
+  });
+  const facebookSearching = makeStatus({
+    envId: 'fb-searching',
+    account: { id: 'fb-searching', name: 'FB Searching' },
+    presence: { text: '正在观察 Facebook 推荐内容…', at: new Date(now - 10_000).toISOString() },
+    dailyUsage: {
+      totals: { view: 4 },
+      quotas: { view: 120 },
+      firstPost: { state: 'searching', viewed: 4, target: 20, startedAt: now - 60_000 },
+    },
+  });
+  const facebookGenerating = makeStatus({
+    envId: 'fb-generating',
+    account: { id: 'fb-generating', name: 'FB Generating' },
+    presence: { text: '正在生成待确认内容…', at: new Date(now - 10_000).toISOString() },
+    dailyUsage: {
+      totals: { view: 14 },
+      quotas: { view: 120 },
+      firstPost: { state: 'generating', viewed: 14, target: 20, startedAt: now - 60_000, sourceId: 'post-1' },
+    },
+  });
+  const facebookRunning = makeStatus({
+    envId: 'fb-running',
+    account: { id: 'fb-running', name: 'FB Running' },
+    presence: { text: '正在认真阅读一条 Facebook 推荐内容…', at: new Date(now - 10_000).toISOString() },
+    dailyUsage: {
+      totals: { view: 17 },
+      quotas: { view: 120 },
+    },
+  });
+  const { w } = await boot({}, {
+    fleetGet: async () => ({
+      environments: [
+        { envId: 'xhs-active', name: '小红书账号', platform: 'xiaohongshu', status: xhs },
+        { envId: 'fb-searching', name: 'FB Searching', platform: 'facebook', status: facebookSearching },
+        { envId: 'fb-generating', name: 'FB Generating', platform: 'facebook', status: facebookGenerating },
+        { envId: 'fb-running', name: 'FB Running', platform: 'facebook', status: facebookRunning },
+      ],
+      selectedEnvId: 'xhs-active',
+    }),
+    delegatedTaskList: async () => ({ ok: true, data: { tasks: [] } }),
+  });
+
+  assert.equal(hidden($(w, '#runtime-guidance')), false);
+  assert.equal($(w, '#runtime-guidance').dataset.mode, 'first-post');
+
+  const select = async (envId: string) => {
+    ($(w, `[data-env-id="${envId}"]`) as HTMLElement).click();
+    await gestureTick();
+    for (let i = 0; i < 5; i += 1) await tick();
+  };
+
+  for (const [envId, presenceText] of [
+    ['fb-searching', '正在观察 Facebook 推荐内容'],
+    ['fb-generating', '正在生成待确认内容'],
+    ['fb-running', '正在认真阅读一条 Facebook 推荐内容'],
+  ]) {
+    await select(envId);
+    assert.equal($(w, '#daily-summary').dataset.platform, 'facebook');
+    assert.equal(hidden($(w, '#runtime-guidance')), true, `${envId} 不得保留获得感卡空壳`);
+    assert.equal($(w, '#runtime-guidance').hasAttribute('data-mode'), false);
+    assert.equal($(w, '#runtime-guidance-progress').textContent, '');
+    assert.match($(w, '#presence-text').textContent ?? '', new RegExp(presenceText), '顶部真实状态必须保留');
+    assert.equal(hidden($(w, '#daily-summary')), false, '今日进展必须保留');
+    assert.equal(hidden($(w, '#pub-card')), false, '发布卡必须保留');
+  }
+
+  await select('xhs-active');
+  assert.equal($(w, '#daily-summary').dataset.platform, 'xiaohongshu');
+  assert.equal(hidden($(w, '#runtime-guidance')), false, '切回 XHS 后必须恢复原卡');
+  assert.equal($(w, '#runtime-guidance').dataset.mode, 'first-post');
+  assert.match($(w, '#runtime-guidance-flow').textContent ?? '', /看趋势[\s\S]*找匹配[\s\S]*开始创作/);
+  assert.match($(w, '#runtime-guidance-progress').textContent ?? '', /4\/20/);
+});
+
 // ── 三段价值流程不再附带七段详细步骤 ──
 test('运行步骤入口与七段详细步骤从 DOM、脚本和样式中彻底移除', async () => {
   const { w } = await boot();

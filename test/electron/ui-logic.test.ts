@@ -427,6 +427,20 @@ test('运行价值说明：新鲜浏览事件先说明正在寻找内容灵感',
   });
 });
 
+test('运行价值说明：Facebook 普通运行中隐藏整张卡，小红书与未知平台保持原卡', () => {
+  const now = Date.now();
+  const status = st({
+    presence: { text: '正在认真读「x」…', at: new Date(now - 10_000).toISOString() },
+    dailyUsage: {
+      totals: { view: 12, collect: 2 },
+      quotas: { view: 150 },
+    },
+  });
+  assert.equal(uiLogic.runtimeGuidanceView(status, now, 'facebook'), null);
+  assert.equal(uiLogic.runtimeGuidanceView(status, now, 'xiaohongshu')?.mode, 'running');
+  assert.equal(uiLogic.runtimeGuidanceView(status, now)?.mode, 'running', '未知平台不得继承 Facebook 闸门');
+});
+
 test('运行价值说明：日常进度分母来自今日目标时，分子也使用今日浏览累计', () => {
   const now = Date.now();
   const v = uiLogic.runtimeGuidanceView(st({
@@ -518,14 +532,25 @@ test('运行价值说明：Facebook 未启动优先隐藏缓存进度，并兼�
   assert.equal(uiLogic.runtimeGuidanceView(legacyStopped, now)?.mode, 'first-post', '未知平台不得按 Facebook 隐藏');
 });
 
-test('运行价值说明：Facebook 仅精确隐藏 stopped，其他生命周期继续按现有证据显示', () => {
+test('运行价值说明：Facebook 首作寻找与生成中隐藏整张卡，小红书保持原卡', () => {
   const now = Date.now();
-  const dailyUsage = {
-    firstPost: { state: 'searching', viewed: 4, target: 20, startedAt: now - 60_000 },
-  };
-  for (const automationState of ['starting', 'waiting_resource', 'ready', 'running', 'paused', 'pausing', 'stopping', 'error']) {
-    const view = uiLogic.runtimeGuidanceView(st({ automationState, dailyUsage }), now, 'facebook');
-    assert.equal(view?.mode, 'first-post', `${automationState} 不得被当成未启动`);
+  for (const firstPostState of ['searching', 'generating']) {
+    const dailyUsage = {
+      firstPost: { state: firstPostState, viewed: 4, target: 20, startedAt: now - 60_000 },
+    };
+    for (const automationState of ['starting', 'waiting_resource', 'ready', 'running', 'paused', 'pausing', 'stopping', 'error']) {
+      const status = st({ automationState, dailyUsage });
+      assert.equal(
+        uiLogic.runtimeGuidanceView(status, now, 'facebook'),
+        null,
+        `${firstPostState}/${automationState} 的 Facebook 首作卡必须整张隐藏`,
+      );
+      assert.equal(
+        uiLogic.runtimeGuidanceView(status, now, 'xiaohongshu')?.mode,
+        'first-post',
+        `${firstPostState}/${automationState} 不得影响小红书`,
+      );
+    }
   }
 });
 
@@ -623,6 +648,60 @@ test('运行价值说明：本轮等待缺少浏览配额字段时仍展示完�
   });
   assert.equal(v?.resume, '');
   assert.equal(v?.note, '');
+});
+
+test('运行价值说明：Facebook 仍保留本轮、小时间隔与今日完成卡', () => {
+  const now = Date.now();
+  const presence = { text: '旧事件', at: new Date(now - 6 * 60_000).toISOString() };
+  const session = st({
+    session: 'resting',
+    presence,
+    dailyUsage: {
+      windows: {
+        session: {
+          active: true,
+          releaseAt: now + 20 * 60_000,
+          totals: { view: 12 },
+          quotas: { view: 12 },
+          saturated: ['view'],
+        },
+      },
+    },
+  });
+  const hour = st({
+    session: 'resting',
+    presence,
+    dailyUsage: {
+      windows: {
+        hour: {
+          active: true,
+          releaseAt: now + 30 * 60_000,
+          totals: { view: 24 },
+          quotas: { view: 24 },
+          saturated: ['view'],
+        },
+      },
+    },
+  });
+  const day = st({
+    session: 'resting',
+    presence,
+    dailyUsage: {
+      windows: {
+        day: {
+          active: true,
+          releaseAt: now + 8 * 60 * 60_000,
+          totals: { view: 120 },
+          quotas: { view: 120 },
+          saturated: ['view'],
+        },
+      },
+    },
+  });
+
+  assert.equal(uiLogic.runtimeGuidanceView(session, now, 'facebook')?.mode, 'session');
+  assert.equal(uiLogic.runtimeGuidanceView(hour, now, 'facebook')?.mode, 'hour');
+  assert.equal(uiLogic.runtimeGuidanceView(day, now, 'facebook')?.mode, 'day');
 });
 
 test('运行价值说明：单项互动完成不升级为全局浏览间隔', () => {

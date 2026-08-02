@@ -436,11 +436,13 @@
 
   function runtimeGuidanceView(status, nowMs, platform) {
     const s = status || {};
+    const facebook = platform === 'facebook';
     // Facebook 未启动时，缓存的首帖 / 窗口 / 今日成果不代表自动化仍在推进。
     // 只匹配标准化后的 stopped；待机、暂停、排队、启动与异常继续走既有证据规则。
-    if (platform === 'facebook' && lifecycleView(s).automationState === 'stopped') return null;
+    if (facebook && lifecycleView(s).automationState === 'stopped') return null;
     const firstPost = firstPostGuidance(s);
-    if (firstPost) return firstPost;
+    // Facebook 保留完整的人设完成弹窗，但主运行区不再重复展示寻找/生成首作的大卡。
+    if (firstPost) return facebook ? null : firstPost;
     const p = s.presence || null;
     const at = p && p.at ? Date.parse(p.at) : NaN;
     const running = s.edge === 'running' && s.session === 'running';
@@ -466,6 +468,8 @@
       };
     }
     if (running && p && p.text && fresh) {
+      // 顶部真实动作与今日进展已经承载运行状态；Facebook 不再追加普通运行获得感卡。
+      if (facebook) return null;
       const window = explorationWindow(s, nowMs);
       const progress = explorationProgress(s, window, false, day);
       if (harvest) {
