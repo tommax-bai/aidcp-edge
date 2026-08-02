@@ -324,6 +324,27 @@ test('开发者详情：旧状态为空态，结构化命令展示诚实阶段�
   assert.doesNotMatch($(w, '#activity-stream').textContent || '', /已交给执行器|interaction\.comment/);
 });
 
+test('开发者详情：Reels 入口显示入口意图且仍只声明已交给执行器', async () => {
+  const now = Date.now();
+  const w = await boot(makeStub({
+    getStatus: async () => makeStatus({
+      commandDiagnostics: [{
+        key: 'abcd1234',
+        type: 'page.scroll',
+        stage: 'dispatched',
+        summary: '进入 Reels 主浏览',
+        receivedAt: now - 1_000,
+        updatedAt: now,
+      }],
+    }),
+  }));
+  const item = w.document.querySelector('[data-command-key="abcd1234"]') as unknown as HTMLElement;
+  assert.match(item.textContent || '', /进入 Reels/);
+  assert.doesNotMatch(item.textContent || '', /页面滚动|滚动当前页面|步骤已完成/);
+  assert.match(item.textContent || '', /已交给执行器/);
+  assert.match($(w, '#dev-section').textContent || '', /不代表平台成功/);
+});
+
 test('开发者详情：命令按当前环境隔离，非法或过期状态不渲染', async () => {
   let pushStatus: ((status: unknown) => void) | undefined;
   const now = Date.now();

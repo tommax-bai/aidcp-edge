@@ -68,3 +68,20 @@ test('command diagnostics: malformed enums and unknown command payload fall back
   assert.equal(malformed, '发布原子步骤，序号 0');
   assert.equal(malformed.includes('secret'), false);
 });
+
+test('command diagnostics: Reels entry reasons are named without changing ordinary page scrolls', () => {
+  assert.equal(
+    summarizeCommand('page.scroll', { reason: 'facebook_reels_primary' }),
+    '进入 Reels 主浏览',
+  );
+  assert.equal(
+    summarizeCommand('page.scroll', { reason: 'empty_feed_reels_fallback' }),
+    '信息流结束，进入 Reels',
+  );
+  assert.equal(summarizeCommand('page.scroll', { reason: 'feed_scroll' }), '滚动当前页面');
+  assert.equal(
+    summarizeCommand('page.scroll', { reason: 'facebook_reels_primary', url: 'https://secret.test/reels' })
+      .includes('secret'),
+    false,
+  );
+});

@@ -200,7 +200,7 @@ pub(crate) async fn execute_facebook_page_scroll(
         )
         .await;
     }
-    if !before.ok || before.video_key.is_none() {
+    if !before.ok || before.video_key.is_none() || !before.is_keyboard_input_safe() {
         return Ok(facebook_scroll_failure(
             EffectPhase::NotStarted,
             "no_target",
@@ -208,44 +208,78 @@ pub(crate) async fn execute_facebook_page_scroll(
     }
 
     let navigation = probe_facebook_reel_next_target(session).await?;
-    if !reel_navigation_target_matches(&navigation, &before) {
+    if !reel_navigation_probe_matches_active(&navigation, &before) {
         return Ok(facebook_scroll_failure(
             EffectPhase::NotStarted,
             "no_target",
         ));
     }
-    let Some(axis) = navigation.axis else {
-        return Ok(facebook_scroll_failure(
-            EffectPhase::NotStarted,
-            "no_target",
-        ));
-    };
-    let (key, key_code) = reel_forward_key(axis);
-    session
-        .cdp
-        .dispatch_key("rawKeyDown", key, key, key_code)
-        .await?;
-    session
-        .cdp
-        .dispatch_key("keyUp", key, key, key_code)
-        .await?;
-    if wait_for_facebook_reel_movement(session, &before)
-        .await?
-        .is_some()
-    {
+    let key_order = reel_key_order(navigation.axis, session.facebook.preferred_reel_axis);
+    let last_key_axis = key_order[1];
+    for axis in key_order {
+        let (key, key_code) = reel_forward_key(axis);
+        session
+            .cdp
+            .dispatch_key("rawKeyDown", key, key, key_code)
+            .await?;
+        session
+            .cdp
+            .dispatch_key("keyUp", key, key, key_code)
+            .await?;
+        if wait_for_facebook_reel_movement(session, &before)
+            .await?
+            .is_some()
+        {
+            session.facebook.preferred_reel_axis = Some(axis);
+            return finish_facebook_reel_transition(session, command, &before).await;
+        }
+
+        // The observation loop may finish one scheduling turn before Facebook commits the
+        // transition. This fresh pre-commit readback both catches that late movement and proves
+        // that the second key would still target the exact same safe Reel.
+        let fresh = probe_facebook_reel(session).await?;
+        if reel_transition_observed(&fresh, &before) {
+            session.facebook.preferred_reel_axis = Some(axis);
+            return finish_facebook_reel_transition(session, command, &before).await;
+        }
+        if !reel_probe_matches(&fresh, &before) || !fresh.is_keyboard_input_safe() {
+            return Ok(facebook_scroll_failure(
+                EffectPhase::Ambiguous,
+                "reels_navigation_unconfirmed",
+            ));
+        }
+        if session.facebook.preferred_reel_axis == Some(axis) {
+            session.facebook.preferred_reel_axis = None;
+        }
+    }
+
+    let mut target = probe_facebook_reel_next_target(session).await?;
+    if reel_target_transition_observed(&target, &before) {
+        session.facebook.preferred_reel_axis = Some(last_key_axis);
         return finish_facebook_reel_transition(session, command, &before).await;
     }
+    if !reel_navigation_target_matches(&target, &before) {
+        return Ok(facebook_scroll_failure(
+            EffectPhase::Ambiguous,
+            "reels_navigation_unconfirmed",
+        ));
+    }
+    let Some(axis) = target.axis else {
+        return Ok(facebook_scroll_failure(
+            EffectPhase::Ambiguous,
+            "reels_navigation_unconfirmed",
+        ));
+    };
 
     if axis == facebook::FacebookReelAxis::Vertical {
         let before_wheel = probe_facebook_reel(session).await?;
         if reel_transition_observed(&before_wheel, &before) {
+            session.facebook.preferred_reel_axis = Some(last_key_axis);
             return finish_facebook_reel_transition(session, command, &before).await;
         }
-        let Some(rect) = before_wheel
-            .video_rect
-            .as_ref()
-            .filter(|_| reel_probe_matches(&before_wheel, &before))
-        else {
+        let Some(rect) = before_wheel.video_rect.as_ref().filter(|_| {
+            reel_probe_matches(&before_wheel, &before) && before_wheel.is_keyboard_input_safe()
+        }) else {
             return Ok(facebook_scroll_failure(
                 EffectPhase::Ambiguous,
                 "reels_navigation_unconfirmed",
@@ -277,9 +311,9 @@ pub(crate) async fn execute_facebook_page_scroll(
         {
             return finish_facebook_reel_transition(session, command, &before).await;
         }
+        target = probe_facebook_reel_next_target(session).await?;
     }
 
-    let target = probe_facebook_reel_next_target(session).await?;
     if reel_target_transition_observed(&target, &before) {
         return finish_facebook_reel_transition(session, command, &before).await;
     }
@@ -347,7 +381,7 @@ async fn wait_for_facebook_reel_movement(
     Ok(None)
 }
 
-async fn finish_facebook_reel_transition(
+pub(crate) async fn finish_facebook_reel_transition(
     session: &mut EngineSession,
     command: &NativeCommand,
     previous: &facebook::FacebookReelProbe,
@@ -382,12 +416,25 @@ fn reel_probe_matches(
         && (previous.note_id.is_none() || current.note_id == previous.note_id)
 }
 
+fn reel_navigation_probe_matches_active(
+    target: &facebook::FacebookReelNextTarget,
+    previous: &facebook::FacebookReelProbe,
+) -> bool {
+    // Control ambiguity is intentionally not an admission gate for keyboard probing. Only the
+    // exact active Reel binding matters here; pointer safety remains in
+    // `reel_navigation_target_matches` below.
+    target.ok
+        && target.video_key == previous.video_key
+        && (previous.note_id.is_none() || target.note_id == previous.note_id)
+}
+
 fn reel_navigation_target_matches(
     target: &facebook::FacebookReelNextTarget,
     previous: &facebook::FacebookReelProbe,
 ) -> bool {
-    // A proven axis may be keyboard-only when its overlay is unsafe to click. Every other
-    // `found:false` reason remains pre-dispatch so a disabled forward control cannot emit a key.
+    // A proven axis may still authorize the vertical wheel when its overlay is unsafe to click.
+    // Every other `found:false` reason blocks the post-key pointer/wheel ladder; it does not gate
+    // the bounded keyboard discovery above.
     let input_eligible = if target.found {
         target.reason.is_none()
     } else {
@@ -425,6 +472,20 @@ pub(crate) fn reel_forward_key(axis: facebook::FacebookReelAxis) -> (&'static st
         facebook::FacebookReelAxis::Vertical => ("ArrowDown", 40),
         facebook::FacebookReelAxis::Horizontal => ("ArrowRight", 39),
     }
+}
+
+pub(crate) fn reel_key_order(
+    structural_hint: Option<facebook::FacebookReelAxis>,
+    preferred: Option<facebook::FacebookReelAxis>,
+) -> [facebook::FacebookReelAxis; 2] {
+    let first = structural_hint
+        .or(preferred)
+        .unwrap_or(facebook::FacebookReelAxis::Horizontal);
+    let second = match first {
+        facebook::FacebookReelAxis::Vertical => facebook::FacebookReelAxis::Horizontal,
+        facebook::FacebookReelAxis::Horizontal => facebook::FacebookReelAxis::Vertical,
+    };
+    [first, second]
 }
 
 #[cfg(test)]

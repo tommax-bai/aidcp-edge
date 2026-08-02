@@ -234,6 +234,76 @@ async fn facebook_initial_scan_navigation_failure_never_reads_the_persisted_page
 }
 
 #[tokio::test]
+async fn facebook_reels_entry_success_stays_background_only() {
+    let (outcome, requests) =
+        run_facebook_reels_entry(FacebookReelsEntryScenario::FirstNavigationSucceeds).await;
+
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    assert_eq!(method_count(&requests, "Page.navigate"), 1);
+    assert_eq!(method_count(&requests, "Page.bringToFront"), 0);
+}
+
+#[tokio::test]
+async fn facebook_reels_entry_foregrounds_once_only_after_ineffective_navigation() {
+    let (outcome, requests) =
+        run_facebook_reels_entry(FacebookReelsEntryScenario::RetryNavigationSucceeds).await;
+
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    assert_eq!(method_count(&requests, "Page.navigate"), 2);
+    assert_eq!(method_count(&requests, "Page.bringToFront"), 1);
+    let first_navigation = method_index(&requests, "Page.navigate", 0);
+    let foreground = method_index(&requests, "Page.bringToFront", 0);
+    let second_navigation = method_index(&requests, "Page.navigate", 1);
+    assert!(first_navigation < foreground && foreground < second_navigation);
+    assert!(
+        requests[foreground + 1..second_navigation]
+            .iter()
+            .any(|request| request["method"] == "Runtime.evaluate")
+    );
+}
+
+#[tokio::test]
+async fn facebook_reels_entry_late_surface_transition_suppresses_navigation_retry() {
+    let (outcome, requests) =
+        run_facebook_reels_entry(FacebookReelsEntryScenario::ActivationRevealsReels).await;
+
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    assert_eq!(method_count(&requests, "Page.navigate"), 1);
+    assert_eq!(method_count(&requests, "Page.bringToFront"), 1);
+}
+
+#[tokio::test]
+async fn facebook_reels_entry_does_not_foreground_a_reached_surface_with_unhydrated_video() {
+    let (outcome, requests) =
+        run_facebook_reels_entry(FacebookReelsEntryScenario::ReelsWithoutCards).await;
+
+    assert_eq!(outcome.effect_phase, EffectPhase::Ambiguous);
+    assert!(
+        outcome.error.is_none(),
+        "hydration miss must remain a typed receipt: {:?}",
+        outcome.error
+    );
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("entry receipt") else {
+        panic!("expected entry action receipt")
+    };
+    assert_eq!(receipt.reason.as_deref(), Some("reels_identity_unresolved"));
+    assert_eq!(method_count(&requests, "Page.navigate"), 1);
+    assert_eq!(method_count(&requests, "Page.bringToFront"), 0);
+}
+
+#[tokio::test]
+async fn facebook_reels_entry_blocker_and_document_drift_suppress_foreground_recovery() {
+    for scenario in [
+        FacebookReelsEntryScenario::BlockedByLogin,
+        FacebookReelsEntryScenario::DocumentDrifts,
+    ] {
+        let (outcome, requests) = run_facebook_reels_entry(scenario).await;
+        assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+        assert_eq!(method_count(&requests, "Page.bringToFront"), 0);
+    }
+}
+
+#[tokio::test]
 async fn facebook_feed_scroll_dispatches_a_humanized_multi_frame_wheel_gesture() {
     let (port, server) = spawn_facebook_feed_scroll_cdp().await;
     let mut engine = Engine::default();
@@ -719,11 +789,13 @@ async fn facebook_anonymous_reel_axis_only_navigation_uses_horizontal_arrow() {
 }
 
 #[tokio::test]
-async fn facebook_reel_disabled_forward_control_dispatches_no_input() {
-    let (port, server) = spawn_facebook_reel_disabled_forward_cdp().await;
+async fn facebook_reel_competing_controls_still_discover_horizontal_key() {
+    let (port, server) =
+        spawn_facebook_reel_active_key_probe_cdp(FacebookReelKeyScenario::RightMoves).await;
     let mut engine = Engine::default();
     let mut open = session_open(port);
     open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 8_000;
     engine.open(&open).await.expect("open Facebook session");
 
     let outcome = engine
@@ -740,43 +812,98 @@ async fn facebook_reel_disabled_forward_control_dispatches_no_input() {
             }),
         })
         .await
-        .expect("disabled forward Reel scroll");
+        .expect("competing-control Reel scroll");
 
-    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
     engine.shutdown().await;
-    let requests = server.await.expect("disabled forward Reel fake CDP");
-    assert!(requests.iter().all(|request| {
-        !request["method"]
-            .as_str()
-            .is_some_and(|method| method.starts_with("Input."))
-    }));
+    let requests = server.await.expect("competing-control Reel fake CDP");
+    assert_eq!(dispatched_keys(&requests), vec!["ArrowRight", "ArrowRight"]);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Input.dispatchMouseEvent")
+    );
 }
 
 #[tokio::test]
-async fn facebook_reel_scroll_uses_one_active_video_wheel_after_unchanged_arrow() {
-    let (port, server) = spawn_facebook_reel_wheel_cdp().await;
-    let mut engine = Engine::default();
-    let mut open = session_open(port);
-    open.params.platform = Platform::Facebook;
-    // 两个上限都要抬：只抬下面那条命令死线是空操作，实际预算被会话的默认 2s 卡死。见常量注释。
-    open.params.timeout_ms = HUMANIZED_GESTURE_SESSION_TIMEOUT_MS;
-    engine.open(&open).await.expect("open Facebook session");
+async fn facebook_reel_unknown_axis_tries_down_only_after_fresh_right_miss() {
+    let (outcome, requests) =
+        run_facebook_reel_active_key_probe(FacebookReelKeyScenario::RightMissesDownMoves).await;
 
-    let outcome = engine
-        .execute(&CommandRecord {
-            protocol_version: 2,
-            id: "reel-scroll-wheel-1".to_owned(),
-            session_id: "session-1".to_owned(),
-            task_id: "browse-1".to_owned(),
-            command_id: 1,
-            deadline_unix_ms: unix_time_ms() + HUMANIZED_GESTURE_DEADLINE_MS,
-            command: NativeCommand::PageScroll(PageScrollParams {
-                reason: Some("feed_scroll".to_owned()),
-                dwell_ms: None,
-            }),
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    assert_eq!(
+        dispatched_keys(&requests),
+        vec!["ArrowRight", "ArrowRight", "ArrowDown", "ArrowDown"]
+    );
+    let key_up_right = requests
+        .iter()
+        .position(|request| {
+            request["method"] == "Input.dispatchKeyEvent"
+                && request["params"]["type"] == "keyUp"
+                && request["params"]["key"] == "ArrowRight"
         })
-        .await
-        .expect("Reel wheel fallback");
+        .expect("right keyUp");
+    let key_down_down = requests
+        .iter()
+        .position(|request| {
+            request["method"] == "Input.dispatchKeyEvent"
+                && request["params"]["type"] == "rawKeyDown"
+                && request["params"]["key"] == "ArrowDown"
+        })
+        .expect("down rawKeyDown");
+    assert!(
+        requests[key_up_right + 1..key_down_down]
+            .iter()
+            .any(|request| request["method"] == "Runtime.evaluate")
+    );
+}
+
+#[tokio::test]
+async fn facebook_reel_late_right_transition_suppresses_down_key() {
+    let (outcome, requests) =
+        run_facebook_reel_active_key_probe(FacebookReelKeyScenario::RightMovesLate).await;
+
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    assert_eq!(dispatched_keys(&requests), vec!["ArrowRight", "ArrowRight"]);
+}
+
+#[tokio::test]
+async fn facebook_reel_unknown_axis_is_ambiguous_after_both_keys_leave_it_unchanged() {
+    let (outcome, requests) =
+        run_facebook_reel_active_key_probe(FacebookReelKeyScenario::NeitherMoves).await;
+
+    assert_eq!(outcome.effect_phase, EffectPhase::Ambiguous);
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("scroll receipt") else {
+        panic!("expected scroll action receipt")
+    };
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("reels_navigation_unconfirmed")
+    );
+    assert_eq!(
+        dispatched_keys(&requests),
+        vec!["ArrowRight", "ArrowRight", "ArrowDown", "ArrowDown"]
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "Input.dispatchMouseEvent")
+    );
+}
+
+#[tokio::test]
+async fn facebook_reel_unsafe_keyboard_focus_blocks_active_probe_before_input() {
+    let (outcome, requests) =
+        run_facebook_reel_active_key_probe(FacebookReelKeyScenario::UnsafeFocus).await;
+
+    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+    assert!(dispatched_keys(&requests).is_empty());
+}
+
+#[tokio::test]
+async fn facebook_reel_scroll_uses_one_active_video_wheel_after_both_keys_miss() {
+    let (outcome, requests) =
+        run_facebook_reel_active_key_probe(FacebookReelKeyScenario::VerticalWheelMoves).await;
     let CommandOutput::PageCards(cards) = outcome.output.expect("Reel cards") else {
         panic!("expected Reel cards")
     };
@@ -785,8 +912,6 @@ async fn facebook_reel_scroll_uses_one_active_video_wheel_after_unchanged_arrow(
         Some("https://www.facebook.com/reel/2")
     );
 
-    engine.shutdown().await;
-    let requests = server.await.expect("Facebook Reel wheel fake CDP");
     assert!(
         requests
             .iter()
@@ -1051,28 +1176,8 @@ async fn facebook_reel_scroll_without_active_video_does_not_foreground_or_dispat
 #[tokio::test]
 async fn facebook_reel_scroll_returns_ambiguous_after_dispatched_methods_without_fabricated_cards()
 {
-    let (port, server) = spawn_facebook_reel_no_target_cdp().await;
-    let mut engine = Engine::default();
-    let mut open = session_open(port);
-    open.params.platform = Platform::Facebook;
-    open.params.timeout_ms = 8_000;
-    engine.open(&open).await.expect("open Facebook session");
-
-    let outcome = engine
-        .execute(&CommandRecord {
-            protocol_version: 2,
-            id: "reel-scroll-no-target-1".to_owned(),
-            session_id: "session-1".to_owned(),
-            task_id: "browse-1".to_owned(),
-            command_id: 1,
-            deadline_unix_ms: unix_time_ms() + 8_000,
-            command: NativeCommand::PageScroll(PageScrollParams {
-                reason: Some("feed_scroll".to_owned()),
-                dwell_ms: None,
-            }),
-        })
-        .await
-        .expect("Reel no-target terminal");
+    let (outcome, requests) =
+        run_facebook_reel_active_key_probe(FacebookReelKeyScenario::VerticalNeitherMoves).await;
 
     assert_eq!(outcome.effect_phase, EffectPhase::Ambiguous);
     let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("scroll receipt") else {
@@ -1085,8 +1190,6 @@ async fn facebook_reel_scroll_returns_ambiguous_after_dispatched_methods_without
         Some("reels_navigation_unconfirmed")
     );
 
-    engine.shutdown().await;
-    let requests = server.await.expect("Facebook Reel no-target fake CDP");
     assert!(
         requests
             .iter()
@@ -3050,6 +3153,23 @@ fn pointer_event_count(requests: &[Value], kind: &str) -> usize {
             request["method"] == "Input.dispatchMouseEvent" && request["params"]["type"] == kind
         })
         .count()
+}
+
+fn method_count(requests: &[Value], method: &str) -> usize {
+    requests
+        .iter()
+        .filter(|request| request["method"] == method)
+        .count()
+}
+
+fn method_index(requests: &[Value], method: &str, occurrence: usize) -> usize {
+    requests
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| request["method"] == method)
+        .nth(occurrence)
+        .map(|(index, _)| index)
+        .unwrap_or_else(|| panic!("missing {method} occurrence {occurrence}"))
 }
 
 /// 一次拟人点击的**可断言形状**：逐帧移动（帧数按距离与分布采样、不是常数）→ 按下 → 抬起，
@@ -5137,43 +5257,239 @@ async fn spawn_facebook_reel_anonymous_horizontal_cdp() -> (u16, tokio::task::Jo
     (port, server)
 }
 
-async fn spawn_facebook_reel_disabled_forward_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+#[derive(Clone, Copy)]
+enum FacebookReelsEntryScenario {
+    FirstNavigationSucceeds,
+    RetryNavigationSucceeds,
+    ActivationRevealsReels,
+    ReelsWithoutCards,
+    BlockedByLogin,
+    DocumentDrifts,
+}
+
+#[derive(Clone, Copy)]
+enum FacebookEntryPageState {
+    Feed,
+    Reels,
+    Login,
+    Drifted,
+}
+
+async fn run_facebook_reels_entry(
+    scenario: FacebookReelsEntryScenario,
+) -> (StoredCommandResult, Vec<Value>) {
+    let (port, server) = spawn_facebook_reels_entry_cdp(scenario).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 15_000;
+    engine.open(&open).await.expect("open Facebook session");
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "reels-entry-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 15_000,
+            command: NativeCommand::PageScroll(PageScrollParams {
+                reason: Some("facebook_reels_primary".to_owned()),
+                dwell_ms: None,
+            }),
+        })
+        .await
+        .expect("Reels entry command");
+    engine.shutdown().await;
+    let requests = server.await.expect("Reels entry fake CDP");
+    (outcome, requests)
+}
+
+async fn spawn_facebook_reels_entry_cdp(
+    scenario: FacebookReelsEntryScenario,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let port = listener.local_addr().expect("address").port();
+    let initial_url = if matches!(scenario, FacebookReelsEntryScenario::BlockedByLogin) {
+        "https://www.facebook.com/login/"
+    } else {
+        "https://www.facebook.com/"
+    };
     let server = tokio::spawn(async move {
-        serve_target_listing_for(&listener, port, "https://www.facebook.com/reel/1").await;
+        serve_target_listing_for(&listener, port, initial_url).await;
         let (stream, _) = listener.accept().await.expect("WebSocket request");
         let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
         let mut requests = Vec::new();
-        for _ in 0..3 {
-            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
+        let mut state = if matches!(scenario, FacebookReelsEntryScenario::BlockedByLogin) {
+            FacebookEntryPageState::Login
+        } else {
+            FacebookEntryPageState::Feed
+        };
+        let mut navigation_count = 0_u32;
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            if request["method"] == "Page.navigate" {
+                navigation_count += 1;
+                state = match scenario {
+                    FacebookReelsEntryScenario::FirstNavigationSucceeds
+                    | FacebookReelsEntryScenario::ReelsWithoutCards => {
+                        FacebookEntryPageState::Reels
+                    }
+                    FacebookReelsEntryScenario::RetryNavigationSucceeds
+                        if navigation_count >= 2 =>
+                    {
+                        FacebookEntryPageState::Reels
+                    }
+                    FacebookReelsEntryScenario::DocumentDrifts => FacebookEntryPageState::Drifted,
+                    _ => state,
+                };
+            } else if request["method"] == "Page.bringToFront"
+                && matches!(scenario, FacebookReelsEntryScenario::ActivationRevealsReels)
+            {
+                state = FacebookEntryPageState::Reels;
+            }
+            let result = if request["method"] == "Runtime.evaluate" {
+                let expression = request["params"]["expression"].as_str().unwrap_or_default();
+                if expression.contains("\"kind\":\"page_probe\"") {
+                    facebook_entry_page_probe_cdp(state)
+                } else if expression.contains("\"kind\":\"consent_probe\"") {
+                    facebook_consent_absent_cdp()
+                } else if expression.contains("\"kind\":\"reel_probe\"") {
+                    match state {
+                        FacebookEntryPageState::Reels
+                            if matches!(
+                                scenario,
+                                FacebookReelsEntryScenario::ReelsWithoutCards
+                            ) =>
+                        {
+                            router_cdp(
+                                "reel_probe",
+                                json!({"ok": false, "reason": "no_active_video"}),
+                            )
+                        }
+                        FacebookEntryPageState::Reels => {
+                            reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1")
+                        }
+                        _ => router_cdp("reel_probe", json!({"ok": false, "reason": "not_reel"})),
+                    }
+                } else if expression.contains("\"kind\":\"reel_cards\"") {
+                    if matches!(scenario, FacebookReelsEntryScenario::ReelsWithoutCards) {
+                        reel_empty_cards_cdp()
+                    } else {
+                        reel_cards_cdp("https://www.facebook.com/reel/1")
+                    }
+                } else {
+                    json!({})
+                }
+            } else {
+                json!({})
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
         }
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
-            )
-            .await,
-        );
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                reel_axis_only_target_cdp(
-                    Some("https://www.facebook.com/reel/1"),
-                    "video-1@element:1",
-                    "horizontal",
-                    "next_control_disabled",
-                ),
-            )
-            .await,
-        );
-        let _ = websocket.close(None).await;
         requests
     });
     (port, server)
 }
 
-async fn spawn_facebook_reel_wheel_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+fn facebook_entry_page_probe_cdp(state: FacebookEntryPageState) -> Value {
+    let (path, page_kind, blocking_kind) = match state {
+        FacebookEntryPageState::Feed => ("/", "home", None),
+        FacebookEntryPageState::Reels => ("/reels/", "unknown", None),
+        FacebookEntryPageState::Login => ("/login/", "login", Some("login")),
+        FacebookEntryPageState::Drifted => ("/notifications/", "unknown", None),
+    };
+    router_cdp(
+        "page_probe",
+        json!({
+            "targetId": "",
+            "origin": "https://www.facebook.com",
+            "path": path,
+            "readyState": "complete",
+            "pageKind": page_kind,
+            "blockingKind": blocking_kind,
+            "signals": {
+                "feedCardCount": 1,
+                "noteDetailCount": 0,
+                "loginWallCount": u32::from(blocking_kind == Some("login")),
+                "captchaSignalCount": 0,
+                "dialogCount": 0,
+                "profileSignalCount": 0,
+                "notificationSignalCount": 0,
+                "publishSignalCount": 0,
+                "errorSignalCount": 0,
+                "mainCount": 1
+            }
+        }),
+    )
+}
+
+fn reel_empty_cards_cdp() -> Value {
+    router_cdp(
+        "page_cards",
+        json!({"cards": [], "listKind": "reels", "listState": "present_unreportable"}),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum FacebookReelKeyScenario {
+    RightMoves,
+    RightMissesDownMoves,
+    RightMovesLate,
+    NeitherMoves,
+    UnsafeFocus,
+    VerticalWheelMoves,
+    VerticalNeitherMoves,
+}
+
+async fn run_facebook_reel_active_key_probe(
+    scenario: FacebookReelKeyScenario,
+) -> (StoredCommandResult, Vec<Value>) {
+    let (port, server) = spawn_facebook_reel_active_key_probe_cdp(scenario).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 10_000;
+    engine.open(&open).await.expect("open Facebook session");
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "reel-active-key-probe-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 10_000,
+            command: NativeCommand::PageScroll(PageScrollParams {
+                reason: Some("feed_scroll".to_owned()),
+                dwell_ms: None,
+            }),
+        })
+        .await
+        .expect("active Reels key probe");
+    engine.shutdown().await;
+    let requests = server.await.expect("active Reels key fake CDP");
+    (outcome, requests)
+}
+
+fn dispatched_keys(requests: &[Value]) -> Vec<&str> {
+    requests
+        .iter()
+        .filter(|request| request["method"] == "Input.dispatchKeyEvent")
+        .filter_map(|request| request["params"]["key"].as_str())
+        .collect()
+}
+
+async fn spawn_facebook_reel_active_key_probe_cdp(
+    scenario: FacebookReelKeyScenario,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let port = listener.local_addr().expect("address").port();
     let server = tokio::spawn(async move {
@@ -5181,63 +5497,99 @@ async fn spawn_facebook_reel_wheel_cdp() -> (u16, tokio::task::JoinHandle<Vec<Va
         let (stream, _) = listener.accept().await.expect("WebSocket request");
         let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
         let mut requests = Vec::new();
-        for _ in 0..3 {
-            requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
+        let mut last_key = String::new();
+        let mut probes_after_key = 0_u32;
+        let mut moved = false;
+        while let Some(message) = websocket.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            let request: Value = serde_json::from_str(&text).expect("request JSON");
+            let id = request["id"].as_u64().expect("request id");
+            if request["method"] == "Input.dispatchKeyEvent"
+                && request["params"]["type"] == "rawKeyDown"
+            {
+                last_key = request["params"]["key"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                probes_after_key = 0;
+                moved = matches!(scenario, FacebookReelKeyScenario::RightMoves)
+                    && last_key == "ArrowRight"
+                    || matches!(scenario, FacebookReelKeyScenario::RightMissesDownMoves)
+                        && last_key == "ArrowDown";
+            } else if request["method"] == "Input.dispatchMouseEvent"
+                && request["params"]["type"] == "mouseWheel"
+                && matches!(scenario, FacebookReelKeyScenario::VerticalWheelMoves)
+            {
+                moved = true;
+            }
+            let result = if request["method"] == "Runtime.evaluate" {
+                let expression = request["params"]["expression"].as_str().unwrap_or_default();
+                if expression.contains("\"kind\":\"reel_probe\"") {
+                    if !last_key.is_empty() {
+                        probes_after_key += 1;
+                    }
+                    let late_move = matches!(scenario, FacebookReelKeyScenario::RightMovesLate)
+                        && last_key == "ArrowRight"
+                        && probes_after_key >= 7;
+                    if matches!(scenario, FacebookReelKeyScenario::UnsafeFocus) {
+                        router_cdp(
+                            "reel_probe",
+                            json!({
+                                "ok": true,
+                                "noteId": "https://www.facebook.com/reel/1",
+                                "videoKey": "video-1@element:1",
+                                "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
+                                "inputSafe": false
+                            }),
+                        )
+                    } else if moved || late_move {
+                        reel_probe_cdp("https://www.facebook.com/reel/2", "video-2@element:2")
+                    } else {
+                        reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1")
+                    }
+                } else if expression.contains("\"kind\":\"reel_next_target\"") {
+                    if matches!(
+                        scenario,
+                        FacebookReelKeyScenario::VerticalWheelMoves
+                            | FacebookReelKeyScenario::VerticalNeitherMoves
+                    ) {
+                        reel_next_target_cdp(
+                            "https://www.facebook.com/reel/1",
+                            "video-1@element:1",
+                            "vertical",
+                            true,
+                        )
+                    } else {
+                        router_cdp(
+                            "reel_next_target",
+                            json!({
+                                "ok": true,
+                                "noteId": "https://www.facebook.com/reel/1",
+                                "videoKey": "video-1@element:1",
+                                "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
+                                "found": false,
+                                "ambiguous": true
+                            }),
+                        )
+                    }
+                } else if expression.contains("\"kind\":\"reel_cards\"") {
+                    reel_cards_cdp("https://www.facebook.com/reel/2")
+                } else {
+                    json!({})
+                }
+            } else {
+                json!({})
+            };
+            requests.push(request);
+            websocket
+                .send(Message::Text(
+                    json!({"id":id,"result":result}).to_string().into(),
+                ))
+                .await
+                .expect("CDP response");
         }
-        requests.extend(
-            respond_to_call_capture_all(
-                &mut websocket,
-                reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
-            )
-            .await,
-        );
-        requests.extend(
-            respond_to_call_capture_all(
-                &mut websocket,
-                reel_next_target_cdp(
-                    "https://www.facebook.com/reel/1",
-                    "video-1@element:1",
-                    "vertical",
-                    true,
-                ),
-            )
-            .await,
-        );
-        requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
-        requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
-        for _ in 0..6 {
-            requests.extend(
-                respond_to_call_capture_all(
-                    &mut websocket,
-                    reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
-                )
-                .await,
-            );
-        }
-        requests.extend(
-            respond_to_call_capture_all(
-                &mut websocket,
-                reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
-            )
-            .await,
-        );
-        // 兜底滚轮已改为多帧惯性手势，其帧数不固定：滚轮事件由上面的应答器透明放行，
-        // 脚本这里不再为「单帧滚轮」预留一格。
-        requests.extend(
-            respond_to_call_capture_all(
-                &mut websocket,
-                reel_probe_cdp("https://www.facebook.com/reel/2", "video-2@element:2"),
-            )
-            .await,
-        );
-        requests.extend(
-            respond_to_call_capture_all(
-                &mut websocket,
-                reel_cards_cdp("https://www.facebook.com/reel/2"),
-            )
-            .await,
-        );
-        let _ = websocket.close(None).await;
         requests
     });
     (port, server)
@@ -5259,82 +5611,6 @@ async fn spawn_facebook_reel_missing_active_video_cdp() -> (u16, tokio::task::Jo
             respond_to_call_capture(
                 &mut websocket,
                 router_cdp("reel_probe", json!({"ok": false, "reason": "no_target"})),
-            )
-            .await,
-        );
-        let _ = websocket.close(None).await;
-        requests
-    });
-    (port, server)
-}
-
-async fn spawn_facebook_reel_no_target_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
-    let port = listener.local_addr().expect("address").port();
-    let server = tokio::spawn(async move {
-        serve_target_listing_for(&listener, port, "https://www.facebook.com/reel/1").await;
-        let (stream, _) = listener.accept().await.expect("WebSocket request");
-        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
-        let mut requests = Vec::new();
-        for _ in 0..3 {
-            requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
-        }
-        requests.extend(
-            respond_to_call_capture_all(
-                &mut websocket,
-                reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
-            )
-            .await,
-        );
-        requests.extend(
-            respond_to_call_capture_all(
-                &mut websocket,
-                reel_next_target_cdp(
-                    "https://www.facebook.com/reel/1",
-                    "video-1@element:1",
-                    "vertical",
-                    true,
-                ),
-            )
-            .await,
-        );
-        requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
-        requests.extend(respond_to_call_capture_all(&mut websocket, json!({})).await);
-        for _ in 0..6 {
-            requests.extend(
-                respond_to_call_capture_all(
-                    &mut websocket,
-                    reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
-                )
-                .await,
-            );
-        }
-        requests.extend(
-            respond_to_call_capture_all(
-                &mut websocket,
-                reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
-            )
-            .await,
-        );
-        // 同上：多帧惯性手势的滚轮事件透明放行，脚本不再为单帧滚轮预留一格。
-        for _ in 0..6 {
-            requests.extend(
-                respond_to_call_capture_all(
-                    &mut websocket,
-                    reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
-                )
-                .await,
-            );
-        }
-        requests.extend(
-            respond_to_call_capture_all(
-                &mut websocket,
-                reel_next_target_cdp(
-                    "https://www.facebook.com/reel/1",
-                    "video-1@element:1",
-                    "vertical",
-                    false,
-                ),
             )
             .await,
         );
@@ -5631,48 +5907,6 @@ where
     request
 }
 
-/// 应答一条脚本化的 CDP 请求；沿途出现的指针 / 滚轮事件先就地应答并一并记录。
-///
-/// 拟人化输入是**多帧**的（轨迹帧数、滚轮帧数都按分布采样），一问一答的脚本对不上号——
-/// 这里让输入事件透明通过并保留在记录里，脚本只对下一条非输入请求生效。
-async fn respond_to_call_capture_all<S>(
-    websocket: &mut tokio_tungstenite::WebSocketStream<S>,
-    result: Value,
-) -> Vec<Value>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let mut captured = Vec::new();
-    loop {
-        let message = websocket
-            .next()
-            .await
-            .expect("CDP request")
-            .expect("valid CDP request");
-        let Message::Text(text) = message else {
-            panic!("expected text request");
-        };
-        let request: Value = serde_json::from_str(&text).expect("request JSON");
-        let id = request["id"].as_u64().expect("request id");
-        let pointer_frame = request["method"] == "Input.dispatchMouseEvent";
-        let payload = if pointer_frame {
-            json!({})
-        } else {
-            result.clone()
-        };
-        websocket
-            .send(Message::Text(
-                json!({"id":id,"result":payload}).to_string().into(),
-            ))
-            .await
-            .expect("CDP response");
-        captured.push(request);
-        if !pointer_frame {
-            return captured;
-        }
-    }
-}
-
 async fn reject_call_capture<S>(
     websocket: &mut tokio_tungstenite::WebSocketStream<S>,
     code: i64,
@@ -5723,32 +5957,6 @@ where
         .await
         .expect("CDP response");
 }
-
-/// 拟人手势类用例的墙钟预算。
-///
-/// 这些用例断言的是**手势形状**（帧数 / 落点坐标 / 总位移），墙钟死线在其中只是「别跑成死循环」的
-/// 兜底，不承载任何被断言的语义。而 cargo 会并行跑 14 个测试二进制，负载一上来，同一段带停顿的手势
-/// 真实耗时会被拉长数倍。把兜底值定在手势自身的量级，门禁就变成掷骰子。
-///
-/// ── 上一轮在这里犯的错，必须写下来 ──
-/// 上一轮只把命令死线从 8s 抬到本常量，就宣布「修好了」。**那个改动完全没有生效**：真正的预算是
-/// `engine.rs::remaining_budget` 算出来的
-///     `min(deadline - now, min(session.timeout_ms, 该命令的 ceiling))`
-/// 而 `session_open()` 的 `timeout_ms` 默认是 **2_000**。也就是说无论死线写多大，实际budget 恒为 2 秒——
-/// 抬死线是一次**空操作**。之所以当时看着像修好了，只是因为验证量太小、又恰好没抽到。
-/// 本轮独立目录连跑 14 次全量，这条仍红 2 次（≈14%），失败在 `outcome.output.expect("Reel cards")`：
-/// 命令被外层看门狗掐掉、`output` 为 `None`。
-///
-/// 结论（用这条常量时必须同时做的事）：**两个上限都要抬，只抬一个等于没抬。**
-///   ① 命令死线 `deadline_unix_ms` ← 本常量；
-///   ② 会话 `open.params.timeout_ms`（默认 2s，Facebook 上限 90s、其他平台 30s，见 protocol.rs）。
-/// 断言不会因此变松——形状断言不看时间。真要覆盖「超时会怎样」，请显式写一个小死线 + 小会话预算，
-/// 别指望这些形状用例顺手覆盖到。
-const HUMANIZED_GESTURE_DEADLINE_MS: u64 = 120_000;
-
-/// 与上面配套的会话预算：Facebook 会话允许的最大值（`protocol.rs::MAX_FACEBOOK_TIMEOUT_MS`）。
-/// 单独抬 `HUMANIZED_GESTURE_DEADLINE_MS` 不生效，见那条常量的注释。
-const HUMANIZED_GESTURE_SESSION_TIMEOUT_MS: u64 = 90_000;
 
 fn unix_time_ms() -> u64 {
     SystemTime::now()

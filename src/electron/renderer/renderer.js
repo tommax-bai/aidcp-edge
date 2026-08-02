@@ -2319,7 +2319,9 @@ function renderCommandDiagnostics(status, now = Date.now()) {
     return;
   }
   fields.commandDiagnosticList.innerHTML = entries.map((entry) => {
-    const label = COMMAND_DIAGNOSTIC_LABELS[entry.type] || entry.type;
+    const reelsEntry = entry.type === 'page.scroll'
+      && (entry.summary === '进入 Reels 主浏览' || entry.summary === '信息流结束，进入 Reels');
+    const label = reelsEntry ? '进入 Reels' : (COMMAND_DIAGNOSTIC_LABELS[entry.type] || entry.type);
     const stage = COMMAND_DIAGNOSTIC_STAGES[entry.stage];
     const reason = typeof entry.reason === 'string' ? COMMAND_DIAGNOSTIC_REASONS[entry.reason] : '';
     const detail = reason ? `${entry.summary} · ${reason}` : entry.summary;

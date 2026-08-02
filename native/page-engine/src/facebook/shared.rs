@@ -767,23 +767,6 @@ pub(crate) async fn evaluate_facebook_first_post_router(
     Ok((result.effect_phase, output))
 }
 
-pub(crate) async fn evaluate_facebook_router_until_cards(
-    session: &mut EngineSession,
-    command: &NativeCommand,
-    timeout: Duration,
-) -> Result<(EffectPhase, CommandOutput), EngineError> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let latest = evaluate_facebook_router(session, command).await?;
-        if matches!(&latest.1, CommandOutput::PageCards(cards) if !cards.cards.is_empty())
-            || tokio::time::Instant::now() >= deadline
-        {
-            return Ok(latest);
-        }
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    }
-}
-
 pub(crate) async fn evaluate_facebook_router_until_requested_detail(
     session: &mut EngineSession,
     command: &NativeCommand,

@@ -360,6 +360,7 @@ pub(crate) struct FacebookSessionState {
     pub(crate) seen_post_ids: HashSet<String>,
     pub(crate) consumed_auth_signal_ids: HashSet<String>,
     pub(crate) last_refresh_reload_at_ms: u64,
+    pub(crate) preferred_reel_axis: Option<facebook::FacebookReelAxis>,
 }
 
 impl Default for FacebookSessionState {
@@ -369,6 +370,7 @@ impl Default for FacebookSessionState {
             seen_post_ids: HashSet::new(),
             consumed_auth_signal_ids: HashSet::new(),
             last_refresh_reload_at_ms: 0,
+            preferred_reel_axis: None,
         }
     }
 }
@@ -3981,7 +3983,7 @@ mod tests {
     use crate::facebook::group_join::{
         FacebookJoinPostDecision, facebook_join_post_decision, facebook_join_readiness_decisive,
     };
-    use crate::facebook::reels::{reel_forward_key, reel_identity_moved};
+    use crate::facebook::reels::{reel_forward_key, reel_identity_moved, reel_key_order};
     use crate::facebook::shared::{canonical_facebook_post_id, facebook_scroll_failure};
 
     #[test]
@@ -4387,6 +4389,7 @@ mod tests {
             note_id: Some("https://www.facebook.com/reel/1".to_owned()),
             video_key: Some("video-1@element:1".to_owned()),
             video_rect: None,
+            input_safe: None,
         };
         assert!(!reel_identity_moved(
             Some("https://www.facebook.com/reel/1"),
@@ -4430,6 +4433,18 @@ mod tests {
             reel_forward_key(facebook::FacebookReelAxis::Horizontal),
             ("ArrowRight", 39)
         );
+    }
+
+    #[test]
+    fn reel_key_order_uses_structure_then_session_preference_then_safe_default() {
+        use facebook::FacebookReelAxis::{Horizontal, Vertical};
+
+        assert_eq!(
+            reel_key_order(Some(Vertical), Some(Horizontal)),
+            [Vertical, Horizontal]
+        );
+        assert_eq!(reel_key_order(None, Some(Vertical)), [Vertical, Horizontal]);
+        assert_eq!(reel_key_order(None, None), [Horizontal, Vertical]);
     }
 
     #[test]

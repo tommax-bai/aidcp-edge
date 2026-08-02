@@ -826,6 +826,45 @@ test('Facebook Reels next target resolves one viewport-scale horizontal overlay 
   }
 });
 
+test('Facebook Reels competing disabled media control and viewport overlay remain keyboard-probe eligible', async () => {
+  const dom = install(`
+    <main>
+      <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
+      <button id="media-next" aria-label="Next items" aria-disabled="true"></button>
+      <button id="card-next" aria-label="Next Card"></button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setViewport(dom, 1_440, 893);
+  setRect(dom.window.document.querySelector('video')!, { left: 495, top: 74, right: 946, bottom: 875 });
+  setRect(dom.window.document.querySelector('#media-next')!, { left: 720, top: 780, right: 768, bottom: 828 });
+  setRect(dom.window.document.querySelector('#card-next')!, { left: 946, top: 38, right: 1_440, bottom: 875 });
+
+  const target = await run({ kind: 'reel_next_target', params: {} });
+
+  assert.equal(target.output.value.ok, true);
+  assert.equal(target.output.value.inputSafe, true);
+  assert.equal(target.output.value.axis, undefined);
+  assert.equal(target.output.value.found, false);
+  assert.equal(target.output.value.cx, undefined);
+  assert.equal(target.output.value.cy, undefined);
+});
+
+test('Facebook Reels editable focus blocks page-level keyboard probing', async () => {
+  const dom = install(`
+    <main>
+      <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
+      <textarea id="comment"></textarea>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setRect(dom.window.document.querySelector('video')!, { left: 400, top: 80, right: 1_040, bottom: 760 });
+  (dom.window.document.querySelector('#comment') as HTMLTextAreaElement).focus();
+
+  const probe = await run({ kind: 'reel_probe', params: {} });
+
+  assert.equal(probe.output.value.ok, true);
+  assert.equal(probe.output.value.inputSafe, false);
+});
+
 test('Facebook Reels next target does not infer an axis from one compact generic Next control', async () => {
   const dom = install(`
     <main>
@@ -981,7 +1020,7 @@ test('Facebook Reels next target excludes an outer pair of reaction controls', a
   assert.equal(target.output.value.cy, undefined);
 });
 
-test('Facebook Reels next target refuses a disabled forward control before keyboard input', async () => {
+test('Facebook Reels disabled forward control blocks pointer fallback without blocking key probing', async () => {
   const dom = install(`
     <main>
       <article role="article"><a href="/reel/777/">one</a><video src="one.mp4"></video></article>
@@ -1016,6 +1055,7 @@ test('Facebook Reels next target refuses a disabled forward control before keybo
   assert.equal(target.output.value.ambiguous, false);
   assert.equal(target.output.value.axis, undefined);
   assert.equal(target.output.value.reason, 'next_control_disabled');
+  assert.equal(target.output.value.inputSafe, true);
 });
 
 test('Facebook Reels next target ignores almost entirely offscreen rail remnants', async () => {

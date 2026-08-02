@@ -117,6 +117,10 @@ const NOTE_PURPOSES = new Set(['read', 'navigate']);
 const SEARCH_SOURCES = new Set(['extract_from_liked', 'random_from_interests', 'new_concept', 'manager']);
 const CAPTCHA_REASONS = new Set(['initial', 'refresh', 'retry']);
 const INTERACTION_CHANNELS = new Set(['comment', 'dm']);
+const REELS_ENTRY_SUMMARIES: Readonly<Record<string, string>> = {
+  facebook_reels_primary: '进入 Reels 主浏览',
+  empty_feed_reels_fallback: '信息流结束，进入 Reels',
+};
 
 export function isActiveCommandType(type: unknown): boolean {
   return typeof type === 'string' && ACTIVE_COMMAND_TYPES.has(type);
@@ -167,6 +171,10 @@ function joinParts(parts: Array<string | undefined>): string {
 export function summarizeCommand(type: unknown, payload: unknown): string {
   const commandType = safeType(type);
   const data = asRecord(payload);
+  if (commandType === 'page.scroll' && typeof data.reason === 'string') {
+    const reelsEntrySummary = REELS_ENTRY_SUMMARIES[data.reason];
+    if (reelsEntrySummary) return reelsEntrySummary;
+  }
   if (FIXED_SUMMARIES[commandType]) return FIXED_SUMMARIES[commandType];
 
   if (commandType === 'plan.response') {

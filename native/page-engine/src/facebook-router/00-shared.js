@@ -445,12 +445,24 @@ async function(input){
       video:active.video,
     };
   };
+  const reelKeyboardInputSafe=()=>{
+    const focused=document.activeElement;
+    const tag=String(focused&&focused.tagName||'').toLowerCase();
+    const role=fold(focused&&focused.getAttribute&&focused.getAttribute('role')).toLowerCase();
+    const editable=Boolean(focused&&(
+      tag==='input'||tag==='textarea'||tag==='select'
+      ||focused.isContentEditable
+      ||role==='textbox'||role==='combobox'||role==='searchbox'
+    ));
+    return !editable&&!blocker(blockingProbe())&&!consentProbe().present;
+  };
   const reelProbeValue=(probe)=>({
     ok:Boolean(probe&&probe.ok),
     ...(probe&&probe.reason?{reason:probe.reason}:{}),
     ...(probe&&probe.noteId?{noteId:probe.noteId}:{}),
     ...(probe&&probe.videoKey?{videoKey:probe.videoKey}:{}),
     ...(probe&&probe.videoRect?{videoRect:probe.videoRect}:{}),
+    ...(probe&&probe.ok?{inputSafe:reelKeyboardInputSafe()}:{}),
   });
   const reelNextTarget=()=>{
     const active=activeReel();

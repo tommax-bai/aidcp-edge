@@ -65,6 +65,8 @@ pub struct FacebookReelProbe {
     pub video_key: Option<String>,
     #[serde(default)]
     pub video_rect: Option<FacebookReelRect>,
+    #[serde(default)]
+    pub input_safe: Option<bool>,
 }
 
 impl FacebookReelProbe {
@@ -90,6 +92,10 @@ impl FacebookReelProbe {
 
     pub fn is_reels_surface(&self) -> bool {
         self.reason.as_deref() != Some("not_reel")
+    }
+
+    pub fn is_keyboard_input_safe(&self) -> bool {
+        self.input_safe != Some(false)
     }
 }
 
@@ -1340,6 +1346,7 @@ mod tests {
             note_id: Some("https://www.facebook.com/reel/1".to_owned()),
             video_key: Some("video-1@element:1".to_owned()),
             video_rect: None,
+            input_safe: None,
         };
         assert!(!before.moved_from(&before));
 
@@ -1419,6 +1426,7 @@ mod tests {
             note_id: None,
             video_key: None,
             video_rect: None,
+            input_safe: None,
         };
         let ambiguous_reel = FacebookReelProbe {
             reason: Some("ambiguous_target".to_owned()),

@@ -1,4 +1,6 @@
-use super::reels::execute_facebook_page_scroll;
+use super::reels::{
+    execute_facebook_page_scroll, finish_facebook_reel_transition, probe_facebook_reel,
+};
 use super::shared::*;
 use crate::command::{NoteOpenParams, NotePurpose, NoteSurface};
 use crate::engine::{CommandOutput, EngineSession};
@@ -131,12 +133,7 @@ pub(crate) async fn execute(
         NativeCommand::PageScroll(params)
             if facebook_reels_entry_reason(params.reason.as_deref()) =>
         {
-            session
-                .cdp
-                .navigate("https://www.facebook.com/reels/")
-                .await?;
-            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
-            evaluate_facebook_router_until_cards(session, command, Duration::from_secs(5)).await
+            execute_facebook_reels_entry(session, command).await
         }
         NativeCommand::PageScroll(_) => {
             execute_facebook_page_scroll(session, command, cancellation, deadline_unix_ms).await
@@ -154,6 +151,108 @@ pub(crate) async fn execute(
             "native Facebook Feed capability received another owner's command",
         )),
     }
+}
+
+async fn execute_facebook_reels_entry(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+) -> Result<(EffectPhase, CommandOutput), EngineError> {
+    let initial_page = probe_facebook_page(session).await?;
+    if let Some(output) = facebook_reels_entry_blocker(session, command, &initial_page).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+
+    session
+        .cdp
+        .navigate("https://www.facebook.com/reels/")
+        .await?;
+    wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    let first = probe_facebook_reel(session).await?;
+    if first.is_reels_surface() {
+        return finish_facebook_reel_transition(session, command, &first).await;
+    }
+
+    let unchanged_page = probe_facebook_page(session).await?;
+    if let Some(output) = facebook_reels_entry_blocker(session, command, &unchanged_page).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    if !facebook_same_page_context(&initial_page, &unchanged_page) {
+        return Ok(facebook_scroll_failure(
+            EffectPhase::NotStarted,
+            "no_target",
+        ));
+    }
+
+    session.cdp.bring_to_front().await?;
+    let after_activation = probe_facebook_reel(session).await?;
+    if after_activation.is_reels_surface() {
+        return finish_facebook_reel_transition(session, command, &after_activation).await;
+    }
+
+    let retry_page = probe_facebook_page(session).await?;
+    if let Some(output) = facebook_reels_entry_blocker(session, command, &retry_page).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    if !facebook_same_page_context(&initial_page, &retry_page) {
+        return Ok(facebook_scroll_failure(
+            EffectPhase::Ambiguous,
+            "reels_entry_unconfirmed",
+        ));
+    }
+
+    session
+        .cdp
+        .navigate("https://www.facebook.com/reels/")
+        .await?;
+    wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    let retried = probe_facebook_reel(session).await?;
+    if retried.is_reels_surface() {
+        return finish_facebook_reel_transition(session, command, &retried).await;
+    }
+    let final_page = probe_facebook_page(session).await?;
+    if let Some(output) = facebook_reels_entry_blocker(session, command, &final_page).await? {
+        return Ok((EffectPhase::NotStarted, output));
+    }
+    Ok(facebook_scroll_failure(
+        EffectPhase::Ambiguous,
+        "reels_entry_unconfirmed",
+    ))
+}
+
+async fn facebook_reels_entry_blocker(
+    session: &mut EngineSession,
+    command: &NativeCommand,
+    page: &crate::probe::ProbeResult,
+) -> Result<Option<CommandOutput>, EngineError> {
+    let reason = match page.blocking_kind.as_deref() {
+        Some("login") => Some("login_required"),
+        Some("captcha") => Some("blocked_by_captcha"),
+        Some("unknown") => Some("blocked_by_unknown"),
+        _ => None,
+    };
+    if let Some(reason) = reason {
+        return facebook_gate_failure(session, command, reason).map(Some);
+    }
+    if !matches!(
+        page.origin.as_str(),
+        "https://www.facebook.com" | "https://facebook.com"
+    ) {
+        return facebook_gate_failure(session, command, "target_not_found").map(Some);
+    }
+    let consent = probe_facebook_consent(session).await?;
+    if consent.present {
+        return facebook_gate_failure(session, command, "blocked_by_consent").map(Some);
+    }
+    Ok(None)
+}
+
+fn facebook_same_page_context(
+    initial: &crate::probe::ProbeResult,
+    current: &crate::probe::ProbeResult,
+) -> bool {
+    initial.target_id == current.target_id
+        && initial.origin == current.origin
+        && initial.path == current.path
 }
 
 /// 用途为「导航」的开帖：这条命令要的是**账号真的落在那一页**，不是拿一份详情读物。
