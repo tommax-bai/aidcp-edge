@@ -272,6 +272,16 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   private observationDeferredLogged = false;
   private consecutiveProbeFailures = 0;
   private lastOkProbeAt?: number;
+  /**
+   * 小红书通知未读波次的宿主真态。页面探针只负责读结构；epoch 与 Cloud 信号只能由会话持有，
+   * 否则 notification.home / items 每报一次就会凭空造一个新波次。
+   * `unreadable` 采用 sticky 语义，不改这里的已知态。
+   */
+  private notificationUnreadState: 'clear' | 'unread' = 'clear';
+  private notificationEpoch = 0;
+  private notificationAccountId?: string;
+  /** 同一物理未读波次已送达的 Cloud session；重连后以同一 epoch 向新 session 补一次。 */
+  private notificationDeliveredSessionId?: string;
   private stopRequested = false;
   /**
    * 本批卡到达时刻（离页停留的锚点之一）。**与平台无关**：它曾经只在 Facebook 分支里记，
@@ -1124,6 +1134,9 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     if (!this.reportedBlockingKind) {
       // 从未上报过的阻断态自愈：MUST NOT 发孤儿 cleared。
       if (previous === 'captcha' || previous === 'unknown') this.blockingEpisode += 1;
+      // 未读触发必须晚于阻断判类。验证码 / 登录墙仍在时先开巡视，Cloud 会按 hard-pause 丢掉信号，
+      // Edge 却已把波次记成送达；恢复后这波就永久不再上报。
+      if (kind === 'none') this.observeNotificationUnread(value);
       return;
     }
     const cleared = this.reportedBlockingKind;
@@ -1142,6 +1155,69 @@ export class NativeBrowseSession implements EdgeBrowseSession {
         sentence: '阻断已解除，继续浏览',
         presence: '继续浏览…',
       });
+    }
+    // 严格顺序：先让 Cloud 收到 paired cleared，再发 notification.detected。
+    // 反过来 Gatekeeper 仍看到 hard-pause，会丢掉这波未读。
+    if (kind === 'none') this.observeNotificationUnread(value);
+  }
+
+  /**
+   * 消费小红书 page probe 的三态未读读数，并只在 clear → unread 时发一次巡视信号。
+   *
+   * 计数只是附带读数：3 → 5 仍是同一波，不重开 epoch。读不到采用 sticky，绝不把真未读
+   * 清成 clear。物理波次与 Cloud delivery 分开：重连后的新 Cloud session 需要补收同一 epoch，
+   * 但同一 session 内绝不每拍重发；发送失败也不提交 delivery，下一拍仍可重试。
+   */
+  private observeNotificationUnread(value: Record<string, unknown>): void {
+    if (this.options.platform !== 'xiaohongshu') return;
+    // drain / 接管 / 执行器暂停期间，在途 probe 即使迟到也不得凭旧页面帧开启巡视。
+    if (this.closed || this.blocked || this.observationSuspended || this.stopRequested) return;
+    const accountId = this.options.getAccountId?.()?.trim();
+    if (!accountId) return;
+    if (accountId !== this.notificationAccountId) {
+      // 同一 NativeBrowseSession 会在身份重立后复用。A 的 unread latch 不能吞掉 B 的首波；
+      // epoch 保持会话内单调，不因换号倒退。
+      this.notificationAccountId = accountId;
+      this.notificationUnreadState = 'clear';
+      this.notificationDeliveredSessionId = undefined;
+      this.diagnostic('notification_scope_rearmed', { account: 'changed' });
+    }
+    const reading = value.notificationUnread;
+    if (!reading || typeof reading !== 'object') return;
+    const state = (reading as { state?: unknown }).state;
+    if (state === 'unreadable') return;
+    if (state === 'clear') {
+      this.notificationUnreadState = 'clear';
+      this.notificationDeliveredSessionId = undefined;
+      return;
+    }
+    if (state !== 'unread') return;
+
+    const rawCount = (reading as { count?: unknown }).count;
+    const unreadCount = typeof rawCount === 'number' && Number.isInteger(rawCount) && rawCount >= 0
+      ? Math.min(999, rawCount)
+      : 0;
+    if (this.notificationUnreadState === 'clear') {
+      this.notificationUnreadState = 'unread';
+      this.notificationEpoch += 1;
+      this.notificationDeliveredSessionId = undefined;
+    }
+    const epoch = this.notificationEpoch;
+    const cloudSessionId = this.options.client.getSessionId();
+    if (!cloudSessionId || cloudSessionId === this.notificationDeliveredSessionId) return;
+    const edgeId = this.options.edgeId;
+    try {
+      this.options.client.send('notification.detected', {
+        ...(edgeId ? { edgeId } : {}),
+        ...(accountId ? { accountId } : {}),
+        epoch,
+        unreadCount,
+      });
+      this.notificationDeliveredSessionId = cloudSessionId;
+      this.diagnostic('notification_unread_detected', { epoch, unreadCount });
+    } catch {
+      // WS 断开不是「没有未读」。不提交 delivery，令同波次在新连接 / 下一拍以同一 epoch 重试。
+      this.diagnostic('notification_signal_failed', { epoch, unreadCount });
     }
   }
 

@@ -46,12 +46,17 @@ function harness(
     probeIntervalMs?: number;
     blockingWaitMs?: number;
     blockingPollMs?: number;
+    notificationSendFailures?: number;
+    cloudSessionId?: string;
   } = {},
 ) {
   const executions: Array<{ ownerId: string; command: NativePageCommand }> = [];
   const actions: ActionCompletedPayload[] = [];
   const logs: string[] = [];
   const sent: Array<{ type: string; payload: unknown }> = [];
+  let notificationSendFailures = options.notificationSendFailures ?? 0;
+  let accountId = options.accountId;
+  let cloudSessionId = options.cloudSessionId ?? 'cloud-session-1';
   const runtime = {
     async execute(
       ownerId: string,
@@ -69,7 +74,14 @@ function harness(
     reportActionCompleted(payload: ActionCompletedPayload) { actions.push(payload); },
     reportPageCards(_payload: PageCardsPayload) { /* no-op */ },
     reportNoteDetail(_payload: NoteDetailPayload) { /* no-op */ },
-    send(type: string, payload: unknown) { sent.push({ type, payload }); },
+    getSessionId() { return cloudSessionId; },
+    send(type: string, payload: unknown) {
+      if (type === 'notification.detected' && notificationSendFailures > 0) {
+        notificationSendFailures -= 1;
+        throw new Error('simulated notification transport loss');
+      }
+      sent.push({ type, payload });
+    },
   } as unknown as EdgeClient;
   const session = new NativeBrowseSession({
     runtime,
@@ -77,7 +89,7 @@ function harness(
     startupId: 'startup-xhs-session-guard',
     platform: options.platform ?? 'xiaohongshu',
     edgeId: 'edge-guard',
-    getAccountId: () => options.accountId,
+    getAccountId: () => accountId,
     clock: options.clock,
     sleep: options.sleep,
     probeIntervalMs: options.probeIntervalMs,
@@ -85,7 +97,15 @@ function harness(
     blockingPollMs: options.blockingPollMs,
     logger: (message) => logs.push(message),
   });
-  return { session, executions, actions, logs, sent };
+  return {
+    session,
+    executions,
+    actions,
+    logs,
+    sent,
+    setAccountId(value?: string) { accountId = value; },
+    setCloudSessionId(value: string) { cloudSessionId = value; },
+  };
 }
 
 const okScroll: NativePageCommandExecution = {
@@ -102,6 +122,228 @@ function diagnostics(logs: string[]): string[] {
 function diagnosticEvents(logs: string[]): string[] {
   return diagnostics(logs).map((line) => /event=([a-z_]+)/.exec(line)?.[1] ?? '');
 }
+
+test('Xiaohongshu unread probe emits once per clear-to-unread wave with a session-monotonic epoch', () => {
+  const h = harness(async () => okScroll, { accountId: 'xhs-account-1' });
+  const observeUnread = (state: 'unread' | 'clear' | 'unreadable', count: number) => {
+    h.session.observeProbe({
+      origin: 'https://www.xiaohongshu.com',
+      path: '/explore',
+      pageKind: 'explore',
+      notificationUnread: { state, count },
+    });
+  };
+
+  observeUnread('unread', 3);
+  observeUnread('unread', 5);
+  observeUnread('unreadable', 0);
+  observeUnread('unread', 7);
+  observeUnread('clear', 0);
+  observeUnread('unread', 0);
+
+  assert.deepEqual(
+    h.sent.filter((entry) => entry.type === 'notification.detected'),
+    [
+      {
+        type: 'notification.detected',
+        payload: { edgeId: 'edge-guard', accountId: 'xhs-account-1', epoch: 1, unreadCount: 3 },
+      },
+      {
+        type: 'notification.detected',
+        payload: { edgeId: 'edge-guard', accountId: 'xhs-account-1', epoch: 2, unreadCount: 0 },
+      },
+    ],
+    '计数变化与 unreadable 不得重开 epoch；只有真实 clear 后的新 unread 才开启下一波',
+  );
+});
+
+test('notification unread signal stays Xiaohongshu-only and missing evidence never fabricates clear', () => {
+  const xhs = harness(async () => okScroll, { accountId: 'xhs-account-1' });
+  xhs.session.observeProbe({
+    origin: 'https://www.xiaohongshu.com',
+    path: '/explore',
+    pageKind: 'explore',
+  });
+  xhs.session.observeProbe({
+    origin: 'https://www.xiaohongshu.com',
+    path: '/explore',
+    pageKind: 'explore',
+    notificationUnread: { state: 'unread', count: 2 },
+  });
+  assert.equal(xhs.sent.filter((entry) => entry.type === 'notification.detected').length, 1);
+
+  const facebook = harness(async () => okScroll, { platform: 'facebook', accountId: 'fb-account-1' });
+  facebook.session.observeProbe({
+    origin: 'https://www.facebook.com',
+    path: '/',
+    pageKind: 'home',
+    notificationUnread: { state: 'unread', count: 9 },
+  });
+  assert.equal(
+    facebook.sent.filter((entry) => entry.type === 'notification.detected').length,
+    0,
+    'Facebook 没有这条通知面，不能因共享 page probe 被误通电',
+  );
+});
+
+test('failed unread signal delivery does not consume the wave and retries the same epoch', () => {
+  const h = harness(async () => okScroll, {
+    accountId: 'xhs-account-1',
+    notificationSendFailures: 1,
+  });
+  const unread = {
+    origin: 'https://www.xiaohongshu.com',
+    path: '/explore',
+    pageKind: 'explore',
+    notificationUnread: { state: 'unread', count: 4 },
+  };
+
+  h.session.observeProbe(unread);
+  assert.equal(h.sent.filter((entry) => entry.type === 'notification.detected').length, 0);
+  assert.equal(diagnosticEvents(h.logs).includes('notification_signal_failed'), true);
+
+  h.session.observeProbe(unread);
+  assert.deepEqual(h.sent.filter((entry) => entry.type === 'notification.detected'), [{
+    type: 'notification.detected',
+    payload: { edgeId: 'edge-guard', accountId: 'xhs-account-1', epoch: 1, unreadCount: 4 },
+  }]);
+});
+
+test('unread waves are scoped to the dynamic account while epoch stays session-monotonic', () => {
+  const h = harness(async () => okScroll, { accountId: 'xhs-account-A' });
+  const unread = {
+    origin: 'https://www.xiaohongshu.com',
+    path: '/explore',
+    pageKind: 'explore',
+    notificationUnread: { state: 'unread', count: 1 },
+  };
+
+  h.session.observeProbe(unread);
+  h.setAccountId('xhs-account-B');
+  h.session.observeProbe(unread);
+  h.setAccountId(undefined);
+  h.session.observeProbe(unread);
+
+  assert.deepEqual(h.sent.filter((entry) => entry.type === 'notification.detected'), [
+    {
+      type: 'notification.detected',
+      payload: { edgeId: 'edge-guard', accountId: 'xhs-account-A', epoch: 1, unreadCount: 1 },
+    },
+    {
+      type: 'notification.detected',
+      payload: { edgeId: 'edge-guard', accountId: 'xhs-account-B', epoch: 2, unreadCount: 1 },
+    },
+  ]);
+});
+
+test('one physical unread wave is replayed once to a new Cloud session with the same epoch', () => {
+  const h = harness(async () => okScroll, { accountId: 'xhs-account-1', cloudSessionId: 'cloud-session-1' });
+  const unread = (count: number) => ({
+    origin: 'https://www.xiaohongshu.com',
+    path: '/explore',
+    pageKind: 'explore',
+    notificationUnread: { state: 'unread', count },
+  });
+
+  h.session.observeProbe(unread(3));
+  h.setCloudSessionId('cloud-session-2');
+  h.session.observeProbe(unread(5));
+  h.session.observeProbe(unread(7));
+
+  assert.deepEqual(h.sent.filter((entry) => entry.type === 'notification.detected'), [
+    {
+      type: 'notification.detected',
+      payload: { edgeId: 'edge-guard', accountId: 'xhs-account-1', epoch: 1, unreadCount: 3 },
+    },
+    {
+      type: 'notification.detected',
+      payload: { edgeId: 'edge-guard', accountId: 'xhs-account-1', epoch: 1, unreadCount: 5 },
+    },
+  ]);
+});
+
+test('blocking clearance reaches Cloud before the unread signal and blocked frames do not consume the wave', () => {
+  const h = harness(async () => okScroll, { accountId: 'xhs-account-1' });
+  h.session.observeProbe({
+    origin: 'https://www.xiaohongshu.com',
+    path: '/explore',
+    pageKind: 'captcha',
+    notificationUnread: { state: 'unread', count: 6 },
+  });
+  h.session.observeProbe({
+    origin: 'https://www.xiaohongshu.com',
+    path: '/explore',
+    pageKind: 'explore',
+    notificationUnread: { state: 'unread', count: 6 },
+  });
+
+  assert.deepEqual(h.sent.map((entry) => entry.type), [
+    'risk.captcha_detected',
+    'risk.captcha_cleared',
+    'notification.detected',
+  ]);
+  assert.deepEqual(h.sent.at(-1)?.payload, {
+    edgeId: 'edge-guard',
+    accountId: 'xhs-account-1',
+    epoch: 1,
+    unreadCount: 6,
+  });
+});
+
+test('task quiescence ignores a late unread frame and the resumed fresh frame still emits', async () => {
+  const h = harness(async () => okScroll, { accountId: 'xhs-account-1' });
+  await h.session.quiesceForTask();
+  h.session.observeProbe({
+    origin: 'https://www.xiaohongshu.com',
+    path: '/explore',
+    pageKind: 'explore',
+    notificationUnread: { state: 'unread', count: 2 },
+  });
+  assert.equal(h.sent.filter((entry) => entry.type === 'notification.detected').length, 0);
+
+  await h.session.resumeAfterTask();
+  h.session.observeProbe({
+    origin: 'https://www.xiaohongshu.com',
+    path: '/explore',
+    pageKind: 'explore',
+    notificationUnread: { state: 'unread', count: 2 },
+  });
+  assert.equal(h.sent.filter((entry) => entry.type === 'notification.detected').length, 1);
+  h.session.close();
+});
+
+test('the lifecycle-managed periodic page probe is the live notification.detected producer', async () => {
+  const h = harness(async (_ownerId, command) => {
+    if (command.kind === 'page_probe') {
+      return {
+        ok: true,
+        effectPhase: 'confirmed',
+        reasonCode: 'confirmed',
+        output: {
+          kind: 'page_probe',
+          value: {
+            origin: 'https://www.xiaohongshu.com',
+            path: '/explore',
+            pageKind: 'explore',
+            notificationUnread: { state: 'unread', count: 8 },
+          },
+        },
+      };
+    }
+    return okScroll;
+  }, { accountId: 'xhs-account-1', probeIntervalMs: 1 });
+
+  await h.session.start();
+  const deadline = Date.now() + 250;
+  while (!h.sent.some((entry) => entry.type === 'notification.detected') && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.deepEqual(h.sent.find((entry) => entry.type === 'notification.detected'), {
+    type: 'notification.detected',
+    payload: { edgeId: 'edge-guard', accountId: 'xhs-account-1', epoch: 1, unreadCount: 8 },
+  });
+  h.session.close();
+});
 
 test('Xiaohongshu captcha page kind reports one detection and exactly one paired clearance', async () => {
   const h = harness(async () => okScroll, { accountId: 'xhs-account-1' });

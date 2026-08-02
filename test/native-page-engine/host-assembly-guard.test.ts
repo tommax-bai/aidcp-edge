@@ -282,6 +282,29 @@ test('host assembly: 阻断上报的活代码只在 Native 会话里，宿主不
   assert.match(nativeSession, /risk\.captcha_cleared/);
 });
 
+test('host assembly: notification.detected 只有 Native page probe 会话这一个生产者', () => {
+  const producers = listTypeScriptSources(srcRoot)
+    .flatMap((path) => {
+      const source = readFileSync(path, 'utf8');
+      const matches = source.match(/\.send\(\s*['"]notification\.detected['"]/g) ?? [];
+      return matches.map(() => relative(srcRoot, path).split(sep).join('/'));
+    });
+  assert.deepEqual(
+    producers,
+    ['native-page-engine/browse-session.ts'],
+    `notification.detected 必须只有现役 Native page probe 会话生产，当前生产者：${producers.join(', ') || '无'}`,
+  );
+
+  const revivedLegacyMonitor = listTypeScriptSources(srcRoot)
+    .filter((path) => /new\s+CdpNotificationMonitor\b/.test(readFileSync(path, 'utf8')))
+    .map((path) => relative(srcRoot, path).split(sep).join('/'));
+  assert.deepEqual(
+    revivedLegacyMonitor,
+    [],
+    `不得复活 CdpNotificationMonitor 第二时钟；未读读数由现役 page probe 消费：${revivedLegacyMonitor.join(', ')}`,
+  );
+});
+
 // ── §6.5：无调用点的浮层监测体工厂成员，最终形态 ──────────────────────────────
 //
 // 裁定：从 driver 契约上删除（而不是接进小红书阻断观测通路）。坐实过程：
