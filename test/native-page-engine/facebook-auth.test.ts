@@ -495,6 +495,42 @@ test('optional post-login signals may arrive reordered and each action is follow
   runtime.assertDone();
 });
 
+test('hydrated warning is independently dismissed after transitional probes', async () => {
+  const automaticProgress: Array<{ signal: string; action: string }> = [];
+  const runtime = new ScriptedRuntime([
+    { kind: 'facebook_auth_probe', execution: probe('none', { reason: 'checkpoint_hydrating' }) },
+    { kind: 'facebook_auth_probe', execution: probe('none', { reason: 'automation_warning_hydrating' }) },
+    { kind: 'facebook_auth_probe', execution: probe('automation_warning_dismiss', { signalId: 'warning-1' }) },
+    {
+      kind: 'facebook_auth_dismiss_warning',
+      execution: action('facebook_auth_dismiss_warning', 'warning-1'),
+    },
+    { kind: 'facebook_auth_probe', execution: probe('authenticated') },
+  ]);
+
+  const result = await reconcileFacebookStartupAuth({
+    runtime,
+    totpBroker: totpBroker(),
+    freshStartPolicyApplied: true,
+    timeoutMs: 20_000,
+    sleep: async () => undefined,
+    onAutomaticProgress: (progress) => automaticProgress.push(progress),
+  });
+
+  assert.deepEqual(result, { kind: 'authenticated', actionAttempts: 1 });
+  assert.deepEqual(runtime.calls.map((call) => call.kind), [
+    'facebook_auth_probe',
+    'facebook_auth_probe',
+    'facebook_auth_probe',
+    'facebook_auth_dismiss_warning',
+    'facebook_auth_probe',
+  ]);
+  assert.deepEqual(automaticProgress, [
+    { signal: 'automation_warning_dismiss', action: 'facebook_auth_dismiss_warning' },
+  ]);
+  runtime.assertDone();
+});
+
 test('an unchanged signal id is never dispatched twice', async () => {
   const runtime = new ScriptedRuntime([
     { kind: 'facebook_auth_probe', execution: probe('push_blocker_close', { signalId: 'push-1' }) },

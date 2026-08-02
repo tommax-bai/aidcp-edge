@@ -1,5 +1,10 @@
   const facebookAuthSignalPrefix='aidcp:facebook-auth:v1:';
-  const facebookAuthCredentialFillGraceMs=1500;
+  const facebookAuthCredentialFillGraceMs=25000;
+  const facebookAuthCheckpointHydrationGraceMs=15000;
+  const authWithinHydrationGrace=(graceMs)=>{
+    const documentAge=Number(window.performance&&window.performance.now&&window.performance.now());
+    return Number.isFinite(documentAge)&&documentAge<graceMs;
+  };
   const authDigest=async(value)=>{
     const bytes=new TextEncoder().encode(String(value||''));
     const digest=await crypto.subtle.digest('SHA-256',bytes);
@@ -200,8 +205,7 @@
     if(emails.length>1||passwords.length>1)return authObservation('blocked_unknown',null,'login_fields_ambiguous');
     if(emails.length!==1||passwords.length!==1)return authObservation('none',null,'login_fields_hydrating');
     if(!String(emails[0].value||'').trim()||!String(passwords[0].value||'')){
-      const documentAge=Number(window.performance&&window.performance.now&&window.performance.now());
-      if(Number.isFinite(documentAge)&&documentAge<facebookAuthCredentialFillGraceMs){
+      if(authWithinHydrationGrace(facebookAuthCredentialFillGraceMs)){
         return authObservation('none',null,'credential_fill_pending');
       }
       return authObservation('manual_login_required',null,'credential_fill_unavailable');
@@ -272,12 +276,28 @@
     const scopes=matchingScopes.filter((scope)=>
       !matchingScopes.some((nested)=>nested!==scope&&scope.contains(nested))
     );
-    if(scopes.length===0)return authObservation('blocked_unknown',null,'automation_warning_scope_unavailable');
+    if(scopes.length===0){
+      return authWithinHydrationGrace(facebookAuthCheckpointHydrationGraceMs)
+        ?authObservation('none',null,'automation_warning_hydrating')
+        :authObservation('blocked_unknown',null,'automation_warning_scope_unavailable');
+    }
     if(scopes.length!==1)return authObservation('blocked_unknown',null,'automation_warning_scope_ambiguous');
-    const dismiss=authUnique(authButtons(scopes[0]).filter((button)=>/^dismiss$/i.test(label(button))));
-    return dismiss.candidate
-      ?authObservation('automation_warning_dismiss',dismiss.candidate)
-      :authObservation('blocked_unknown',null,dismiss.reason||'automation_warning_target_unavailable');
+    const dismissInventory=all('button,[role="button"],input[type="submit"]',scopes[0])
+      .filter((button)=>/^dismiss$/i.test(label(button)));
+    const dismissCandidates=dismissInventory.filter(visible);
+    if(dismissCandidates.length===0){
+      if(dismissInventory.length===0&&authWithinHydrationGrace(facebookAuthCheckpointHydrationGraceMs)){
+        return authObservation('none',null,'automation_warning_hydrating');
+      }
+      return authObservation('blocked_unknown',null,dismissInventory.length
+        ?'auth_target_not_visible'
+        :'auth_target_not_found');
+    }
+    if(dismissCandidates.length!==1)return authObservation('blocked_unknown',null,'auth_target_ambiguous');
+    const dismiss=dismissCandidates[0];
+    if(authTargetDisabled(dismiss))return authObservation('blocked_unknown',null,'auth_target_disabled');
+    if(!authTopHit(dismiss))return authObservation('blocked_unknown',null,'auth_target_not_topmost');
+    return authObservation('automation_warning_dismiss',dismiss);
   };
   const authPushObservation=async()=>{
     const dialogs=all('[role="alertdialog"]').filter(visible).filter((dialog)=>
@@ -325,7 +345,13 @@
       )return authObservation('authenticated');
       return warning;
     }
-    if(/\/checkpoint|\/recover|\/identify|\/login\/device-based|\/disabled/i.test(location.pathname)){
+    if(/\/checkpoint/i.test(location.pathname)){
+      if(authWithinHydrationGrace(facebookAuthCheckpointHydrationGraceMs)){
+        return authObservation('none',null,'checkpoint_hydrating');
+      }
+      return authObservation('blocked_unknown',null,'unsupported_facebook_checkpoint');
+    }
+    if(/\/recover|\/identify|\/login\/device-based|\/disabled/i.test(location.pathname)){
       return authObservation('blocked_unknown',null,'unsupported_facebook_checkpoint');
     }
     if(blocking.kind==='unknown'){

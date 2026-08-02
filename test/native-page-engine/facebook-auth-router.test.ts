@@ -148,7 +148,7 @@ test('login hydration waits before empty credentials fail closed, while ambiguit
       <input name="pass" type="password" value="">
       <button name="login">Log in</button>
     </form>
-  `, 'https://www.facebook.com/login/', 1_800_000_015_000, 0, 500);
+  `, 'https://www.facebook.com/login/', 1_800_000_015_000, 0, 24_999);
   const pending = await probe();
   assert.equal(pending.signal, 'none');
   assert.equal(pending.reason, 'credential_fill_pending');
@@ -160,7 +160,7 @@ test('login hydration waits before empty credentials fail closed, while ambiguit
       <input name="pass" type="password" value="">
       <button name="login">Log in</button>
     </form>
-  `, 'https://www.facebook.com/login/', 1_800_000_015_000, 0, 2_000);
+  `, 'https://www.facebook.com/login/', 1_800_000_015_000, 0, 25_000);
   const empty = await probe();
   assert.equal(empty.signal, 'manual_login_required');
   assert.equal(empty.reason, 'credential_fill_unavailable');
@@ -618,7 +618,7 @@ test('supported post-login prompts are independent exact topmost signals', async
   install(`
     <main>
       <p>We suspect automated behavior on your account</p>
-      <button id="dismiss">Dismiss</button>
+      <div id="dismiss" role="button">Dismiss</div>
     </main>
   `, 'https://www.facebook.com/checkpoint/123');
   setRect(document.getElementById('dismiss')!, { left: 100, top: 100, right: 240, bottom: 145 });
@@ -656,6 +656,92 @@ test('supported post-login prompts are independent exact topmost signals', async
   `, 'https://www.facebook.com/');
   setRect(document.getElementById('ok')!, { left: 500, top: 500, right: 620, bottom: 545 });
   assert.equal((await probe()).signal, 'remember_password_confirm');
+});
+
+test('new checkpoint waits up to fifteen seconds for the automation warning to hydrate', async () => {
+  install(
+    '<div aria-busy="true">Loading</div>',
+    'https://www.facebook.com/checkpoint/601051028565049/',
+    1_800_000_015_000,
+    0,
+    1_762,
+  );
+  const loading = await probe();
+  assert.equal(loading.signal, 'none');
+  assert.equal(loading.reason, 'checkpoint_hydrating');
+  assert.equal(loading.signalId, undefined);
+
+  install(`
+    <div>
+      <p>We suspect automated behavior on your account</p>
+    </div>
+  `, 'https://www.facebook.com/checkpoint/601051028565049/', 1_800_000_015_000, 0, 14_999);
+  const warningLoading = await probe();
+  assert.equal(warningLoading.signal, 'none');
+  assert.equal(warningLoading.reason, 'automation_warning_hydrating');
+  assert.equal(warningLoading.signalId, undefined);
+
+  install(
+    '<main>Security check</main>',
+    'https://www.facebook.com/checkpoint/601051028565049/',
+    1_800_000_015_000,
+    0,
+    15_000,
+  );
+  const expired = await probe();
+  assert.equal(expired.signal, 'blocked_unknown');
+  assert.equal(expired.reason, 'unsupported_facebook_checkpoint');
+  assert.equal(expired.signalId, undefined);
+});
+
+test('checkpoint hydration never delays explicit blockers or ambiguous warning targets', async () => {
+  install(
+    '<main>Your account is temporarily blocked</main>',
+    'https://www.facebook.com/checkpoint/123',
+    1_800_000_015_000,
+    0,
+    500,
+  );
+  const restricted = await probe();
+  assert.equal(restricted.signal, 'blocked_unknown');
+  assert.equal(restricted.reason, 'unsupported_facebook_auth_state');
+
+  install(`
+    <main>
+      <p>We suspect automated behavior on your account</p>
+      <button id="first">Dismiss</button>
+      <button id="second">Dismiss</button>
+    </main>
+  `, 'https://www.facebook.com/checkpoint/123', 1_800_000_015_000, 0, 500);
+  setRect(document.getElementById('first')!, { left: 100, top: 100, right: 240, bottom: 145 });
+  setRect(document.getElementById('second')!, { left: 300, top: 100, right: 440, bottom: 145 });
+  const ambiguous = await probe();
+  assert.equal(ambiguous.signal, 'blocked_unknown');
+  assert.equal(ambiguous.reason, 'auth_target_ambiguous');
+
+  install(`
+    <main>
+      <p>We suspect automated behavior on your account</p>
+      <div id="disabled" role="button" aria-disabled="true">Dismiss</div>
+    </main>
+  `, 'https://www.facebook.com/checkpoint/123', 1_800_000_015_000, 0, 500);
+  setRect(document.getElementById('disabled')!, { left: 100, top: 100, right: 240, bottom: 145 });
+  const disabled = await probe();
+  assert.equal(disabled.signal, 'blocked_unknown');
+  assert.equal(disabled.reason, 'auth_target_disabled');
+
+  install(`
+    <main>
+      <p>We suspect automated behavior on your account</p>
+      <div id="dismiss" role="button">Dismiss</div>
+      <div id="cover">Loading</div>
+    </main>
+  `, 'https://www.facebook.com/checkpoint/123', 1_800_000_015_000, 0, 500);
+  setRect(document.getElementById('dismiss')!, { left: 100, top: 100, right: 240, bottom: 145 });
+  setRect(document.getElementById('cover')!, { left: 100, top: 100, right: 240, bottom: 145 });
+  const covered = await probe();
+  assert.equal(covered.signal, 'blocked_unknown');
+  assert.equal(covered.reason, 'auth_target_not_topmost');
 });
 
 test('authenticated unproven profiles short-circuit supported prompts while fresh policy may act', async () => {
@@ -707,8 +793,19 @@ test('authenticated unproven profiles still fail closed on CAPTCHA and unsupport
   assert.equal(captcha.signal, 'blocked_human_verification');
   assert.equal(captcha.signalId, undefined);
 
-  for (const url of [
+  install(
+    '<main>Security check</main>',
     'https://www.facebook.com/checkpoint/unknown',
+    1_800_000_015_000,
+    0,
+    15_000,
+  );
+  const checkpoint = await probe({ authenticated: true, allowAuthActions: false });
+  assert.equal(checkpoint.signal, 'blocked_unknown');
+  assert.equal(checkpoint.reason, 'unsupported_facebook_checkpoint');
+  assert.equal(checkpoint.signalId, undefined);
+
+  for (const url of [
     'https://www.facebook.com/recover/initiate/',
     'https://www.facebook.com/disabled/',
   ]) {
@@ -770,7 +867,13 @@ test('authenticated unproven profiles still fail closed on CAPTCHA and unsupport
 });
 
 test('unfamiliar checkpoint is blocked while authenticated and transitional pages remain read-only', async () => {
-  install('<main>Security check</main>', 'https://www.facebook.com/checkpoint/unknown');
+  install(
+    '<main>Security check</main>',
+    'https://www.facebook.com/checkpoint/unknown',
+    1_800_000_015_000,
+    0,
+    15_000,
+  );
   const unknown = await probe();
   assert.equal(unknown.signal, 'blocked_unknown');
   assert.equal(unknown.signalId, undefined);
