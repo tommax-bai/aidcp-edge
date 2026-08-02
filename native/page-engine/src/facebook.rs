@@ -94,8 +94,16 @@ impl FacebookReelProbe {
         self.reason.as_deref() != Some("not_reel")
     }
 
+    pub fn is_unique_anonymous_video(&self) -> bool {
+        self.ok && self.video_key.is_some() && self.note_id.is_none()
+    }
+
     pub fn is_keyboard_input_safe(&self) -> bool {
         self.input_safe != Some(false)
+    }
+
+    pub fn is_explicitly_keyboard_input_safe(&self) -> bool {
+        self.input_safe == Some(true)
     }
 }
 
@@ -137,6 +145,10 @@ pub struct FacebookReelNextTarget {
 impl FacebookReelNextTarget {
     pub fn is_keyboard_input_safe(&self) -> bool {
         self.input_safe != Some(false)
+    }
+
+    pub fn is_explicitly_keyboard_input_safe(&self) -> bool {
+        self.input_safe == Some(true)
     }
 }
 

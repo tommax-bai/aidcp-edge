@@ -1,5 +1,5 @@
 use super::reels::{
-    execute_facebook_page_scroll, finish_facebook_reel_transition, probe_facebook_reel,
+    execute_facebook_page_scroll, finish_facebook_reels_entry, probe_facebook_reel,
 };
 use super::shared::*;
 use crate::command::{NoteOpenParams, NotePurpose, NoteSurface};
@@ -131,9 +131,15 @@ pub(crate) async fn execute(
             }
         }
         NativeCommand::PageScroll(params)
+            if facebook_reels_entry_reason(params.reason.as_deref())
+                && session.facebook.pending_reel_transition.is_some() =>
+        {
+            execute_facebook_page_scroll(session, command, cancellation, deadline_unix_ms).await
+        }
+        NativeCommand::PageScroll(params)
             if facebook_reels_entry_reason(params.reason.as_deref()) =>
         {
-            execute_facebook_reels_entry(session, command).await
+            execute_facebook_reels_entry(session, command, cancellation, deadline_unix_ms).await
         }
         NativeCommand::PageScroll(_) => {
             execute_facebook_page_scroll(session, command, cancellation, deadline_unix_ms).await
@@ -156,10 +162,15 @@ pub(crate) async fn execute(
 async fn execute_facebook_reels_entry(
     session: &mut EngineSession,
     command: &NativeCommand,
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let initial_page = probe_facebook_page(session).await?;
     if let Some(output) = facebook_reels_entry_blocker(session, command, &initial_page).await? {
         return Ok((EffectPhase::NotStarted, output));
+    }
+    if let Some(result) = facebook_reels_entry_route_gate(cancellation, deadline_unix_ms, false)? {
+        return Ok(result);
     }
 
     session
@@ -169,35 +180,63 @@ async fn execute_facebook_reels_entry(
     wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
     let first = probe_facebook_reel(session).await?;
     if first.is_reels_surface() {
-        return finish_facebook_reel_transition(session, command, &first).await;
+        if let Some(result) = facebook_reels_entry_route_gate(cancellation, deadline_unix_ms, true)?
+        {
+            return Ok(result);
+        }
+        return finish_facebook_reels_entry(
+            session,
+            command,
+            &first,
+            cancellation,
+            deadline_unix_ms,
+        )
+        .await;
     }
 
     let unchanged_page = probe_facebook_page(session).await?;
     if let Some(output) = facebook_reels_entry_blocker(session, command, &unchanged_page).await? {
-        return Ok((EffectPhase::NotStarted, output));
+        return Ok((EffectPhase::Ambiguous, output));
     }
     if !facebook_same_page_context(&initial_page, &unchanged_page) {
         return Ok(facebook_scroll_failure(
-            EffectPhase::NotStarted,
-            "no_target",
+            EffectPhase::Ambiguous,
+            "reels_entry_unconfirmed",
         ));
+    }
+    if let Some(result) = facebook_reels_entry_route_gate(cancellation, deadline_unix_ms, true)? {
+        return Ok(result);
     }
 
     session.cdp.bring_to_front().await?;
     let after_activation = probe_facebook_reel(session).await?;
     if after_activation.is_reels_surface() {
-        return finish_facebook_reel_transition(session, command, &after_activation).await;
+        if let Some(result) = facebook_reels_entry_route_gate(cancellation, deadline_unix_ms, true)?
+        {
+            return Ok(result);
+        }
+        return finish_facebook_reels_entry(
+            session,
+            command,
+            &after_activation,
+            cancellation,
+            deadline_unix_ms,
+        )
+        .await;
     }
 
     let retry_page = probe_facebook_page(session).await?;
     if let Some(output) = facebook_reels_entry_blocker(session, command, &retry_page).await? {
-        return Ok((EffectPhase::NotStarted, output));
+        return Ok((EffectPhase::Ambiguous, output));
     }
     if !facebook_same_page_context(&initial_page, &retry_page) {
         return Ok(facebook_scroll_failure(
             EffectPhase::Ambiguous,
             "reels_entry_unconfirmed",
         ));
+    }
+    if let Some(result) = facebook_reels_entry_route_gate(cancellation, deadline_unix_ms, true)? {
+        return Ok(result);
     }
 
     session
@@ -207,16 +246,56 @@ async fn execute_facebook_reels_entry(
     wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
     let retried = probe_facebook_reel(session).await?;
     if retried.is_reels_surface() {
-        return finish_facebook_reel_transition(session, command, &retried).await;
+        if let Some(result) = facebook_reels_entry_route_gate(cancellation, deadline_unix_ms, true)?
+        {
+            return Ok(result);
+        }
+        return finish_facebook_reels_entry(
+            session,
+            command,
+            &retried,
+            cancellation,
+            deadline_unix_ms,
+        )
+        .await;
     }
     let final_page = probe_facebook_page(session).await?;
     if let Some(output) = facebook_reels_entry_blocker(session, command, &final_page).await? {
-        return Ok((EffectPhase::NotStarted, output));
+        return Ok((EffectPhase::Ambiguous, output));
     }
     Ok(facebook_scroll_failure(
         EffectPhase::Ambiguous,
         "reels_entry_unconfirmed",
     ))
+}
+
+fn facebook_reels_entry_route_gate(
+    cancellation: Option<&AtomicBool>,
+    deadline_unix_ms: u64,
+    route_dispatched: bool,
+) -> Result<Option<(EffectPhase, CommandOutput)>, EngineError> {
+    if facebook_command_cancelled(cancellation) {
+        if route_dispatched {
+            return Ok(Some(facebook_scroll_failure(
+                EffectPhase::Ambiguous,
+                "reels_entry_cancelled_after_route",
+            )));
+        }
+        return Err(cancelled_before_dispatch());
+    }
+    if deadline_unix_ms <= unix_time_ms() {
+        if route_dispatched {
+            return Ok(Some(facebook_scroll_failure(
+                EffectPhase::Ambiguous,
+                "reels_entry_deadline_after_route",
+            )));
+        }
+        return Ok(Some(facebook_scroll_failure(
+            EffectPhase::NotStarted,
+            "reels_entry_deadline_before_route",
+        )));
+    }
+    Ok(None)
 }
 
 async fn facebook_reels_entry_blocker(
@@ -1471,6 +1550,33 @@ mod tests {
         )));
         assert!(!facebook_reels_entry_reason(Some("feed_scroll")));
         assert!(!facebook_reels_entry_reason(None));
+    }
+
+    #[test]
+    fn reels_entry_deadline_gate_preserves_the_route_effect_boundary() {
+        let (before_phase, before_output) = facebook_reels_entry_route_gate(None, 0, false)
+            .expect("pre-route deadline gate")
+            .expect("pre-route deadline receipt");
+        assert_eq!(before_phase, EffectPhase::NotStarted);
+        let CommandOutput::ActionReceipt(before_receipt) = before_output else {
+            panic!("expected pre-route deadline receipt")
+        };
+        assert_eq!(
+            before_receipt.reason.as_deref(),
+            Some("reels_entry_deadline_before_route")
+        );
+
+        let (after_phase, after_output) = facebook_reels_entry_route_gate(None, 0, true)
+            .expect("post-route deadline gate")
+            .expect("post-route deadline receipt");
+        assert_eq!(after_phase, EffectPhase::Ambiguous);
+        let CommandOutput::ActionReceipt(after_receipt) = after_output else {
+            panic!("expected post-route deadline receipt")
+        };
+        assert_eq!(
+            after_receipt.reason.as_deref(),
+            Some("reels_entry_deadline_after_route")
+        );
     }
 
     /// 内容派生的会话内引用**不是地址**：导航校验必须诚实拒绝它，绝不放行、也绝不猜一个地址
