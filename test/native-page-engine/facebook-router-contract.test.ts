@@ -1139,6 +1139,35 @@ test('Facebook Reels page.scroll refuses the document-scroll fallback', async ()
   assert.equal(documentScrolls, 0);
 });
 
+test('Facebook Reels entry reasons return the current canonical Reel card', async () => {
+  for (const reason of ['facebook_reels_primary', 'empty_feed_reels_fallback']) {
+    const dom = install(`
+      <main>
+        <article role="article">
+          <h2><a href="/people/Alice/123456/">Alice</a></h2>
+          <div data-ad-rendering-role="story_message">Configured primary Reel</div>
+          <a href="/reel/777/">timestamp</a>
+          <video src="https://cdn.example/reel-777.mp4"></video>
+        </article>
+      </main>
+    `, 'https://www.facebook.com/reel/777');
+    setRect(dom.window.document.querySelector('video')!, {
+      left: 280,
+      top: 80,
+      right: 980,
+      bottom: 760,
+    });
+
+    const result = await run({ kind: 'page_scroll', params: { reason } });
+
+    assert.equal(result.effectPhase, 'confirmed', reason);
+    assert.equal(result.output.kind, 'page_cards', reason);
+    assert.equal(result.output.value.listKind, 'reels', reason);
+    const cards = result.output.value.cards as Array<Record<string, unknown>>;
+    assert.equal(cards[0]?.noteId, 'https://www.facebook.com/reel/777', reason);
+  }
+});
+
 test('Facebook Native identity treats c_user as authoritative over other feed profile links', async () => {
   install(`
     <nav><a href="/people/Self/123456/" aria-label="Self's profile picture"></a></nav>

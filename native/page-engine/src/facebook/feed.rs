@@ -32,6 +32,13 @@ const FACEBOOK_FEED_RECOVERY_TIMEOUT: Duration = Duration::from_secs(12);
 /// 就能吃掉它，于是「偶发」退化成合成失败。取 1s：相对 8s 恢复窗仍是小头，却扛得住抖动。
 const FACEBOOK_FEED_RECOVERY_RECEIPT_MARGIN: Duration = Duration::from_millis(1_000);
 
+fn facebook_reels_entry_reason(reason: Option<&str>) -> bool {
+    matches!(
+        reason,
+        Some("facebook_reels_primary") | Some("empty_feed_reels_fallback")
+    )
+}
+
 pub(crate) async fn execute(
     session: &mut EngineSession,
     command: &NativeCommand,
@@ -122,7 +129,7 @@ pub(crate) async fn execute(
             }
         }
         NativeCommand::PageScroll(params)
-            if params.reason.as_deref() == Some("empty_feed_reels_fallback") =>
+            if facebook_reels_entry_reason(params.reason.as_deref()) =>
         {
             session
                 .cdp
@@ -1356,6 +1363,16 @@ fn facebook_near_bottom(probe: &facebook::FacebookFeedProbe) -> bool {
 mod tests {
     use super::*;
     use crate::model::{FacebookListKind, FacebookListState};
+
+    #[test]
+    fn reels_entry_reason_accepts_only_configured_primary_and_feed_fallback() {
+        assert!(facebook_reels_entry_reason(Some("facebook_reels_primary")));
+        assert!(facebook_reels_entry_reason(Some(
+            "empty_feed_reels_fallback"
+        )));
+        assert!(!facebook_reels_entry_reason(Some("feed_scroll")));
+        assert!(!facebook_reels_entry_reason(None));
+    }
 
     /// 内容派生的会话内引用**不是地址**：导航校验必须诚实拒绝它，绝不放行、也绝不猜一个地址
     /// （change generalize-facebook-content-derived-post-identity task 2.3）。
