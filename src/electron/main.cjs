@@ -2174,6 +2174,7 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     cascadeIndex: cascadeIndex || 0,
     child: undefined,
     spawnCloudKey: '',
+    spawnAuthenticatedTarget: '',
     status: makeStatus(kind === 'self' ? 'self' : 'adspower'),
     // 每环境各一份日志→UI 事件解析器（交织 stdout 按 envId 归属，绝不串号）。
     uiEvents: createUiEventStream(),
@@ -2741,7 +2742,8 @@ function occupiedSlots() {
   let n = 0;
   for (const h of envs.values()) {
     // 初始 browser-absent 核心从未打开浏览器；coldStandbyPending 期间也不能虚占一个执行槽。
-    if (h.child && !usesTransientBrowserLane(h) && !h.coldStandbyActive && !h.controlPlaneOnly && !h.removed) n += 1;
+    if (fleet.childProcessIsRunning(h.child) && !usesTransientBrowserLane(h)
+      && !h.coldStandbyActive && !h.controlPlaneOnly && !h.removed) n += 1;
   }
   return n;
 }
@@ -2751,7 +2753,8 @@ function queuedStartCount() {
   let count = 0;
   for (const handle of envs.values()) {
     if (!handle.startQueueReserved) continue;
-    const executing = Boolean(handle.child && !handle.coldStandbyActive && !handle.coldStandbyPending);
+    const executing = Boolean(fleet.childProcessIsRunning(handle.child)
+      && !handle.coldStandbyActive && !handle.coldStandbyPending);
     if (handle.removed || handle.stopRequested || handle.status.session === 'paused' || executing) {
       handle.startQueueReserved = false;
       continue;
@@ -2891,7 +2894,7 @@ function slotWaiters() {
   for (const h of envs.values()) {
     if (!h.slotWaitingSince) continue;
     const parked = h.coldStandbyActive || h.coldStandbyPending; // 待机中的核心还活着，但浏览器已关 = 不占槽位
-    const running = h.child && !parked;
+    const running = fleet.childProcessIsRunning(h.child) && !parked;
     if (h.removed || running || h.stopRequested || h.status.session === 'paused') {
       clearSlotWaiting(h);
       continue;
@@ -4652,6 +4655,10 @@ async function spawnEdgeChild(handle, {
   const cloudSel = resolveCloudUrl();
   spawnEnv.AIDCP_CLOUD_URL = cloudSel.url;
   handle.spawnCloudKey = cloudSel.key;
+  // 冻结本次 spawn 获得的客户认证目标。连接回执可能晚于令牌刷新窗口；届时重新读取
+  // hasValidSession() 会把“同一目标、令牌正在刷新”误判成跨环境连接并杀掉健康核心。
+  // 真正的会话失效仍由 onSessionInvalid() 统一撤销花名册并终止全部核心。
+  handle.spawnAuthenticatedTarget = hasValidSession() ? clientSession.deploymentTarget : '';
   if (controlBootstrap) {
     // 与 AIDCP_ACCOUNT_ID 严格分离：后者会覆盖页面真实身份，绝不能承载可能陈旧的启动引导。
     spawnEnv.AIDCP_START_BROWSER_ABSENT = '1';
@@ -5159,15 +5166,21 @@ async function spawnEdgeChild(handle, {
     }
     scheduleRespawnIfNeeded(handle, decision);
   });
-  // 终局判定挂 'close'（非 'exit'）：Node 只保证 'close' 在 stdio 全部 drain 后触发、且必在 'exit' 之后；
+  // 终局归因优先挂 'close'：Node 只保证 'close' 在 stdio 全部 drain 后触发、且必在 'exit' 之后；
   // 'exit' 可能早于末尾 stdout/stderr 'data'，那样内核缺失退出时 kernelMissThisRun/neededKernel 尚未由
   // handleEdgeLogLine 写入 → 被误判为硬失败、弹出本 change 意在消除的启动失败通知。改挂 'close' 后，
   // 「SunBrowser <N> is not ready」等末行必已处理完，内核缺失分类可靠。（spawn 失败无 'close'，由上方 'error'
-  // 经 handle.child===child 互斥兜底；核心不派生继承 stdio 的孙进程，'close' 及时触发；退出应用的有界等待
-  // 读 handle.child、'close' 仅晚 'exit' 数毫秒，远在 ~10s 预算内。）
-  child.on('close', (code, signal) => {
-    if (handle.child !== child) return; // 已被 'error' 处理器接管
-    settleLaunchReady(handle, false); // 进程没了：放行启动队列的下一个
+  // 经 handle.child===child 互斥兜底。）资源归还则不能等 'close'：真实机器上孙进程/管道可能让 close
+  // 长时间不来，OS 进程早已退出却仍被统计为公共槽位，最终把整机卡成 4/4 幽灵占用。
+  // exit 当场释放执行容量；末尾日志只再给 2 秒 drain，超时后仍按已观察到的退出码完成终局归因。
+  const CORE_CLOSE_DRAIN_GRACE_MS = 2_000;
+  let coreExitFinalized = false;
+  let closeDrainTimer = null;
+  const finalizeCoreExit = (code, signal) => {
+    if (coreExitFinalized || handle.child !== child) return; // 已被 'error' 处理器接管
+    coreExitFinalized = true;
+    if (closeDrainTimer) clearTimeout(closeDrainTimer);
+    closeDrainTimer = null;
     const wasClosing = handle.closePending;
     const wasParked = handle.coreParked;
     const wasPausing = handle.pausePending;
@@ -5399,6 +5412,25 @@ async function spawnEdgeChild(handle, {
       handle.restartPending = false;
       if (!isQuitting) void enqueueStartFlow(handle);
     }
+  };
+  child.on('exit', (code, signal) => {
+    if (handle.child !== child) return;
+    // OS 执行态已经结束：公共槽位与串行启动队列立即前进，不等待 stdio close。
+    settleLaunchReady(handle, false);
+    broadcastFleet();
+    setTimeout(() => drainSlotWaiters(), 0);
+    closeDrainTimer = setTimeout(() => {
+      appendEdgeLog(handle.envId, `核心进程已退出，但日志管道 ${CORE_CLOSE_DRAIN_GRACE_MS}ms 内未关闭；按退出码完成回收。`, true);
+      finalizeCoreExit(code, signal);
+    }, CORE_CLOSE_DRAIN_GRACE_MS);
+    if (typeof closeDrainTimer.unref === 'function') closeDrainTimer.unref();
+  });
+  child.on('close', (code, signal) => {
+    if (coreExitFinalized || handle.child !== child) return;
+    // 正常路径：stdio 已 drain，保留完整末尾日志后再分类；若 close 异常缺席则由上面的有界兜底完成。
+    settleLaunchReady(handle, false);
+    setTimeout(() => drainSlotWaiters(), 0);
+    finalizeCoreExit(code, signal);
   });
 
   // 串行启动队列在此等待：起完一个（云端已连上）或诚实失败，才放行下一个。
@@ -5916,9 +5948,9 @@ function handleEdgeLogLine(handle, message, isError = false) {
     next.presence = { text: '请在浏览器里扫码登录', at: new Date().toISOString() };
   }
   if (message.includes('已连接云端') || message.includes('已握手') || message.includes('云端已重连')) {
-    const authenticatedTarget = hasValidSession() ? clientSession.deploymentTarget : null;
     if (!handle.spawnCloudKey || handle.spawnCloudKey !== settings.deploymentTarget
-      || authenticatedTarget !== settings.deploymentTarget) {
+      || handle.spawnAuthenticatedTarget !== settings.deploymentTarget
+      || !clientSession || clientSession.deploymentTarget !== handle.spawnAuthenticatedTarget) {
       handle.stopRequested = true;
       settleLaunchReady(handle, false);
       updateStatus(handle, {

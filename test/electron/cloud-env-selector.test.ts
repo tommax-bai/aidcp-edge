@@ -40,6 +40,7 @@ test('core spawn overwrites inherited AIDCP_CLOUD_URL after env merging with the
   const spawnCallIndex = spawn.indexOf('spawn(process.execPath');
   assert.ok(mergeIndex >= 0 && injectIndex > mergeIndex && spawnCallIndex > injectIndex);
   assert.match(spawn, /handle\.spawnCloudKey = cloudSel\.key/);
+  assert.match(spawn, /handle\.spawnAuthenticatedTarget = hasValidSession\(\) \? clientSession\.deploymentTarget : ''/);
   assert.doesNotMatch(spawn, /if \(cloudSel\.fromSelection\)/);
   assert.doesNotMatch(spawn, /process\.env\.AIDCP_CLOUD_URL/);
 });
@@ -92,10 +93,13 @@ test('target switch signs out and clears customer authority while retaining phys
   assert.doesNotMatch(transition, /environments:\s*\[\]|adsProfileId:\s*''|deletePhysical/);
 });
 
-test('connection receipt is accepted only when spawn, selected, and authenticated targets agree', () => {
+test('connection receipt uses the authenticated target frozen at spawn, not mutable token expiry', () => {
   const logProjection = blockBetween(main, 'function handleEdgeLogLine(', 'function pauseEdge(');
   assert.match(logProjection, /handle\.spawnCloudKey !== settings\.deploymentTarget/);
-  assert.match(logProjection, /authenticatedTarget !== settings\.deploymentTarget/);
+  assert.match(logProjection, /handle\.spawnAuthenticatedTarget !== settings\.deploymentTarget/);
+  assert.match(logProjection, /clientSession\.deploymentTarget !== handle\.spawnAuthenticatedTarget/);
+  assert.doesNotMatch(logProjection, /const authenticatedTarget = hasValidSession\(\)/,
+    '延迟连接回执不得因令牌刷新窗口短暂变成无效而误杀同目标核心');
   assert.match(logProjection, /部署环境与自动化连接目标不一致，已安全停止自动化/);
   assert.match(logProjection, /next\.connectedCloudKey = handle\.spawnCloudKey/);
 });

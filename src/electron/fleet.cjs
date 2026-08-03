@@ -419,6 +419,14 @@ function startQueueAdmission({ queuedCount, limit, alreadyQueued = false } = {})
 }
 
 /**
+ * A ChildProcess object can outlive the OS process while Node waits for inherited stdio to close.
+ * Resource accounting follows the OS execution lifetime, not the later `close` notification.
+ */
+function childProcessIsRunning(child) {
+  return Boolean(child && child.exitCode == null && child.signalCode == null);
+}
+
+/**
  * 两个上限的最终取值（界面可设，change browser-slot-scheduling 追加）。
  *
  * 优先级 **界面设置 > 启动环境变量 > 按内存自动推**——与云端环境选择同一套口径（界面是权威，env 只是
@@ -714,6 +722,7 @@ module.exports = {
   resolveSlotCapacity,
   maxQueuedStartsForSlots,
   startQueueAdmission,
+  childProcessIsRunning,
   resolveSlotSettings,
   normalizeSlotLimit,
   QUEUED_STARTS_PER_SLOT,

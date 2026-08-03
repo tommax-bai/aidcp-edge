@@ -29,6 +29,32 @@ test('自动启动排队上限 = 2 × 浏览器并发；这不是账号/环境�
   assert.equal(fleet.maxQueuedStartsForSlots(8), 16);
 });
 
+test('子进程对象等待 close 时不再虚占 OS 已退出的浏览器槽位', () => {
+  assert.equal(fleet.childProcessIsRunning({ exitCode: null, signalCode: null }), true);
+  assert.equal(fleet.childProcessIsRunning({ exitCode: 0, signalCode: null }), false);
+  assert.equal(fleet.childProcessIsRunning({ exitCode: 1, signalCode: null }), false);
+  assert.equal(fleet.childProcessIsRunning({ exitCode: null, signalCode: 'SIGTERM' }), false);
+  assert.equal(fleet.childProcessIsRunning(undefined), false);
+
+  const occupied = mainSource.slice(
+    mainSource.indexOf('function occupiedSlots()'),
+    mainSource.indexOf('\nfunction queuedStartCount()', mainSource.indexOf('function occupiedSlots()')),
+  );
+  assert.match(occupied, /fleet\.childProcessIsRunning\(h\.child\)/);
+
+  const spawn = mainSource.slice(
+    mainSource.indexOf('async function spawnEdgeChild('),
+    mainSource.indexOf('\nfunction stopLoginPoller()', mainSource.indexOf('async function spawnEdgeChild(')),
+  );
+  assert.match(spawn, /child\.on\('exit',[\s\S]{0,420}broadcastFleet\(\)[\s\S]{0,120}drainSlotWaiters\(\)/,
+    'OS exit 必须立即推进槽位 FIFO，不得等 stdio close');
+  assert.match(spawn, /CORE_CLOSE_DRAIN_GRACE_MS = 2_000/);
+  assert.match(spawn, /setTimeout\([\s\S]{0,360}finalizeCoreExit\(code, signal\)[\s\S]{0,80}CORE_CLOSE_DRAIN_GRACE_MS/,
+    'close 缺席时必须有界完成终局归因并清理 handle');
+  assert.match(spawn, /child\.on\('close',[\s\S]{0,120}coreExitFinalized \|\| handle\.child !== child/,
+    '旧进程迟到的 close 不得 settle 新一代核心的启动队列');
+});
+
 test('启动排队准入：未满可加入、满时拒绝、同一环境重复请求幂等', () => {
   assert.deepEqual(fleet.startQueueAdmission({ queuedCount: 3, limit: 4 }), {
     ok: true, queued: 4, limit: 4, added: true,
