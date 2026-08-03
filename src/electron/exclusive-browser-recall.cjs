@@ -24,8 +24,8 @@ function createExclusiveBrowserRecallCoordinator({
   let latestGeneration = 0;
   let tail = Promise.resolve();
 
-  const recall = (target) => {
-    // 无效目标不应取消一个已经在途的有效召回；它也不会触碰任何其他窗口。
+  const enqueue = (target, operation) => {
+    // 无效目标不应取消一个已经在途的有效窗口意图；它也不会触碰任何其他窗口。
     if (!target || !isControllable(target)) {
       return Promise.resolve({ ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' });
     }
@@ -35,42 +35,7 @@ function createExclusiveBrowserRecallCoordinator({
       if (!isControllable(target)) {
         return { ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' };
       }
-
-      const targetId = idOf(target);
-      const others = Array.from(listHandles() || [])
-        .filter((handle) => handle && idOf(handle) !== targetId && isControllable(handle));
-      const parkResults = await Promise.all(others.map(async (handle) => {
-        try {
-          const result = settledControlResult(await parkBrowser(handle), '浏览器窗口归位失败');
-          return { handle, ...result };
-        } catch (error) {
-          return { handle, ok: false, error: error?.message || '浏览器窗口归位失败' };
-        }
-      }));
-
-      // 新请求已到达时，不再把旧目标抬前；其已完成的非目标归位都是安全、可逆的。
-      if (generation !== latestGeneration) return { ok: false, superseded: true };
-
-      let shown;
-      try {
-        shown = settledControlResult(await showBrowser(target), '目标浏览器窗口移动失败');
-      } catch (error) {
-        shown = { ok: false, error: error?.message || '目标浏览器窗口移动失败' };
-      }
-      // show 已写出后无法可信取消，但串行尾部会让最新请求随后建立最终布局；旧回执不得更新 renderer。
-      if (generation !== latestGeneration) return { ok: false, superseded: true };
-      if (!shown.ok) return { ...shown, otherParkingAttempted: true };
-
-      const failures = parkResults.filter((result) => !result.ok);
-      return {
-        ok: true,
-        parkFailureCount: failures.length,
-        parkFailures: failures.slice(0, 5).map((result) => ({
-          envId: idOf(result.handle),
-          name: labelOf(result.handle).trim().replace(/\s+/g, ' ').slice(0, 80) || idOf(result.handle),
-          error: String(result.error || '浏览器窗口归位失败').slice(0, 240),
-        })),
-      };
+      return operation(() => generation === latestGeneration);
     };
 
     const result = tail.then(run, run);
@@ -78,7 +43,56 @@ function createExclusiveBrowserRecallCoordinator({
     return result;
   };
 
-  return { recall };
+  const recall = (target) => enqueue(target, async (isLatest) => {
+    const targetId = idOf(target);
+    const others = Array.from(listHandles() || [])
+      .filter((handle) => handle && idOf(handle) !== targetId && isControllable(handle));
+    const parkResults = await Promise.all(others.map(async (handle) => {
+      try {
+        const result = settledControlResult(await parkBrowser(handle), '浏览器窗口归位失败');
+        return { handle, ...result };
+      } catch (error) {
+        return { handle, ok: false, error: error?.message || '浏览器窗口归位失败' };
+      }
+    }));
+
+    // 新请求已到达时，不再把旧目标抬前；其已完成的非目标归位都是安全、可逆的。
+    if (!isLatest()) return { ok: false, superseded: true };
+
+    let shown;
+    try {
+      shown = settledControlResult(await showBrowser(target), '目标浏览器窗口移动失败');
+    } catch (error) {
+      shown = { ok: false, error: error?.message || '目标浏览器窗口移动失败' };
+    }
+    // show 已写出后无法可信取消，但串行尾部会让最新请求随后建立最终布局；旧回执不得更新 renderer。
+    if (!isLatest()) return { ok: false, superseded: true };
+    if (!shown.ok) return { ...shown, otherParkingAttempted: true };
+
+    const failures = parkResults.filter((result) => !result.ok);
+    return {
+      ok: true,
+      parkFailureCount: failures.length,
+      parkFailures: failures.slice(0, 5).map((result) => ({
+        envId: idOf(result.handle),
+        name: labelOf(result.handle).trim().replace(/\s+/g, ' ').slice(0, 80) || idOf(result.handle),
+        error: String(result.error || '浏览器窗口归位失败').slice(0, 240),
+      })),
+    };
+  });
+
+  const park = (target) => enqueue(target, async (isLatest) => {
+    let parked;
+    try {
+      parked = settledControlResult(await parkBrowser(target), '浏览器窗口归位失败');
+    } catch (error) {
+      parked = { ok: false, error: error?.message || '浏览器窗口归位失败' };
+    }
+    if (!isLatest()) return { ok: false, superseded: true };
+    return parked;
+  });
+
+  return { recall, park };
 }
 
 module.exports = { createExclusiveBrowserRecallCoordinator };

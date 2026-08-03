@@ -72,7 +72,7 @@ async function boot(
   let pushActivity: (e: unknown) => void = () => undefined;
   let pushFleet: (snap: unknown) => void = () => undefined;
   let pushBatchProxyProgress: (progress: unknown) => void = () => undefined;
-  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], showDrivenOptions: [], recallExclusive: [], resetParking: [], startAll: [], closeAll: [], personaPreview: [], personaFill: [], select: [], close: [], browserOpen: [], browserClose: [], notify: [], start: [], resume: [], saveNickname: [], updateProxies: [] };
+  const calls: Record<string, unknown[]> = { relogin: [], showDriven: [], showDrivenOptions: [], recallExclusive: [], parkShown: [], resetParking: [], startAll: [], closeAll: [], personaPreview: [], personaFill: [], select: [], close: [], browserOpen: [], browserClose: [], notify: [], start: [], resume: [], saveNickname: [], updateProxies: [] };
   const personaStatusByEnv = new Map<string, Record<string, unknown>>();
   const settings = {
     provider: 'adspower',
@@ -153,6 +153,7 @@ async function boot(
     notify: async (payload: unknown) => { calls.notify.push(payload); return { ok: true }; },
     showDrivenBrowser: async (envId: string, opts?: unknown) => { calls.showDriven.push(envId); calls.showDrivenOptions.push(opts); return { ok: true }; },
     recallExclusiveBrowser: async (envId: string) => { calls.recallExclusive.push(envId); return { ok: true, parkFailureCount: 0, parkFailures: [] }; },
+    parkShownBrowser: async (envId: string) => { calls.parkShown.push(envId); return { ok: true }; },
     resetBrowserParking: async (envId: string) => { calls.resetParking.push(envId); return { ok: true }; },
     pause: async () => makeStatus(),
     resume: async (envId: string) => { calls.resume.push(envId); return makeStatus({ envId }); },
@@ -497,7 +498,7 @@ test('增量心跳保留完整投影，待机与真实排队不会退化为运�
   assert.match(queued.title, /排队中 #3/);
 });
 
-test('环境头像：单击只选中，双击未选中环境即可独占召回，重复双击不反向归位', async () => {
+test('环境头像：单击只选中，双击召回，再次双击按配置复原', async () => {
   const { w, calls, pushStatus } = await boot();
   pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二' }));
   await tick();
@@ -522,13 +523,24 @@ test('环境头像：单击只选中，双击未选中环境即可独占召回�
   await tick();
   assert.deepEqual(calls.recallExclusive, ['ads-p2']);
   assert.equal(rowOf('ads-p2').classList.contains('shown'), true);
+  assert.equal(rowOf('ads-p2').querySelector('.rail-ava')?.getAttribute('title'), '双击复原浏览器');
   assert.equal(w.document.querySelector('#rail-msg')!.textContent, '', '窗口前置成功不展示说明文案');
 
-  // 同一目标重复双击仍是召回，绝不能把目标作为 toggle 归位。
+  // 同一已显示目标再次双击 → 精确归位；仍保持选中。
+  doubleClickAvatar('ads-p2');
+  await tick();
+  assert.deepEqual(calls.recallExclusive, ['ads-p2']);
+  assert.deepEqual(calls.parkShown, ['ads-p2']);
+  assert.deepEqual(calls.resetParking, []);
+  assert.equal(rowOf('ads-p2').classList.contains('shown'), false);
+  assert.equal(rowOf('ads-p2').classList.contains('selected'), true);
+  assert.equal(rowOf('ads-p2').querySelector('.rail-ava')?.getAttribute('title'), '双击召回浏览器');
+
+  // 已归位目标再次双击 → 又回到召回态。
   doubleClickAvatar('ads-p2');
   await tick();
   assert.deepEqual(calls.recallExclusive, ['ads-p2', 'ads-p2']);
-  assert.deepEqual(calls.resetParking, []);
+  assert.deepEqual(calls.parkShown, ['ads-p2']);
   assert.equal(rowOf('ads-p2').classList.contains('shown'), true);
 
   // 未选中的环境无需先单击再补一次：同一双击同时选中并召回。
@@ -538,6 +550,27 @@ test('环境头像：单击只选中，双击未选中环境即可独占召回�
   assert.equal(rowOf('ads-p1').classList.contains('shown'), true);
   assert.equal(rowOf('ads-p2').classList.contains('shown'), false);
   assert.deepEqual(calls.recallExclusive, ['ads-p2', 'ads-p2', 'ads-p1']);
+});
+
+test('环境头像复原失败：保留 shown 并诚实提示', async () => {
+  const parked: string[] = [];
+  const { w } = await boot({
+    parkShownBrowser: async (envId: string) => {
+      parked.push(envId);
+      return { ok: false, error: '归位超时' };
+    },
+  });
+  const avatar = () => w.document.querySelector('.rail-row[data-env-id="ads-p1"] .rail-ava') as HTMLElement;
+  const doubleClick = () => avatar().dispatchEvent(new w.MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+
+  doubleClick();
+  await tick();
+  assert.equal(w.document.querySelector('.rail-row[data-env-id="ads-p1"]')?.classList.contains('shown'), true);
+  doubleClick();
+  await tick();
+  assert.deepEqual(parked, ['ads-p1']);
+  assert.equal(w.document.querySelector('.rail-row[data-env-id="ads-p1"]')?.classList.contains('shown'), true);
+  assert.match(w.document.querySelector('#rail-msg')?.textContent || '', /浏览器归位失败.*归位超时/);
 });
 
 test('环境头像独占召回：其他环境部分归位失败时保留目标 shown 并诚实提示', async () => {
@@ -980,7 +1013,7 @@ test('人工昵称先乐观显示 pending，写盘失败后恢复原昵称与来
   assert.match(w.document.querySelector('#rail-msg')?.textContent || '', /保存失败.*已恢复.*磁盘只读/);
 });
 
-test('环境头像独占召回：验证码浮层态保留 shown，重复双击仍召回而不归位目标', async () => {
+test('环境头像独占召回：验证码浮层态保留 shown，再次双击仍可复原目标', async () => {
   const { w, calls, pushStatus } = await boot();
   const rowOf = (id: string) => w.document.querySelector(`.rail-row[data-env-id="${id}"]`) as HTMLElement;
   pushStatus(makeStatus({ envId: 'ads-p2', envName: '环境二' }));
@@ -999,9 +1032,10 @@ test('环境头像独占召回：验证码浮层态保留 shown，重复双击�
   await tick();
   assert.equal(rowOf('ads-p2').classList.contains('shown'), true, 'attention 态（core 在跑）保留 shown');
   doubleClickAvatar(); await tick();
-  assert.deepEqual(calls.recallExclusive, ['ads-p2', 'ads-p2']);
-  assert.deepEqual(calls.resetParking, [], '重复双击不得把目标作为 toggle 归位');
-  assert.equal(rowOf('ads-p2').classList.contains('shown'), true);
+  assert.deepEqual(calls.recallExclusive, ['ads-p2']);
+  assert.deepEqual(calls.parkShown, ['ads-p2']);
+  assert.deepEqual(calls.resetParking, []);
+  assert.equal(rowOf('ads-p2').classList.contains('shown'), false);
 });
 
 test('环境头像独占召回：键盘落在人设 ✦ 图标上不触发浏览器窗口动作', async () => {

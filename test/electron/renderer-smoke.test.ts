@@ -77,6 +77,7 @@ interface Stub {
   relogin: () => Promise<unknown>;
   openAdsDownload: () => void;
   showDrivenBrowser: (envId?: string, opts?: { keepClientForeground?: boolean }) => Promise<{ ok: boolean; error?: string }>;
+  parkShownBrowser: (envId?: string) => Promise<{ ok: boolean; error?: string; superseded?: boolean }>;
   resetBrowserParking: () => Promise<{ ok: boolean; error?: string }>;
   adsStatus: (opts?: unknown) => Promise<{ ok: boolean; error?: string }>;
   adsListProfiles: (opts?: unknown) => Promise<unknown>;
@@ -244,6 +245,7 @@ function makeStub(overrides: Partial<Stub> = {}): Stub {
     relogin: async () => makeStatus(),
     openAdsDownload: () => undefined,
     showDrivenBrowser: async () => ({ ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' }),
+    parkShownBrowser: async () => ({ ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' }),
     resetBrowserParking: async () => ({ ok: false, error: '引擎未运行或浏览器尚未就绪，请先启动引擎再操作' }),
     adsStatus: async () => ({ ok: true }),
     adsListProfiles: async () => ({ ok: true, profiles: [] }),

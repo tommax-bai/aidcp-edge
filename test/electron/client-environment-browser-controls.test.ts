@@ -91,7 +91,9 @@ test('successful foreground and parking requests no longer emit explanatory copy
 test('environment-avatar exclusive recall uses correlated park/show completion and restores AIDCP above the target', () => {
   assert.match(preload, /showDrivenBrowser: \(envId, opts\) => ipcRenderer\.invoke\('browser:showDriven', envId, opts\)/);
   assert.match(preload, /recallExclusiveBrowser: \(envId\) => ipcRenderer\.invoke\('browser:recallExclusive', envId\)/);
+  assert.match(preload, /parkShownBrowser: \(envId\) => ipcRenderer\.invoke\('browser:parkShown', envId\)/);
   assert.match(renderer, /window\.aidcpEdge\.recallExclusiveBrowser/);
+  assert.match(renderer, /window\.aidcpEdge\.parkShownBrowser/);
   assert.match(main, /const browserControlPending = new Map\(\)/);
   assert.match(main, /mainWindow\.getBounds\(\)/);
   assert.match(main, /screen\.getDisplayMatching\(clientBounds\)/);
@@ -107,6 +109,7 @@ test('environment-avatar exclusive recall uses correlated park/show completion a
   assert.match(show, /浏览器窗口移动超时/);
   assert.match(main, /createExclusiveBrowserRecallCoordinator\(\{[\s\S]{0,500}parkBrowser: parkDrivenBrowserUsingConfiguredBounds[\s\S]{0,160}showBrowser: showDrivenBrowserBelowClient/);
   assert.match(main, /ipcMain\.handle\('browser:recallExclusive'[\s\S]{0,180}envs\.get\(envId\)[\s\S]{0,120}exclusiveBrowserRecallCoordinator\.recall/);
+  assert.match(main, /ipcMain\.handle\('browser:parkShown'[\s\S]{0,180}envs\.get\(envId\)[\s\S]{0,120}exclusiveBrowserRecallCoordinator\.park/);
   assert.match(main, /opts && opts\.keepClientForeground === true[\s\S]{0,120}showDrivenBrowserBelowClient/);
   assert.match(renderer, /showDrivenBrowser\(envId\)/, '登录引导保留不带 client-foreground policy 的浏览器前台调用');
 });

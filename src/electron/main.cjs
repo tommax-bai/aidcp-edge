@@ -7583,6 +7583,10 @@ ipcMain.handle('browser:recallExclusive', (_event, envId) => {
   const target = envId ? envs.get(envId) : null;
   return exclusiveBrowserRecallCoordinator.recall(target);
 });
+ipcMain.handle('browser:parkShown', (_event, envId) => {
+  const target = envId ? envs.get(envId) : null;
+  return exclusiveBrowserRecallCoordinator.park(target);
+});
 ipcMain.handle('browser:resetParking', (_event, envId) => sendBrowserParkingCommand(resolveHandle(envId), 'browser.park'));
 // 账号人设（change offline-account-persona-management）：这三条具名 IPC 只接收本地 envId，并在 main
 // 权威换成 profileId/envKey 后直连 customer-auth。浏览器与环境 core 不参与，因此停止状态也能读写；

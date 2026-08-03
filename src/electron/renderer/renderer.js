@@ -6245,9 +6245,9 @@ function makeRailRow(row) {
   btn.tabIndex = 0;
   btn.setAttribute('role', 'button');
   const displayName = railDisplayName(row);
-  // 单击只选中，双击头像始终召回；shown 与 selected 独立，避免把选中切换冒充物理窗口归位。
+  // 单击只选中，双击头像在召回与复原之间切换；shown 与 selected 独立，避免把选中切换冒充物理窗口归位。
   const nextHint = isShown
-    ? '浏览器已在 AIDCP 后方；双击头像可重新召回'
+    ? '浏览器已在 AIDCP 后方；双击头像按配置复原'
     : '单击选中；双击头像召回浏览器';
   const queueText = row.state === 'queued' && Number.isInteger(row.queuePosition) ? ` #${row.queuePosition}` : '';
   const reasonText = row.detail && row.detail !== row.label ? ` · ${row.detail}` : '';
@@ -6255,7 +6255,7 @@ function makeRailRow(row) {
   const ava = document.createElement('span');
   ava.className = 'rail-ava';
   ava.textContent = displayName.slice(0, 1);
-  ava.title = '双击召回浏览器';
+  ava.title = isShown ? '双击复原浏览器' : '双击召回浏览器';
   if (row.state === 'queued' && Number.isInteger(row.queuePosition)) {
     const queueBadge = document.createElement('span');
     queueBadge.className = 'rail-queue-badge';
@@ -6547,19 +6547,26 @@ function beginRailNameEdit(row, nameEl) {
   input.addEventListener('blur', () => { void commit(); });
 }
 
-// 环境头像三态已收敛为双击独占召回：主进程把其他可控浏览器按各自配置归位，再把目标放到 AIDCP 正后方。
-// 单击环境行只做选择；同一头像重复双击仍是召回，绝不反向触发目标归位。
+// 环境头像双击在两态间切换：未显示时独占召回；已显示的同一目标再次双击时按自身配置复原。
+// 召回与复原共用主进程 latest-wins 队列，renderer 只在带完成回执的动作成功后推进 shown 状态。
 // 引导登录仍调用 showDrivenBrowser，浏览器保持前台供人工处理，不进入本互斥编排。
 async function onRailAvatarRecall(envId) {
   if (!envId || !fleetView.envs.has(envId)) return;
   const epoch = ++fleetView.browserRecallEpoch;
+  const restoring = fleetView.shownEnv === envId;
   if (envId !== fleetView.selected) selectEnv(envId);
-  const api = window.aidcpEdge.recallExclusiveBrowser;
+  const api = restoring ? window.aidcpEdge.parkShownBrowser : window.aidcpEdge.recallExclusiveBrowser;
   if (typeof api !== 'function') return;
   try {
     const r = await api(envId);
     if (epoch !== fleetView.browserRecallEpoch || (r && r.superseded)) return;
     if (r && r.ok) {
+      if (restoring) {
+        fleetView.shownEnv = null;
+        setRailMsg('');
+        renderRail();
+        return;
+      }
       fleetView.shownEnv = envId;
       const failures = Array.isArray(r.parkFailures) ? r.parkFailures : [];
       const count = Number.isInteger(r.parkFailureCount) ? r.parkFailureCount : failures.length;
@@ -6569,13 +6576,14 @@ async function onRailAvatarRecall(envId) {
         : '');
       renderRail();
     } else {
-      if (r && r.otherParkingAttempted) fleetView.shownEnv = null;
-      setRailMsg(`显示浏览器失败：${(r && r.error) || '引擎未运行或浏览器尚未就绪'}`);
+      if (!restoring && r && r.otherParkingAttempted) fleetView.shownEnv = null;
+      const action = restoring ? '浏览器归位' : '显示浏览器';
+      setRailMsg(`${action}失败：${(r && r.error) || '引擎未运行或浏览器尚未就绪'}`);
       renderRail();
     }
   } catch (e) {
     if (epoch !== fleetView.browserRecallEpoch) return;
-    setRailMsg(`显示浏览器失败：${(e && e.message) || e}`);
+    setRailMsg(`${restoring ? '浏览器归位' : '显示浏览器'}失败：${(e && e.message) || e}`);
   }
 }
 
