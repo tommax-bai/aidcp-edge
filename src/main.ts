@@ -598,6 +598,7 @@ async function main(): Promise<void> {
     ...(accountId ? { accountId } : {}),
     ...(accountNickname ? { accountNickname } : {}),
     ...(machineLabel ? { machineLabel } : {}),
+    browserState: startBrowserAbsent ? 'absent' : 'ready',
     runner: {
       run: async (step) => ({
         actionId: step.actionId,
@@ -1735,11 +1736,13 @@ async function main(): Promise<void> {
       }
     },
     onStandby: () => {
+      client.reportBrowserStatus({ state: 'absent', reason: 'cold_standby' });
       if (typeof process.send === 'function' && process.connected) {
         process.send({ type: 'lifecycle.standby' });
       }
     },
     onWoken: () => {
+      client.reportBrowserStatus({ state: 'ready', reason: 'wake_completed' });
       settleWake(true); // 放行所有卡在浏览器闸上的动作
       sendLifecycleIpc({ type: 'lifecycle.woken' });
     },
@@ -1749,6 +1752,7 @@ async function main(): Promise<void> {
       // 对所有后续云端任务静默停摆（比槽位争用严重一个量级：它连「排队」都排不上）。
       clearColdStandbyWakeLatch();
       settleWake(false); // 立刻放行等待者去诚实失败，绝不让它们吊到 180s 死线
+      client.reportBrowserStatus({ state: 'absent', reason: 'wake_failed' });
       sendLifecycleIpc({ type: 'lifecycle.wake_failed', reason });
     },
     logger: (message) => console.log(message),

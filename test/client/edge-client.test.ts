@@ -168,6 +168,50 @@ test('edge-client: hello carries platform metadata without changing message type
   await connecting;
 });
 
+test('edge-client: reports browser readiness separately from Cloud transport readiness', async () => {
+  const ws = new FakeWebSocket();
+  const client = new EdgeClient({
+    url: 'ws://test',
+    edgeId: 'edge-browser-state',
+    platform: 'facebook',
+    app: 'facebook',
+    browserState: 'absent',
+    runner: {
+      run: async () => ({
+        actionId: 'noop',
+        ok: true,
+        outcome: 'success',
+        attempts: 1,
+        reason: 'ok',
+      }),
+    },
+    wsFactory: () => ws,
+    idGen: (() => {
+      const ids = ['hello-browser-state', 'browser-ready'];
+      let index = 0;
+      return () => ids[index++] ?? `id-${index}`;
+    })(),
+    clock: () => 1,
+    logger: () => {},
+  });
+
+  const connecting = client.connect();
+  ws.emitOpen();
+  await Promise.resolve();
+  const hello = JSON.parse(ws.sent[0]) as Envelope;
+  assert.equal(hello.type, 'hello');
+  assert.equal((hello.payload as { browserState?: string }).browserState, 'absent');
+
+  ws.emitMessage(makeEnvelope('welcome', 'hello-browser-state', 1, { sessionId: 's1', serverVersion: 'v1' }));
+  await connecting;
+  ws.sent.length = 0;
+
+  client.reportBrowserStatus({ state: 'ready', reason: 'wake_completed' });
+  const status = JSON.parse(ws.sent[0]) as Envelope;
+  assert.equal(status.type, 'browser.status');
+  assert.deepEqual(status.payload, { state: 'ready', reason: 'wake_completed' });
+});
+
 test('edge-client: hello error envelope fail-closed and never becomes connected', async () => {
   const ws = new FakeWebSocket();
   const logs: string[] = [];

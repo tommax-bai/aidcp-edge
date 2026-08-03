@@ -37,6 +37,8 @@ import {
   type NoteDetailPayload,
   type ProfileDetailPayload,
   type WelcomePayload,
+  type BrowserState,
+  type BrowserStatusPayload,
   type PacingSnapshotPayload,
   type EdgeTaskAcquirePayload,
   type EdgeTaskReleasePayload,
@@ -168,6 +170,8 @@ export interface EdgeClientOptions {
   accountNickname?: string;
   /** 人类可读机器标签（hello 上报，验证码卡片据此告诉运维去哪台机器） */
   machineLabel?: string;
+  /** 当前浏览器执行层真态；缺省只用于旧/非浏览平台兼容。 */
+  browserState?: BrowserState;
   /** 步骤执行器（把命令落到页面） */
   runner: StepRunner;
   /** WebSocket 工厂（默认全局 WebSocket） */
@@ -211,10 +215,10 @@ export class EdgeClient {
   private readonly opts: Required<
     Omit<
       EdgeClientOptions,
-      'platform' | 'app' | 'capabilities' | 'accountId' | 'accountNickname' | 'machineLabel' | 'reconnect'
+      'platform' | 'app' | 'capabilities' | 'accountId' | 'accountNickname' | 'machineLabel' | 'browserState' | 'reconnect'
     >
   > &
-    Pick<EdgeClientOptions, 'platform' | 'app' | 'capabilities' | 'accountId' | 'accountNickname' | 'machineLabel'>;
+    Pick<EdgeClientOptions, 'platform' | 'app' | 'capabilities' | 'accountId' | 'accountNickname' | 'machineLabel' | 'browserState'>;
   private seq = 0;
   private readonly pending = new Map<string, Pending>();
   private sessionId?: string;
@@ -254,6 +258,7 @@ export class EdgeClient {
       accountId: options.accountId,
       accountNickname: options.accountNickname,
       machineLabel: options.machineLabel,
+      browserState: options.browserState,
       runner: options.runner,
       wsFactory: options.wsFactory ?? defaultWsFactory,
       clock: options.clock ?? Date.now,
@@ -334,6 +339,7 @@ export class EdgeClient {
         accountId: this.opts.accountId,
         accountNickname: this.opts.accountNickname,
         machineLabel: this.opts.machineLabel,
+        browserState: this.opts.browserState,
       });
     } catch (error) {
       this.failHandshake(error);
@@ -590,6 +596,11 @@ export class EdgeClient {
   /** 上报动作执行完成 */
   reportActionCompleted(payload: ActionCompletedPayload): void {
     this.send('action.completed', payload);
+  }
+
+  /** 上报浏览器执行层真态；不会触发或代替任何页面命令。 */
+  reportBrowserStatus(payload: BrowserStatusPayload): void {
+    this.send('browser.status', payload);
   }
 
   /** 上报当前可见卡片列表 */
