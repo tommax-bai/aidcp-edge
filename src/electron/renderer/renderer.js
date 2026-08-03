@@ -469,13 +469,9 @@ const settingsUi = {
   applyRestart: document.querySelector('#apply-restart'),
   msg: document.querySelector('#settings-msg'),
   // 云端环境卡（change edge-cloud-env-selector）
-  cloudEnvButtons: Array.from(document.querySelectorAll('.cloud-env-btn')),
-  cloudEnvCustomField: document.querySelector('#cloud-env-custom-field'),
-  cloudUrlCustom: document.querySelector('#cloud-url-custom'),
-  clientAuthUrlCustom: document.querySelector('#client-auth-url-custom'),
   cloudEnvCurrent: document.querySelector('#cloud-env-current'),
   cloudEnvHint: document.querySelector('#cloud-env-hint'),
-  cloudRestartAll: document.querySelector('#cloud-restart-all'),
+  cloudSwitchTarget: document.querySelector('#cloud-switch-target'),
 };
 // 云端环境展示名（一处；与主进程 CLOUD_ENV_LABELS 对齐）。
 const CLOUD_ENV_LABELS = { dev: 'dev', ol: 'ol（线上）', custom: '自定义', '': '默认' };
@@ -538,9 +534,8 @@ const publishDraftReview = {
   scheduleReservationsByAccount: new Map(),
 };
 let publishDraftRefinementPollTimer = null;
-// 云端环境（change edge-cloud-env-selector）：本地已选 key + 主进程解析出的目标云端视图（含友好名）。
-let cloudSelKey = '';
-let targetCloud = { key: '', label: '默认', url: '' };
+// 部署目标只由 main 投影；renderer 不保存或拼接 Cloud 地址。
+let targetCloud = { key: '', label: '默认', automationUrl: '', dataApiUrl: '' };
 // ── 多环境 fleet 视图态（edge-multi-environment-fleet）──
 // 状态 / 活动按 envId 归属；右侧主区域只呈现「当前选中环境」的投影（内容与交互不变）。
 // 无 envId 的旧形状（单环境主进程 / 测试桩）归 '__local__'，环境栏对其隐藏——零回归。
@@ -7234,74 +7229,14 @@ function updateProfileDisplay() {
   settingsUi.adsProfileDisplay.classList.toggle('empty', !v);
 }
 
-// ─── 云端环境（change edge-cloud-env-selector）───
-function isWsUrl(u) {
-  return /^wss?:\/\//i.test(String(u || '').trim());
-}
-function isHttpUrl(u) {
-  return /^https?:\/\//i.test(String(u || '').trim());
-}
-// 反映已选 key 到分段按钮 + 自定义输入框显隐（不触发保存）。
-function applyCloudSelectionUi() {
-  for (const btn of settingsUi.cloudEnvButtons) {
-    btn.classList.toggle('active', btn.dataset && btn.dataset.cloud === cloudSelKey);
-  }
-  settingsUi.cloudEnvCustomField.classList.toggle('hidden', cloudSelKey !== 'custom');
-}
-// 把某选择落盘（custom 先校验地址；非法则诚实提示、不保存、不注入垃圾）。返回 saved（或 {ok:false}）。
-async function persistCloudSelection() {
-  const key = cloudSelKey;
-  const custom = settingsUi.cloudUrlCustom.value.trim();
-  const dataApi = settingsUi.clientAuthUrlCustom.value.trim();
-  if (key === 'custom' && !isWsUrl(custom)) {
-    settingsUi.cloudEnvHint.textContent = '自动化 WebSocket 地址需以 ws:// 或 wss:// 开头。';
-    return { ok: false };
-  }
-  if (key === 'custom' && !isHttpUrl(dataApi)) {
-    settingsUi.cloudEnvHint.textContent = '客户数据 API 地址需以 http:// 或 https:// 开头。';
-    return { ok: false };
-  }
-  const saved = await window.aidcpEdge.saveSettings({
-    cloudEnvKey: key,
-    cloudUrlCustom: custom,
-    clientAuthUrl: key === 'custom' ? dataApi : '',
-  });
-  // 主进程归一化可能把非法 custom 降级为 ''（未选择）；以回执为准回填。
-  cloudSelKey = (saved && typeof saved.cloudEnvKey === 'string') ? saved.cloudEnvKey : key;
-  if (saved && saved.cloudEnv) targetCloud = saved.cloudEnv;
-  applyCloudSelectionUi();
-  updateCloudPending();
-  return saved;
-}
-// 选择云端目标：数据 API 按请求生效；只有正在运行的自动化引擎需要显式重绑 WebSocket。
-async function selectCloudEnv(key) {
-  if (key === 'ol' && cloudSelKey !== 'ol') {
-    if (!window.confirm('将数据请求和自动化目标切换到线上生产环境 ol，确认切换？\n（不会启动已停止的自动化或浏览器）')) return;
-  }
-  cloudSelKey = key;
-  applyCloudSelectionUi();
-  if (key === 'custom') {
-    // 等用户填地址再落盘：仅展开输入框、聚焦；不立即保存空地址。
-    settingsUi.cloudUrlCustom.focus();
-    settingsUi.cloudEnvHint.textContent = '分别填写客户数据 API 与自动化 WebSocket 地址后保存。';
-    if (!isWsUrl(settingsUi.cloudUrlCustom.value) || !isHttpUrl(settingsUi.clientAuthUrlCustom.value)) { updateCloudPending(); return; }
-  }
-  const saved = await persistCloudSelection();
-  if (saved && saved.ok !== false) {
-    settingsUi.cloudEnvHint.textContent = `数据请求已切到「${targetCloud.label}」；运行中的自动化引擎可执行重绑，停止中的下次启动生效。`;
-  }
-}
-// 逐环境比较实际 Cloud、目标 Cloud 和重绑失败；部分成功绝不冒充全量成功。
+// ─── 部署环境：认证目标与自动化实际连接分开呈现。───
 function updateCloudPending() {
   const target = targetCloud || { key: '', label: '默认' };
   const running = [...fleetView.envs.values()].filter(
     (e) => e.status && (e.status.coreState === 'online' || e.status.coreState === 'starting'
       || e.status.edge === 'running' || e.status.edge === 'starting'),
   );
-  const pendingRows = running.filter((e) => (e.status.connectedCloudKey && e.status.connectedCloudKey !== target.key)
-    || (e.status.cloudRebind && e.status.cloudRebind.state === 'pending'));
-  const failedRows = running.filter((e) => e.status.cloudRebind && e.status.cloudRebind.state === 'failed');
-  const pending = pendingRows.length > 0;
+  const mismatchRows = running.filter((e) => e.status.connectedCloudKey && e.status.connectedCloudKey !== target.key);
   const actualKeys = [...new Set(running.map((e) => e.status.connectedCloudKey).filter(Boolean))];
   const liveLabel = actualKeys.length === 0
     ? '未连接'
@@ -7309,24 +7244,19 @@ function updateCloudPending() {
       ? (CLOUD_ENV_LABELS[actualKeys[0]] || actualKeys[0])
       : `多目标（${actualKeys.map((key) => CLOUD_ENV_LABELS[key] || key).join(' / ')}）`;
   if (settingsUi.cloudEnvCurrent) {
-    settingsUi.cloudEnvCurrent.textContent = failedRows.length > 0
-      ? `${liveLabel} → 目标 ${target.label}（${failedRows.length} 个重绑失败）`
-      : pending
-        ? `${liveLabel} → 目标 ${target.label}（${pendingRows.length} 个待重绑）`
-        : (actualKeys.length ? liveLabel : target.label || '默认');
-    settingsUi.cloudEnvCurrent.classList.toggle('ol', !pending && actualKeys.length === 1 && actualKeys[0] === 'ol');
+    settingsUi.cloudEnvCurrent.textContent = target.label || '默认';
+    settingsUi.cloudEnvCurrent.classList.toggle('ol', target.key === 'ol');
   }
-  if (settingsUi.cloudRestartAll) settingsUi.cloudRestartAll.classList.toggle('hidden', !pending);
   if (fields.cloudEnvChipLabel) {
-    fields.cloudEnvChipLabel.textContent = failedRows.length > 0
-      ? `Cloud ${target.label}·${failedRows.length} 失败`
-      : pending
-        ? `Cloud ${target.label}·待重绑 ${pendingRows.length}`
-        : `Cloud ${actualKeys.length ? liveLabel : target.label || '默认'}`;
+    fields.cloudEnvChipLabel.textContent = mismatchRows.length > 0
+      ? `${target.label}·自动化目标不一致`
+      : actualKeys.length > 0
+        ? `${target.label}·自动化 ${liveLabel}`
+        : `${target.label}·自动化未启动`;
   }
   if (fields.cloudEnvChip) {
-    fields.cloudEnvChip.classList.toggle('ol', !pending && (actualKeys[0] || target.key) === 'ol');
-    fields.cloudEnvChip.classList.toggle('pending', pending);
+    fields.cloudEnvChip.classList.toggle('ol', target.key === 'ol');
+    fields.cloudEnvChip.classList.toggle('pending', mismatchRows.length > 0);
   }
 }
 
@@ -7359,12 +7289,16 @@ function applySettings(s) {
   if (settingsUi.maxQueuedStartLimit) settingsUi.maxQueuedStartLimit.value = Number(s.maxQueuedStartLimit) > 0 ? String(s.maxQueuedStartLimit) : '';
   applySlotsView(s.slots);
   updateProfileDisplay();
-  // 云端环境（change edge-cloud-env-selector）：回填已选 key、自定义地址、目标云端视图。
-  cloudSelKey = typeof s.cloudEnvKey === 'string' ? s.cloudEnvKey : '';
-  settingsUi.cloudUrlCustom.value = s.cloudUrlCustom || '';
-  settingsUi.clientAuthUrlCustom.value = s.clientAuthUrl || '';
-  if (s.cloudEnv) targetCloud = s.cloudEnv;
-  applyCloudSelectionUi();
+  // 部署环境：回填主进程给出的认证目标视图。
+  if (s.cloudTarget) targetCloud = s.cloudTarget;
+  else if (s.cloudEnv) targetCloud = s.cloudEnv;
+  const ambiguousPending = (Array.isArray(s.pendingInteractionOffboards) ? s.pendingInteractionOffboards : [])
+    .filter((item) => item && item.deploymentTarget === 'unknown').length;
+  if (settingsUi.cloudEnvHint) {
+    settingsUi.cloudEnvHint.textContent = ambiguousPending > 0
+      ? `有 ${ambiguousPending} 条旧版清理记录无法确认属于 DEV 还是 OL，已停止自动重放，请在原环境重新处理。`
+      : '切换环境会停止自动化、退出当前会话，并返回登录页重新验证。';
+  }
   updateCloudPending();
   editingProvider = null;
   dirty = false;
@@ -7417,38 +7351,13 @@ async function persistSlotLimits() {
 settingsUi.slotLimit?.addEventListener('change', () => { void persistSlotLimits(); });
 settingsUi.maxQueuedStartLimit?.addEventListener('change', () => { void persistSlotLimits(); });
 
-// 云端环境卡交互（change edge-cloud-env-selector）
-for (const btn of settingsUi.cloudEnvButtons) {
-  btn.addEventListener('click', () => {
-    const key = btn.dataset && btn.dataset.cloud;
-    if (key === 'dev' || key === 'ol' || key === 'custom') void selectCloudEnv(key);
-  });
-}
-// 自定义地址填好后（change/blur）落盘（仅当当前是 custom）。
-settingsUi.cloudUrlCustom.addEventListener('change', () => {
-  if (cloudSelKey !== 'custom') return;
-  void persistCloudSelection().then((saved) => {
-    if (saved && saved.ok !== false) {
-      settingsUi.cloudEnvHint.textContent = `数据请求已切到「${targetCloud.label}」；运行中的自动化引擎可执行重绑。`;
-    }
-  });
-});
-settingsUi.clientAuthUrlCustom.addEventListener('change', () => {
-  if (cloudSelKey !== 'custom') return;
-  void persistCloudSelection();
-});
-// 兼容旧 API 名，仅重绑运行中的自动化 WebSocket；不启动引擎或浏览器。
-settingsUi.cloudRestartAll.addEventListener('click', async () => {
-  settingsUi.cloudRestartAll.disabled = true;
-  try {
-    const r = await window.aidcpEdge.cloudRestartAll?.();
-    settingsUi.cloudEnvHint.textContent = r && r.ok
-      ? `${r.rebound} 个运行中的自动化引擎已重绑「${(r.cloudEnv && r.cloudEnv.label) || targetCloud.label}」；${r.skipped || 0} 个停止中的环境将在下次启动时生效。`
-      : r
-        ? `引擎重绑完成 ${r.rebound || 0}/${r.accepted || 0}；${r.failed || 0} 个失败，请查看各环境状态后重试。`
-        : '自动化引擎重绑请求失败，请重试。';
-  } finally {
-    settingsUi.cloudRestartAll.disabled = false;
+settingsUi.cloudSwitchTarget?.addEventListener('click', async () => {
+  if (!window.confirm('切换部署环境会停止全部自动化并退出当前登录，确认返回登录页？')) return;
+  settingsUi.cloudSwitchTarget.disabled = true;
+  const result = await window.aidcpEdge.clientSwitchTarget?.();
+  if (!result || !result.ok) {
+    settingsUi.cloudEnvHint.textContent = '退出当前环境失败，请重试。';
+    settingsUi.cloudSwitchTarget.disabled = false;
   }
 });
 // 标题带「当前云端」chip 点击 → 打开设置抽屉（去切换）。

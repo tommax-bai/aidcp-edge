@@ -13,7 +13,6 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEAM_ID="DK3BYZ9K32"
-AUTH_URL="${AIDCP_CLIENT_AUTH_URL:-http://123.56.253.183:8088/capi}"
 MOUNT_DIR=""
 MOUNTED=0
 
@@ -245,7 +244,7 @@ verify_final_dmg() {
   require_file "$ads/aidcp-runtime-template.json"
   require_file "$ads_sqlite"
 
-  PACKAGED_ASAR="$asar_path" EXPECTED_AUTH_URL="$AUTH_URL" node <<'NODE'
+  PACKAGED_ASAR="$asar_path" node <<'NODE'
 const asar = require('@electron/asar');
 const pkg = JSON.parse(
   asar.extractFile(process.env.PACKAGED_ASAR, 'package.json').toString('utf8'),
@@ -253,10 +252,10 @@ const pkg = JSON.parse(
 if (pkg.aidcpCloudDefaultEnv !== 'ol') {
   throw new Error(`Wrong packaged cloud environment: ${pkg.aidcpCloudDefaultEnv}`);
 }
-if (pkg.aidcpClientAuthUrl !== process.env.EXPECTED_AUTH_URL) {
-  throw new Error(`Wrong packaged client auth URL: ${pkg.aidcpClientAuthUrl}`);
+if (Object.prototype.hasOwnProperty.call(pkg, 'aidcpClientAuthUrl')) {
+  throw new Error('Packaged app must not contain aidcpClientAuthUrl');
 }
-console.log('OK: OL environment and client auth URL verified');
+console.log('OK: OL login preselection verified; no baked client auth URL');
 NODE
 
   verify_app_signature "$app"
@@ -321,7 +320,6 @@ main() {
   run_source_and_packaging_checks
 
   export AIDCP_CLOUD_DEFAULT_ENV="ol"
-  export AIDCP_CLIENT_AUTH_URL="$AUTH_URL"
   export CSC_IDENTITY_AUTO_DISCOVERY="true"
   builder_cli="$REPO_ROOT/node_modules/electron-builder/cli.js"
   require_file "$builder_cli"
@@ -330,7 +328,6 @@ main() {
     -c.mac.notarize=false
     -c.mac.forceCodeSigning=true
     -c.extraMetadata.aidcpCloudDefaultEnv=ol
-    "-c.extraMetadata.aidcpClientAuthUrl=$AUTH_URL"
   )
 
   app_dir="$REPO_ROOT/dist-electron/mac-arm64"

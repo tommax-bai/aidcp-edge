@@ -28,8 +28,6 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   // Facebook 批量人设：主进程本地构建模板；确认后 Cloud 只筛目标并原样补齐。
   facebookPersonaTemplatePreview: (selection) => ipcRenderer.invoke('persona:preview-facebook-template', selection),
   facebookPersonaFillSelected: (soulYaml) => ipcRenderer.invoke('persona:fill-facebook-selected', soulYaml),
-  // 云端环境：兼容旧方法名，主进程执行的是 core transport rebind，不重启 core/浏览器。
-  cloudRestartAll: () => ipcRenderer.invoke('cloud:restartAll'),
   fleetSetRailCollapsed: (collapsed) => ipcRenderer.invoke('fleet:setRailCollapsed', collapsed),
   onFleetUpdate: (callback) => {
     const listener = (_event, snapshot) => callback(snapshot);
@@ -107,7 +105,9 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   // 主进程做实际 HTTP，渲染层不直连网络（避免 CORS / 凭据落渲染层）。
   clientLogin: (creds) => ipcRenderer.invoke('client-auth:login', creds),
   clientLogout: () => ipcRenderer.invoke('client-auth:logout'),
+  clientSwitchTarget: () => ipcRenderer.invoke('client-auth:switch-target'),
   clientSession: () => ipcRenderer.invoke('client-auth:session'),
+  clientAuthTarget: () => ipcRenderer.invoke('client-auth:target'),
   clientLoginPrefill: () => ipcRenderer.invoke('client-auth:prefill'),
   clearClientLoginPrefill: () => ipcRenderer.invoke('client-auth:prefill:clear'),
   // 视频号互动工作区：逐端点具名 IPC。renderer 只能提交冻结 DTO，不能传 URL/method/header/token。

@@ -20,7 +20,11 @@ interface UiEvent {
 const { createUiEventStream, mergeStats, projectBrowserSlotWaitingEvent } = require('../../src/electron/ui-events.cjs') as {
   createUiEventStream: () => { push: (line: string) => UiEvent | null };
   mergeStats: (prev: Record<string, number> | null, patch: Record<string, number> | null) => Record<string, number>;
-  projectBrowserSlotWaitingEvent: (event: UiEvent | null, waitingForSlot: boolean) => UiEvent | null;
+  projectBrowserSlotWaitingEvent: (
+    event: UiEvent | null,
+    waitingForSlot: boolean,
+    connectedTarget?: string,
+  ) => UiEvent | null;
 };
 
 test('结构化 [ui-event] 行优先直接采用', () => {
@@ -94,9 +98,17 @@ test('浏览器仍在等槽位时，身份与 Cloud 连接不得冒充已经开�
   const connected = projectBrowserSlotWaitingEvent(
     s.push('[aidcp-edge] 已连接云端 ws://x:8787，等待命令 ...'),
     true,
+    'dev',
   );
-  assert.equal(connected?.sentence, '自动化引擎已连接，等待浏览器槽位');
-  assert.equal(connected?.presence, '自动化引擎已连接，等待浏览器槽位');
+  assert.equal(connected?.sentence, '自动化通道已连接 DEV，等待浏览器槽位');
+  assert.equal(connected?.presence, '自动化通道已连接 DEV，等待浏览器槽位');
+
+  const connectedOl = projectBrowserSlotWaitingEvent(
+    s.push('[aidcp-edge] 已连接云端 ws://x:8787，等待命令 ...'),
+    true,
+    'ol',
+  );
+  assert.equal(connectedOl?.sentence, '自动化通道已连接 OL，等待浏览器槽位');
 
   const ready = s.push('[aidcp-edge] 已连接云端 ws://x:8787，等待命令 ...');
   assert.equal(projectBrowserSlotWaitingEvent(ready, false), ready, '浏览器不在等槽位时保留原文案');

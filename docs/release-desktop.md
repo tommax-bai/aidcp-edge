@@ -49,9 +49,9 @@ npm run electron:build:win
 - 工作流：`aidcp-edge/.github/workflows/build-desktop.yml`（手动触发；核心脚本 `scripts/build-desktop-macos.sh` 完成签名 → notarytool 公证 → staple → Gatekeeper 校验）。
 
 - [ ] 确保第 1 步已推到 `master`（CI 从 master 拉代码），且第 1 步的 secret 齐全。
-- [ ] 触发构建（**带烘焙缺省云端环境 + 客户登录门**）：
-      - 网页：GitHub → 仓库 → **Actions** → **Build Desktop Installers** → **Run workflow** → 选 `master`、`cloud_default_env` 选 `dev` 或 `ol`（`ol` = 装完默认连线上）；`client_auth_url` 留空时，`ol` 构建默认烘焙 `https://aidcp.tommax.cc/capi` 并开启客户登录门；`include_windows` 默认关 → 跑。
-      - 或命令行：`gh workflow run build-desktop.yml --ref master -f cloud_default_env=ol -f client_auth_url=https://aidcp.tommax.cc/capi`，再 `gh run watch <run-id>` 看进度。**公证是异步排队，正常几分钟到几十分钟，偶发 >1 小时**（脚本按此设上限）。
+- [ ] 触发构建（**仅烘焙登录页缺省目标，运行时仍可选 DEV/OL**）：
+      - 网页：GitHub → 仓库 → **Actions** → **Build Desktop Installers** → **Run workflow** → 选 `master`、`cloud_default_env` 选 `dev` 或 `ol`；它只决定登录页预选，不写入数据 API 或自动化绝对地址。`include_windows` 默认关 → 跑。
+      - 或命令行：`gh workflow run build-desktop.yml --ref master -f cloud_default_env=ol`，再 `gh run watch <run-id>` 看进度。**公证是异步排队，正常几分钟到几十分钟，偶发 >1 小时**（脚本按此设上限）。
 - [ ] 跑完下载产物（macOS 那份）：
       ```bash
       gh run download <run-id> --name aidcp-macos --dir <某临时目录>
@@ -70,7 +70,7 @@ npm run electron:build:win
 ./scripts/build-desktop-macos-ol-arm64-signed.sh
 ```
 
-该入口完整构建并验证 AdsPower CLI、GOST、Native Page Engine、OL 环境和客户登录 URL，
+该入口完整构建并验证 AdsPower CLI、GOST、Native Page Engine 与 OL 登录页默认目标，
 但**不调用 Apple 公证**。代码签名有效不等于 Gatekeeper 接受，输出会明确标记 `NOT notarized`。
 
 #### 本地 arm64 OL：Developer ID 签名并公证
@@ -83,9 +83,8 @@ export APPLE_API_ISSUER=issuer-uuid
 ```
 
 该入口严格按“签名 App → 公证/staple App → 生成 DMG → 公证/staple DMG”执行，并验证最终
-DMG 内应用的 Gatekeeper、staple、嵌套运行时签名和 arm64 架构。默认登录地址为
-`http://123.56.253.183:8088/capi`；如 OL 地址调整，必须用
-`AIDCP_CLIENT_AUTH_URL=http(s)://.../capi` 显式覆盖，脚本会在最终 `app.asar` 中回读确认。
+DMG 内应用的 Gatekeeper、staple、嵌套运行时签名和 arm64 架构。数据 API 与自动化
+WebSocket 由客户端内同一 DEV/OL 目标目录解析；打包脚本不接受或注入独立登录 URL。
 
 两个入口都只生成本地文件，不上传、不部署、不发布。产物为
 `dist-electron/AIDCP-<version>-arm64.dmg`；已有 `dist-electron` 会先移动到时间戳备份，
@@ -152,8 +151,8 @@ ssh -i ~/codes/dev-0722.pem root@121.89.85.150 '
 ## 附：CI 工作流要点（build-desktop.yml）
 
 - **手动触发**（`workflow_dispatch`）；`macos-latest` 出签名+公证的 x64+arm64 dmg/zip；`include_windows=true` 时 `windows-latest` 才出 nsis exe（默认关，见 §2B）。产物作为 run artifact，保留 14 天。
-- **输入 `cloud_default_env`（dev|ol）**：经 `-c.extraMetadata.aidcpCloudDefaultEnv` 注入打包 package.json，客户端「无界面选择、无启动环境变量」时据此连指定云（`ol`=装完默认连线上）。不注入=沿用客户端自身缺省 dev。
-- **输入 `client_auth_url`（http(s)://.../capi）**：经 `-c.extraMetadata.aidcpClientAuthUrl` 注入打包 package.json，客户端启动即开启客户登录门。`cloud_default_env=ol` 且该输入留空时，workflow 默认使用 `https://aidcp.tommax.cc/capi`。
+- **输入 `cloud_default_env`（dev|ol）**：经 `-c.extraMetadata.aidcpCloudDefaultEnv` 注入打包 package.json，仅作为登录页首次预选；客户仍可在登录前选择 DEV/OL。
+- **无绝对登录 URL 输入**：正式包不得注入 `aidcpClientAuthUrl`；登录、续签、数据 API 与自动化 WebSocket 始终由所选部署目标成对解析。
 - **必须 `electron-builder --publish never`**（脚本内已强制）：CI 环境里 electron-builder 会自动尝试把产物发布到 GitHub release，缺 `GH_TOKEN` 直接报错。
 - **mac 签名 / 公证**：`scripts/build-desktop-macos.sh` 先构建签名 `.app`（`forceCodeSigning` + hardened runtime + entitlements + 关内置 notarize），再用 `scripts/notarize-and-staple.sh` 显式 `notarytool` 公证 / staple `.app`，随后生成并公证 / staple dmg/zip，最后 Gatekeeper 校验。任一闸失败 → job 非零退出，绝不上传坏包。
 - **自包含运行时进 CI**：build 前 `npm run build:ads-runtime`（stage 随包 AdsPower CLI）+ 从 `ADS_RUNTIME_JSON_BASE64` secret 还原 `resources/ads-runtime.json`（baked key），缺任一即诚实失败。
@@ -166,14 +165,14 @@ ssh -i ~/codes/dev-0722.pem root@121.89.85.150 '
 - 后台下载清单来源：cloud `src/panel/downloads-manifest.ts`（现扫该机 downloads 目录）+ console `src/config/downloads.ts` 顶部注释。
 - Nginx 下载 location：`aidcp-console/deploy/aidcp-console.conf`（`location /downloads/`）。
 
-## Client auth defaults
+## Official deployment target catalog
 
 Desktop clients require customer login by default for official cloud
-environments. The default customer-auth URLs are:
+environments. Each target resolves customer-auth and automation together:
 
-- `dev`: `http://121.89.85.150:8088/capi`
-- `ol`: `https://aidcp.tommax.cc/capi`
+- `dev`: customer-auth `http://121.89.85.150:8088/capi`; automation `ws://121.89.85.150:8787`
+- `ol`: customer-auth `https://aidcp.tommax.cc/capi`; automation `ws://123.56.253.183:8787`
 
-`AIDCP_CLIENT_AUTH_URL` or the workflow `client_auth_url` input still overrides
-these defaults. Leaving the workflow input empty bakes the default URL for the
-selected `cloud_default_env`.
+The login-page `deploymentTarget` selects one of these built-in endpoint tuples.
+Package metadata and environment variables do not override one official
+transport independently.

@@ -153,6 +153,7 @@ test('Electron startup awaits one-shot recovery before authenticated startup pro
   const ipcStart = main.indexOf("ipcMain.handle('client-auth:login'");
   const ipcEnd = main.indexOf("ipcMain.handle('client-auth:logout'", ipcStart);
   const manualLogin = main.slice(ipcStart, ipcEnd);
-  assert.match(manualLogin, /await establishClientSession\(creds\)/);
+  assert.match(manualLogin, /const payload = parseClientLoginPayload\(creds\)/);
+  assert.match(manualLogin, /await establishClientSession\(payload\)/);
   assert.match(main, /loginWithCredentials: establishClientSession/);
 });

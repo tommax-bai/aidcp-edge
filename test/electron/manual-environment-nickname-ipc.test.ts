@@ -47,7 +47,7 @@ test('主进程先本地 pending、再 Cloud 确认，任一步失败恢复原�
 
 test('renderer 在昵称持久化前乐观显示，失败时恢复旧名称与来源', () => {
   const start = renderer.indexOf('function beginRailNameEdit');
-  const end = renderer.indexOf('// 环境头像三态', start);
+  const end = renderer.indexOf('async function onRailAvatarRecall', start);
   const block = renderer.slice(start, end);
   assert.ok(block, '昵称编辑实现块必须存在');
   assert.ok(

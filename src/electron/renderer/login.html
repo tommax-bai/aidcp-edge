@@ -63,9 +63,10 @@
   .mark.anim-in { animation-delay: .04s; }
   h1.anim-in { animation-delay: .10s; }
   .sub.anim-in { animation-delay: .16s; }
-  #fName.anim-in { animation-delay: .22s; }
-  #fKey.anim-in { animation-delay: .28s; }
-  .btn.anim-in { animation-delay: .34s; }
+  #targetField.anim-in { animation-delay: .20s; }
+  #fName.anim-in { animation-delay: .25s; }
+  #fKey.anim-in { animation-delay: .30s; }
+  .btn.anim-in { animation-delay: .35s; }
   @keyframes rise { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
   @keyframes orbitspin { to { transform: rotate(360deg); } }
   .f { margin-bottom: 16px; }
@@ -94,6 +95,17 @@
   .gmsg { min-height: 18px; margin-top: 14px; text-align: center; font-size: 12.5px; color: var(--err); opacity: 0; transition: opacity .18s; }
   .gmsg.show { opacity: 1; }
   .gmsg.plain { color: var(--text-2); }
+  .target-field { border: 0; padding: 0; margin: 0 0 17px; }
+  .target-field legend { padding: 0; margin-bottom: 7px; font-size: 12.5px; font-weight: 500; color: var(--text-2); }
+  .target-options { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .target-option { position: relative; cursor: pointer; }
+  .target-option input { position: absolute; opacity: 0; pointer-events: none; }
+  .target-card { display: block; padding: 10px 11px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--panel); transition: border-color .16s, box-shadow .16s, background .16s; }
+  .target-card strong { display: block; font-size: 13px; line-height: 1.3; }
+  .target-card small { display: block; margin-top: 2px; color: var(--text-3); font-size: 11px; }
+  .target-option input:checked + .target-card { border-color: var(--accent); background: rgba(47,107,223,.06); box-shadow: 0 0 0 2px var(--accent-soft); }
+  .target-option input:focus-visible + .target-card { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .target-option.ol input:checked + .target-card { border-color: #B7791F; background: #FFF8E7; box-shadow: 0 0 0 2px rgba(183,121,31,.13); }
   .col.shake { animation: shake .32s cubic-bezier(.36,.07,.19,.97); }
   @keyframes shake { 20%,60% { transform: translateX(-3px); } 40%,80% { transform: translateX(3px); } }
   .foot { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; border-top: 1px solid var(--line); font-size: 12px; color: var(--text-3); background: var(--bg); }
@@ -121,6 +133,19 @@
       <h1 class="anim-in">欢迎使用 AIDCP</h1>
       <p class="sub anim-in">登录你的客户端以继续</p>
       <form id="form" novalidate>
+        <fieldset class="target-field anim-in" id="targetField">
+          <legend>部署环境</legend>
+          <div class="target-options">
+            <label class="target-option">
+              <input type="radio" name="deploymentTarget" value="dev" />
+              <span class="target-card"><strong>DEV</strong><small>测试环境</small></span>
+            </label>
+            <label class="target-option ol">
+              <input type="radio" name="deploymentTarget" value="ol" />
+              <span class="target-card"><strong>OL</strong><small>正式环境</small></span>
+            </label>
+          </div>
+        </fieldset>
         <div class="f anim-in" id="fName">
           <label for="name">账户名</label>
           <div class="inp">
@@ -163,6 +188,44 @@
     var gmsg = document.getElementById('gmsg');
     var col = document.getElementById('col');
     var userEdited = false;
+    var initialTarget = 'dev';
+    var selectedTarget = 'dev';
+
+    function targetLabel(value) { return value === 'dev' ? 'DEV 测试环境' : 'OL 正式环境'; }
+    function applyTarget(value) {
+      selectedTarget = value === 'dev' ? 'dev' : 'ol';
+      var radio = document.querySelector('input[name="deploymentTarget"][value="' + selectedTarget + '"]');
+      if (radio) radio.checked = true;
+      btn.innerHTML = '<span id="btnLabel">登录 ' + (selectedTarget === 'dev' ? 'DEV' : 'OL') + '</span>';
+    }
+
+    try {
+      if (api.clientAuthTarget) {
+        Promise.resolve(api.clientAuthTarget()).then(function (view) {
+          initialTarget = view && view.deploymentTarget === 'dev' ? 'dev' : 'ol';
+          applyTarget(initialTarget);
+        }).catch(function () { applyTarget('dev'); });
+      } else { applyTarget('dev'); }
+    } catch (e) { applyTarget('dev'); }
+
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="deploymentTarget"]'), function (radio) {
+      radio.addEventListener('change', function () {
+        var next = radio.value === 'dev' ? 'dev' : 'ol';
+        if (next === 'ol' && initialTarget === 'dev'
+          && !window.confirm('将登录 OL 正式环境。OL 与 DEV 的账号、数据和自动化完全隔离，确认继续？')) {
+          applyTarget('dev');
+          return;
+        }
+        if (next !== selectedTarget) {
+          nameEl.value = '';
+          key.value = '';
+          userEdited = true;
+          clearRememberedCredentials();
+        }
+        applyTarget(next);
+        gmsg.classList.remove('show', 'plain');
+      });
+    });
 
     function clearRememberedCredentials() {
       try {
@@ -212,7 +275,7 @@
       if (bad) { shake(); return; }
       btn.disabled = true;
       btn.innerHTML = '<span class="spin"></span><span>验证中…</span>';
-      Promise.resolve(api.clientLogin ? api.clientLogin({ name: n, key: k }) : { ok: false, reason: 'network' })
+      Promise.resolve(api.clientLogin ? api.clientLogin({ deploymentTarget: selectedTarget, name: n, key: k }) : { ok: false, reason: 'network' })
         .then(function (r) {
           if (r && r.ok) {
             btn.innerHTML = '<span>✓</span><span>已验证</span>';
@@ -223,9 +286,11 @@
           btn.innerHTML = '<span id="btnLabel">登录</span>';
           gmsg.classList.add('show');
           var reason = r && r.reason;
-          if (reason === 'disabled') { gmsg.textContent = '该账户已停用，请联系你的服务顾问'; }
+          if (reason === 'deployment_target_not_persisted') { gmsg.classList.add('plain'); gmsg.textContent = '环境设置未能保存，尚未提交登录，请重试'; }
+          else if (reason === 'invalid_deployment_target' || reason === 'deployment_target_mismatch' || reason === 'invalid_login_payload') { gmsg.textContent = '部署环境状态不一致，请重新选择后登录'; }
+          else if (reason === 'disabled') { gmsg.textContent = '该账户已停用，请联系你的服务顾问'; }
           else if (reason === 'rate_limited') { gmsg.textContent = '尝试过于频繁，请 ' + (r.retryAfter || 30) + ' 秒后再试'; }
-          else if (reason === 'network') { gmsg.classList.add('plain'); gmsg.textContent = '无法连接服务器，请检查网络后重试'; }
+          else if (reason === 'network') { gmsg.classList.add('plain'); gmsg.textContent = '无法连接' + targetLabel(selectedTarget) + '，请检查网络后重试'; }
           else { gmsg.textContent = '账户名或访问密钥不正确，请核对后重试'; document.getElementById('fKey').classList.add('err'); shake(); }
         })
         .catch(function () {

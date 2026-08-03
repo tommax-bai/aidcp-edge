@@ -13,6 +13,13 @@ const {
   writePrivateJsonAtomic,
 } = require('./customer-auth-security.cjs');
 const { restoreClientAuthAtStartup } = require('./client-startup-auth.cjs');
+const {
+  isDeploymentTarget,
+  migrateDeploymentTarget,
+  deploymentTargetConfig,
+  deploymentTargetView,
+  targetForKnownCustomerAuthUrl,
+} = require('./deployment-target.cjs');
 const { hasXhsCookie, launchChrome } = require('./chrome-launcher.cjs');
 const { createAdsLocalApi } = require('./ads-local-api.cjs');
 const { readWithRuntimeRecovery } = require('./ads-read-runtime.cjs');
@@ -225,13 +232,11 @@ function appendEdgeLog(envId, line, isError) {
 // 旧单值 adsProfileId/adsProfileName/platform 向后兼容加载为单元素花名册，并保持镜像回写（回滚兼容）。
 // 敏感值（apiKey）只落本机 userData、随用户机器，不进仓库 / 不外发。
 // ── 云端目标选择 ───────────────────────────────────────────────────────────────
-// 正式环境把 request-scoped 客户数据 API 与自动化 WebSocket 作为两个独立端点映射；custom 也分别配置。
-// AIDCP_CLOUD_URL 只代表自动化通道，绝不被解释成“客户端全局云端连接”。
-const CLOUD_ENV_URLS = { dev: 'ws://121.89.85.150:8787', ol: 'ws://123.56.253.183:8787' };
-const CLIENT_AUTH_ENV_URLS = { dev: 'http://121.89.85.150:8088/capi', ol: 'https://aidcp.tommax.cc/capi' };
+// 正式 DEV/OL 只允许一个部署目标同时解析客户数据 API 与自动化 WebSocket。
+// renderer、安装包绝对 URL 和单传输环境变量都不能拆开这两个权威端点。
 // 构建期烘焙的缺省云端环境：分发包用 electron-builder `-c.extraMetadata.aidcpCloudDefaultEnv=ol`
-// 注入 'dev' | 'ol'，让「无界面选择、无启动环境变量」时连指定云（如线上分发包默认 ol）。
-// 普通开发 / CI 包不带此字段 → '' → 沿用历史缺省 dev（零回归）。只读打包进 app 的 package.json；
+// 注入 'dev' | 'ol'，只决定登录页首次预选；实际路由仍由登录时持久化的 deploymentTarget 解析。
+// 普通开发 / CI 包不带此字段 → '' → 首次预选 dev。只读打包进 app 的 package.json；
 // 读失败或字段非法即回落 ''。dev(electron .) 下 getAppPath 是仓库根、package.json 无此字段 → 不受影响。
 function readBakedDefaultCloudEnv() {
   try {
@@ -243,36 +248,7 @@ function readBakedDefaultCloudEnv() {
   }
 }
 const BAKED_DEFAULT_CLOUD_ENV = readBakedDefaultCloudEnv();
-function normalizeClientAuthUrl(value) {
-  const v = String(value || '').trim();
-  return /^https?:\/\//i.test(v) ? v.replace(/\/+$/, '') : '';
-}
-// 构建期烘焙的对外客户鉴权地址（change edge-client-customer-auth）：分发包用
-// electron-builder `-c.extraMetadata.aidcpClientAuthUrl=https://…/capi` 注入，让分发的客户端「一装即带登录门」，
-// 无需运营 / 客户手填环境变量。只读打包进 app 的 package.json；非法 / 缺失 → ''，随后按 dev/ol 环境默认地址启用登录门。
-// dev(electron .) 下 getAppPath 是仓库根、package.json 无此字段 → 不受影响。
-function readBakedClientAuthUrl() {
-  try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8'));
-    const v = String((pkg && pkg.aidcpClientAuthUrl) || '').trim();
-    return normalizeClientAuthUrl(v);
-  } catch {
-    return '';
-  }
-}
-const BAKED_CLIENT_AUTH_URL = readBakedClientAuthUrl();
-const DEFAULT_CLOUD_URL = CLOUD_ENV_URLS[BAKED_DEFAULT_CLOUD_ENV] || CLOUD_ENV_URLS.dev;
-const CLOUD_ENV_LABELS = { dev: 'dev', ol: 'ol（线上）', custom: '自定义', '': '默认' };
-function isWsUrl(u) {
-  return /^wss?:\/\//i.test(String(u || '').trim());
-}
-// 地址 → 展示 key（供「当前连的是哪个云」常驻显示；未知地址归 custom、空归 ''）。
-function cloudKeyForUrl(url) {
-  const u = String(url || '').trim();
-  if (u === CLOUD_ENV_URLS.dev) return 'dev';
-  if (u === CLOUD_ENV_URLS.ol) return 'ol';
-  return u ? 'custom' : '';
-}
+const CLOUD_ENV_LABELS = { dev: 'DEV（测试）', ol: 'OL（正式）', '': '默认' };
 
 const DEFAULT_SETTINGS = {
   provider: 'adspower',
@@ -287,10 +263,8 @@ const DEFAULT_SETTINGS = {
   platform: 'xiaohongshu',
   // 默认关闭。开启后：macOS 固定系统代理 → 环境代理 → 目标站点。
   systemProxyUpstreamEnabled: false,
-  // 云端环境选择（change edge-cloud-env-selector）：'' = 未选择（跟随启动环境变量 / 缺省 dev，零回归）；
-  // 'dev' | 'ol' 用映射地址；'custom' 用 cloudUrlCustom。
-  cloudEnvKey: '',
-  cloudUrlCustom: '',
+  // 登录前选择的唯一部署目标；loadSettings 会按旧 cloudEnvKey / 包默认键完成兼容迁移。
+  deploymentTarget: '',
   // 浏览器窗口停放：默认主屏停放（窗口停在主屏可靠可见的背景位、不抢焦点，不用最小化/headless）。
   browserParkingMode: DEFAULT_PARKING_MODE,
   // 长等待冷待机：默认开启；由云端给确定性长等待 hint，壳本地二次判断后关闭浏览器并预热恢复。
@@ -307,10 +281,6 @@ const DEFAULT_SETTINGS = {
   // 环境栏（fleet rail）收起态与上次选中环境（跨重启保留）。
   railCollapsed: true,
   selectedEnvId: '',
-  // 对外客户鉴权登录门：dev/ol 默认启用；clientAuthUrl 给完整 http(s):// 地址时覆盖默认地址。
-  // clientAuthEnabled=true 仅用于 custom 云端由主机派生客户鉴权地址。
-  clientAuthUrl: '',
-  clientAuthEnabled: false,
   // 仅保存 Cloud 已受理的解绑清理游标与短期清理凭证。该凭证只在 Electron main 中使用，
   // settings:get 会剥离；Cloud tombstone 前绝不物理删除本地环境。
   pendingInteractionOffboards: [],
@@ -319,7 +289,7 @@ let settings = { ...DEFAULT_SETTINGS };
 
 const INTERACTION_OFFBOARD_STATES = new Set(['pending_edge', 'dispatched', 'tombstoned', 'purged']);
 const INTERACTION_OFFBOARD_REASONS = new Set(['environment_unbind', 'customer_terminated', 'admin_revoked']);
-function normalizePendingInteractionOffboards(list) {
+function normalizePendingInteractionOffboards(list, legacyTarget = null) {
   const out = [];
   const seen = new Set();
   for (const raw of Array.isArray(list) ? list : []) {
@@ -328,6 +298,9 @@ function normalizePendingInteractionOffboards(list) {
     const accountId = String((raw && raw.accountId) || '').trim();
     const state = String((raw && raw.state) || '').trim();
     const reason = String((raw && raw.reason) || '').trim();
+    const deploymentTarget = isDeploymentTarget(raw && raw.deploymentTarget)
+      ? raw.deploymentTarget
+      : isDeploymentTarget(legacyTarget) ? legacyTarget : 'unknown';
     if (!offboardId || !envKey || !accountId || seen.has(offboardId)
       || !INTERACTION_OFFBOARD_STATES.has(state) || !INTERACTION_OFFBOARD_REASONS.has(reason)) continue;
     seen.add(offboardId);
@@ -337,6 +310,7 @@ function normalizePendingInteractionOffboards(list) {
       accountId,
       state,
       reason,
+      deploymentTarget,
       requestedAt: Math.max(0, Number(raw.requestedAt) || 0),
       purgeDueAt: Math.max(0, Number(raw.purgeDueAt) || 0),
       platform: normalizePlatform(raw.platform),
@@ -379,65 +353,53 @@ function loadSettings() {
   normalizeSlotSettingsIntoSettings();
   // 花名册迁移（向后兼容）：旧单值 adsProfileId → 单元素花名册；镜像回写旧字段（回滚兼容）。
   settings.environments = fleet.migrateEnvironments(parsed && typeof parsed === 'object' ? { ...parsed, environments: settings.environments } : settings);
-  settings.pendingInteractionOffboards = normalizePendingInteractionOffboards(settings.pendingInteractionOffboards);
+  settings.deploymentTarget = migrateDeploymentTarget({
+    deploymentTarget: parsed.deploymentTarget,
+    legacyCloudEnvKey: parsed.cloudEnvKey,
+    bakedDefault: BAKED_DEFAULT_CLOUD_ENV,
+  });
+  settings.pendingInteractionOffboards = normalizePendingInteractionOffboards(
+    settings.pendingInteractionOffboards,
+    legacyPendingTarget(parsed),
+  );
   settings.clientRosterExclusionOwner = String(settings.clientRosterExclusionOwner || '').trim();
   settings.clientRosterExcludedEnvIds = normalizeClientRosterExcludedEnvIds(settings.clientRosterExcludedEnvIds);
   applyLegacyMirror();
-  normalizeCloudSettings();
   return settings;
 }
 
-// 归一化云端选择（loadSettings / saveSettings 共用）：非法 key 归 ''；custom 地址去空白；
-// custom 选了但地址非法 → 降级为「未选择」，绝不注入垃圾地址（诚实回落，不静默连坏地址）。
-function normalizeCloudSettings() {
-  const key = settings.cloudEnvKey;
-  if (key !== 'dev' && key !== 'ol' && key !== 'custom') settings.cloudEnvKey = '';
-  settings.cloudUrlCustom = String(settings.cloudUrlCustom || '').trim();
-  settings.clientAuthUrl = normalizeClientAuthUrl(settings.clientAuthUrl);
-  if (
-    settings.cloudEnvKey === 'custom'
-    && (!isWsUrl(settings.cloudUrlCustom) || !settings.clientAuthUrl)
-  ) settings.cloudEnvKey = '';
+function legacyPendingTarget(parsed) {
+  const explicit = targetForKnownCustomerAuthUrl(parsed && parsed.clientAuthUrl);
+  if (explicit) return explicit;
+  // Old official packages baked the data endpoint separately. It is migration evidence only,
+  // never an active route after this change.
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8'));
+    const baked = targetForKnownCustomerAuthUrl(pkg && pkg.aidcpClientAuthUrl);
+    if (baked) return baked;
+  } catch {
+    // Fall through to the old official selector. Unknown/custom values remain non-replayable.
+  }
+  return isDeploymentTarget(parsed && parsed.cloudEnvKey) ? parsed.cloudEnvKey : null;
 }
 
-// 解析自动化引擎应连接的 WebSocket：界面选择优先 > 启动环境变量 AIDCP_CLOUD_URL > 缺省 dev。
-// fromSelection=true 时派生处 MUST 在合并之后显式覆盖继承来的 AIDCP_CLOUD_URL（否则被 processEnv 同名值压过）；
-// false 时不注入、沿用继承 / 缺省（零回归）。
 function resolveCloudUrl() {
-  const key = settings.cloudEnvKey;
-  if (key === 'dev' || key === 'ol') return { url: CLOUD_ENV_URLS[key], key, fromSelection: true };
-  if (key === 'custom' && isWsUrl(settings.cloudUrlCustom)) {
-    return { url: settings.cloudUrlCustom.trim(), key: 'custom', fromSelection: true };
-  }
-  const env = String(process.env.AIDCP_CLOUD_URL || '').trim();
-  if (env) return { url: env, key: cloudKeyForUrl(env), fromSelection: false };
-  // 无界面选择、无启动环境变量：回落到构建期烘焙的缺省环境。
-  // 烘焙缺省（ol/dev）必须像「界面选择」一样显式下发给核心（fromSelection:true）——否则核心自身
-  // 回落 dev，造成「界面显示 ol、实连 dev」（违反 change edge-cloud-env-selector「显示须等于实际连接」红线）。
-  // 未烘焙（普通包，BAKED_DEFAULT_CLOUD_ENV==''）→ 保持历史缺省、不显式注入（零回归）。
-  if (BAKED_DEFAULT_CLOUD_ENV === 'dev' || BAKED_DEFAULT_CLOUD_ENV === 'ol') {
-    return { url: CLOUD_ENV_URLS[BAKED_DEFAULT_CLOUD_ENV], key: BAKED_DEFAULT_CLOUD_ENV, fromSelection: true };
-  }
-  return { url: DEFAULT_CLOUD_URL, key: 'dev', fromSelection: false };
+  const target = deploymentTargetConfig(settings.deploymentTarget);
+  if (!target) throw new Error('deployment_target_invalid');
+  return { url: target.automationWebSocketUrl, key: target.key, fromSelection: true };
 }
 
-// 供界面常驻显示「目标云端」（当前选择解析出的地址 + 友好名）。
 function cloudSelectionView() {
   const r = resolveCloudUrl();
   return { key: r.key, url: r.url, label: CLOUD_ENV_LABELS[r.key] || r.key || '默认', fromSelection: r.fromSelection };
 }
 
 // ── 对外客户鉴权登录门（change edge-client-customer-auth）─────────────────────
-// 给客户端加一层「客户 name+key 登录」。dev/ol 默认启用登录门；custom 云端仍需显式 URL 或显式派生开关。地址解析：
-//   ① 显式完整 URL：env AIDCP_CLIENT_AUTH_URL 或 settings.clientAuthUrl（http(s)://…）；
-//   ② 打包 URL：electron-builder extraMetadata.aidcpClientAuthUrl；
-//   ③ 官方 dev/ol 默认地址；
-//   ④ 显式启用（env AIDCP_CLIENT_AUTH_ENABLE=1 或 settings.clientAuthEnabled）→ 由云端 WS 主机派生
-//      ws(s)://host:8787 → http(s)://host:8091（部署经 Nginx 反代时用 ① 给完整 URL）。
+// 给客户端加一层「客户 name+key 登录」。DEV/OL 始终启用，登录与所有客户数据请求只从
+// deploymentTarget 目标目录解析，绝不再读取单独的 URL 覆盖。
 // 登录后：客户令牌存 userData/client-session.json（随 AIDCP_USER_DATA_DIR 多实例隔离）；
 // 环境栏只显示云端按该客户下发的可见环境（与本地花名册求交，见 syncEnvHandles 的 allowedProfileIds 过滤）。
 // 边缘只走 HTTP 到客户鉴权端口，**不改 WS 协议 / hello**（协议零改）。
-const CLIENT_AUTH_DEFAULT_PORT = 8091;
 let loginWindow = null;
 let clientSession = null; // { token, name, expiresAt(ms) } | null
 let allowedProfileIds = null; // Set<profileId> | null（null = 未 gated，不过滤）
@@ -452,38 +414,15 @@ const coreBootstrapSupervisor = createCoreBootstrapSupervisor({
   concurrency: Number(process.env.AIDCP_CORE_BOOTSTRAP_CONCURRENCY) || 3,
 });
 
-function deriveClientAuthBaseFromCloudUrl(cloud) {
-  const m = /^wss?:\/\/([^/:]+)(?::(\d+))?/i.exec(String(cloud || '').trim());
-  if (!m) return '';
-  const scheme = /^wss:/i.test(cloud) ? 'https' : 'http';
-  return `${scheme}://${m[1]}:${CLIENT_AUTH_DEFAULT_PORT}`;
-}
-
 function resolveClientAuthBase() {
-  // 优先级：显式完整 URL > 构建期烘焙地址 > dev/ol 默认地址 > 显式启用+云端主机派生。
-  const explicit = normalizeClientAuthUrl((process.env.AIDCP_CLIENT_AUTH_URL || '') || (settings && settings.clientAuthUrl) || '');
-  if (explicit) return explicit;
-  if (BAKED_CLIENT_AUTH_URL) return BAKED_CLIENT_AUTH_URL;
-  const cloud = resolveCloudUrl();
-  const envDefault = CLIENT_AUTH_ENV_URLS[cloud.key];
-  if (envDefault) return envDefault;
-  const enabled = process.env.AIDCP_CLIENT_AUTH_ENABLE === '1' || Boolean(settings && settings.clientAuthEnabled);
-  if (!enabled) return '';
-  return deriveClientAuthBaseFromCloudUrl(cloud.url);
+  return deploymentTargetConfig(settings.deploymentTarget)?.customerAuthBaseUrl || '';
 }
 function clientAuthEnabled() {
   return Boolean(resolveClientAuthBase());
 }
 
 function cloudTargetView() {
-  const automation = cloudSelectionView();
-  return {
-    key: automation.key,
-    label: automation.label,
-    automationUrl: automation.url,
-    dataApiUrl: resolveClientAuthBase(),
-    fromSelection: automation.fromSelection,
-  };
+  return { ...deploymentTargetView(settings.deploymentTarget), fromSelection: true };
 }
 function clientSessionFile() {
   return path.join(app.getPath('userData'), 'client-session.json');
@@ -500,8 +439,13 @@ function loadClientLoginPrefill() {
     const stored = JSON.parse(fs.readFileSync(clientLoginPrefillFile(), 'utf8'));
     if (!stored || typeof stored.ciphertext !== 'string' || !stored.ciphertext) return null;
     const value = JSON.parse(safeStorage.decryptString(Buffer.from(stored.ciphertext, 'base64')));
-    if (!value || typeof value.name !== 'string' || !value.name.trim() || typeof value.key !== 'string' || !value.key) return null;
-    return { name: value.name, key: value.key };
+    if (!value || value.deploymentTarget !== settings.deploymentTarget
+      || typeof value.name !== 'string' || !value.name.trim()
+      || typeof value.key !== 'string' || !value.key) {
+      clearClientLoginPrefill();
+      return null;
+    }
+    return { deploymentTarget: value.deploymentTarget, name: value.name, key: value.key };
   } catch {
     return null;
   }
@@ -511,7 +455,11 @@ function saveClientLoginPrefill({ name, key } = {}) {
   const normalizedKey = String(key || '');
   if (!normalizedName || !normalizedKey || !clientLoginPrefillEncryptionAvailable()) return false;
   try {
-    const ciphertext = safeStorage.encryptString(JSON.stringify({ name: normalizedName, key: normalizedKey }));
+    const ciphertext = safeStorage.encryptString(JSON.stringify({
+      deploymentTarget: settings.deploymentTarget,
+      name: normalizedName,
+      key: normalizedKey,
+    }));
     const file = clientLoginPrefillFile();
     writePrivateJsonAtomic(file, { version: 1, ciphertext: ciphertext.toString('base64') });
     return true;
@@ -527,7 +475,12 @@ function loadClientSession() {
     const file = clientSessionFile();
     const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
     const s = unsealClientSession(stored, safeStorage);
-    clientSession = s && typeof s.token === 'string' && s.token ? s : null;
+    clientSession = s && s.deploymentTarget === settings.deploymentTarget
+      && typeof s.token === 'string' && s.token ? s : null;
+    if (!clientSession) {
+      try { fs.unlinkSync(file); } catch { /* already absent */ }
+      return;
+    }
     try { fs.chmodSync(file, 0o600); } catch { /* best-effort on filesystems without POSIX modes */ }
     if (clientSession && safeStorageAvailable(safeStorage) && !isEncryptedClientSessionRecord(stored)) {
       saveClientSession(clientSession); // 旧明文/0600 fallback 在系统加密可用时立即迁移。
@@ -537,6 +490,9 @@ function loadClientSession() {
   }
 }
 function saveClientSession(s) {
+  if (!s || s.deploymentTarget !== settings.deploymentTarget || typeof s.token !== 'string' || !s.token) {
+    throw new Error('client_session_target_mismatch');
+  }
   clientSession = s;
   try { writePrivateJsonAtomic(clientSessionFile(), sealClientSession(s, safeStorage)); } catch { /* best-effort */ }
 }
@@ -549,7 +505,8 @@ function clearClientSession() {
   clearClientLoginPrefill();
 }
 function hasValidSession() {
-  return Boolean(clientSession && clientSession.token && (!clientSession.expiresAt || Date.now() < clientSession.expiresAt));
+  return Boolean(clientSession && clientSession.deploymentTarget === settings.deploymentTarget
+    && clientSession.token && (!clientSession.expiresAt || Date.now() < clientSession.expiresAt));
 }
 // 启动恢复与定时维护共用同一续签闸：缓存令牌可能在启动时仍有效，却早于首次 4 分钟维护到期。
 // 非 401 的瞬时失败不销毁仍有效的会话；若请求返回时本地已过期，则立即走统一失效流程。
@@ -564,6 +521,7 @@ async function refreshClientSessionInternal(invalidateOnFailure) {
   const rr = await clientAuthFetch('/auth/refresh', { method: 'POST', token: clientSession.token });
   if (rr.status === 200 && rr.data && rr.data.token) {
     saveClientSession({
+      deploymentTarget: settings.deploymentTarget,
       token: rr.data.token,
       name: clientSession.name,
       expiresAt: Date.now() + (Number(rr.data.expiresIn) || 900) * 1000,
@@ -584,6 +542,9 @@ async function clientAuthFetch(pathname, {
 } = {}) {
   const base = resolveClientAuthBase();
   if (!base) return { status: 0, ok: false, data: null };
+  if (token && (!clientSession || clientSession.deploymentTarget !== settings.deploymentTarget || token !== clientSession.token)) {
+    return { status: 401, ok: false, data: null, error: 'client_session_target_mismatch' };
+  }
   const headers = { 'content-type': 'application/json' };
   if (token) headers.authorization = `Bearer ${token}`;
   if (idempotencyKey) headers['idempotency-key'] = idempotencyKey;
@@ -635,20 +596,35 @@ async function clientAuthFetch(pathname, {
 }
 
 async function establishClientSession(creds) {
+  const deploymentTarget = String((creds && creds.deploymentTarget) || '').trim();
   const name = String((creds && creds.name) || '').trim();
   const key = String((creds && creds.key) || '');
+  if (!isDeploymentTarget(deploymentTarget) || deploymentTarget !== settings.deploymentTarget) {
+    return { ok: false, reason: 'deployment_target_mismatch' };
+  }
   if (!name || !key) return { ok: false, reason: 'invalid_credentials' };
   const r = await clientAuthFetch('/login', { method: 'POST', body: { name, key } });
   if (r.status === 200 && r.data && r.data.token) {
     const ttl = Number(r.data.expiresIn) || 900;
     saveClientLoginPrefill({ name, key });
-    saveClientSession({ token: r.data.token, name, expiresAt: Date.now() + ttl * 1000 });
-    return { ok: true };
+    saveClientSession({ deploymentTarget, token: r.data.token, name, expiresAt: Date.now() + ttl * 1000 });
+    return { ok: true, deploymentTarget };
   }
   if (r.status === 429) return { ok: false, reason: 'rate_limited', retryAfter: (r.data && r.data.retryAfter) || 30 };
   if (r.status === 0) return { ok: false, reason: 'network' };
   // 登录侧 401 一律不可区分（防枚举）；停用同样只表现为凭据拒绝。
   return { ok: false, reason: 'invalid_credentials' };
+}
+
+function parseClientLoginPayload(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const allowed = new Set(['deploymentTarget', 'name', 'key']);
+  if (Object.keys(value).some((key) => !allowed.has(key))) return null;
+  return {
+    deploymentTarget: value.deploymentTarget,
+    name: value.name,
+    key: value.key,
+  };
 }
 
 const CONTROL_BOOTSTRAP_REASON_ZH = {
@@ -1188,6 +1164,40 @@ function onSessionInvalid({ forgetCredentials = false } = {}) {
   createLoginWindow();
 }
 
+function persistDeploymentTargetForLogin(target) {
+  if (!isDeploymentTarget(target)) return { ok: false, reason: 'invalid_deployment_target' };
+  if (hasValidSession() && clientSession.deploymentTarget !== target) {
+    return { ok: false, reason: 'target_switch_requires_logout' };
+  }
+  const previousSettings = settings;
+  const changed = settings.deploymentTarget !== target;
+  const saved = saveSettings({
+    deploymentTarget: target,
+    ...(changed ? { clientRosterExclusionOwner: '', clientRosterExcludedEnvIds: [] } : {}),
+  });
+  if (!saved.ok) {
+    settings = previousSettings;
+    return { ok: false, reason: 'deployment_target_not_persisted', error: saved.error };
+  }
+  if (changed) {
+    clearClientSession();
+    allowedProfileIds = new Set();
+    allowedEnvironmentPlatforms = new Map();
+    allowedEnvironmentControlStates = new Map();
+    try { syncEnvHandles(); } catch { /* login startup may not have initialized handles yet */ }
+  }
+  return { ok: true, changed, deploymentTarget: target };
+}
+
+function switchAuthenticatedTargetToLogin() {
+  if (clientSession && clientSession.token && clientSession.deploymentTarget === settings.deploymentTarget) {
+    void clientAuthFetch('/logout', { method: 'POST', token: clientSession.token });
+  }
+  onSessionInvalid({ forgetCredentials: true });
+  saveSettings({ clientRosterExclusionOwner: '', clientRosterExcludedEnvIds: [] });
+  return { ok: true, deploymentTarget: settings.deploymentTarget };
+}
+
 let legacyManualAliasSyncPromise = null;
 /** 升级前本地人工名的有界补同步：最多 20 个并行、单请求 5 秒；失败保留本地值并显式标为 unsynced。 */
 function syncUnsyncedManualAliases() {
@@ -1325,6 +1335,15 @@ function applyLegacyMirror() {
 // 绝不谎报保存成功——否则用户以为已存、重启后配置丢失却毫无提示。
 function saveSettings(patch) {
   const p = omitLegacyColdStandbyMinWaitSetting({ ...(patch || {}) });
+  // Official target is an enum. Legacy single-transport keys are migration-only and may never
+  // re-enter persisted authority through a renderer patch.
+  if (Object.prototype.hasOwnProperty.call(p, 'deploymentTarget') && !isDeploymentTarget(p.deploymentTarget)) {
+    delete p.deploymentTarget;
+  }
+  delete p.cloudEnvKey;
+  delete p.cloudUrlCustom;
+  delete p.clientAuthUrl;
+  delete p.clientAuthEnabled;
   // 花名册来源二选一：显式 environments 优先；否则旧 adsProfileId 补丁（旧渲染层/单环境语义）转单元素花名册。
   if (Array.isArray(p.environments)) {
     p.environments = fleet.normalizeEnvironments(p.environments);
@@ -1343,11 +1362,15 @@ function saveSettings(patch) {
   normalizeColdStandbySettingsIntoSettings();
   normalizeSlotSettingsIntoSettings();
   settings.environments = fleet.normalizeEnvironments(settings.environments);
+  settings.deploymentTarget = isDeploymentTarget(settings.deploymentTarget) ? settings.deploymentTarget : 'dev';
   settings.pendingInteractionOffboards = normalizePendingInteractionOffboards(settings.pendingInteractionOffboards);
   settings.clientRosterExclusionOwner = String(settings.clientRosterExclusionOwner || '').trim();
   settings.clientRosterExcludedEnvIds = normalizeClientRosterExcludedEnvIds(settings.clientRosterExcludedEnvIds);
   applyLegacyMirror();
-  normalizeCloudSettings();
+  delete settings.cloudEnvKey;
+  delete settings.cloudUrlCustom;
+  delete settings.clientAuthUrl;
+  delete settings.clientAuthEnabled;
   try {
     fs.mkdirSync(app.getPath('userData'), { recursive: true });
     fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2), 'utf8');
@@ -2151,7 +2174,6 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     cascadeIndex: cascadeIndex || 0,
     child: undefined,
     spawnCloudKey: '',
-    cloudRebindPending: null,
     status: makeStatus(kind === 'self' ? 'self' : 'adspower'),
     // 每环境各一份日志→UI 事件解析器（交织 stdout 按 envId 归属，绝不串号）。
     uiEvents: createUiEventStream(),
@@ -2240,12 +2262,14 @@ function selectedHandle() {
 }
 
 function pendingOffboardForEnv(envKey) {
-  return (settings.pendingInteractionOffboards || []).find((item) => item.envKey === envKey) || null;
+  return (settings.pendingInteractionOffboards || []).find(
+    (item) => item.envKey === envKey && item.deploymentTarget === settings.deploymentTarget,
+  ) || null;
 }
 
 function pendingOffboardEnvKeys() {
   return new Set((settings.pendingInteractionOffboards || [])
-    .filter((item) => item.state !== 'purged')
+    .filter((item) => item.deploymentTarget === settings.deploymentTarget && item.state !== 'purged')
     .map((item) => item.envKey));
 }
 
@@ -2271,7 +2295,7 @@ function syncEnvHandles() {
     // 不在运行花名册的环境也可能留有密文。Cloud 已受理解绑后，建立仅用于重连收取 offboard command 的 handle；
     // welcome.offboardPending 会让新版核心 fail-closed，不启动平台 connector、更不会盲写。
     for (const pending of settings.pendingInteractionOffboards || []) {
-      if (pending.state === 'purged') continue;
+      if (pending.deploymentTarget !== settings.deploymentTarget || pending.state === 'purged') continue;
       const envId = fleet.envIdForProfile(pending.envKey);
       if (wanted.has(envId)) continue;
       wanted.set(envId, {
@@ -3792,77 +3816,6 @@ function sendCoreLifecycle(handle, command, onError) {
   }
 }
 
-function failPendingCoreRebind(handle, reason) {
-  const pending = handle && handle.cloudRebindPending;
-  if (!pending) return;
-  clearTimeout(pending.timer);
-  handle.cloudRebindPending = null;
-  updateStatus(handle, {
-    cloudRebind: { state: 'failed', targetKey: pending.targetKey, reason },
-    lastMessage: `自动化引擎重绑失败：${reason}。浏览器状态未改变。`,
-    ...presencePatch('自动化引擎重绑失败'),
-  });
-  pending.resolve({ ok: false, reason });
-}
-
-/** Rebind only a core's Cloud transport; browser/provider/CDP/slot state is intentionally absent. */
-function requestCoreCloudRebind(handle, target) {
-  return new Promise((resolve) => {
-    const child = handle && handle.child;
-    if (!child || typeof child.send !== 'function' || child.connected === false) {
-      resolve({ ok: false, reason: 'core_offline' });
-      return;
-    }
-    const requestId = `cloud-rebind-${crypto.randomUUID()}`;
-    const timer = setTimeout(() => {
-      if (!handle.cloudRebindPending || handle.cloudRebindPending.requestId !== requestId) return;
-      handle.cloudRebindPending = null;
-      updateStatus(handle, {
-        cloudRebind: { state: 'failed', targetKey: target.key, reason: 'rebind_timeout' },
-        lastMessage: `自动化引擎切换到 ${target.label || target.key} 超时；浏览器状态未改变。`,
-        ...presencePatch('自动化引擎重绑超时'),
-      });
-      resolve({ ok: false, reason: 'rebind_timeout' });
-    }, 45_000);
-    if (typeof timer.unref === 'function') timer.unref();
-    handle.cloudRebindPending = { requestId, targetKey: target.key, timer, resolve };
-    updateStatus(handle, {
-      targetCloudKey: target.key,
-      cloudRebind: { state: 'pending', targetKey: target.key },
-      lastMessage: `正在把自动化引擎重绑到 ${target.label || target.key}；浏览器状态与槽位保持不变。`,
-      ...presencePatch('正在切换 Cloud 控制连接…'),
-    });
-    try {
-      child.send({
-        type: 'lifecycle.cloud_rebind',
-        requestId,
-        url: target.url,
-        targetKey: target.key,
-      }, (error) => {
-        if (!error || handle.child !== child || handle.cloudRebindPending?.requestId !== requestId) return;
-        clearTimeout(timer);
-        handle.cloudRebindPending = null;
-        updateStatus(handle, {
-          cloudRebind: { state: 'failed', targetKey: target.key, reason: error.message },
-          lastMessage: `自动化引擎重绑指令未送达：${error.message}。浏览器状态未改变。`,
-          ...presencePatch('自动化引擎重绑未送达'),
-        });
-        resolve({ ok: false, reason: 'ipc_send_failed' });
-      });
-    } catch (error) {
-      clearTimeout(timer);
-      handle.cloudRebindPending = null;
-      const reason = (error && error.message) || String(error);
-      updateStatus(handle, {
-        cloudRebind: { state: 'failed', targetKey: target.key, reason },
-        lastMessage: `自动化引擎重绑指令未送达：${reason}。浏览器状态未改变。`,
-        ...presencePatch('自动化引擎重绑未送达'),
-      });
-      resolve({ ok: false, reason: 'ipc_send_failed' });
-    }
-  });
-}
-
 function clearColdStandbyTimer(handle) {
   if (!handle) return;
   if (handle.coldStandbyTimer) clearTimeout(handle.coldStandbyTimer);
@@ -4693,15 +4646,12 @@ async function spawnEdgeChild(handle, {
     }
   }
 
-  // 云端环境注入（change edge-cloud-env-selector）：界面已显式选择时，在**合并之后**覆盖继承来的
-  // AIDCP_CLOUD_URL（必须在此、而非塞进 providerEnv：合并 { ...providerEnv, ...processEnv } 会让继承值压过）；
-  // 未选择则不动、沿用继承 / 缺省（零回归）。这里只记录本次目标；实际 key 必须等 hello/welcome 成功后再确认。
+  // 官方 Electron 运行始终在**合并之后**用登录目标目录覆盖继承的 AIDCP_CLOUD_URL。
+  // 这样旧环境变量只能影响独立核心开发，不能把已认证桌面会话的自动化传输带到另一环境。
+  // 这里只记录本次目标；实际 key 必须等 hello/welcome 成功后再确认。
   const cloudSel = resolveCloudUrl();
-  if (cloudSel.fromSelection) spawnEnv.AIDCP_CLOUD_URL = cloudSel.url;
-  const resolvedCloudKey = cloudSel.fromSelection
-    ? cloudSel.key
-    : cloudKeyForUrl(String(process.env.AIDCP_CLOUD_URL || '').trim() || DEFAULT_CLOUD_URL);
-  handle.spawnCloudKey = resolvedCloudKey;
+  spawnEnv.AIDCP_CLOUD_URL = cloudSel.url;
+  handle.spawnCloudKey = cloudSel.key;
   if (controlBootstrap) {
     // 与 AIDCP_ACCOUNT_ID 严格分离：后者会覆盖页面真实身份，绝不能承载可能陈旧的启动引导。
     spawnEnv.AIDCP_START_BROWSER_ABSENT = '1';
@@ -4887,36 +4837,6 @@ async function spawnEdgeChild(handle, {
     }
     if (message.type === 'facebook-totp.request') {
       void handleFacebookTotpRequest(handle, child, message);
-      return;
-    }
-    if (message.type === 'lifecycle.cloud_rebound' || message.type === 'lifecycle.cloud_rebind_failed') {
-      const pending = handle.cloudRebindPending;
-      if (!pending || message.requestId !== pending.requestId || message.targetKey !== pending.targetKey) return;
-      clearTimeout(pending.timer);
-      handle.cloudRebindPending = null;
-      if (message.type === 'lifecycle.cloud_rebound' && message.ok === true) {
-        handle.spawnCloudKey = pending.targetKey;
-        updateStatus(handle, {
-          cloud: 'connected',
-          connectedCloudKey: pending.targetKey,
-          targetCloudKey: pending.targetKey,
-          cloudRebind: { state: 'connected', targetKey: pending.targetKey },
-          lastMessage: `自动化引擎已连接 ${CLOUD_ENV_LABELS[pending.targetKey] || pending.targetKey}；浏览器状态未改变。`,
-          ...presencePatch('Cloud 控制连接已切换'),
-          ...clearEdgeFailurePatch(handle),
-        });
-        pending.resolve({ ok: true });
-      } else {
-        const reason = typeof message.reason === 'string' && message.reason ? message.reason : 'rebind_failed';
-        updateStatus(handle, {
-          cloud: 'disconnected',
-          targetCloudKey: pending.targetKey,
-          cloudRebind: { state: 'failed', targetKey: pending.targetKey, reason },
-          lastMessage: `自动化引擎未能连接 ${CLOUD_ENV_LABELS[pending.targetKey] || pending.targetKey}：${reason}。浏览器状态未改变。`,
-          ...presencePatch('自动化引擎重绑失败'),
-        });
-        pending.resolve({ ok: false, reason });
-      }
       return;
     }
     if (message.type === 'lifecycle.transient_browser_requested') {
@@ -5154,7 +5074,6 @@ async function spawnEdgeChild(handle, {
   child.on('error', (err) => {
     if (handle.child !== child) return;
     const staleGeneration = !isCurrentLifecycleGeneration(handle, generation);
-    failPendingCoreRebind(handle, `core_spawn_error:${(err && err.message) || String(err)}`);
     settleLaunchReady(handle, false); // 起不来：立刻放行启动队列的下一个，绝不占着队列干等
     handle.child = undefined;
     handle.status.authReason = null;
@@ -5248,7 +5167,6 @@ async function spawnEdgeChild(handle, {
   // 读 handle.child、'close' 仅晚 'exit' 数毫秒，远在 ~10s 预算内。）
   child.on('close', (code, signal) => {
     if (handle.child !== child) return; // 已被 'error' 处理器接管
-    failPendingCoreRebind(handle, `core_exited:${code ?? signal ?? 'unknown'}`);
     settleLaunchReady(handle, false); // 进程没了：放行启动队列的下一个
     const wasClosing = handle.closePending;
     const wasParked = handle.coreParked;
@@ -5998,6 +5916,23 @@ function handleEdgeLogLine(handle, message, isError = false) {
     next.presence = { text: '请在浏览器里扫码登录', at: new Date().toISOString() };
   }
   if (message.includes('已连接云端') || message.includes('已握手') || message.includes('云端已重连')) {
+    const authenticatedTarget = hasValidSession() ? clientSession.deploymentTarget : null;
+    if (!handle.spawnCloudKey || handle.spawnCloudKey !== settings.deploymentTarget
+      || authenticatedTarget !== settings.deploymentTarget) {
+      handle.stopRequested = true;
+      settleLaunchReady(handle, false);
+      updateStatus(handle, {
+        edge: 'warning',
+        cloud: 'disconnected',
+        session: 'idle',
+        connectedCloudKey: '',
+        lastMessage: '部署环境与自动化连接目标不一致，已安全停止自动化。',
+        ...presencePatch('部署环境不一致，自动化已停止'),
+        ...edgeFailurePatch('部署环境与自动化连接目标不一致'),
+      });
+      void queueLifecycle(() => { try { handle.child?.kill('SIGTERM'); } catch { /* best-effort */ } });
+      return;
+    }
     next.cloud = 'connected';
     if (handle.spawnCloudKey) next.connectedCloudKey = handle.spawnCloudKey;
     // 本轮核心已确凿连上过云端：此后再断，才配讲「正在重新连接」（change honest-first-connect-label）。
@@ -6053,6 +5988,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
   const evt = projectBrowserSlotWaitingEvent(
     handle.uiEvents.push(structuredMessage),
     Boolean(handle.controlPlaneOnly && handle.slotWaitingSince),
+    next.connectedCloudKey || handle.status.connectedCloudKey,
   );
   let standbyHint = null;
   let standbyHintUpdated = false;
@@ -6878,6 +6814,7 @@ ipcMain.handle('settings:get', () => ({
   pendingInteractionOffboards: (settings.pendingInteractionOffboards || []).map((item) => ({
     offboardId: item.offboardId,
     envKey: item.envKey,
+    deploymentTarget: item.deploymentTarget,
     state: item.state,
     reason: item.reason,
     requestedAt: item.requestedAt,
@@ -6901,7 +6838,11 @@ ipcMain.handle('settings:get', () => ({
 
 // 对外客户鉴权（change edge-client-customer-auth）：登录窗口调 login；主进程做 HTTP，成功后拉可见环境 + 建主窗 + 关登录窗。
 ipcMain.handle('client-auth:login', async (_event, creds) => {
-  const result = await establishClientSession(creds);
+  const payload = parseClientLoginPayload(creds);
+  if (!payload) return { ok: false, reason: 'invalid_login_payload' };
+  const targetResult = persistDeploymentTargetForLogin(payload.deploymentTarget);
+  if (!targetResult.ok) return targetResult;
+  const result = await establishClientSession(payload);
   if (result.ok) {
     await proceedAfterAuth();
     if (loginWindow) { try { loginWindow.close(); } catch { /* ignore */ } loginWindow = null; }
@@ -6916,9 +6857,17 @@ ipcMain.handle('client-auth:logout', async () => {
   onSessionInvalid({ forgetCredentials: true });
   return { ok: true };
 });
+ipcMain.handle('client-auth:switch-target', () => switchAuthenticatedTargetToLogin());
 ipcMain.handle('client-auth:session', () => ({
   enabled: clientAuthEnabled(),
   name: (clientSession && clientSession.name) || null,
+  deploymentTarget: settings.deploymentTarget,
+  authenticatedTarget: hasValidSession() ? clientSession.deploymentTarget : null,
+}));
+ipcMain.handle('client-auth:target', () => ({
+  deploymentTarget: settings.deploymentTarget,
+  options: ['dev', 'ol'],
+  label: CLOUD_ENV_LABELS[settings.deploymentTarget],
 }));
 ipcMain.handle('client-auth:prefill', () => loadClientLoginPrefill());
 ipcMain.handle('client-auth:prefill:clear', () => {
@@ -7369,6 +7318,11 @@ ipcMain.handle('settings:save', async (_event, patch) => {
   const previousSystemProxyUpstreamEnabled = settings.systemProxyUpstreamEnabled === true;
   // pending offboard 是主进程在 Cloud 202 回执后写入的恢复游标，renderer 不得伪造/覆盖。
   delete safePatch.pendingInteractionOffboards;
+  // 部署目标只能在登录 IPC 中变更；认证 renderer 不能通过通用设置制造跨目标会话。
+  delete safePatch.deploymentTarget;
+  delete safePatch.cloudEnvKey;
+  delete safePatch.cloudUrlCustom;
+  delete safePatch.clientAuthUrl;
   // 排除集合 owner 只由当前有效客户会话派生，renderer 不得伪造身份或把选择带给另一客户。
   delete safePatch.clientRosterExclusionOwner;
   let scopeError;
@@ -7412,7 +7366,7 @@ ipcMain.handle('settings:save', async (_event, patch) => {
     const current = selectedHandle();
     if (current) scheduleSelectedProxyPreflight(current);
   }
-  // 保存只持久化、**不打断**在跑的核心（应用改动经显式 edge:restart「按新设置重启」/「全部重启换云」）。
+  // 普通浏览器设置只持久化、**不打断**在跑的核心；部署目标已从本通用 IPC 排除，必须退出到登录门切换。
   const handle = selectedHandle();
   if (handle) {
     updateStatus(handle, {
@@ -7420,7 +7374,7 @@ ipcMain.handle('settings:save', async (_event, patch) => {
       lastMessage: res.ok ? '浏览器设置已保存。' : '设置已应用（本次生效），但写入本地失败，重启应用后可能丢失。',
     });
   }
-  broadcastFleet(); // cloudEnv 目标云端可能已变，推快照让界面「当前云端」即时刷新（保存不打断在跑核心）
+  broadcastFleet();
   return {
     ...settings,
     adsDownloadUrl: ADS_DOWNLOAD_URL,
@@ -7436,31 +7390,6 @@ ipcMain.handle('settings:save', async (_event, patch) => {
     },
     saveOk: res.ok && !scopeError,
     saveError: res.error || scopeError,
-  };
-});
-// 兼容既有 preload 通道名，但仅重绑已经运行的自动化引擎：绝不因设置变更启动已停止的引擎或浏览器。
-ipcMain.handle('cloud:restartAll', async () => {
-  const target = cloudSelectionView();
-  const targets = [...envs.values()].filter((h) => !h.removed && h.kind === 'adspower');
-  const results = await Promise.all(targets.map(async (handle) => {
-    if (handle.child) return requestCoreCloudRebind(handle, target);
-    updateStatus(handle, {
-      targetCloudKey: target.key,
-      cloudRebind: { state: 'idle', targetKey: target.key },
-      lastMessage: '自动化目标已保存；当前引擎未运行，将在下次开始自动化时生效。',
-    });
-    return { ok: true, skipped: true, reason: 'engine_not_running' };
-  }));
-  const activeResults = results.filter((result) => !result.skipped);
-  const rebound = activeResults.filter((result) => result.ok).length;
-  return {
-    ok: rebound === activeResults.length,
-    accepted: activeResults.length,
-    rebound,
-    skipped: results.length - activeResults.length,
-    failed: activeResults.length - rebound,
-    results: targets.map((handle, index) => ({ envId: handle.envId, ...results[index] })),
-    cloudEnv: target,
   };
 });
 // 悬浮「启动」：目标环境未跑则错峰启动；已在跑则不重复启动。
@@ -8101,7 +8030,9 @@ ipcMain.handle('ads:listProfiles', async (_event, opts) => {
     // foreign id 不在 roster/allowed、本就不与花名册成员相撞、不影响剔孤儿；降范围但本机仍在的环境仍在 roster 里、故不被误剔（保 MAJOR-2 修复）。
     const knownIds = new Set(allowedProfileIds);
     for (const e of settings.environments || []) { if (e && e.profileId) knownIds.add(e.profileId); }
-    for (const pending of settings.pendingInteractionOffboards || []) knownIds.add(pending.envKey);
+    for (const pending of settings.pendingInteractionOffboards || []) {
+      if (pending.deploymentTarget === settings.deploymentTarget) knownIds.add(pending.envKey);
+    }
     result.physicalUserIds = (result.profiles || []).map((p) => p && p.userId).filter((id) => id && knownIds.has(id));
     result.profiles = (result.profiles || [])
       .filter((p) => p && (allowedProfileIds.has(p.userId) || Boolean(pendingOffboardForEnv(p.userId))))
@@ -8658,10 +8589,15 @@ ipcMain.handle('ads:updateEnvProxies', async (event, opts) => {
 });
 
 function storePendingInteractionOffboard(offboard, platform) {
-  const normalized = normalizePendingInteractionOffboards([{ ...offboard, platform }])[0];
+  const normalized = normalizePendingInteractionOffboards([{
+    ...offboard,
+    platform,
+    deploymentTarget: settings.deploymentTarget,
+  }])[0];
   if (!normalized) return { ok: false, error: 'Cloud 返回的解绑状态不合法，已停止本地删除。' };
   const next = (settings.pendingInteractionOffboards || [])
-    .filter((item) => item.offboardId !== normalized.offboardId && item.envKey !== normalized.envKey);
+    .filter((item) => item.deploymentTarget !== normalized.deploymentTarget
+      || (item.offboardId !== normalized.offboardId && item.envKey !== normalized.envKey));
   next.push(normalized);
   const saved = saveSettings({ pendingInteractionOffboards: next });
   const handle = envs.get(fleet.envIdForProfile(normalized.envKey));
@@ -8681,7 +8617,9 @@ function updatePendingInteractionOffboard(offboard) {
 }
 
 function finishLocalInteractionOffboard(envKey) {
-  const nextPending = (settings.pendingInteractionOffboards || []).filter((item) => item.envKey !== envKey);
+  const nextPending = (settings.pendingInteractionOffboards || []).filter(
+    (item) => item.envKey !== envKey || item.deploymentTarget !== settings.deploymentTarget,
+  );
   const nextEnvironments = (settings.environments || []).filter((item) => item.profileId !== envKey);
   const saved = saveSettings({ pendingInteractionOffboards: nextPending, environments: nextEnvironments });
   syncEnvHandles();
@@ -8716,6 +8654,9 @@ async function deletePhysicalEnvironmentAfterTombstone(envKey, opts) {
 }
 
 async function reconcilePendingInteractionOffboard(entry, opts, pollAttempts = 1) {
+  if (!entry || entry.deploymentTarget !== settings.deploymentTarget) {
+    return { ok: false, cleanupPending: true, error: '解绑恢复游标不属于当前部署环境，已拒绝跨环境重放。' };
+  }
   let current = entry;
   for (let attempt = 0; attempt < Math.max(1, pollAttempts); attempt += 1) {
     const response = await clientAuthFetch(`/offboarding/${encodeURIComponent(current.offboardId)}`, {
@@ -8745,7 +8686,8 @@ let pendingOffboardRetryPromise = null;
 function retryPendingInteractionOffboards() {
   if (pendingOffboardRetryPromise || !clientAuthEnabled() || !hasValidSession()) return pendingOffboardRetryPromise || Promise.resolve();
   pendingOffboardRetryPromise = (async () => {
-    for (const entry of [...(settings.pendingInteractionOffboards || [])]) {
+    for (const entry of [...(settings.pendingInteractionOffboards || [])]
+      .filter((item) => item.deploymentTarget === settings.deploymentTarget)) {
       await reconcilePendingInteractionOffboard(entry, {}, 1);
     }
   })().finally(() => { pendingOffboardRetryPromise = null; });

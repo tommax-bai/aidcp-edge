@@ -24,7 +24,7 @@
         </button>
       </div>
       <div class="tb-spacer"></div>
-      <!-- 当前云端常驻显示：点击去设置切换。ol 醒目色；控制连接待重绑时带 pending 态。 -->
+      <!-- 当前认证目标常驻显示：点击去设置退出切换。OL 醒目色；自动化实际目标不一致时带 pending 态。 -->
       <button id="cloud-env-chip" class="cloud-env-chip nodrag" type="button" title="当前云端环境（点击去设置切换）">
         <span id="cloud-env-chip-label">云端…</span>
       </button>
@@ -1443,30 +1443,19 @@
       <p class="subtle" id="subtitle">数据管理可直接使用；开始自动化时才连接引擎并按需打开浏览器。</p>
 
       <section class="settings">
-        <!-- 云端目标：客户数据 API 与自动化 WebSocket 明确分离。 -->
+        <!-- 部署目标由登录门统一选择；认证会话内只展示和退出切换。 -->
         <div class="set-card">
           <div class="set-card-head">
             <div class="set-card-title">
-              <span>云端目标</span>
-              <span class="set-card-sub">数据管理走按请求 HTTP；自动化引擎另走 WebSocket</span>
+              <span>部署环境</span>
+              <span class="set-card-sub">登录、数据 API 与自动化统一绑定</span>
             </div>
           </div>
           <div class="cloud-env-field">
-            <div class="seg-group cloud-env-options">
-              <button id="cloud-env-dev" class="seg cloud-env-btn" type="button" data-cloud="dev">dev（测试）</button>
-              <button id="cloud-env-ol" class="seg cloud-env-btn" type="button" data-cloud="ol">ol（线上）</button>
-              <button id="cloud-env-custom" class="seg cloud-env-btn" type="button" data-cloud="custom">自定义</button>
-            </div>
-            <label id="cloud-env-custom-field" class="field hidden">
-              <span class="field-label">自动化 WebSocket</span>
-              <input id="cloud-url-custom" type="text" placeholder="ws:// 或 wss:// 开头" autocomplete="off" />
-              <span class="field-label">客户数据 API</span>
-              <input id="client-auth-url-custom" type="text" placeholder="http:// 或 https:// 开头，通常以 /capi 结尾" autocomplete="off" />
-            </label>
-            <div class="cloud-env-current">自动化目标：<strong id="cloud-env-current" class="badge">—</strong></div>
-            <span id="cloud-env-hint" class="parking-hint">dev / ol 会使用内置的 HTTP 与 WebSocket 端点；自定义环境需要分别填写。</span>
+            <div class="cloud-env-current">当前认证环境：<strong id="cloud-env-current" class="badge">—</strong></div>
+            <span id="cloud-env-hint" class="parking-hint">切换环境会停止自动化、退出当前会话，并返回登录页重新验证。</span>
             <div class="cloud-env-actions">
-              <button id="cloud-restart-all" class="secondary small hidden" type="button">重绑运行中的自动化引擎</button>
+              <button id="cloud-switch-target" class="secondary small" type="button">退出并切换环境</button>
             </div>
           </div>
         </div>

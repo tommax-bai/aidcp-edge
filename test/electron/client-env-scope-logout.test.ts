@@ -77,8 +77,8 @@ test('ads:listProfiles 只收窄显示、physicalUserIds 收窄到 roster∪allo
     /for \(const e of settings\.environments \|\| \[\]\) \{ if \(e && e\.profileId\) knownIds\.add\(e\.profileId\); \}/,
     '并含花名册成员 id(roster)——降范围但在册的环境不被误剔(保 MAJOR-2)',
   );
-  assert.match(block, /for \(const pending of settings\.pendingInteractionOffboards \|\| \[\]\) knownIds\.add\(pending\.envKey\)/,
-    'Cloud 已受理解绑的环境可继续出现在清理列表，但不会恢复普通 scope');
+  assert.match(block, /for \(const pending of settings\.pendingInteractionOffboards \|\| \[\]\) \{[\s\S]*pending\.deploymentTarget === settings\.deploymentTarget[\s\S]*knownIds\.add\(pending\.envKey\)/,
+    '仅当前部署目标下 Cloud 已受理解绑的环境可继续出现在清理列表，不跨目标泄漏或恢复 scope');
   assert.match(
     block,
     /result\.physicalUserIds\s*=\s*\(result\.profiles\s*\|\|\s*\[\]\)\.map\(\(p\) => p && p\.userId\)\.filter\(\(id\) => id && knownIds\.has\(id\)\)/,

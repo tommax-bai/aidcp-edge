@@ -21,10 +21,20 @@ test('登录记忆使用 safeStorage 加密文件，不写明文回退', () => {
 
 test('成功登录保存完整输入，session 文件仍只承载会话', () => {
   assert.match(main, /saveClientLoginPrefill\(\{\s*name,\s*key\s*\}\)/, '登录成功后必须保存账户名和访问密钥');
-  assert.match(main, /saveClientSession\(\{\s*token:\s*r\.data\.token/, '客户会话仍独立保存 token');
+  assert.match(main, /saveClientLoginPrefill[\s\S]*deploymentTarget:\s*settings\.deploymentTarget/, '加密凭据必须绑定当前部署目标');
+  assert.match(main, /saveClientSession\(\{\s*deploymentTarget,\s*token:\s*r\.data\.token/, '客户会话必须把目标和 token 一起保存');
   assert.match(main, /sealClientSession\(s, safeStorage\)/, 'JWT 会话优先经 safeStorage 整包加密');
   assert.match(main, /writePrivateJsonAtomic\(clientSessionFile\(\)/, '会话必须走原子 0600 私有文件写入');
   assert.doesNotMatch(main, /writeFileSync\(clientSessionFile\(\)/, '不得再直接明文 writeFile 会话');
+});
+
+test('旧版或跨目标 session/prefill 不恢复、不自动提交', () => {
+  assert.match(main, /value\.deploymentTarget !== settings\.deploymentTarget[\s\S]*clearClientLoginPrefill\(\)/,
+    '目标不匹配或缺目标的加密凭据必须清除');
+  assert.match(main, /s && s\.deploymentTarget === settings\.deploymentTarget[\s\S]*fs\.unlinkSync\(file\)/,
+    '目标不匹配或缺目标的 session 必须清除');
+  assert.match(main, /clientSession\.deploymentTarget === settings\.deploymentTarget/,
+    '有效会话判定必须绑定当前目标');
 });
 
 test('令牌失效保留凭据记忆，显式退出清除全部', () => {
