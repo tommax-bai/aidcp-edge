@@ -332,6 +332,44 @@ test('fleetRailModel：需处理浮顶、同级保持花名册序、待处理计
   assert.equal(model.pendingCount, 2);
 });
 
+test('fleetRailModel：排队组按权威位次升序，未知位次稳定置后', () => {
+  const now = Date.now();
+  const queued = (envId: string, queuePosition?: number) => ({
+    envId,
+    name: envId,
+    status: makeStatus({
+      automationState: 'waiting_resource',
+      engineLinkState: 'disconnected',
+      browserState: 'queued',
+      queuePosition,
+      updatedAt: new Date(now).toISOString(),
+    }),
+  });
+  const model = uiLogic.fleetRailModel([
+    queued('position-6', 6),
+    queued('position-7', 7),
+    queued('position-1', 1),
+    queued('unknown-a'),
+    queued('position-2', 2),
+    queued('position-3', 3),
+    queued('position-4', 4),
+    queued('position-5', 5),
+    queued('unknown-b'),
+  ], now);
+
+  assert.deepEqual(model.rows.map((row) => row.envId), [
+    'position-1',
+    'position-2',
+    'position-3',
+    'position-4',
+    'position-5',
+    'position-6',
+    'position-7',
+    'unknown-a',
+    'unknown-b',
+  ]);
+});
+
 // ── DOM：环境栏 / 路由不串号 / 切换整体切换 ──
 
 test('环境栏：fleet 快照建行、默认收起、点选切换主区域并回写选中', async () => {

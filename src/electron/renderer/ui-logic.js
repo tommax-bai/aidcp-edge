@@ -871,7 +871,7 @@
     return result('offline', false, '未启动', 'offline', 'offline', '自动化尚未启动');
   }
 
-  // 需处理浮顶；普通环境按用户可理解的运行阶段分组，同组保持花名册序。
+  // 需处理浮顶；普通环境按用户可理解的运行阶段分组。排队组按权威位次，其余同组保持花名册序。
   const FLEET_LEVEL_RANK = { error: 0, attention: 1, launching: 2, stale: 3, running: 4, offline: 5 };
   const FLEET_GROUP_RANK = { attention: 0, running: 1, ready: 2, starting: 3, queued: 4, standby: 5, paused: 6, offline: 7 };
 
@@ -909,9 +909,18 @@
         status: e && e.status,
       };
     });
-    rows.sort((a, b) => (FLEET_GROUP_RANK[a.railGroup] - FLEET_GROUP_RANK[b.railGroup])
-      || (FLEET_LEVEL_RANK[a.level] - FLEET_LEVEL_RANK[b.level])
-      || (a.rosterIndex - b.rosterIndex));
+    rows.sort((a, b) => {
+      const groupOrder = FLEET_GROUP_RANK[a.railGroup] - FLEET_GROUP_RANK[b.railGroup];
+      if (groupOrder !== 0) return groupOrder;
+      const levelOrder = FLEET_LEVEL_RANK[a.level] - FLEET_LEVEL_RANK[b.level];
+      if (levelOrder !== 0) return levelOrder;
+      if (a.railGroup === 'queued') {
+        const aPosition = a.queuePosition === null ? Number.POSITIVE_INFINITY : a.queuePosition;
+        const bPosition = b.queuePosition === null ? Number.POSITIVE_INFINITY : b.queuePosition;
+        if (aPosition !== bPosition) return aPosition - bPosition;
+      }
+      return a.rosterIndex - b.rosterIndex;
+    });
     return { rows, pendingCount: rows.filter((r) => r.needsAction).length };
   }
 
