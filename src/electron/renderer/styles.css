@@ -5455,6 +5455,8 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
   outline: 3px solid rgba(59, 111, 240, .16);
   outline-offset: 1px;
 }
+#facebook-slow-start-day-select { min-width: 104px; }
+#facebook-slow-start-completed-select { min-width: 108px; }
 .slow-start-row .switch-track { width: 30px; height: 16.5px; }
 .slow-start-row .switch-thumb { top: 1.5px; left: 1.5px; width: 13.5px; height: 13.5px; }
 .slow-start-row .switch input:checked + .switch-track .switch-thumb { transform: translateX(13.5px); }

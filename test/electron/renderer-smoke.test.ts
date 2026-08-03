@@ -98,6 +98,13 @@ interface Stub {
     mode: 'persona' | 'slow_start' | 'rule' | 'consumption';
   }) => Promise<unknown>;
   getFacebookOperationPolicy?: (opts: { envKey: string }) => Promise<unknown>;
+  setFacebookSlowStartProgress?: (opts: {
+    envKey: string;
+    expectedRevision: number;
+    day: number;
+    completed: boolean;
+  }) => Promise<unknown>;
+  getFacebookSlowStartProgress?: (opts: { envKey: string }) => Promise<unknown>;
   setFacebookPrimarySurface?: (opts: {
     envKey: string;
     expectedRevision: number;
@@ -1742,6 +1749,71 @@ function slowStartStub(overrides: Partial<Stub> = {}, platform = 'facebook'): St
       policyRevision = args.expectedRevision + 1;
       return facebookOperationPolicyReceipt(args.envKey, args.mode, policyRevision);
     });
+  const getFacebookSlowStartProgress = overrides.getFacebookSlowStartProgress
+    || (async ({ envKey }: { envKey: string }) => {
+      const policyResponse = await getFacebookOperationPolicy({ envKey }) as {
+        ok?: boolean;
+        data?: { data?: { facebookOperationPolicy?: Record<string, unknown> } };
+      };
+      const slowResponse = await getSlowStart({ envKey }) as {
+        data?: { data?: { slowStart?: { state?: string; day?: number; totalDays?: number } } };
+      };
+      const policy = policyResponse.data?.data?.facebookOperationPolicy;
+      const slow = slowResponse.data?.data?.slowStart;
+      if (!policyResponse.ok || !policy || !slow) return policyResponse;
+      const state = (policy.slowStart as { state?: string } | undefined)?.state;
+      const totalDays = Number.isSafeInteger(slow.totalDays) ? Number(slow.totalDays) : 7;
+      const day = state === 'active'
+        ? (Number.isSafeInteger(slow.day) ? Number(slow.day) : 1)
+        : state === 'graduated'
+          ? totalDays
+          : null;
+      return {
+        ok: true,
+        data: {
+          data: {
+            envKey,
+            facebookOperationPolicy: policy,
+            slowStartProgress: {
+              day,
+              totalDays,
+              completed: state === 'graduated',
+            },
+          },
+        },
+      };
+    });
+  const setFacebookSlowStartProgress = overrides.setFacebookSlowStartProgress
+    || (async (args: {
+      envKey: string;
+      expectedRevision: number;
+      day: number;
+      completed: boolean;
+    }) => {
+      const receipt = facebookOperationPolicyReceipt(
+        args.envKey,
+        'slow_start',
+        args.expectedRevision + 1,
+      );
+      if (args.completed) {
+        receipt.data.data.facebookOperationPolicy.effectiveMode = 'persona';
+        receipt.data.data.facebookOperationPolicy.slowStart.state = 'graduated';
+      }
+      return {
+        ok: true,
+        data: {
+          data: {
+            envKey: args.envKey,
+            facebookOperationPolicy: receipt.data.data.facebookOperationPolicy,
+            slowStartProgress: {
+              day: args.day,
+              totalDays: 7,
+              completed: args.completed,
+            },
+          },
+        },
+      };
+    });
   stub = makeStub({
     ...overrides,
     getSettings: overrides.getSettings || (async () => ({
@@ -1752,6 +1824,8 @@ function slowStartStub(overrides: Partial<Stub> = {}, platform = 'facebook'): St
     getSlowStart,
     getFacebookOperationPolicy,
     setFacebookOperationPolicy,
+    getFacebookSlowStartProgress,
+    setFacebookSlowStartProgress,
   });
   return stub;
 }
@@ -2592,6 +2666,34 @@ function facebookOperationPolicyReceipt(
   };
 }
 
+function facebookSlowStartProgressReceipt(
+  envKey: string,
+  day: number,
+  completed: boolean,
+  policyRevision = 3,
+  totalDays = 7,
+) {
+  const policy = facebookOperationPolicyReceipt(
+    envKey,
+    'slow_start',
+    policyRevision,
+  ).data.data.facebookOperationPolicy;
+  if (completed) {
+    policy.effectiveMode = 'persona';
+    policy.slowStart.state = 'graduated';
+  }
+  return {
+    ok: true,
+    data: {
+      data: {
+        envKey,
+        facebookOperationPolicy: policy,
+        slowStartProgress: { day, totalDays, completed },
+      },
+    },
+  };
+}
+
 function facebookRuleModeStub(overrides: Partial<Stub> = {}, platform = 'facebook'): Stub {
   return slowStartStub({
     getFacebookOperationPolicy: async ({ envKey }) =>
@@ -2774,6 +2876,144 @@ test('运行方式：Cloud 的 active slow-start 在四选一中胜出', async (
   }));
   const select = $(w, '#facebook-operation-mode-select') as unknown as HTMLSelectElement;
   assert.equal(select.value, 'slow_start');
+});
+
+test('冷启动进度：只在确认冷启动后紧跟主入口展示，并按 Cloud totalDays 生成选项', async () => {
+  const progress = facebookSlowStartProgressReceipt('__local__', 4, false, 9, 10);
+  const w = await boot(facebookRuleModeStub({
+    getFacebookOperationPolicy: async ({ envKey }) => ({
+      ok: true,
+      data: {
+        data: {
+          envKey,
+          facebookOperationPolicy: progress.data.data.facebookOperationPolicy,
+        },
+      },
+    }),
+    getFacebookSlowStartProgress: async () => progress,
+  }));
+  for (let i = 0; i < 3; i++) await tick();
+  const dayField = $(w, '#facebook-slow-start-day-field');
+  const completedField = $(w, '#facebook-slow-start-completed-field');
+  const day = $(w, '#facebook-slow-start-day-select') as unknown as HTMLSelectElement;
+  const completed = $(w, '#facebook-slow-start-completed-select') as unknown as HTMLSelectElement;
+  assert.equal(hidden(dayField), false);
+  assert.equal(hidden(completedField), false);
+  assert.equal(day.options.length, 10);
+  assert.equal(day.value, '4');
+  assert.equal(completed.value, 'false');
+
+  const persona = await boot(facebookRuleModeStub());
+  assert.equal(hidden($(persona, '#facebook-slow-start-day-field')), true);
+  assert.equal(hidden($(persona, '#facebook-slow-start-completed-field')), true);
+});
+
+test('冷启动进度：毕业态仍保持冷启动选择并允许取消完成', async () => {
+  let current = facebookSlowStartProgressReceipt('__local__', 7, true, 12);
+  const writes: Array<Record<string, unknown>> = [];
+  const w = await boot(facebookRuleModeStub({
+    getFacebookOperationPolicy: async ({ envKey }) => ({
+      ok: true,
+      data: {
+        data: {
+          envKey,
+          facebookOperationPolicy: current.data.data.facebookOperationPolicy,
+        },
+      },
+    }),
+    getFacebookSlowStartProgress: async () => current,
+    setFacebookSlowStartProgress: async (args) => {
+      writes.push(args);
+      current = facebookSlowStartProgressReceipt(
+        args.envKey,
+        args.day,
+        args.completed,
+        args.expectedRevision + 1,
+      );
+      return current;
+    },
+  }));
+  for (let i = 0; i < 3; i++) await tick();
+  const mode = $(w, '#facebook-operation-mode-select') as unknown as HTMLSelectElement;
+  const completed = $(w, '#facebook-slow-start-completed-select') as unknown as HTMLSelectElement;
+  assert.equal(mode.value, 'slow_start');
+  assert.equal(completed.value, 'true');
+
+  completed.value = 'false';
+  completed.dispatchEvent(new w.Event('change', { bubbles: true }));
+  for (let i = 0; i < 3; i++) await tick();
+  assert.equal(JSON.stringify(writes), JSON.stringify([{
+    envKey: '__local__',
+    expectedRevision: 12,
+    day: 7,
+    completed: false,
+  }]));
+  assert.equal(mode.value, 'slow_start');
+  assert.equal(completed.value, 'false');
+  assert.equal(hidden($(w, '#facebook-slow-start-day-field')), false);
+});
+
+test('冷启动进度：写入中保留确认值，完整匹配回读后才更新当前天数', async () => {
+  const write = deferred<unknown>();
+  const initial = facebookSlowStartProgressReceipt('__local__', 3, false, 9);
+  let written: Record<string, unknown> | null = null;
+  const w = await boot(facebookRuleModeStub({
+    getFacebookOperationPolicy: async ({ envKey }) => ({
+      ok: true,
+      data: {
+        data: {
+          envKey,
+          facebookOperationPolicy: initial.data.data.facebookOperationPolicy,
+        },
+      },
+    }),
+    getFacebookSlowStartProgress: async () => initial,
+    setFacebookSlowStartProgress: async (args) => {
+      written = args;
+      return write.promise;
+    },
+  }));
+  for (let i = 0; i < 3; i++) await tick();
+  const day = $(w, '#facebook-slow-start-day-select') as unknown as HTMLSelectElement;
+  const completed = $(w, '#facebook-slow-start-completed-select') as unknown as HTMLSelectElement;
+  day.value = '5';
+  day.dispatchEvent(new w.Event('change', { bubbles: true }));
+  assert.equal(day.value, '3', 'pending 期间必须恢复最后 Cloud 确认天数');
+  assert.equal(day.disabled, true);
+  assert.equal(completed.disabled, true);
+  assert.equal(JSON.stringify(written), JSON.stringify({
+    envKey: '__local__',
+    expectedRevision: 9,
+    day: 5,
+    completed: false,
+  }));
+
+  write.resolve(facebookSlowStartProgressReceipt('__local__', 5, false, 10));
+  for (let i = 0; i < 3; i++) await tick();
+  assert.equal(day.value, '5');
+  assert.equal(day.disabled, false);
+  assert.equal(completed.disabled, false);
+});
+
+test('冷启动进度：不完整或夹带字段的独立投影不显示可操作控件', async () => {
+  const response: any = facebookSlowStartProgressReceipt('__local__', 3, false, 9);
+  response.data.data.slowStartProgress.since = 1_700_000_000_000;
+  const w = await boot(facebookRuleModeStub({
+    getFacebookOperationPolicy: async ({ envKey }) => ({
+      ok: true,
+      data: {
+        data: {
+          envKey,
+          facebookOperationPolicy: response.data.data.facebookOperationPolicy,
+        },
+      },
+    }),
+    getFacebookSlowStartProgress: async () => response,
+  }));
+  for (let i = 0; i < 3; i++) await tick();
+  assert.equal(hidden($(w, '#facebook-slow-start-day-field')), true);
+  assert.equal(hidden($(w, '#facebook-slow-start-completed-field')), true);
+  assert.match($(w, '#facebook-operation-policy-status').textContent || '', /暂时无法读取冷启动进度/);
 });
 
 test('运行方式：未绑定环境以 active 锚点确认冷启动，不要求伪造 effectiveMode', async () => {

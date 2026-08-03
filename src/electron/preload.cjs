@@ -137,6 +137,8 @@ contextBridge.exposeInMainWorld('aidcpEdge', {
   getFacebookOperationPolicy: (args) => ipcRenderer.invoke('facebook-operation-policy:get', args),
   setFacebookPrimarySurface: (args) => ipcRenderer.invoke('facebook-primary-surface:set', args),
   getFacebookPrimarySurface: (args) => ipcRenderer.invoke('facebook-primary-surface:get', args),
+  setFacebookSlowStartProgress: (args) => ipcRenderer.invoke('facebook-slow-start-progress:set', args),
+  getFacebookSlowStartProgress: (args) => ipcRenderer.invoke('facebook-slow-start-progress:get', args),
   // Facebook 规则模式：只传 envKey / enabled；账号、平台与规则权威均留在 Cloud。
   // 旧 IPC 仅供已发布客户端兼容；新 UI 不再以它作为运行方式权威。
   setFacebookRuleMode: (args) => ipcRenderer.invoke('facebook-rule-mode:set', args),

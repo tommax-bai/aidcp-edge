@@ -7027,6 +7027,36 @@ ipcMain.handle('facebook-operation-policy:get', (_event, raw) => handleInteracti
   return res;
 }));
 
+ipcMain.handle('facebook-slow-start-progress:set', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey', 'expectedRevision', 'day', 'completed']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  if (!Number.isInteger(args.expectedRevision) || args.expectedRevision < 1) {
+    throw new Error('expectedRevision 不合法');
+  }
+  if (!Number.isInteger(args.day) || args.day < 1) throw new Error('day 不合法');
+  if (typeof args.completed !== 'boolean') throw new Error('completed 不合法');
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/facebook-slow-start-progress`,
+    method: 'PUT',
+    body: {
+      expectedRevision: args.expectedRevision,
+      day: args.day,
+      completed: args.completed,
+    },
+  });
+}));
+
+ipcMain.handle('facebook-slow-start-progress:get', (_event, raw) => handleInteractionIpc(async () => {
+  const args = interactionArgs(raw, new Set(['envKey']));
+  const envKey = interactionId(args.envKey, 'envKey');
+  return interactionCustomerRequest({
+    envKey,
+    pathname: `/environments/${encodeURIComponent(envKey)}/facebook-slow-start-progress`,
+    method: 'GET',
+  });
+}));
+
 ipcMain.handle('facebook-primary-surface:set', (_event, raw) => handleInteractionIpc(async () => {
   const args = interactionArgs(raw, new Set(['envKey', 'expectedRevision', 'primarySurface']));
   const envKey = interactionId(args.envKey, 'envKey');

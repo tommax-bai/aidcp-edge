@@ -11,6 +11,8 @@ test('统一运行策略只经具名 IPC 与固定 customer-auth 环境路径读
   for (const channel of [
     'facebook-operation-policy:get',
     'facebook-operation-policy:set',
+    'facebook-slow-start-progress:get',
+    'facebook-slow-start-progress:set',
     'facebook-primary-surface:get',
     'facebook-primary-surface:set',
   ]) {
@@ -41,6 +43,29 @@ test('统一运行策略只经具名 IPC 与固定 customer-auth 环境路径读
   );
 });
 
+test('冷启动进度经具名 IPC 严格提交 revision/day/completed', () => {
+  const start = main.indexOf("ipcMain.handle('facebook-slow-start-progress:set'");
+  const end = main.indexOf("ipcMain.handle('facebook-primary-surface:set'", start);
+  const block = main.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.match(
+    block,
+    /new Set\(\['envKey', 'expectedRevision', 'day', 'completed'\]\)/,
+  );
+  assert.match(block, /Number\.isInteger\(args\.expectedRevision\)/);
+  assert.match(block, /Number\.isInteger\(args\.day\)/);
+  assert.match(block, /typeof args\.completed !== 'boolean'/);
+  assert.match(
+    block,
+    /`\/environments\/\$\{encodeURIComponent\(envKey\)\}\/facebook-slow-start-progress`/,
+  );
+  assert.match(
+    block,
+    /body: \{[\s\S]*expectedRevision: args\.expectedRevision,[\s\S]*day: args\.day,[\s\S]*completed: args\.completed/,
+  );
+  assert.doesNotMatch(block, /accountId|slow_start_since|totalDays|dailyCaps/);
+});
+
 test('已建环境使用一个四选一模式和一个独立 Feed/Reels 选择', () => {
   const policy = html.indexOf('id="facebook-operation-policy-row"');
   const risk = html.indexOf('id="risk-recovery-row"');
@@ -48,6 +73,12 @@ test('已建环境使用一个四选一模式和一个独立 Feed/Reels 选择',
   const block = html.slice(policy, risk);
   assert.match(block, /id="facebook-operation-mode-select"[\s\S]*value="persona"[\s\S]*value="slow_start"[\s\S]*value="rule"[\s\S]*value="consumption"/);
   assert.match(block, /id="facebook-primary-surface-select"[\s\S]*value="feed"[\s\S]*value="reels"/);
+  const surface = block.indexOf('id="facebook-primary-surface-select"');
+  const day = block.indexOf('id="facebook-slow-start-day-select"');
+  const completed = block.indexOf('id="facebook-slow-start-completed-select"');
+  assert.ok(surface >= 0 && surface < day && day < completed);
+  assert.match(block, /id="facebook-slow-start-day-field" class="create-field hidden"/);
+  assert.match(block, /id="facebook-slow-start-completed-field" class="create-field hidden"/);
 
   const submitStart = renderer.indexOf('async function submitFacebookOperationMode');
   const submitEnd = renderer.indexOf('// 旧慢启动/规则写函数', submitStart);

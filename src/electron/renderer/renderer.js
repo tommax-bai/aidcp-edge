@@ -29,6 +29,10 @@ const fields = {
   facebookOperationPolicyRow: document.querySelector('#facebook-operation-policy-row'),
   facebookOperationModeSelect: document.querySelector('#facebook-operation-mode-select'),
   facebookPrimarySurfaceSelect: document.querySelector('#facebook-primary-surface-select'),
+  facebookSlowStartDayField: document.querySelector('#facebook-slow-start-day-field'),
+  facebookSlowStartDaySelect: document.querySelector('#facebook-slow-start-day-select'),
+  facebookSlowStartCompletedField: document.querySelector('#facebook-slow-start-completed-field'),
+  facebookSlowStartCompletedSelect: document.querySelector('#facebook-slow-start-completed-select'),
   facebookOperationPolicyStatus: document.querySelector('#facebook-operation-policy-status'),
   riskRecoveryRow: document.querySelector('#risk-recovery-row'),
   riskRecoveryButton: document.querySelector('#risk-recovery-button'),
@@ -737,6 +741,8 @@ const slowStartHttpByEnv = new Map();
 // 不落 localStorage/settings，也不复制规则/消费节奏数字。
 const facebookOperationPolicyHttpByEnv = new Map();
 const facebookOperationPolicyFeedbackByEnv = new Map();
+const facebookSlowStartProgressHttpByEnv = new Map();
+const facebookSlowStartProgressFeedbackByEnv = new Map();
 
 // Facebook 规则模式配置只由 customer-auth HTTP 读写。按 envKey 隔离读真态与写反馈，
 // 下面两份旧缓存仅供已发布规则模式兼容与“规则模式免人设”呈现；新模式 UI 不再使用它们。
@@ -970,6 +976,49 @@ function normalizeFacebookOperationPolicyResponse(res, expectedEnvKey) {
   };
 }
 
+function normalizeFacebookSlowStartProgressResponse(res, expectedEnvKey) {
+  const payload = res && res.ok && res.data && res.data.data;
+  if (!hasExactObjectKeys(payload, [
+    'envKey', 'facebookOperationPolicy', 'slowStartProgress',
+  ]) || payload.envKey !== expectedEnvKey) return null;
+  const config = normalizeFacebookOperationPolicyResponse({
+    ok: true,
+    data: {
+      data: {
+        envKey: payload.envKey,
+        facebookOperationPolicy: payload.facebookOperationPolicy,
+      },
+    },
+  }, expectedEnvKey);
+  const progress = payload.slowStartProgress;
+  if (!config
+      || !hasExactObjectKeys(progress, ['day', 'totalDays', 'completed'])
+      || !Number.isSafeInteger(progress.totalDays)
+      || progress.totalDays < 1
+      || progress.totalDays > 30
+      || (progress.day !== null && (
+        !Number.isSafeInteger(progress.day)
+        || progress.day < 1
+        || progress.day > progress.totalDays
+      ))
+      || typeof progress.completed !== 'boolean') return null;
+  const state = config.slowStart.state;
+  const consistent = state === 'active'
+    ? progress.day !== null && progress.completed === false
+    : state === 'graduated'
+      ? progress.day !== null && progress.completed === true
+      : progress.day === null && progress.completed === false;
+  if (!consistent) return null;
+  return {
+    config,
+    progress: {
+      day: progress.day,
+      totalDays: progress.totalDays,
+      completed: progress.completed,
+    },
+  };
+}
+
 function selectedFacebookOperationPolicyContext() {
   const context = selectedSlowStartContext();
   return context && selectedEnvPlatform() === 'facebook' ? context : null;
@@ -977,7 +1026,9 @@ function selectedFacebookOperationPolicyContext() {
 
 function selectedModeFromFacebookOperationPolicy(policy) {
   if (!policy) return null;
-  if (policy.slowStart.state === 'active' || policy.effectiveMode === 'slow_start') {
+  if (policy.slowStart.state === 'active'
+      || policy.slowStart.state === 'graduated'
+      || policy.effectiveMode === 'slow_start') {
     return 'slow_start';
   }
   return policy.baseMode;
@@ -1011,6 +1062,42 @@ async function ensureFacebookOperationPolicyHttpFetch(
   const context = selectedFacebookOperationPolicyContext();
   if (context && context.envKey === envKey) renderFacebookOperationPolicy();
   syncPersonaPresentationForRuleMode(envKey);
+}
+
+async function ensureFacebookSlowStartProgressHttpFetch(
+  envKey,
+  { force = false, preserveConfirmed = false } = {},
+) {
+  if (!envKey || !window.aidcpEdge
+      || typeof window.aidcpEdge.getFacebookSlowStartProgress !== 'function') return;
+  const existing = facebookSlowStartProgressHttpByEnv.get(envKey);
+  if (!force && existing && (existing.kind === 'loading' || existing.kind === 'ok')) return;
+  const retainExisting = preserveConfirmed && existing?.kind === 'ok';
+  if (!retainExisting) facebookSlowStartProgressHttpByEnv.set(envKey, { kind: 'loading' });
+  let next;
+  try {
+    const res = await window.aidcpEdge.getFacebookSlowStartProgress({ envKey });
+    const projection = normalizeFacebookSlowStartProgressResponse(res, envKey);
+    next = projection
+      ? { kind: 'ok', progress: projection.progress }
+      : { kind: 'error', message: facebookOperationPolicyError(
+        res,
+        '暂时无法读取冷启动进度',
+      ) };
+    if (projection) {
+      facebookOperationPolicyHttpByEnv.set(envKey, {
+        kind: 'ok',
+        config: projection.config,
+      });
+    }
+  } catch (err) {
+    next = { kind: 'error', message: `读取失败：${(err && err.message) || err}` };
+  }
+  if (next.kind === 'ok' || !retainExisting) {
+    facebookSlowStartProgressHttpByEnv.set(envKey, next);
+  }
+  const context = selectedFacebookOperationPolicyContext();
+  if (context && context.envKey === envKey) renderFacebookOperationPolicy();
 }
 
 function facebookRuleModeError(res, fallback = '暂时无法读取规则模式配置') {
@@ -2149,8 +2236,44 @@ function hideLegacyFacebookOperationModeRows() {
   fields.slowStartToggleWrap?.classList.add('hidden');
 }
 
+function hideFacebookSlowStartProgressControls() {
+  fields.facebookSlowStartDayField?.classList.add('hidden');
+  fields.facebookSlowStartCompletedField?.classList.add('hidden');
+  if (fields.facebookSlowStartDaySelect) fields.facebookSlowStartDaySelect.disabled = true;
+  if (fields.facebookSlowStartCompletedSelect) {
+    fields.facebookSlowStartCompletedSelect.disabled = true;
+  }
+}
+
+function applyFacebookSlowStartProgressControls(progress, disabled) {
+  if (!progress || !Number.isSafeInteger(progress.day)) {
+    hideFacebookSlowStartProgressControls();
+    return;
+  }
+  if (fields.facebookSlowStartDaySelect) {
+    const select = fields.facebookSlowStartDaySelect;
+    if (select.options.length !== progress.totalDays) {
+      select.replaceChildren(...Array.from({ length: progress.totalDays }, (_, index) => {
+        const option = document.createElement('option');
+        option.value = String(index + 1);
+        option.textContent = `第 ${index + 1} 天`;
+        return option;
+      }));
+    }
+    select.value = String(progress.day);
+    select.disabled = disabled;
+  }
+  if (fields.facebookSlowStartCompletedSelect) {
+    fields.facebookSlowStartCompletedSelect.value = String(progress.completed);
+    fields.facebookSlowStartCompletedSelect.disabled = disabled;
+  }
+  fields.facebookSlowStartDayField?.classList.remove('hidden');
+  fields.facebookSlowStartCompletedField?.classList.remove('hidden');
+}
+
 function setOperationModeUnknown(message, error = false) {
   hideLegacyFacebookOperationModeRows();
+  hideFacebookSlowStartProgressControls();
   const context = selectedFacebookOperationPolicyContext();
   fields.facebookOperationPolicyRow?.classList.toggle('hidden', !context);
   fields.facebookOperationPolicyRow?.classList.remove('is-pending');
@@ -2168,13 +2291,33 @@ function setOperationModeUnknown(message, error = false) {
 function applyFacebookOperationPolicyView(config, context) {
   hideLegacyFacebookOperationModeRows();
   const feedback = facebookOperationPolicyFeedbackByEnv.get(context.envKey);
-  const pending = feedback?.kind === 'pending' ? feedback : null;
+  const policyPending = feedback?.kind === 'pending' ? feedback : null;
   const error = feedback?.kind === 'error' ? String(feedback.message || '') : '';
+  const progressHttp = facebookSlowStartProgressHttpByEnv.get(context.envKey);
+  const progressFeedback = facebookSlowStartProgressFeedbackByEnv.get(context.envKey);
+  const progressPending = progressFeedback?.kind === 'pending' ? progressFeedback : null;
+  const progressError = progressFeedback?.kind === 'error'
+    ? String(progressFeedback.message || '')
+    : progressHttp?.kind === 'error'
+      ? String(progressHttp.message || '')
+      : '';
+  const pending = policyPending || progressPending;
   const modeUnavailable = !window.aidcpEdge
     || typeof window.aidcpEdge.setFacebookOperationPolicy !== 'function';
   const surfaceUnavailable = !window.aidcpEdge
     || typeof window.aidcpEdge.setFacebookPrimarySurface !== 'function';
+  const progressUnavailable = !window.aidcpEdge
+    || typeof window.aidcpEdge.getFacebookSlowStartProgress !== 'function'
+    || typeof window.aidcpEdge.setFacebookSlowStartProgress !== 'function';
   const selectedMode = selectedModeFromFacebookOperationPolicy(config);
+  const needsProgress = selectedMode === 'slow_start';
+  const progress = needsProgress && progressHttp?.kind === 'ok'
+    ? progressHttp.progress
+    : null;
+
+  if (needsProgress && !progressHttp && !progressUnavailable) {
+    void ensureFacebookSlowStartProgressHttpFetch(context.envKey);
+  }
 
   fields.facebookOperationPolicyRow?.classList.remove('hidden');
   fields.facebookOperationPolicyRow?.classList.toggle('is-pending', Boolean(pending));
@@ -2188,14 +2331,31 @@ function applyFacebookOperationPolicyView(config, context) {
     fields.facebookPrimarySurfaceSelect.value = config.primarySurface;
     fields.facebookPrimarySurfaceSelect.disabled = Boolean(pending) || surfaceUnavailable;
   }
+  if (needsProgress && progress) {
+    applyFacebookSlowStartProgressControls(
+      progress,
+      Boolean(pending) || progressUnavailable,
+    );
+  } else {
+    hideFacebookSlowStartProgressControls();
+  }
   if (fields.facebookOperationPolicyStatus) {
     const text = pending
       ? '正在等待 Cloud 回读确认…'
-      : error || config.blocker
+      : error || (needsProgress ? progressError : '') || config.blocker
+        || (needsProgress && progressUnavailable ? '当前客户端无法读取或修改冷启动进度' : '')
+        || (needsProgress && !progress ? '正在读取 Cloud 冷启动进度…' : '')
         || (modeUnavailable || surfaceUnavailable ? '当前客户端无法修改运行方式或主浏览入口' : '');
+    const hasError = Boolean(
+      error
+      || (needsProgress && (progressError || progressUnavailable))
+      || config.blocker
+      || modeUnavailable
+      || surfaceUnavailable,
+    );
     fields.facebookOperationPolicyStatus.textContent = text;
     fields.facebookOperationPolicyStatus.className = text
-      ? `parking-hint${error || config.blocker || modeUnavailable || surfaceUnavailable ? ' is-error' : ''}`
+      ? `parking-hint${hasError ? ' is-error' : ''}`
       : 'parking-hint hidden';
   }
 }
@@ -2204,6 +2364,7 @@ function renderFacebookOperationPolicy() {
   const context = selectedFacebookOperationPolicyContext();
   if (!context) {
     hideLegacyFacebookOperationModeRows();
+    hideFacebookSlowStartProgressControls();
     fields.facebookOperationPolicyRow?.classList.add('hidden');
     return;
   }
@@ -4908,6 +5069,14 @@ fields.facebookPrimarySurfaceSelect?.addEventListener('change', (event) => {
   event.stopPropagation();
   void submitFacebookPrimarySurface(String(event.target.value || ''));
 });
+fields.facebookSlowStartDaySelect?.addEventListener('change', (event) => {
+  event.stopPropagation();
+  void submitFacebookSlowStartProgress({ day: Number(event.target.value) });
+});
+fields.facebookSlowStartCompletedSelect?.addEventListener('change', (event) => {
+  event.stopPropagation();
+  void submitFacebookSlowStartProgress({ completed: event.target.value === 'true' });
+});
 
 fields.riskRecoveryButton?.addEventListener('click', (event) => {
   event.stopPropagation();
@@ -5087,6 +5256,12 @@ async function submitFacebookOperationMode(mode, enabled) {
       force: true,
       preserveConfirmed: true,
     });
+    if (facebookSlowStartProgressHttpByEnv.has(envKey)) {
+      void ensureFacebookSlowStartProgressHttpFetch(envKey, {
+        force: true,
+        preserveConfirmed: true,
+      });
+    }
   };
 
   try {
@@ -5108,9 +5283,14 @@ async function submitFacebookOperationMode(mode, enabled) {
     facebookOperationPolicyFeedbackByEnv.delete(envKey);
     facebookOperationPolicyHttpByEnv.set(envKey, { kind: 'ok', config });
     // 慢启动详情与旧规则兼容呈现都必须重读，不能把切换前缓存继续当作新模式真态。
+    facebookSlowStartProgressFeedbackByEnv.delete(envKey);
+    facebookSlowStartProgressHttpByEnv.delete(envKey);
     slowStartHttpByEnv.delete(envKey);
     facebookRuleModeHttpByEnv.delete(envKey);
     void ensureSlowStartHttpFetch(envKey);
+    if (requestedMode === 'slow_start') {
+      void ensureFacebookSlowStartProgressHttpFetch(envKey);
+    }
     syncPersonaPresentationForRuleMode(envKey);
     const current = selectedFacebookOperationPolicyContext();
     if (current && current.envKey === envKey) {
@@ -5176,6 +5356,104 @@ async function submitFacebookPrimarySurface(primarySurface) {
     facebookOperationPolicyHttpByEnv.set(envKey, { kind: 'ok', config });
     const current = selectedFacebookOperationPolicyContext();
     if (current && current.envKey === envKey) renderFacebookOperationPolicy();
+  } catch (err) {
+    settleError(`设置失败：${(err && err.message) || err}`);
+  }
+}
+
+async function submitFacebookSlowStartProgress(patch) {
+  const context = selectedFacebookOperationPolicyContext();
+  if (!context || !window.aidcpEdge
+      || typeof window.aidcpEdge.setFacebookSlowStartProgress !== 'function') return;
+  const { envKey } = context;
+  const policyHttp = facebookOperationPolicyHttpByEnv.get(envKey);
+  const progressHttp = facebookSlowStartProgressHttpByEnv.get(envKey);
+  if (!policyHttp || policyHttp.kind !== 'ok'
+      || !progressHttp || progressHttp.kind !== 'ok'
+      || selectedModeFromFacebookOperationPolicy(policyHttp.config) !== 'slow_start') {
+    renderFacebookOperationPolicy();
+    return;
+  }
+  const existing = facebookOperationPolicyFeedbackByEnv.get(envKey);
+  const existingProgress = facebookSlowStartProgressFeedbackByEnv.get(envKey);
+  if (existing?.kind === 'pending' || existingProgress?.kind === 'pending') return;
+  const current = progressHttp.progress;
+  const day = patch && Object.prototype.hasOwnProperty.call(patch, 'day')
+    ? Number(patch.day)
+    : current.day;
+  const completed = patch && Object.prototype.hasOwnProperty.call(patch, 'completed')
+    ? Boolean(patch.completed)
+    : current.completed;
+  if (!Number.isSafeInteger(day) || day < 1 || day > current.totalDays) {
+    renderFacebookOperationPolicy();
+    return;
+  }
+  if (day === current.day && completed === current.completed) {
+    renderFacebookOperationPolicy();
+    return;
+  }
+
+  facebookSlowStartProgressFeedbackByEnv.set(envKey, {
+    kind: 'pending',
+    day,
+    completed,
+  });
+  renderFacebookOperationPolicy();
+
+  const settleError = (message) => {
+    facebookSlowStartProgressFeedbackByEnv.set(envKey, {
+      kind: 'error',
+      message: String(message || '设置失败'),
+    });
+    const currentContext = selectedFacebookOperationPolicyContext();
+    if (currentContext && currentContext.envKey === envKey) renderFacebookOperationPolicy();
+    void ensureFacebookSlowStartProgressHttpFetch(envKey, {
+      force: true,
+      preserveConfirmed: true,
+    });
+    void ensureFacebookOperationPolicyHttpFetch(envKey, {
+      force: true,
+      preserveConfirmed: true,
+    });
+  };
+
+  try {
+    const res = await window.aidcpEdge.setFacebookSlowStartProgress({
+      envKey,
+      expectedRevision: policyHttp.config.policyRevision,
+      day,
+      completed,
+    });
+    const projection = normalizeFacebookSlowStartProgressResponse(res, envKey);
+    if (!projection
+        || projection.config.policyRevision <= policyHttp.config.policyRevision
+        || selectedModeFromFacebookOperationPolicy(projection.config) !== 'slow_start'
+        || projection.progress.day !== day
+        || projection.progress.completed !== completed) {
+      settleError(facebookOperationPolicyError(
+        res,
+        res && res.ok
+          ? 'Cloud 已返回，但冷启动进度回读与本次设置不一致，请稍后重试'
+          : '设置失败',
+      ));
+      return;
+    }
+    facebookSlowStartProgressFeedbackByEnv.delete(envKey);
+    facebookOperationPolicyHttpByEnv.set(envKey, {
+      kind: 'ok',
+      config: projection.config,
+    });
+    facebookSlowStartProgressHttpByEnv.set(envKey, {
+      kind: 'ok',
+      progress: projection.progress,
+    });
+    slowStartHttpByEnv.delete(envKey);
+    void ensureSlowStartHttpFetch(envKey);
+    const currentContext = selectedFacebookOperationPolicyContext();
+    if (currentContext && currentContext.envKey === envKey) {
+      renderSlowStart((currentContext.env && currentContext.env.status) || currentStatus);
+      renderFacebookOperationPolicy();
+    }
   } catch (err) {
     settleError(`设置失败：${(err && err.message) || err}`);
   }
@@ -5765,6 +6043,8 @@ function applyFleetSnapshot(snap) {
     slowStartHttpByEnv.delete(goneEnvKey); // change slow-start-offline-toggle：连同慢启动 HTTP/回执缓存一并清
     facebookOperationPolicyFeedbackByEnv.delete(goneEnvKey);
     facebookOperationPolicyHttpByEnv.delete(goneEnvKey);
+    facebookSlowStartProgressFeedbackByEnv.delete(goneEnvKey);
+    facebookSlowStartProgressHttpByEnv.delete(goneEnvKey);
     facebookRuleModeFeedbackByEnv.delete(goneEnvKey);
     facebookRuleModeHttpByEnv.delete(goneEnvKey);
     environmentRiskHttpByEnv.delete(goneEnvKey);
