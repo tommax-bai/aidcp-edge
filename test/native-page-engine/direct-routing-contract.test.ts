@@ -44,6 +44,36 @@ test('preserves Facebook first-post selection across the Native command boundary
   });
 });
 
+test('preserves unified resume target while legacy page.scroll remains compatible', () => {
+  const resume = nativeCommandForEnvelope({
+    v: 2,
+    id: 'resume-reels',
+    ts: Date.now(),
+    type: 'page.scroll',
+    payload: {
+      taskId: 'must-not-cross-native-boundary',
+      reason: 'resume_redrive',
+      targetSurface: 'reels',
+    },
+  } as never);
+  assert.deepEqual(resume, {
+    kind: 'page_scroll',
+    params: { reason: 'resume_redrive', targetSurface: 'reels' },
+  });
+
+  const legacy = nativeCommandForEnvelope({
+    v: 2,
+    id: 'legacy-scroll',
+    ts: Date.now(),
+    type: 'page.scroll',
+    payload: { reason: 'feed_scroll' },
+  } as never);
+  assert.deepEqual(legacy, {
+    kind: 'page_scroll',
+    params: { reason: 'feed_scroll' },
+  });
+});
+
 test('identity commands preserve Cloud correlation but inject only the Edge-bound account', () => {
   const current = nativeCommandForEnvelope({
     v: 2,

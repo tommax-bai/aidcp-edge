@@ -171,6 +171,9 @@ function joinParts(parts: Array<string | undefined>): string {
 export function summarizeCommand(type: unknown, payload: unknown): string {
   const commandType = safeType(type);
   const data = asRecord(payload);
+  if (commandType === 'page.scroll' && data.reason === 'resume_redrive') {
+    return data.targetSurface === 'reels' ? '恢复 Reels 浏览' : '恢复信息流浏览';
+  }
   if (commandType === 'page.scroll' && typeof data.reason === 'string') {
     const reelsEntrySummary = REELS_ENTRY_SUMMARIES[data.reason];
     if (reelsEntrySummary) return reelsEntrySummary;

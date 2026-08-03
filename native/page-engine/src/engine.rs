@@ -2769,6 +2769,7 @@ fn xhs_initial_scan_command(command: &NativeCommand) -> Result<NativeCommand, En
         NativeCommand::PageScroll(params) => {
             NativeCommand::PageScroll(crate::command::PageScrollParams {
                 reason,
+                target_surface: params.target_surface,
                 dwell_ms: params.dwell_ms,
             })
         }

@@ -600,6 +600,42 @@ mod tests {
     }
 
     #[test]
+    fn page_scroll_strictly_decodes_the_optional_resume_target() {
+        let resume = valid_command().replace(
+            r#"{"kind":"page_probe","params":{}}"#,
+            r#"{"kind":"page_scroll","params":{"reason":"resume_redrive","targetSurface":"reels"}}"#,
+        );
+        let InputRecord::Command(record) = parse_input(&resume).expect("targeted resume") else {
+            panic!("expected command");
+        };
+        let NativeCommand::PageScroll(params) = record.command else {
+            panic!("expected page scroll");
+        };
+        assert_eq!(params.reason.as_deref(), Some("resume_redrive"));
+        assert_eq!(
+            params.target_surface,
+            Some(crate::command::FacebookBrowseSurface::Reels),
+        );
+
+        let legacy = valid_command().replace(
+            r#"{"kind":"page_probe","params":{}}"#,
+            r#"{"kind":"page_scroll","params":{"reason":"feed_scroll"}}"#,
+        );
+        assert!(matches!(
+            parse_input(&legacy).expect("legacy page scroll"),
+            InputRecord::Command(_),
+        ));
+
+        let invalid = resume.replace("\"reels\"", "\"groups\"");
+        assert_eq!(
+            parse_input(&invalid)
+                .expect_err("unknown resume target")
+                .code,
+            ErrorCode::InvalidRequest,
+        );
+    }
+
+    #[test]
     fn commit_window_acknowledgement_carries_an_explicit_host_decision() {
         let accepted = r#"{"type":"commit_window_ack","protocolVersion":2,"id":"ack-1","sessionId":"session-1","taskId":"browse-1","commandId":1,"token":"cw_1_1","label":"fb_join_click","accepted":true}"#;
         let InputRecord::CommitWindowAck(record) =

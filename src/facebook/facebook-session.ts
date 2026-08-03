@@ -546,7 +546,13 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
           if (
             payload.reason === 'empty_feed_reels_fallback'
             || payload.reason === 'facebook_reels_primary'
+            || (payload.reason === 'resume_redrive' && payload.targetSurface === 'reels')
           ) return this.enterReels();
+          if (payload.reason === 'resume_redrive' && payload.targetSurface === 'feed') {
+            this.listMode = 'feed';
+            this.activeFeedUrl = this.feedUrl;
+            return this.scrollFeed();
+          }
           if (this.listMode === 'reels') return this.scrollReels();
           return this.scrollFeed();
         });

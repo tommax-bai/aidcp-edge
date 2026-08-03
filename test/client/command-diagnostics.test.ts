@@ -71,6 +71,14 @@ test('command diagnostics: malformed enums and unknown command payload fall back
 
 test('command diagnostics: Reels entry reasons are named without changing ordinary page scrolls', () => {
   assert.equal(
+    summarizeCommand('page.scroll', { reason: 'resume_redrive', targetSurface: 'reels' }),
+    '恢复 Reels 浏览',
+  );
+  assert.equal(
+    summarizeCommand('page.scroll', { reason: 'resume_redrive', targetSurface: 'feed' }),
+    '恢复信息流浏览',
+  );
+  assert.equal(
     summarizeCommand('page.scroll', { reason: 'facebook_reels_primary' }),
     '进入 Reels 主浏览',
   );

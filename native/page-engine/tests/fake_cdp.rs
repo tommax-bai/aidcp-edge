@@ -1,6 +1,6 @@
 use aidcp_page_engine::command::{
-    CaptchaCaptureParams, CaptchaClickParams, CaptchaPoint, CommentParams, FollowParams,
-    GroupJoinParams, IdentityCaptureParams, NoteInteractionParams, NoteOpenParams,
+    CaptchaCaptureParams, CaptchaClickParams, CaptchaPoint, CommentParams, FacebookBrowseSurface,
+    FollowParams, GroupJoinParams, IdentityCaptureParams, NoteInteractionParams, NoteOpenParams,
     NoteOpenSelection, NotePurpose, NoteSurface, PageScrollParams, ReasonParams,
     SearchExecuteParams,
 };
@@ -474,6 +474,7 @@ async fn facebook_feed_scroll_dispatches_a_humanized_multi_frame_wheel_gesture()
             deadline_unix_ms: unix_time_ms() + 8_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("feed_scroll".to_owned()),
+                target_surface: None,
                 dwell_ms: None,
             }),
         })
@@ -735,6 +736,7 @@ async fn facebook_watchdog_feed_recovery_foregrounds_once_without_duplicate_acti
             deadline_unix_ms: unix_time_ms() + 30_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("idle_recover_nudge".to_owned()),
+                target_surface: None,
                 dwell_ms: None,
             }),
         })
@@ -818,6 +820,48 @@ async fn facebook_feed_recovery_click_without_home_postcondition_is_ambiguous() 
 }
 
 #[tokio::test]
+async fn facebook_resume_redrive_on_active_reel_reports_current_without_extra_navigation() {
+    let (port, server) =
+        spawn_facebook_reel_active_key_probe_cdp(FacebookReelKeyScenario::RightMoves).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 10_000;
+    engine.open(&open).await.expect("open Facebook session");
+    let outcome = engine
+        .execute(&CommandRecord {
+            protocol_version: 2,
+            id: "reel-resume-redrive-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            task_id: "browse-1".to_owned(),
+            command_id: 1,
+            deadline_unix_ms: unix_time_ms() + 10_000,
+            command: NativeCommand::PageScroll(PageScrollParams {
+                reason: Some("resume_redrive".to_owned()),
+                target_surface: Some(FacebookBrowseSurface::Reels),
+                dwell_ms: None,
+            }),
+        })
+        .await
+        .expect("active Reels resume redrive");
+    engine.shutdown().await;
+    let requests = server.await.expect("active Reels resume fake CDP");
+
+    assert_eq!(
+        outcome.effect_phase,
+        EffectPhase::Confirmed,
+        "unexpected resume outcome: {outcome:?}",
+    );
+    let CommandOutput::PageCards(cards) = outcome.output.expect("current Reel cards") else {
+        panic!("expected current Reel cards")
+    };
+    assert_eq!(cards.cards.len(), 1);
+    assert_eq!(method_count(&requests, "Page.navigate"), 0);
+    assert_eq!(method_count(&requests, "Input.dispatchKeyEvent"), 0);
+    assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
+}
+
+#[tokio::test]
 async fn facebook_watchdog_reel_scroll_foregrounds_once_before_trusted_arrow() {
     let (port, server) = spawn_facebook_reel_arrow_cdp().await;
     let mut engine = Engine::default();
@@ -835,6 +879,7 @@ async fn facebook_watchdog_reel_scroll_foregrounds_once_before_trusted_arrow() {
             deadline_unix_ms: unix_time_ms() + 5_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("idle_recover_nudge".to_owned()),
+                target_surface: None,
                 dwell_ms: Some(7_000),
             }),
         })
@@ -903,6 +948,7 @@ async fn facebook_anonymous_reel_axis_only_navigation_uses_horizontal_arrow() {
             deadline_unix_ms: unix_time_ms() + 5_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("feed_scroll".to_owned()),
+                target_surface: None,
                 dwell_ms: None,
             }),
         })
@@ -961,6 +1007,7 @@ async fn facebook_reel_competing_axes_fail_before_input() {
             deadline_unix_ms: unix_time_ms() + 5_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("feed_scroll".to_owned()),
+                target_surface: None,
                 dwell_ms: None,
             }),
         })
@@ -1187,6 +1234,7 @@ async fn facebook_reel_scroll_without_active_video_does_not_foreground_or_dispat
             deadline_unix_ms: unix_time_ms() + 5_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("feed_scroll".to_owned()),
+                target_surface: None,
                 dwell_ms: None,
             }),
         })
@@ -1263,6 +1311,7 @@ async fn facebook_reel_unconfirmed_scroll_does_not_block_the_next_command() {
         deadline_unix_ms: unix_time_ms() + 25_000,
         command: NativeCommand::PageScroll(PageScrollParams {
             reason: Some("feed_scroll".to_owned()),
+            target_surface: None,
             dwell_ms: None,
         }),
     };
@@ -4248,6 +4297,7 @@ async fn run_facebook_feed_scroll_recovery(
             deadline_unix_ms: unix_time_ms() + 20_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("feed_scroll".to_owned()),
+                target_surface: None,
                 dwell_ms: None,
             }),
         })
@@ -5408,7 +5458,8 @@ async fn run_facebook_reels_entry(
             command_id: 1,
             deadline_unix_ms: unix_time_ms() + FACEBOOK_REELS_ENTRY_TEST_TIMEOUT_MS,
             command: NativeCommand::PageScroll(PageScrollParams {
-                reason: Some("facebook_reels_primary".to_owned()),
+                reason: Some("resume_redrive".to_owned()),
+                target_surface: Some(FacebookBrowseSurface::Reels),
                 dwell_ms: None,
             }),
         })
@@ -5441,7 +5492,8 @@ async fn run_facebook_reels_entry_with_cancellation(
                 command_id: 1,
                 deadline_unix_ms: unix_time_ms() + FACEBOOK_REELS_ENTRY_TEST_TIMEOUT_MS,
                 command: NativeCommand::PageScroll(PageScrollParams {
-                    reason: Some("facebook_reels_primary".to_owned()),
+                    reason: Some("resume_redrive".to_owned()),
+                    target_surface: Some(FacebookBrowseSurface::Reels),
                     dwell_ms: None,
                 }),
             },
@@ -5931,6 +5983,7 @@ async fn run_facebook_reel_active_key_probe(
             deadline_unix_ms: unix_time_ms() + 25_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("feed_scroll".to_owned()),
+                target_surface: None,
                 dwell_ms: None,
             }),
         })
@@ -6709,6 +6762,7 @@ async fn facebook_identity_acquisition_hovers_without_ever_pressing() {
             deadline_unix_ms: unix_time_ms() + 30_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("feed_scroll".to_owned()),
+                target_surface: None,
                 dwell_ms: None,
             }),
         })

@@ -1180,7 +1180,12 @@ test('Facebook Reels page.scroll refuses the document-scroll fallback', async ()
 });
 
 test('Facebook Reels entry reasons return the current canonical Reel card', async () => {
-  for (const reason of ['facebook_reels_primary', 'empty_feed_reels_fallback']) {
+  for (const params of [
+    { reason: 'facebook_reels_primary' },
+    { reason: 'empty_feed_reels_fallback' },
+    { reason: 'resume_redrive', targetSurface: 'reels' },
+  ]) {
+    const { reason } = params;
     const dom = install(`
       <main>
         <article role="article">
@@ -1198,7 +1203,7 @@ test('Facebook Reels entry reasons return the current canonical Reel card', asyn
       bottom: 760,
     });
 
-    const result = await run({ kind: 'page_scroll', params: { reason } });
+    const result = await run({ kind: 'page_scroll', params });
 
     assert.equal(result.effectPhase, 'confirmed', reason);
     assert.equal(result.output.kind, 'page_cards', reason);

@@ -2,7 +2,7 @@ use super::reels::{
     execute_facebook_page_scroll, finish_facebook_reels_entry, probe_facebook_reel,
 };
 use super::shared::*;
-use crate::command::{NoteOpenParams, NotePurpose, NoteSurface};
+use crate::command::{FacebookBrowseSurface, NoteOpenParams, NotePurpose, NoteSurface};
 use crate::engine::{CommandOutput, EngineSession};
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
@@ -39,6 +39,15 @@ fn facebook_reels_entry_reason(reason: Option<&str>) -> bool {
         reason,
         Some("facebook_reels_primary") | Some("empty_feed_reels_fallback")
     )
+}
+
+fn facebook_resume_target(command: &NativeCommand) -> Option<FacebookBrowseSurface> {
+    match command {
+        NativeCommand::PageScroll(params) if params.reason.as_deref() == Some("resume_redrive") => {
+            params.target_surface
+        }
+        _ => None,
+    }
 }
 
 pub(crate) async fn execute(
@@ -129,6 +138,43 @@ pub(crate) async fn execute(
                 )),
                 Err(error) => Err(error),
             }
+        }
+        NativeCommand::PageScroll(params)
+            if params.reason.as_deref() == Some("resume_redrive")
+                && params.target_surface == Some(FacebookBrowseSurface::Reels) =>
+        {
+            let current = probe_facebook_reel(session).await?;
+            if current.is_reels_surface() {
+                finish_facebook_reels_entry(
+                    session,
+                    command,
+                    &current,
+                    cancellation,
+                    deadline_unix_ms,
+                )
+                .await
+            } else {
+                execute_facebook_reels_entry(session, command, cancellation, deadline_unix_ms).await
+            }
+        }
+        NativeCommand::PageScroll(params)
+            if params.reason.as_deref() == Some("resume_redrive")
+                && params.target_surface == Some(FacebookBrowseSurface::Feed) =>
+        {
+            // A group/search task may have replaced active_list_url with its own container.
+            // The explicit Feed resume target is the session's primary Facebook home surface,
+            // not whichever temporary list the task last visited.
+            session.facebook.active_list_url = FACEBOOK_HOME_URL.to_owned();
+            execute_facebook_feed_scroll(session, cancellation, deadline_unix_ms, false).await
+        }
+        NativeCommand::PageScroll(params)
+            if params.reason.as_deref() == Some("resume_redrive")
+                && facebook_resume_target(command).is_none() =>
+        {
+            Ok(facebook_scroll_failure(
+                EffectPhase::NotStarted,
+                "resume_target_missing",
+            ))
         }
         NativeCommand::PageScroll(params)
             if facebook_reels_entry_reason(params.reason.as_deref()) =>
@@ -516,6 +562,7 @@ pub(crate) async fn execute_facebook_feed_scroll(
     ensure_facebook_active_list(session).await?;
     let command = NativeCommand::PageScroll(crate::command::PageScrollParams {
         reason: None,
+        target_surface: None,
         dwell_ms: None,
     });
     if let Some(output) = ensure_facebook_action_gate(session, &command).await? {
@@ -1544,6 +1591,44 @@ mod tests {
         )));
         assert!(!facebook_reels_entry_reason(Some("feed_scroll")));
         assert!(!facebook_reels_entry_reason(None));
+    }
+
+    #[test]
+    fn unified_resume_target_is_explicit_and_legacy_reasons_stay_compatible() {
+        let reels = NativeCommand::PageScroll(crate::command::PageScrollParams {
+            reason: Some("resume_redrive".to_owned()),
+            target_surface: Some(FacebookBrowseSurface::Reels),
+            dwell_ms: None,
+        });
+        assert_eq!(
+            facebook_resume_target(&reels),
+            Some(FacebookBrowseSurface::Reels),
+        );
+
+        let feed = NativeCommand::PageScroll(crate::command::PageScrollParams {
+            reason: Some("resume_redrive".to_owned()),
+            target_surface: Some(FacebookBrowseSurface::Feed),
+            dwell_ms: None,
+        });
+        assert_eq!(
+            facebook_resume_target(&feed),
+            Some(FacebookBrowseSurface::Feed),
+        );
+
+        let missing = NativeCommand::PageScroll(crate::command::PageScrollParams {
+            reason: Some("resume_redrive".to_owned()),
+            target_surface: None,
+            dwell_ms: None,
+        });
+        assert_eq!(facebook_resume_target(&missing), None);
+
+        let legacy = NativeCommand::PageScroll(crate::command::PageScrollParams {
+            reason: Some("facebook_reels_primary".to_owned()),
+            target_surface: None,
+            dwell_ms: None,
+        });
+        assert_eq!(facebook_resume_target(&legacy), None);
+        assert!(facebook_reels_entry_reason(Some("facebook_reels_primary")));
     }
 
     #[test]

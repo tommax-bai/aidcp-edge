@@ -59,7 +59,7 @@ export function nativeActionNameForCommand(type: string): string {
  */
 export const nativeAllowedParamsByKind: Record<string, readonly string[]> = {
   plan_execute: ['steps'], session_stop: ['reason'], browse_next: ['reason'], browse_scroll: ['reason'],
-  page_scroll: ['reason', 'dwellMs'], feed_refresh: ['reason', 'thinkMs'],
+  page_scroll: ['reason', 'targetSurface', 'dwellMs'], feed_refresh: ['reason', 'thinkMs'],
   search_execute: ['keyword', 'container', 'source', 'maxResults', 'sort', 'timeWindow'],
   note_open: ['noteId', 'index', 'reason', 'url', 'surface', 'purpose', 'thinkMs', 'selection', 'container'],
   note_close: ['reason', 'dwellMs'], navigation_back: ['reason', 'targetPage', 'dwellMs'],

@@ -143,7 +143,16 @@ pub struct PageScrollParams {
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
+    pub target_surface: Option<FacebookBrowseSurface>,
+    #[serde(default)]
     pub dwell_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FacebookBrowseSurface {
+    Feed,
+    Reels,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

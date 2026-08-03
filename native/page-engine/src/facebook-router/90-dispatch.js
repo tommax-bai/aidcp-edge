@@ -57,7 +57,7 @@
   }
   if(kind==='session_stop')return done(action('session_stop',true));
   if(kind==='browse_scroll'||kind==='page_scroll'||kind==='browse_next'){
-    const reelsEntryReason=p.reason==='facebook_reels_primary'||p.reason==='empty_feed_reels_fallback';
+    const reelsEntryReason=p.reason==='facebook_reels_primary'||p.reason==='empty_feed_reels_fallback'||(p.reason==='resume_redrive'&&p.targetSurface==='reels');
     if(reelSurface()&&p.reason!=='initial_scan'&&!reelsEntryReason){
       return fail('scroll','native_reels_actuator_required');
     }
