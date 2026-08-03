@@ -1,6 +1,6 @@
 use super::feed::execute_facebook_feed_scroll;
 use super::shared::*;
-use crate::engine::{CommandOutput, EngineSession};
+use crate::engine::{CommandOutput, EngineSession, FacebookReelProbeKey};
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
 use crate::input::unix_time_ms;
@@ -11,6 +11,8 @@ use std::time::Duration;
 
 /// Reels 已到达或活动视频已切换后，等待规范身份与卡片完成水合的有界窗口。
 const FACEBOOK_REEL_IDENTITY_HYDRATION_TIMEOUT: Duration = Duration::from_secs(15);
+/// Leave enough absolute command budget for the two-event trusted key gesture itself.
+const FACEBOOK_REEL_KEY_DISPATCH_RESERVE_MS: u64 = 1_000;
 const FACEBOOK_REEL_ENTRY_POST_INPUT_RESERVE_MS: u64 = 18_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -202,17 +204,9 @@ pub(crate) async fn execute_facebook_page_scroll(
         )
         .await;
     }
-    if !before.ok || !before.is_keyboard_input_safe() {
-        return Ok(facebook_scroll_failure(
-            EffectPhase::NotStarted,
-            "reels_target_unavailable",
-        ));
-    }
-
     execute_facebook_reel_navigation(
         session,
         command,
-        before,
         ReelNavigationMode::Standard,
         cancellation,
         deadline_unix_ms,
@@ -246,17 +240,9 @@ pub(crate) async fn finish_facebook_reels_entry(
             "reels_entry_unconfirmed",
         ));
     }
-    if !fresh.ok || !fresh.is_explicitly_keyboard_input_safe() {
-        return Ok(facebook_scroll_failure(
-            EffectPhase::Ambiguous,
-            "reels_target_unavailable",
-        ));
-    }
-
     execute_facebook_reel_navigation(
         session,
         command,
-        fresh,
         ReelNavigationMode::AnonymousEntry,
         cancellation,
         deadline_unix_ms,
@@ -267,24 +253,18 @@ pub(crate) async fn finish_facebook_reels_entry(
 async fn execute_facebook_reel_navigation(
     session: &mut EngineSession,
     command: &NativeCommand,
-    before: facebook::FacebookReelProbe,
     mode: ReelNavigationMode,
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
-    let navigation = probe_facebook_reel_next_target(session).await?;
-    let Some(axis) = navigation.axis else {
+    if let Some(result) = reel_write_gate(cancellation, deadline_unix_ms, mode)? {
+        return Ok(result);
+    }
+
+    let before = probe_facebook_reel(session).await?;
+    if !before.is_reels_surface() || !before.is_explicitly_keyboard_input_safe() {
         return Ok(facebook_scroll_failure(
-            navigation_failure_phase(mode, false),
-            "reels_target_unavailable",
-        ));
-    };
-    if !reel_navigation_probe_matches_active(&navigation, &before)
-        || (mode == ReelNavigationMode::AnonymousEntry
-            && !navigation.is_explicitly_keyboard_input_safe())
-    {
-        return Ok(facebook_scroll_failure(
-            navigation_failure_phase(mode, false),
+            navigation_predispatch_failure_phase(mode),
             "reels_target_unavailable",
         ));
     }
@@ -292,11 +272,13 @@ async fn execute_facebook_reel_navigation(
         return Ok(result);
     }
 
-    let (key, key_code) = reel_forward_key(axis);
+    let probe_key = session.facebook.reel_probe_key();
+    let (key, key_code) = reel_probe_key_params(probe_key);
     session
         .cdp
         .dispatch_key("rawKeyDown", key, key, key_code)
         .await?;
+    session.facebook.remember_reel_probe_delivery(probe_key);
     session
         .cdp
         .dispatch_key("keyUp", key, key, key_code)
@@ -311,6 +293,7 @@ async fn execute_facebook_reel_navigation(
     )
     .await?
     {
+        session.facebook.remember_reel_probe_confirmation(probe_key);
         return Ok((EffectPhase::Confirmed, output));
     }
 
@@ -329,14 +312,6 @@ pub(crate) async fn probe_facebook_reel(
     let expression = facebook::reel_probe_expression()?;
     let raw = session.cdp.evaluate(&expression, true).await?;
     facebook::reel_probe_from_cdp(&raw)
-}
-
-async fn probe_facebook_reel_next_target(
-    session: &mut EngineSession,
-) -> Result<facebook::FacebookReelNextTarget, EngineError> {
-    let expression = facebook::reel_next_target_expression()?;
-    let raw = session.cdp.evaluate(&expression, true).await?;
-    facebook::reel_next_target_from_cdp(&raw)
 }
 
 async fn wait_for_canonical_facebook_reel_card(
@@ -435,45 +410,37 @@ fn reel_write_gate(
 ) -> Result<Option<(EffectPhase, CommandOutput)>, EngineError> {
     if cancellation.is_some_and(|value| value.load(Ordering::Acquire)) {
         return Ok(Some(facebook_scroll_failure(
-            navigation_failure_phase(mode, false),
+            navigation_predispatch_failure_phase(mode),
             "reels_navigation_cancelled",
         )));
     }
-    if mode == ReelNavigationMode::AnonymousEntry
-        && deadline_unix_ms.saturating_sub(unix_time_ms())
-            < FACEBOOK_REEL_ENTRY_POST_INPUT_RESERVE_MS
-    {
+    let remaining_ms = deadline_unix_ms.saturating_sub(unix_time_ms());
+    let required_ms = if mode == ReelNavigationMode::AnonymousEntry {
+        FACEBOOK_REEL_ENTRY_POST_INPUT_RESERVE_MS
+    } else {
+        FACEBOOK_REEL_KEY_DISPATCH_RESERVE_MS
+    };
+    if remaining_ms < required_ms {
         return Ok(Some(facebook_scroll_failure(
-            navigation_failure_phase(mode, false),
+            navigation_predispatch_failure_phase(mode),
             "reels_navigation_deadline_insufficient",
         )));
     }
     Ok(None)
 }
 
-fn navigation_failure_phase(mode: ReelNavigationMode, input_dispatched: bool) -> EffectPhase {
-    if input_dispatched || mode == ReelNavigationMode::AnonymousEntry {
+fn navigation_predispatch_failure_phase(mode: ReelNavigationMode) -> EffectPhase {
+    if mode == ReelNavigationMode::AnonymousEntry {
         EffectPhase::Ambiguous
     } else {
         EffectPhase::NotStarted
     }
 }
 
-fn reel_navigation_probe_matches_active(
-    target: &facebook::FacebookReelNextTarget,
-    previous: &facebook::FacebookReelProbe,
-) -> bool {
-    target.ok
-        && target.is_keyboard_input_safe()
-        && !target.ambiguous
-        && canonical_reel_id(target.note_id.as_deref())
-            == canonical_reel_id(previous.note_id.as_deref())
-}
-
-pub(crate) fn reel_forward_key(axis: facebook::FacebookReelAxis) -> (&'static str, u32) {
-    match axis {
-        facebook::FacebookReelAxis::Vertical => ("ArrowDown", 40),
-        facebook::FacebookReelAxis::Horizontal => ("ArrowRight", 39),
+pub(crate) fn reel_probe_key_params(key: FacebookReelProbeKey) -> (&'static str, u32) {
+    match key {
+        FacebookReelProbeKey::ArrowRight => ("ArrowRight", 39),
+        FacebookReelProbeKey::ArrowDown => ("ArrowDown", 40),
     }
 }
 

@@ -355,11 +355,28 @@ fn is_bound_immediate_publish_url(raw: &str, expected_post_id: &str) -> bool {
         && has_token
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum FacebookReelProbeKey {
+    #[default]
+    ArrowRight,
+    ArrowDown,
+}
+
+impl FacebookReelProbeKey {
+    pub(crate) fn alternate(self) -> Self {
+        match self {
+            Self::ArrowRight => Self::ArrowDown,
+            Self::ArrowDown => Self::ArrowRight,
+        }
+    }
+}
+
 pub(crate) struct FacebookSessionState {
     pub(crate) active_list_url: String,
     pub(crate) seen_post_ids: HashSet<String>,
     pub(crate) consumed_auth_signal_ids: HashSet<String>,
     pub(crate) last_refresh_reload_at_ms: u64,
+    reel_probe_key: FacebookReelProbeKey,
 }
 
 impl Default for FacebookSessionState {
@@ -369,7 +386,24 @@ impl Default for FacebookSessionState {
             seen_post_ids: HashSet::new(),
             consumed_auth_signal_ids: HashSet::new(),
             last_refresh_reload_at_ms: 0,
+            reel_probe_key: FacebookReelProbeKey::default(),
         }
+    }
+}
+
+impl FacebookSessionState {
+    pub(crate) fn reel_probe_key(&self) -> FacebookReelProbeKey {
+        self.reel_probe_key
+    }
+
+    pub(crate) fn remember_reel_probe_delivery(&mut self, key: FacebookReelProbeKey) {
+        // Delivery may move Facebook even when later canonical observation fails; the next
+        // normally admitted command probes the other direction unless confirmation restores it.
+        self.reel_probe_key = key.alternate();
+    }
+
+    pub(crate) fn remember_reel_probe_confirmation(&mut self, key: FacebookReelProbeKey) {
+        self.reel_probe_key = key;
     }
 }
 
@@ -3982,7 +4016,7 @@ mod tests {
     use crate::facebook::group_join::{
         FacebookJoinPostDecision, facebook_join_post_decision, facebook_join_readiness_decisive,
     };
-    use crate::facebook::reels::reel_forward_key;
+    use crate::facebook::reels::reel_probe_key_params;
     use crate::facebook::shared::{canonical_facebook_post_id, facebook_scroll_failure};
 
     #[test]
@@ -4381,15 +4415,23 @@ mod tests {
     }
 
     #[test]
-    fn reel_axis_maps_to_one_forward_key() {
+    fn reel_probe_key_state_alternates_after_delivery_and_retains_confirmation() {
+        let mut state = FacebookSessionState::default();
+        assert_eq!(state.reel_probe_key(), FacebookReelProbeKey::ArrowRight);
         assert_eq!(
-            reel_forward_key(facebook::FacebookReelAxis::Vertical),
-            ("ArrowDown", 40)
-        );
-        assert_eq!(
-            reel_forward_key(facebook::FacebookReelAxis::Horizontal),
+            reel_probe_key_params(FacebookReelProbeKey::ArrowRight),
             ("ArrowRight", 39)
         );
+
+        state.remember_reel_probe_delivery(FacebookReelProbeKey::ArrowRight);
+        assert_eq!(state.reel_probe_key(), FacebookReelProbeKey::ArrowDown);
+        assert_eq!(
+            reel_probe_key_params(FacebookReelProbeKey::ArrowDown),
+            ("ArrowDown", 40)
+        );
+
+        state.remember_reel_probe_confirmation(FacebookReelProbeKey::ArrowRight);
+        assert_eq!(state.reel_probe_key(), FacebookReelProbeKey::ArrowRight);
     }
 
     #[test]

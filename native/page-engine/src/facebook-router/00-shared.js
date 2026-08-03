@@ -370,7 +370,9 @@ async function(input){
   const hydratedCards=()=>topArticles().filter(hydratedCard);
   const reelSurface=()=>{
     const path=location.pathname.toLowerCase();
-    return classify()==='reels'||/^\/reel(?:\/|$)/.test(path);
+    const host=location.hostname.toLowerCase();
+    return (host==='facebook.com'||host.endsWith('.facebook.com'))
+      &&(classify()==='reels'||path==='/reel'||path==='/reel/'||Boolean(reelIdFromPath(path)));
   };
   const viewportArea=(rect)=>{
     const left=Math.max(0,rect.left);
@@ -440,185 +442,43 @@ async function(input){
       ||focused.isContentEditable
       ||role==='textbox'||role==='combobox'||role==='searchbox'
     ));
-    return !editable&&!blocker(blockingProbe())&&!consentProbe().present;
+    const path=location.pathname.toLowerCase();
+    const loginPath=path==='/login.php'||/^\/(?:login|recover|two_step_verification)(?:\/|$)/.test(path);
+    const visibleLoginForm=all('input[type="password"],form[action]').filter(visible).some((element)=>{
+      if(String(element.tagName||'').toLowerCase()==='input')return true;
+      try{return /^\/login(?:\/|$)/.test(new URL(element.getAttribute('action')||'',location.origin).pathname);}
+      catch{return false;}
+    });
+    const visibleCaptchaWidget=all('iframe,[data-sitekey],input').filter(visible).some((element)=>{
+      const witness=[
+        element.getAttribute&&element.getAttribute('src'),
+        element.getAttribute&&element.getAttribute('id'),
+        element.getAttribute&&element.getAttribute('name'),
+        element.getAttribute&&element.getAttribute('data-sitekey')?'data-sitekey':'',
+      ].filter(Boolean).join(' ');
+      return /(?:^|[^a-z])(?:captcha|recaptcha)(?:[^a-z]|$)|fbsbx\.com\/captcha/i.test(witness);
+    });
+    const reelConsentPresent=all('button,[role="button"],a[role="button"],div[aria-label],span[aria-label]')
+      .filter(visible)
+      .some((element)=>consentAcceptAllLabel.test(label(element))||consentNecessaryOnlyLabel.test(label(element)));
+    return !editable
+      &&!loginPath
+      &&!visibleLoginForm
+      &&!visibleCaptchaWidget
+      &&!reelConsentPresent;
   };
   const reelProbeValue=(probe)=>({
     ok:Boolean(probe&&probe.ok),
     ...(probe&&probe.reason?{reason:probe.reason}:{}),
     ...(probe&&probe.noteId?{noteId:probe.noteId}:{}),
     ...(probe&&probe.videoRect?{videoRect:probe.videoRect}:{}),
-    ...(probe&&probe.ok?{inputSafe:reelKeyboardInputSafe()}:{}),
+    ...(reelSurface()?{inputSafe:reelKeyboardInputSafe()}:{}),
   });
-  const reelNextTarget=()=>{
-    const active=activeReel();
-    if(!active.ok)return {...reelProbeValue(active),found:false,ambiguous:active.reason==='ambiguous_target'};
-    const viewportWidth=Math.max(1,Number(window.innerWidth)||1);
-    const viewportHeight=Math.max(1,Number(window.innerHeight)||1);
-    const clipRect=(target)=>{
-      const left=Math.max(0,Math.min(viewportWidth,target.left));
-      const top=Math.max(0,Math.min(viewportHeight,target.top));
-      const right=Math.max(left,Math.min(viewportWidth,target.right));
-      const bottom=Math.max(top,Math.min(viewportHeight,target.bottom));
-      return {left,top,right,bottom,width:right-left,height:bottom-top};
-    };
-    const rect=clipRect(active.videoRect);
-    const videoWidth=Math.max(1,rect.width);
-    const videoHeight=Math.max(1,rect.height);
-    const next=/(next|tiep theo|suivant(?:e)?|下一|下一个|下一張|下一张|往下)/i;
-    const previous=/(previous|truoc|precedent(?:e)?|上一|上一个|上一張|上一张|往上)/i;
-    const down=/(arrow down|scroll down|move down|往下|向下)/i;
-    const right=/(arrow right|scroll right|move right|往右|向右)/i;
-    const reactionOrMedia=/(like|unlike|j[’']?aime|comment|share|partager|reaction|menu|more|play|pause|mute|thich|binh luan|chia se|赞|讚|评论|評論|分享|播放|暂停|暫停)/i;
-    const buttons=all('[role="button"],button').filter(visible).map((button)=>({
-      button,
-      rawRect:button.getBoundingClientRect(),
-      label:label(button),
-      disabled:button.getAttribute('aria-disabled')==='true'||Boolean(button.disabled),
-    })).map((candidate)=>({...candidate,rect:clipRect(candidate.rawRect)}))
-      .map((candidate)=>({
-        ...candidate,
-        visibleFraction:(candidate.rect.width*candidate.rect.height)/Math.max(
-          1,
-          candidate.rawRect.width*candidate.rawRect.height,
-        ),
-      }))
-      .filter((candidate)=>
-        candidate.visibleFraction>=0.2
-        &&candidate.rect.width/viewportWidth>=0.005
-        &&candidate.rect.height/viewportHeight>=0.01
-      )
-      .map((candidate)=>({
-      ...candidate,
-      cx:candidate.rect.left+candidate.rect.width/2,
-      cy:candidate.rect.top+candidate.rect.height/2,
-      directionLabel:fold(candidate.label).toLowerCase(),
-    })).map((candidate)=>({
-      ...candidate,
-      role:reactionOrMedia.test(candidate.directionLabel)
-        ?'action'
-        :next.test(candidate.directionLabel)&&!previous.test(candidate.directionLabel)
-        ?'next'
-        :previous.test(candidate.directionLabel)&&!next.test(candidate.directionLabel)?'previous':'unknown',
-    }));
-    const verticalOverlapPx=(candidate)=>
-      Math.max(0,Math.min(candidate.rect.bottom,rect.bottom)-Math.max(candidate.rect.top,rect.top));
-    const verticalOverlap=(candidate)=>
-      verticalOverlapPx(candidate)/Math.max(1,Math.min(candidate.rect.height,videoHeight));
-    const inVideoYBand=(candidate)=>
-      candidate.cy>=rect.top+videoHeight*0.1&&candidate.cy<=rect.bottom-videoHeight*0.1;
-    const rightGutter=Math.max(0,viewportWidth-rect.right);
-    const verticalMember=(candidate)=>
-      rightGutter>0
-      &&candidate.rect.left>=rect.right-videoWidth*0.01
-      &&candidate.cx>=rect.right+rightGutter*0.5
-      &&candidate.rect.width<=videoWidth*0.18
-      &&candidate.rect.height<=videoHeight*0.22
-      &&candidate.cy>=rect.top+videoHeight*0.12
-      &&candidate.cy<=rect.bottom-videoHeight*0.12;
-    const horizontalPrevious=(candidate)=>
-      candidate.rect.left<rect.left
-      &&candidate.rect.right<=rect.left+videoWidth*0.04
-      &&verticalOverlap(candidate)>=0.5
-      &&inVideoYBand(candidate);
-    const horizontalNext=(candidate)=>
-      candidate.rect.right>rect.right
-      &&candidate.rect.left>=rect.right-videoWidth*0.04
-      &&verticalOverlap(candidate)>=0.5
-      &&inVideoYBand(candidate);
-    const horizontalOverlayNext=(candidate)=>
-      rightGutter>0
-      &&horizontalNext(candidate)
-      &&candidate.rect.left<=rect.right+videoWidth*0.04
-      &&candidate.rect.right>=viewportWidth-rightGutter*0.1
-      &&candidate.rect.width/rightGutter>=0.7
-      &&candidate.rect.width/viewportWidth>=0.2
-      &&candidate.rect.height/viewportHeight>=0.6
-      &&verticalOverlapPx(candidate)/videoHeight>=0.7;
-    const axisOf=(back,forward)=>{
-      const horizontal=horizontalPrevious(back)&&horizontalNext(forward)
-        &&Math.abs(back.cy-forward.cy)<=videoHeight*0.12;
-      const vertical=verticalMember(back)&&verticalMember(forward)
-        &&Math.abs(back.cx-forward.cx)<=videoWidth*0.06
-        &&forward.cy>back.cy+videoHeight*0.03
-        &&forward.cy<=back.cy+videoHeight*0.3;
-      return horizontal===vertical?'':horizontal?'horizontal':'vertical';
-    };
-    const previousButtons=buttons.filter((candidate)=>candidate.role==='previous');
-    const nextButtons=buttons.filter((candidate)=>candidate.role==='next');
-    const semanticPairs=[];
-    for(const back of previousButtons){
-      for(const forward of nextButtons){
-        const axis=axisOf(back,forward);
-        if(axis)semanticPairs.push({axis,target:forward});
-      }
-    }
-    const uniquePairs=semanticPairs.filter((pair,index,list)=>
-      list.findIndex((candidate)=>candidate.axis===pair.axis&&candidate.target.button===pair.target.button)===index
-    );
-    const hypotheses=[...uniquePairs];
-    if(nextButtons.length===1){
-      const target=nextButtons[0];
-      if(horizontalOverlayNext(target))hypotheses.push({axis:'horizontal',target});
-      if(down.test(target.directionLabel)&&verticalMember(target))hypotheses.push({axis:'vertical',target});
-      else if(right.test(target.directionLabel)&&horizontalNext(target))hypotheses.push({axis:'horizontal',target});
-    }
-    const unknown=buttons.filter((candidate)=>candidate.role==='unknown');
-    const horizontalLeft=unknown.filter(horizontalPrevious);
-    const horizontalRight=unknown.filter(horizontalNext);
-    if(horizontalLeft.length===1&&horizontalRight.length===1
-      &&Math.abs(horizontalLeft[0].cy-horizontalRight[0].cy)<=videoHeight*0.12){
-      hypotheses.push({axis:'horizontal',target:horizontalRight[0]});
-    }
-    const choices=hypotheses.filter((pair,index,list)=>
-      list.findIndex((candidate)=>candidate.axis===pair.axis&&candidate.target.button===pair.target.button)===index
-    );
-    if(choices.length!==1){
-      return {...reelProbeValue(active),found:false,ambiguous:choices.length>1};
-    }
-    const choice=choices[0];
-    const target=choice.target;
-    if(target.disabled)return {
-      ...reelProbeValue(active),
-      found:false,
-      ambiguous:false,
-      reason:'next_control_disabled',
-    };
-    const targetFullyVisible=target.rawRect.left>=0
-      &&target.rawRect.top>=0
-      &&target.rawRect.right<=viewportWidth
-      &&target.rawRect.bottom<=viewportHeight;
-    const topmost=typeof document.elementFromPoint==='function'
-      ?document.elementFromPoint(target.cx,target.cy)
-      :null;
-    const targetAtPoint=Boolean(topmost&&(topmost===target.button||target.button.contains(topmost)));
-    if(!targetAtPoint)return {
-      ...reelProbeValue(active),
-      found:false,
-      ambiguous:false,
-      reason:'next_control_occluded',
-    };
-    const pointerSafe=targetFullyVisible
-      &&target.rect.width/viewportWidth>=0.015
-      &&target.rect.width/viewportWidth<=0.12
-      &&target.rect.height/viewportHeight>=0.025
-      &&target.rect.height/viewportHeight<=0.18;
-    if(!pointerSafe)return {
-      ...reelProbeValue(active),
-      axis:choice.axis,
-      found:false,
-      ambiguous:false,
-      reason:'next_control_not_click_safe',
-    };
-    return {
-      ...reelProbeValue(active),
-      axis:choice.axis,
-      found:true,
-      ambiguous:false,
-      cx:target.cx,
-      cy:target.cy,
-      label:target.label,
-    };
+  const safeActiveReel=()=>{
+    try{return activeReel();}
+    catch{return {ok:false,reason:'active_probe_failed'};}
   };
+  const safeReelProbeValue=()=>reelProbeValue(safeActiveReel());
   const exactArticle=(expected)=>{
     const expectedId=postId(expected)||String(expected||'');
     const matches=topArticles().filter((article)=>{

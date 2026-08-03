@@ -273,67 +273,28 @@ async fn facebook_reels_entry_late_surface_transition_suppresses_navigation_retr
 }
 
 #[tokio::test]
-async fn facebook_reels_entry_does_not_foreground_a_reached_surface_without_active_video() {
+async fn facebook_reels_entry_probes_a_safe_surface_without_an_active_video() {
     let (outcome, requests) =
-        run_facebook_reels_entry(FacebookReelsEntryScenario::ReelsWithoutActiveVideo).await;
+        run_facebook_reels_entry(FacebookReelsEntryScenario::MissingActiveVideoSafe).await;
 
-    assert_eq!(outcome.effect_phase, EffectPhase::Ambiguous);
-    assert!(
-        outcome.error.is_none(),
-        "hydration miss must remain a typed receipt: {:?}",
-        outcome.error
-    );
-    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("entry receipt") else {
-        panic!("expected entry action receipt")
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::PageCards(cards) = outcome.output.expect("entry Reel cards") else {
+        panic!("expected entry Reel cards")
     };
-    assert_eq!(receipt.reason.as_deref(), Some("reels_target_unavailable"));
+    assert_eq!(
+        cards.cards[0].note_id.as_deref(),
+        Some("https://www.facebook.com/reel/2")
+    );
     assert_eq!(method_count(&requests, "Page.navigate"), 1);
     assert_eq!(method_count(&requests, "Page.bringToFront"), 0);
-    assert_eq!(method_count(&requests, "Input.dispatchKeyEvent"), 0);
+    assert_eq!(raw_dispatched_keys(&requests), vec!["ArrowRight"]);
+    assert_eq!(router_request_count(&requests, "reel_next_target"), 0);
+    assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
 }
 
 #[tokio::test]
-async fn facebook_reels_entry_advances_anonymous_horizontal_and_vertical_landings_once() {
-    for (scenario, expected_key) in [
-        (
-            FacebookReelsEntryScenario::AnonymousHorizontalAdvances,
-            "ArrowRight",
-        ),
-        (
-            FacebookReelsEntryScenario::AnonymousVerticalAdvances,
-            "ArrowDown",
-        ),
-    ] {
-        let (outcome, requests) = run_facebook_reels_entry(scenario).await;
-        assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
-        let CommandOutput::PageCards(cards) = outcome.output.expect("entry Reel cards") else {
-            panic!("expected entry Reel cards")
-        };
-        assert_eq!(cards.cards.len(), 1);
-        assert_eq!(
-            cards.cards[0].note_id.as_deref(),
-            Some("https://www.facebook.com/reel/2")
-        );
-        let raw_keys = requests
-            .iter()
-            .filter(|request| {
-                request["method"] == "Input.dispatchKeyEvent"
-                    && request["params"]["type"] == "rawKeyDown"
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(raw_keys.len(), 1);
-        assert_eq!(raw_keys[0]["params"]["key"], expected_key);
-        assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
-        assert_eq!(method_count(&requests, "Page.navigate"), 1);
-        assert_eq!(method_count(&requests, "Page.bringToFront"), 0);
-    }
-}
-
-#[tokio::test]
-async fn facebook_reels_entry_rejects_disappeared_ambiguous_and_unproven_safe_targets() {
+async fn facebook_reels_entry_rejects_only_unproven_keyboard_safety() {
     for scenario in [
-        FacebookReelsEntryScenario::AnonymousDisappears,
-        FacebookReelsEntryScenario::AnonymousAmbiguous,
         FacebookReelsEntryScenario::AnonymousUnsafe,
         FacebookReelsEntryScenario::AnonymousInputSafetyMissing,
     ] {
@@ -399,11 +360,36 @@ async fn facebook_reels_entry_unchanged_anonymous_video_stops_after_one_bounded_
 
 #[tokio::test]
 async fn facebook_reels_entry_blocker_and_document_drift_suppress_foreground_recovery() {
-    let (blocked, blocked_requests) =
-        run_facebook_reels_entry(FacebookReelsEntryScenario::BlockedByLogin).await;
-    assert_eq!(blocked.effect_phase, EffectPhase::NotStarted);
-    assert_eq!(method_count(&blocked_requests, "Page.navigate"), 0);
-    assert_eq!(method_count(&blocked_requests, "Page.bringToFront"), 0);
+    for scenario in [
+        FacebookReelsEntryScenario::BlockedByLogin,
+        FacebookReelsEntryScenario::BlockedByCaptcha,
+    ] {
+        let (blocked, blocked_requests) = run_facebook_reels_entry(scenario).await;
+        assert_eq!(
+            blocked.effect_phase,
+            EffectPhase::NotStarted,
+            "unexpected blocker phase for {scenario:?}"
+        );
+        assert_eq!(method_count(&blocked_requests, "Page.navigate"), 0);
+        assert_eq!(method_count(&blocked_requests, "Page.bringToFront"), 0);
+        assert!(raw_dispatched_keys(&blocked_requests).is_empty());
+    }
+
+    let (consent, consent_requests) =
+        run_facebook_reels_entry(FacebookReelsEntryScenario::BlockedByConsent).await;
+    assert_eq!(consent.effect_phase, EffectPhase::Ambiguous);
+    let CommandOutput::ActionReceipt(receipt) = consent.output.expect("consent receipt") else {
+        panic!("expected consent action receipt")
+    };
+    assert_eq!(receipt.reason.as_deref(), Some("reels_target_unavailable"));
+    assert_eq!(method_count(&consent_requests, "Page.navigate"), 1);
+    assert!(raw_dispatched_keys(&consent_requests).is_empty());
+
+    let (unknown_copy, unknown_copy_requests) =
+        run_facebook_reels_entry(FacebookReelsEntryScenario::UnknownActionRestriction).await;
+    assert_eq!(unknown_copy.effect_phase, EffectPhase::Confirmed);
+    assert_eq!(method_count(&unknown_copy_requests, "Page.navigate"), 1);
+    assert!(raw_dispatched_keys(&unknown_copy_requests).is_empty());
 
     let (blocked_after_route, blocked_after_route_requests) =
         run_facebook_reels_entry(FacebookReelsEntryScenario::BlockedAfterNavigation).await;
@@ -416,12 +402,14 @@ async fn facebook_reels_entry_blocker_and_document_drift_suppress_foreground_rec
         method_count(&blocked_after_route_requests, "Page.bringToFront"),
         0
     );
+    assert!(raw_dispatched_keys(&blocked_after_route_requests).is_empty());
 
     let (drifted, drifted_requests) =
         run_facebook_reels_entry(FacebookReelsEntryScenario::DocumentDrifts).await;
     assert_eq!(drifted.effect_phase, EffectPhase::Ambiguous);
     assert_eq!(method_count(&drifted_requests, "Page.navigate"), 1);
     assert_eq!(method_count(&drifted_requests, "Page.bringToFront"), 0);
+    assert!(raw_dispatched_keys(&drifted_requests).is_empty());
 }
 
 #[tokio::test]
@@ -531,6 +519,31 @@ async fn facebook_feed_scroll_dispatches_a_humanized_multi_frame_wheel_gesture()
         .map(|(index, _)| index)
         .expect("wheel peak");
     assert!(peak > 0 && peak + 1 < deltas.len());
+}
+
+#[tokio::test]
+async fn facebook_reel_discovery_route_never_receives_a_keyboard_probe() {
+    let (port, server) =
+        spawn_facebook_feed_scroll_cdp_for("https://www.facebook.com/reel/hashtag/cats").await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&facebook_reel_scroll_command(
+            "reel-discovery-scroll-1",
+            1,
+            8_000,
+        ))
+        .await
+        .expect("Reel discovery route scroll");
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Reel discovery route fake CDP");
+    assert!(raw_dispatched_keys(&requests).is_empty());
+    assert!(method_count(&requests, "Input.dispatchMouseEvent") > 0);
 }
 
 #[tokio::test]
@@ -863,7 +876,8 @@ async fn facebook_resume_redrive_on_active_reel_reports_current_without_extra_na
 
 #[tokio::test]
 async fn facebook_watchdog_reel_scroll_foregrounds_once_before_trusted_arrow() {
-    let (port, server) = spawn_facebook_reel_arrow_cdp().await;
+    let (port, server) =
+        spawn_facebook_reel_active_key_probe_cdp(FacebookReelKeyScenario::RightMoves).await;
     let mut engine = Engine::default();
     let mut open = session_open(port);
     open.params.platform = Platform::Facebook;
@@ -921,7 +935,7 @@ async fn facebook_watchdog_reel_scroll_foregrounds_once_before_trusted_arrow() {
     assert!(foreground < first_input);
     assert_eq!(input_requests.len(), 2);
     assert_eq!(input_requests[0]["params"]["type"], "rawKeyDown");
-    assert_eq!(input_requests[0]["params"]["key"], "ArrowDown");
+    assert_eq!(input_requests[0]["params"]["key"], "ArrowRight");
     assert_eq!(input_requests[1]["params"]["type"], "keyUp");
     assert!(
         requests
@@ -931,8 +945,10 @@ async fn facebook_watchdog_reel_scroll_foregrounds_once_before_trusted_arrow() {
 }
 
 #[tokio::test]
-async fn facebook_anonymous_reel_axis_only_navigation_uses_horizontal_arrow() {
-    let (port, server) = spawn_facebook_reel_anonymous_horizontal_cdp().await;
+async fn facebook_axisless_live_shape_uses_the_default_horizontal_probe() {
+    let (port, server) =
+        spawn_facebook_reel_active_key_probe_cdp(FacebookReelKeyScenario::MissingActiveVideoSafe)
+            .await;
     let mut engine = Engine::default();
     let mut open = session_open(port);
     open.params.platform = Platform::Facebook;
@@ -953,7 +969,7 @@ async fn facebook_anonymous_reel_axis_only_navigation_uses_horizontal_arrow() {
             }),
         })
         .await
-        .expect("anonymous horizontal Reel scroll");
+        .expect("axisless Reel scroll");
 
     assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
     let CommandOutput::PageCards(cards) = outcome.output.expect("Reel cards") else {
@@ -966,7 +982,7 @@ async fn facebook_anonymous_reel_axis_only_navigation_uses_horizontal_arrow() {
     );
 
     engine.shutdown().await;
-    let requests = server.await.expect("anonymous horizontal Reel fake CDP");
+    let requests = server.await.expect("axisless Reel fake CDP");
     let input_requests = requests
         .iter()
         .filter(|request| request["method"] == "Input.dispatchKeyEvent")
@@ -974,6 +990,7 @@ async fn facebook_anonymous_reel_axis_only_navigation_uses_horizontal_arrow() {
     assert_eq!(input_requests.len(), 2);
     assert_eq!(input_requests[0]["params"]["key"], "ArrowRight");
     assert_eq!(input_requests[0]["params"]["windowsVirtualKeyCode"], 39);
+    assert_eq!(router_request_count(&requests, "reel_next_target"), 0);
     assert!(
         requests
             .iter()
@@ -988,9 +1005,10 @@ async fn facebook_anonymous_reel_axis_only_navigation_uses_horizontal_arrow() {
 }
 
 #[tokio::test]
-async fn facebook_reel_competing_axes_fail_before_input() {
+async fn facebook_reel_ambiguous_active_structure_still_probes_once_when_safe() {
     let (port, server) =
-        spawn_facebook_reel_active_key_probe_cdp(FacebookReelKeyScenario::RightMoves).await;
+        spawn_facebook_reel_active_key_probe_cdp(FacebookReelKeyScenario::AmbiguousActiveVideoSafe)
+            .await;
     let mut engine = Engine::default();
     let mut open = session_open(port);
     open.params.platform = Platform::Facebook;
@@ -1012,12 +1030,13 @@ async fn facebook_reel_competing_axes_fail_before_input() {
             }),
         })
         .await
-        .expect("competing-control Reel scroll");
+        .expect("ambiguous-structure Reel scroll");
 
-    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
     engine.shutdown().await;
-    let requests = server.await.expect("competing-control Reel fake CDP");
-    assert!(dispatched_keys(&requests).is_empty());
+    let requests = server.await.expect("ambiguous-structure Reel fake CDP");
+    assert_eq!(raw_dispatched_keys(&requests), vec!["ArrowRight"]);
+    assert_eq!(router_request_count(&requests, "reel_next_target"), 0);
     assert!(
         requests
             .iter()
@@ -1035,12 +1054,70 @@ async fn facebook_reel_unsafe_keyboard_focus_blocks_active_probe_before_input() 
 }
 
 #[tokio::test]
-async fn facebook_reel_newly_unsafe_next_target_blocks_keys_before_dispatch() {
+async fn facebook_reel_missing_keyboard_safety_blocks_keys_before_dispatch() {
     let (outcome, requests) =
-        run_facebook_reel_active_key_probe(FacebookReelKeyScenario::UnsafeNextTarget).await;
+        run_facebook_reel_active_key_probe(FacebookReelKeyScenario::InputSafetyMissing).await;
 
     assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
     assert!(dispatched_keys(&requests).is_empty());
+}
+
+#[tokio::test]
+async fn facebook_reel_cancellation_and_expired_deadline_dispatch_zero_keys() {
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let (port, server) = spawn_facebook_reel_active_key_probe_cdp_with_cancellation(
+        FacebookReelKeyScenario::RightMoves,
+        Some(cancellation.clone()),
+    )
+    .await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    engine.open(&open).await.expect("open Facebook session");
+    let cancelled = engine
+        .execute_cancellable(
+            &facebook_reel_scroll_command("reel-cancel-before-key-1", 1, 5_000),
+            cancellation,
+        )
+        .await
+        .expect("cancelled Reels scroll");
+    assert_eq!(cancelled.effect_phase, EffectPhase::NotStarted);
+    let CommandOutput::ActionReceipt(receipt) = cancelled.output.expect("cancel receipt") else {
+        panic!("expected cancel action receipt")
+    };
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("reels_navigation_cancelled")
+    );
+    engine.shutdown().await;
+    let requests = server.await.expect("cancelled Reel fake CDP");
+    assert_eq!(router_request_count(&requests, "reel_probe"), 1);
+    assert!(raw_dispatched_keys(&requests).is_empty());
+
+    let (port, server) =
+        spawn_facebook_reel_active_key_probe_cdp(FacebookReelKeyScenario::RightMoves).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    engine.open(&open).await.expect("open Facebook session");
+    let near_deadline = facebook_reel_scroll_command("reel-near-deadline-before-key-1", 1, 500);
+    let near_deadline = engine
+        .execute(&near_deadline)
+        .await
+        .expect("near-deadline Reels scroll");
+    assert_eq!(near_deadline.effect_phase, EffectPhase::NotStarted);
+    let CommandOutput::ActionReceipt(receipt) = near_deadline.output.expect("deadline receipt")
+    else {
+        panic!("expected deadline action receipt")
+    };
+    assert_eq!(
+        receipt.reason.as_deref(),
+        Some("reels_navigation_deadline_insufficient")
+    );
+    engine.shutdown().await;
+    let requests = server.await.expect("expired Reel fake CDP");
+    assert_eq!(router_request_count(&requests, "reel_probe"), 1);
+    assert!(raw_dispatched_keys(&requests).is_empty());
 }
 
 #[tokio::test]
@@ -1217,8 +1294,10 @@ async fn facebook_group_join_observation_exception_is_not_started_and_diagnostic
 }
 
 #[tokio::test]
-async fn facebook_reel_scroll_without_active_video_does_not_foreground_or_dispatch() {
-    let (port, server) = spawn_facebook_reel_missing_active_video_cdp().await;
+async fn facebook_reel_scroll_without_active_video_uses_one_safe_probe() {
+    let (port, server) =
+        spawn_facebook_reel_active_key_probe_cdp(FacebookReelKeyScenario::MissingActiveVideoSafe)
+            .await;
     let mut engine = Engine::default();
     let mut open = session_open(port);
     open.params.platform = Platform::Facebook;
@@ -1241,28 +1320,28 @@ async fn facebook_reel_scroll_without_active_video_does_not_foreground_or_dispat
         .await
         .expect("Reel scroll without active video");
 
-    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
-    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("scroll receipt") else {
-        panic!("expected scroll action receipt")
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::PageCards(cards) = outcome.output.expect("Reel cards") else {
+        panic!("expected Reel cards")
     };
-    assert_eq!(receipt.reason.as_deref(), Some("reels_target_unavailable"));
+    assert_eq!(
+        cards.cards[0].note_id.as_deref(),
+        Some("https://www.facebook.com/reel/2")
+    );
 
     engine.shutdown().await;
     let requests = server
         .await
         .expect("Facebook missing active video fake CDP");
-    assert!(requests.iter().all(|request| {
-        request["method"] != "Page.bringToFront"
-            && !request["method"]
-                .as_str()
-                .is_some_and(|method| method.starts_with("Input."))
-    }));
+    assert_eq!(raw_dispatched_keys(&requests), vec!["ArrowRight"]);
+    assert_eq!(router_request_count(&requests, "reel_next_target"), 0);
+    assert_eq!(method_count(&requests, "Page.bringToFront"), 0);
 }
 
 #[tokio::test]
 async fn facebook_reel_scroll_returns_ambiguous_after_one_key_without_fabricated_cards() {
     let (outcome, requests) =
-        run_facebook_reel_active_key_probe(FacebookReelKeyScenario::VerticalNeitherMoves).await;
+        run_facebook_reel_active_key_probe(FacebookReelKeyScenario::NeverMoves).await;
 
     assert_eq!(outcome.effect_phase, EffectPhase::Ambiguous);
     let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("scroll receipt") else {
@@ -1286,16 +1365,16 @@ async fn facebook_reel_scroll_returns_ambiguous_after_one_key_without_fabricated
             .iter()
             .all(|request| request["method"] != "Page.navigate")
     );
-    assert_eq!(dispatched_keys(&requests), vec!["ArrowDown", "ArrowDown"]);
+    assert_eq!(raw_dispatched_keys(&requests), vec!["ArrowRight"]);
+    assert_eq!(router_request_count(&requests, "reel_next_target"), 0);
     assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
 }
 
 #[tokio::test]
-async fn facebook_reel_unconfirmed_scroll_does_not_block_the_next_command() {
-    let (port, server) = spawn_facebook_reel_active_key_probe_cdp(
-        FacebookReelKeyScenario::VerticalSecondCommandMoves,
-    )
-    .await;
+async fn facebook_reel_probe_key_alternates_then_retains_the_confirmed_key() {
+    let (port, server) =
+        spawn_facebook_reel_active_key_probe_cdp(FacebookReelKeyScenario::RightMissesThenDownMoves)
+            .await;
     let mut engine = Engine::default();
     let mut open = session_open(port);
     open.params.platform = Platform::Facebook;
@@ -1341,12 +1420,26 @@ async fn facebook_reel_unconfirmed_scroll_does_not_block_the_next_command() {
         Some("https://www.facebook.com/reel/2")
     );
 
+    let third = engine
+        .execute(&command("reel-scroll-3", 3))
+        .await
+        .expect("third scroll");
+    assert_eq!(third.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::PageCards(cards) = third.output.expect("third cards") else {
+        panic!("expected third Reel cards")
+    };
+    assert_eq!(
+        cards.cards[0].note_id.as_deref(),
+        Some("https://www.facebook.com/reel/3")
+    );
+
     engine.shutdown().await;
     let requests = server.await.expect("independent Reel command fake CDP");
     assert_eq!(
-        dispatched_keys(&requests),
-        vec!["ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown"]
+        raw_dispatched_keys(&requests),
+        vec!["ArrowRight", "ArrowDown", "ArrowDown"]
     );
+    assert_eq!(router_request_count(&requests, "reel_next_target"), 0);
     assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
 }
 
@@ -2962,6 +3055,22 @@ fn browse_command(command_id: u64) -> CommandRecord {
     }
 }
 
+fn facebook_reel_scroll_command(id: &str, command_id: u64, timeout_ms: u64) -> CommandRecord {
+    CommandRecord {
+        protocol_version: 2,
+        id: id.to_owned(),
+        session_id: "session-1".to_owned(),
+        task_id: "browse-1".to_owned(),
+        command_id,
+        deadline_unix_ms: unix_time_ms() + timeout_ms,
+        command: NativeCommand::PageScroll(PageScrollParams {
+            reason: Some("feed_scroll".to_owned()),
+            target_surface: None,
+            dwell_ms: None,
+        }),
+    }
+}
+
 fn facebook_like_command(command_id: u64) -> CommandRecord {
     CommandRecord {
         protocol_version: 2,
@@ -3261,6 +3370,19 @@ fn router_call_count(requests: &[Value], kind: &str) -> usize {
         .count()
 }
 
+fn router_request_count(requests: &[Value], kind: &str) -> usize {
+    let token = format!("\"kind\":\"{kind}\"");
+    requests
+        .iter()
+        .filter_map(|request| {
+            request
+                .pointer("/params/expression")
+                .and_then(Value::as_str)
+        })
+        .filter(|expression| expression.contains(&token))
+        .count()
+}
+
 fn page_navigation_count_to(requests: &[Value], url: &str) -> usize {
     requests
         .iter()
@@ -3300,6 +3422,17 @@ fn dispatched_keys(requests: &[Value]) -> Vec<&str> {
     requests
         .iter()
         .filter(|request| request["method"] == "Input.dispatchKeyEvent")
+        .filter_map(|request| request["params"]["key"].as_str())
+        .collect()
+}
+
+fn raw_dispatched_keys(requests: &[Value]) -> Vec<&str> {
+    requests
+        .iter()
+        .filter(|request| {
+            request["method"] == "Input.dispatchKeyEvent"
+                && request["params"]["type"] == "rawKeyDown"
+        })
         .filter_map(|request| request["params"]["key"].as_str())
         .collect()
 }
@@ -4225,10 +4358,16 @@ async fn spawn_facebook_initial_scan_cdp() -> (u16, tokio::task::JoinHandle<Vec<
 }
 
 async fn spawn_facebook_feed_scroll_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    spawn_facebook_feed_scroll_cdp_for("https://www.facebook.com/").await
+}
+
+async fn spawn_facebook_feed_scroll_cdp_for(
+    initial_url: &'static str,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let port = listener.local_addr().expect("address").port();
     let server = tokio::spawn(async move {
-        serve_target_listing_for(&listener, port, "https://www.facebook.com/").await;
+        serve_target_listing_for(&listener, port, initial_url).await;
         let (stream, _) = listener.accept().await.expect("WebSocket request");
         let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
         let mut requests = Vec::new();
@@ -5299,131 +5438,20 @@ fn facebook_note_detail_cdp(note_id: &str, content: &str) -> Value {
     )}})
 }
 
-async fn spawn_facebook_reel_arrow_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
-    let port = listener.local_addr().expect("address").port();
-    let server = tokio::spawn(async move {
-        serve_target_listing_for(&listener, port, "https://www.facebook.com/reel/1").await;
-        let (stream, _) = listener.accept().await.expect("WebSocket request");
-        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
-        let mut requests = Vec::new();
-        for _ in 0..3 {
-            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
-        }
-        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1"),
-            )
-            .await,
-        );
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                reel_next_target_cdp(
-                    "https://www.facebook.com/reel/1",
-                    "video-1@element:1",
-                    "vertical",
-                    true,
-                ),
-            )
-            .await,
-        );
-        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
-        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                reel_cards_cdp("https://www.facebook.com/reel/2"),
-            )
-            .await,
-        );
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                reel_probe_cdp("https://www.facebook.com/reel/2", "video-2@element:2"),
-            )
-            .await,
-        );
-        let _ = websocket.close(None).await;
-        requests
-    });
-    (port, server)
-}
-
-async fn spawn_facebook_reel_anonymous_horizontal_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>)
-{
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
-    let port = listener.local_addr().expect("address").port();
-    let server = tokio::spawn(async move {
-        serve_target_listing_for(&listener, port, "https://www.facebook.com/reel/").await;
-        let (stream, _) = listener.accept().await.expect("WebSocket request");
-        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
-        let mut requests = Vec::new();
-        for _ in 0..3 {
-            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
-        }
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                anonymous_reel_probe_cdp("video-1@element:1"),
-            )
-            .await,
-        );
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                anonymous_reel_next_target_cdp("video-1@element:1", "horizontal"),
-            )
-            .await,
-        );
-        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
-        requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                reel_cards_cdp("https://www.facebook.com/reel/2"),
-            )
-            .await,
-        );
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                reel_probe_cdp("https://www.facebook.com/reel/2", "video-2@element:2"),
-            )
-            .await,
-        );
-        let _ = websocket.close(None).await;
-        requests
-    });
-    (port, server)
-}
-
-#[derive(Clone, Copy)]
-#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
 enum FacebookReelsEntryScenario {
     FirstNavigationSucceeds,
     RetryNavigationSucceeds,
     ActivationRevealsReels,
-    ReelsWithoutActiveVideo,
-    AnonymousHorizontalAdvances,
-    AnonymousVerticalAdvances,
-    AnonymousHydratesBeforeCommit,
-    AnonymousHydratesBeforeCommitWithoutCard,
+    MissingActiveVideoSafe,
     AnonymousHydratesAfterFirstKey,
-    AnonymousMovesAtNextTarget,
-    AnonymousMovesWithIdentityAtNextTarget,
-    AnonymousMovesBeforeIdentity,
-    AnonymousMovesThenSurfaceLost,
-    AnonymousMovesThenDrifts,
-    AnonymousMovesDriftsAndReturnsDuringHydration,
     AnonymousNeverMoves,
-    AnonymousDisappears,
-    AnonymousAmbiguous,
     AnonymousUnsafe,
     AnonymousInputSafetyMissing,
     BlockedByLogin,
+    BlockedByCaptcha,
+    BlockedByConsent,
+    UnknownActionRestriction,
     BlockedAfterNavigation,
     CancelBeforeFirstNavigation,
     CancelBeforeRetryNavigation,
@@ -5435,8 +5463,10 @@ const FACEBOOK_REELS_ENTRY_TEST_TIMEOUT_MS: u64 = 55_000;
 #[derive(Clone, Copy)]
 enum FacebookEntryPageState {
     Feed,
+    UnknownFeed,
     Reels,
     Login,
+    Captcha,
     Drifted,
 }
 
@@ -5528,18 +5558,18 @@ async fn spawn_facebook_reels_entry_cdp_with_cancellation(
         let (stream, _) = listener.accept().await.expect("WebSocket request");
         let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
         let mut requests = Vec::new();
-        let mut state = if matches!(scenario, FacebookReelsEntryScenario::BlockedByLogin) {
-            FacebookEntryPageState::Login
-        } else {
-            FacebookEntryPageState::Feed
+        let mut state = match scenario {
+            FacebookReelsEntryScenario::BlockedByLogin => FacebookEntryPageState::Login,
+            FacebookReelsEntryScenario::BlockedByCaptcha => FacebookEntryPageState::Captcha,
+            FacebookReelsEntryScenario::UnknownActionRestriction => {
+                FacebookEntryPageState::UnknownFeed
+            }
+            _ => FacebookEntryPageState::Feed,
         };
         let mut navigation_count = 0_u32;
         let mut entry_advanced = false;
         let mut pending_identity_ready = false;
-        let mut reel_probe_count = 0_u32;
-        let mut next_target_moved = false;
         let mut foregrounded = false;
-        let mut post_move_probe_count = 0_u32;
         while let Some(message) = websocket.next().await {
             let Ok(Message::Text(text)) = message else {
                 break;
@@ -5550,23 +5580,13 @@ async fn spawn_facebook_reels_entry_cdp_with_cancellation(
                 navigation_count += 1;
                 state = match scenario {
                     FacebookReelsEntryScenario::FirstNavigationSucceeds
-                    | FacebookReelsEntryScenario::ReelsWithoutActiveVideo
-                    | FacebookReelsEntryScenario::AnonymousHorizontalAdvances
-                    | FacebookReelsEntryScenario::AnonymousVerticalAdvances
-                    | FacebookReelsEntryScenario::AnonymousHydratesBeforeCommit
-                    | FacebookReelsEntryScenario::AnonymousHydratesBeforeCommitWithoutCard
+                    | FacebookReelsEntryScenario::MissingActiveVideoSafe
                     | FacebookReelsEntryScenario::AnonymousHydratesAfterFirstKey
-                    | FacebookReelsEntryScenario::AnonymousMovesAtNextTarget
-                    | FacebookReelsEntryScenario::AnonymousMovesWithIdentityAtNextTarget
-                    | FacebookReelsEntryScenario::AnonymousMovesBeforeIdentity
-                    | FacebookReelsEntryScenario::AnonymousMovesThenSurfaceLost
-                    | FacebookReelsEntryScenario::AnonymousMovesThenDrifts
-                    | FacebookReelsEntryScenario::AnonymousMovesDriftsAndReturnsDuringHydration
                     | FacebookReelsEntryScenario::AnonymousNeverMoves
-                    | FacebookReelsEntryScenario::AnonymousDisappears
-                    | FacebookReelsEntryScenario::AnonymousAmbiguous
                     | FacebookReelsEntryScenario::AnonymousUnsafe
-                    | FacebookReelsEntryScenario::AnonymousInputSafetyMissing => {
+                    | FacebookReelsEntryScenario::AnonymousInputSafetyMissing
+                    | FacebookReelsEntryScenario::BlockedByConsent
+                    | FacebookReelsEntryScenario::UnknownActionRestriction => {
                         FacebookEntryPageState::Reels
                     }
                     FacebookReelsEntryScenario::RetryNavigationSucceeds
@@ -5588,25 +5608,6 @@ async fn spawn_facebook_reels_entry_cdp_with_cancellation(
             if request["method"] == "Page.bringToFront" {
                 foregrounded = true;
             }
-            if request["method"] == "Page.bringToFront"
-                && matches!(
-                    scenario,
-                    FacebookReelsEntryScenario::AnonymousMovesBeforeIdentity
-                        | FacebookReelsEntryScenario::AnonymousMovesThenDrifts
-                )
-                && entry_advanced
-            {
-                pending_identity_ready = true;
-            }
-            if request["method"] == "Page.bringToFront"
-                && matches!(
-                    scenario,
-                    FacebookReelsEntryScenario::AnonymousMovesThenSurfaceLost
-                )
-                && entry_advanced
-            {
-                state = FacebookEntryPageState::Feed;
-            }
             if request["method"] == "Input.dispatchKeyEvent"
                 && request["params"]["type"] == "rawKeyDown"
                 && facebook_reels_entry_key(scenario)
@@ -5617,7 +5618,7 @@ async fn spawn_facebook_reels_entry_cdp_with_cancellation(
                     FacebookReelsEntryScenario::AnonymousHydratesAfterFirstKey
                 ) {
                     pending_identity_ready = true;
-                } else {
+                } else if !matches!(scenario, FacebookReelsEntryScenario::AnonymousNeverMoves) {
                     entry_advanced = true;
                 }
             }
@@ -5626,54 +5627,45 @@ async fn spawn_facebook_reels_entry_cdp_with_cancellation(
                 if expression.contains("\"kind\":\"page_probe\"") {
                     facebook_entry_page_probe_cdp(state)
                 } else if expression.contains("\"kind\":\"consent_probe\"") {
-                    facebook_consent_absent_cdp()
+                    if matches!(scenario, FacebookReelsEntryScenario::BlockedByConsent) {
+                        router_cdp(
+                            "consent_probe",
+                            json!({
+                                "present": true,
+                                "acceptAll": {"cx": 420.0, "cy": 680.0},
+                                "necessaryOnly": null,
+                                "acceptAllAmbiguous": false,
+                                "necessaryOnlyAmbiguous": false
+                            }),
+                        )
+                    } else {
+                        facebook_consent_absent_cdp()
+                    }
                 } else if expression.contains("\"kind\":\"reel_probe\"") {
-                    reel_probe_count += 1;
                     match state {
                         FacebookEntryPageState::Reels
                             if matches!(
                                 scenario,
-                                FacebookReelsEntryScenario::ReelsWithoutActiveVideo
+                                FacebookReelsEntryScenario::MissingActiveVideoSafe
                             ) =>
                         {
-                            router_cdp(
-                                "reel_probe",
-                                json!({"ok": false, "reason": "no_active_video"}),
-                            )
-                        }
-                        FacebookEntryPageState::Reels
-                            if matches!(
-                                scenario,
-                                FacebookReelsEntryScenario::AnonymousDisappears
-                            ) =>
-                        {
-                            if reel_probe_count == 1 {
-                                anonymous_reel_probe_cdp("video-1@element:1")
-                            } else {
-                                router_cdp(
-                                    "reel_probe",
-                                    json!({"ok": false, "reason": "no_active_video"}),
+                            if entry_advanced {
+                                reel_probe_cdp(
+                                    "https://www.facebook.com/reel/2",
+                                    "video-2@element:2",
                                 )
+                            } else {
+                                structureless_reel_probe_cdp("no_active_video", Some(true))
                             }
                         }
                         FacebookEntryPageState::Reels
                             if matches!(
                                 scenario,
-                                FacebookReelsEntryScenario::AnonymousAmbiguous
+                                FacebookReelsEntryScenario::AnonymousUnsafe
+                                    | FacebookReelsEntryScenario::BlockedByConsent
                             ) =>
                         {
-                            router_cdp(
-                                "reel_probe",
-                                json!({"ok": false, "reason": "ambiguous_target"}),
-                            )
-                        }
-                        FacebookEntryPageState::Reels
-                            if matches!(scenario, FacebookReelsEntryScenario::AnonymousUnsafe) =>
-                        {
-                            anonymous_reel_probe_with_safety_cdp(
-                                "video-1@element:1",
-                                Some(false),
-                            )
+                            anonymous_reel_probe_with_safety_cdp("video-1@element:1", Some(false))
                         }
                         FacebookEntryPageState::Reels
                             if matches!(
@@ -5686,74 +5678,25 @@ async fn spawn_facebook_reels_entry_cdp_with_cancellation(
                         FacebookEntryPageState::Reels
                             if matches!(
                                 scenario,
-                                FacebookReelsEntryScenario::AnonymousMovesDriftsAndReturnsDuringHydration
-                            ) && entry_advanced =>
+                                FacebookReelsEntryScenario::AnonymousHydratesAfterFirstKey
+                            ) =>
                         {
-                            post_move_probe_count += 1;
-                            match post_move_probe_count {
-                                1 | 2 => anonymous_reel_probe_cdp("video-2@element:2"),
-                                3 => reel_probe_cdp(
-                                    "https://www.facebook.com/reel/3",
-                                    "video-3@element:3",
-                                ),
-                                _ => reel_probe_cdp(
-                                    "https://www.facebook.com/reel/2",
-                                    "video-2@element:2",
-                                ),
-                            }
-                        }
-                        FacebookEntryPageState::Reels
-                            if facebook_reels_entry_axis(scenario).is_some() =>
-                        {
-                            if next_target_moved
-                                && matches!(
-                                    scenario,
-                                    FacebookReelsEntryScenario::AnonymousMovesAtNextTarget
-                                        | FacebookReelsEntryScenario::AnonymousMovesWithIdentityAtNextTarget
-                                )
-                            {
-                                reel_probe_cdp(
-                                    "https://www.facebook.com/reel/2",
-                                    "video-2@element:2",
-                                )
-                            } else if matches!(
-                                scenario,
-                                FacebookReelsEntryScenario::AnonymousHydratesBeforeCommit
-                                    | FacebookReelsEntryScenario::AnonymousHydratesBeforeCommitWithoutCard
-                                    | FacebookReelsEntryScenario::AnonymousHydratesAfterFirstKey
-                            ) && pending_identity_ready
-                            {
+                            if pending_identity_ready {
                                 reel_probe_cdp(
                                     "https://www.facebook.com/reel/1",
                                     "video-1@element:1",
                                 )
-                            } else if matches!(
-                                scenario,
-                                FacebookReelsEntryScenario::AnonymousMovesThenDrifts
-                            ) && entry_advanced
-                                && pending_identity_ready
-                            {
-                                reel_probe_cdp(
-                                    "https://www.facebook.com/reel/3",
-                                    "video-3@element:3",
-                                )
-                            } else if entry_advanced
-                                && (!matches!(
-                                    scenario,
-                                    FacebookReelsEntryScenario::AnonymousMovesBeforeIdentity
-                                        | FacebookReelsEntryScenario::AnonymousMovesThenSurfaceLost
-                                        | FacebookReelsEntryScenario::AnonymousMovesThenDrifts
-                                ) || pending_identity_ready)
-                            {
-                                reel_probe_cdp(
-                                    "https://www.facebook.com/reel/2",
-                                    "video-2@element:2",
-                                )
-                            } else if entry_advanced {
-                                anonymous_reel_probe_cdp("video-2@element:2")
                             } else {
                                 anonymous_reel_probe_cdp("video-1@element:1")
                             }
+                        }
+                        FacebookEntryPageState::Reels
+                            if matches!(
+                                scenario,
+                                FacebookReelsEntryScenario::AnonymousNeverMoves
+                            ) =>
+                        {
+                            anonymous_reel_probe_cdp("video-1@element:1")
                         }
                         FacebookEntryPageState::Reels => {
                             reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1")
@@ -5761,91 +5704,24 @@ async fn spawn_facebook_reels_entry_cdp_with_cancellation(
                         _ => router_cdp("reel_probe", json!({"ok": false, "reason": "not_reel"})),
                     }
                 } else if expression.contains("\"kind\":\"reel_cards\"") {
-                    let anonymous_unreportable = match scenario {
-                        FacebookReelsEntryScenario::ReelsWithoutActiveVideo
-                        | FacebookReelsEntryScenario::AnonymousDisappears
-                        | FacebookReelsEntryScenario::AnonymousAmbiguous
+                    match scenario {
+                        FacebookReelsEntryScenario::MissingActiveVideoSafe if entry_advanced => {
+                            reel_cards_cdp("https://www.facebook.com/reel/2")
+                        }
+                        FacebookReelsEntryScenario::MissingActiveVideoSafe
+                        | FacebookReelsEntryScenario::AnonymousNeverMoves
                         | FacebookReelsEntryScenario::AnonymousUnsafe
                         | FacebookReelsEntryScenario::AnonymousInputSafetyMissing
-                        | FacebookReelsEntryScenario::AnonymousHydratesBeforeCommitWithoutCard => {
-                            true
-                        }
-                        FacebookReelsEntryScenario::AnonymousHydratesBeforeCommit => {
-                            !pending_identity_ready
-                        }
-                        FacebookReelsEntryScenario::AnonymousMovesAtNextTarget
-                        | FacebookReelsEntryScenario::AnonymousMovesWithIdentityAtNextTarget => {
-                            !next_target_moved
+                        | FacebookReelsEntryScenario::BlockedByConsent => reel_empty_cards_cdp(),
+                        FacebookReelsEntryScenario::AnonymousHydratesAfterFirstKey
+                            if pending_identity_ready =>
+                        {
+                            reel_cards_cdp("https://www.facebook.com/reel/1")
                         }
                         FacebookReelsEntryScenario::AnonymousHydratesAfterFirstKey => {
-                            !pending_identity_ready
+                            reel_empty_cards_cdp()
                         }
-                        FacebookReelsEntryScenario::AnonymousMovesBeforeIdentity
-                        | FacebookReelsEntryScenario::AnonymousMovesThenSurfaceLost
-                        | FacebookReelsEntryScenario::AnonymousMovesThenDrifts => {
-                            !entry_advanced || !pending_identity_ready
-                        }
-                        _ if facebook_reels_entry_axis(scenario).is_some() => !entry_advanced,
-                        _ => false,
-                    };
-                    if anonymous_unreportable {
-                        reel_empty_cards_cdp()
-                    } else if matches!(
-                        scenario,
-                        FacebookReelsEntryScenario::AnonymousHydratesBeforeCommit
-                            | FacebookReelsEntryScenario::AnonymousHydratesAfterFirstKey
-                    ) {
-                        reel_cards_cdp("https://www.facebook.com/reel/1")
-                    } else if matches!(
-                        scenario,
-                        FacebookReelsEntryScenario::AnonymousMovesThenDrifts
-                    ) {
-                        reel_cards_cdp("https://www.facebook.com/reel/3")
-                    } else if facebook_reels_entry_axis(scenario).is_some() {
-                        reel_cards_cdp("https://www.facebook.com/reel/2")
-                    } else {
-                        reel_cards_cdp("https://www.facebook.com/reel/1")
-                    }
-                } else if expression.contains("\"kind\":\"reel_next_target\"") {
-                    if let Some(axis) = facebook_reels_entry_axis(scenario) {
-                        if matches!(
-                            scenario,
-                            FacebookReelsEntryScenario::AnonymousMovesAtNextTarget
-                                | FacebookReelsEntryScenario::AnonymousMovesWithIdentityAtNextTarget
-                        ) {
-                            next_target_moved = true;
-                            reel_axis_only_target_cdp(
-                                matches!(
-                                    scenario,
-                                    FacebookReelsEntryScenario::AnonymousMovesWithIdentityAtNextTarget
-                                )
-                                .then_some("https://www.facebook.com/reel/2"),
-                                "video-2@element:2",
-                                axis,
-                                "next_control_not_click_safe",
-                            )
-                        } else if matches!(
-                            scenario,
-                            FacebookReelsEntryScenario::AnonymousHydratesBeforeCommit
-                                | FacebookReelsEntryScenario::AnonymousHydratesBeforeCommitWithoutCard
-                        ) {
-                            pending_identity_ready = true;
-                            reel_axis_only_target_cdp(
-                                Some("https://www.facebook.com/reel/1"),
-                                "video-1@element:1",
-                                axis,
-                                "next_control_not_click_safe",
-                            )
-                        } else {
-                            let video_key = if entry_advanced {
-                                "video-2@element:2"
-                            } else {
-                                "video-1@element:1"
-                            };
-                            anonymous_reel_next_target_cdp(video_key, axis)
-                        }
-                    } else {
-                        json!({})
+                        _ => reel_cards_cdp("https://www.facebook.com/reel/1"),
                     }
                 } else {
                     json!({})
@@ -5853,7 +5729,7 @@ async fn spawn_facebook_reels_entry_cdp_with_cancellation(
             } else {
                 json!({})
             };
-            let cancel_after_probe = router_kind(&request).as_deref() == Some("consent_probe")
+            let cancel_after_probe = router_kind(&request).as_deref() == Some("page_probe")
                 && match scenario {
                     FacebookReelsEntryScenario::CancelBeforeFirstNavigation => {
                         navigation_count == 0
@@ -5879,33 +5755,11 @@ async fn spawn_facebook_reels_entry_cdp_with_cancellation(
     (port, server)
 }
 
-fn facebook_reels_entry_axis(scenario: FacebookReelsEntryScenario) -> Option<&'static str> {
-    match scenario {
-        FacebookReelsEntryScenario::AnonymousHorizontalAdvances
-        | FacebookReelsEntryScenario::AnonymousMovesBeforeIdentity
-        | FacebookReelsEntryScenario::AnonymousMovesThenSurfaceLost
-        | FacebookReelsEntryScenario::AnonymousMovesThenDrifts
-        | FacebookReelsEntryScenario::AnonymousMovesDriftsAndReturnsDuringHydration
-        | FacebookReelsEntryScenario::AnonymousHydratesBeforeCommit
-        | FacebookReelsEntryScenario::AnonymousHydratesBeforeCommitWithoutCard
-        | FacebookReelsEntryScenario::AnonymousHydratesAfterFirstKey
-        | FacebookReelsEntryScenario::AnonymousMovesAtNextTarget
-        | FacebookReelsEntryScenario::AnonymousMovesWithIdentityAtNextTarget
-        | FacebookReelsEntryScenario::AnonymousNeverMoves => Some("horizontal"),
-        FacebookReelsEntryScenario::AnonymousVerticalAdvances => Some("vertical"),
-        _ => None,
-    }
-}
-
 fn facebook_reels_entry_key(scenario: FacebookReelsEntryScenario) -> Option<&'static str> {
     match scenario {
-        FacebookReelsEntryScenario::AnonymousHorizontalAdvances
-        | FacebookReelsEntryScenario::AnonymousMovesBeforeIdentity
-        | FacebookReelsEntryScenario::AnonymousMovesThenSurfaceLost
-        | FacebookReelsEntryScenario::AnonymousMovesThenDrifts
-        | FacebookReelsEntryScenario::AnonymousMovesDriftsAndReturnsDuringHydration
-        | FacebookReelsEntryScenario::AnonymousHydratesAfterFirstKey => Some("ArrowRight"),
-        FacebookReelsEntryScenario::AnonymousVerticalAdvances => Some("ArrowDown"),
+        FacebookReelsEntryScenario::MissingActiveVideoSafe
+        | FacebookReelsEntryScenario::AnonymousHydratesAfterFirstKey
+        | FacebookReelsEntryScenario::AnonymousNeverMoves => Some("ArrowRight"),
         _ => None,
     }
 }
@@ -5913,8 +5767,10 @@ fn facebook_reels_entry_key(scenario: FacebookReelsEntryScenario) -> Option<&'st
 fn facebook_entry_page_probe_cdp(state: FacebookEntryPageState) -> Value {
     let (path, page_kind, blocking_kind) = match state {
         FacebookEntryPageState::Feed => ("/", "home", None),
+        FacebookEntryPageState::UnknownFeed => ("/", "home", Some("unknown")),
         FacebookEntryPageState::Reels => ("/reels/", "unknown", None),
         FacebookEntryPageState::Login => ("/login/", "login", Some("login")),
+        FacebookEntryPageState::Captcha => ("/checkpoint/", "unknown", Some("captcha")),
         FacebookEntryPageState::Drifted => ("/notifications/", "unknown", None),
     };
     router_cdp(
@@ -5930,7 +5786,7 @@ fn facebook_entry_page_probe_cdp(state: FacebookEntryPageState) -> Value {
                 "feedCardCount": 1,
                 "noteDetailCount": 0,
                 "loginWallCount": u32::from(blocking_kind == Some("login")),
-                "captchaSignalCount": 0,
+                "captchaSignalCount": u32::from(blocking_kind == Some("captcha")),
                 "dialogCount": 0,
                 "profileSignalCount": 0,
                 "notificationSignalCount": 0,
@@ -5950,18 +5806,14 @@ fn reel_empty_cards_cdp() -> Value {
 }
 
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 enum FacebookReelKeyScenario {
     RightMoves,
-    RightMovesIdentityPending,
-    RightMissesDownMoves,
-    RightMovesLate,
-    NeitherMoves,
+    RightMissesThenDownMoves,
+    NeverMoves,
     UnsafeFocus,
-    UnsafeNextTarget,
-    VerticalWheelMoves,
-    VerticalNeitherMoves,
-    VerticalSecondCommandMoves,
+    InputSafetyMissing,
+    MissingActiveVideoSafe,
+    AmbiguousActiveVideoSafe,
 }
 
 async fn run_facebook_reel_active_key_probe(
@@ -5997,18 +5849,32 @@ async fn run_facebook_reel_active_key_probe(
 async fn spawn_facebook_reel_active_key_probe_cdp(
     scenario: FacebookReelKeyScenario,
 ) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
+    spawn_facebook_reel_active_key_probe_cdp_with_cancellation(scenario, None).await
+}
+
+async fn spawn_facebook_reel_active_key_probe_cdp_with_cancellation(
+    scenario: FacebookReelKeyScenario,
+    cancellation_after_first_probe: Option<Arc<AtomicBool>>,
+) -> (u16, tokio::task::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let port = listener.local_addr().expect("address").port();
+    let initial_url = if matches!(
+        scenario,
+        FacebookReelKeyScenario::MissingActiveVideoSafe
+            | FacebookReelKeyScenario::AmbiguousActiveVideoSafe
+    ) {
+        "https://www.facebook.com/reel/"
+    } else {
+        "https://www.facebook.com/reel/1"
+    };
     let server = tokio::spawn(async move {
-        serve_target_listing_for(&listener, port, "https://www.facebook.com/reel/1").await;
+        serve_target_listing_for(&listener, port, initial_url).await;
         let (stream, _) = listener.accept().await.expect("WebSocket request");
         let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
         let mut requests = Vec::new();
-        let mut last_key = String::new();
-        let mut probes_after_key = 0_u32;
-        let mut moved = false;
         let mut forward_key_count = 0_u32;
-        let mut pending_identity_ready = false;
+        let mut reel_probe_count = 0_u32;
+        let mut current_reel = 1_u32;
         while let Some(message) = websocket.next().await {
             let Ok(Message::Text(text)) = message else {
                 break;
@@ -6019,44 +5885,27 @@ async fn spawn_facebook_reel_active_key_probe_cdp(
                 && request["params"]["type"] == "rawKeyDown"
             {
                 forward_key_count += 1;
-                last_key = request["params"]["key"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned();
-                probes_after_key = 0;
-                moved = matches!(
+                let key = request["params"]["key"].as_str().unwrap_or_default();
+                let key_moves = (matches!(scenario, FacebookReelKeyScenario::RightMoves)
+                    && key == "ArrowRight")
+                    || (matches!(scenario, FacebookReelKeyScenario::RightMissesThenDownMoves)
+                        && key == "ArrowDown"
+                        && forward_key_count >= 2);
+                if key_moves {
+                    current_reel = current_reel.saturating_add(1);
+                } else if matches!(
                     scenario,
-                    FacebookReelKeyScenario::RightMoves
-                        | FacebookReelKeyScenario::RightMovesIdentityPending
-                ) && last_key == "ArrowRight"
-                    || matches!(scenario, FacebookReelKeyScenario::RightMissesDownMoves)
-                        && last_key == "ArrowDown"
-                    || matches!(
-                        scenario,
-                        FacebookReelKeyScenario::VerticalSecondCommandMoves
-                    ) && last_key == "ArrowDown"
-                        && forward_key_count >= 2;
-            } else if request["method"] == "Input.dispatchMouseEvent"
-                && request["params"]["type"] == "mouseWheel"
-                && matches!(scenario, FacebookReelKeyScenario::VerticalWheelMoves)
-            {
-                moved = true;
-            }
-            if request["method"] == "Page.bringToFront"
-                && matches!(scenario, FacebookReelKeyScenario::RightMovesIdentityPending)
-                && moved
-            {
-                pending_identity_ready = true;
+                    FacebookReelKeyScenario::MissingActiveVideoSafe
+                        | FacebookReelKeyScenario::AmbiguousActiveVideoSafe
+                ) && key == "ArrowRight"
+                {
+                    current_reel = 2;
+                }
             }
             let result = if request["method"] == "Runtime.evaluate" {
                 let expression = request["params"]["expression"].as_str().unwrap_or_default();
                 if expression.contains("\"kind\":\"reel_probe\"") {
-                    if !last_key.is_empty() {
-                        probes_after_key += 1;
-                    }
-                    let late_move = matches!(scenario, FacebookReelKeyScenario::RightMovesLate)
-                        && last_key == "ArrowRight"
-                        && probes_after_key >= 7;
+                    reel_probe_count += 1;
                     if matches!(scenario, FacebookReelKeyScenario::UnsafeFocus) {
                         router_cdp(
                             "reel_probe",
@@ -6067,60 +5916,30 @@ async fn spawn_facebook_reel_active_key_probe_cdp(
                                 "inputSafe": false
                             }),
                         )
-                    } else if matches!(scenario, FacebookReelKeyScenario::RightMovesIdentityPending)
-                        && moved
-                        && !pending_identity_ready
+                    } else if matches!(scenario, FacebookReelKeyScenario::InputSafetyMissing) {
+                        router_cdp(
+                            "reel_probe",
+                            json!({
+                                "ok": true,
+                                "noteId": "https://www.facebook.com/reel/1",
+                                "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0}
+                            }),
+                        )
+                    } else if current_reel == 1
+                        && matches!(scenario, FacebookReelKeyScenario::MissingActiveVideoSafe)
                     {
-                        reel_probe_cdp("https://www.facebook.com/reel/1", "video-2@element:2")
-                    } else if moved || late_move {
-                        reel_probe_cdp("https://www.facebook.com/reel/2", "video-2@element:2")
+                        structureless_reel_probe_cdp("no_active_video", Some(true))
+                    } else if current_reel == 1
+                        && matches!(scenario, FacebookReelKeyScenario::AmbiguousActiveVideoSafe)
+                    {
+                        structureless_reel_probe_cdp("ambiguous_target", Some(true))
                     } else {
-                        reel_probe_cdp("https://www.facebook.com/reel/1", "video-1@element:1")
-                    }
-                } else if expression.contains("\"kind\":\"reel_next_target\"") {
-                    if matches!(scenario, FacebookReelKeyScenario::UnsafeNextTarget) {
-                        router_cdp(
-                            "reel_next_target",
-                            json!({
-                                "ok": true,
-                                "noteId": "https://www.facebook.com/reel/1",
-                                "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
-                                "inputSafe": false,
-                                "found": false,
-                                "ambiguous": false
-                            }),
-                        )
-                    } else if matches!(
-                        scenario,
-                        FacebookReelKeyScenario::VerticalWheelMoves
-                            | FacebookReelKeyScenario::VerticalNeitherMoves
-                            | FacebookReelKeyScenario::VerticalSecondCommandMoves
-                    ) {
-                        reel_next_target_cdp(
-                            "https://www.facebook.com/reel/1",
-                            "video-1@element:1",
-                            "vertical",
-                            true,
-                        )
-                    } else {
-                        router_cdp(
-                            "reel_next_target",
-                            json!({
-                                "ok": true,
-                                "noteId": "https://www.facebook.com/reel/1",
-                                "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
-                                "inputSafe": true,
-                                "found": false,
-                                "ambiguous": true
-                            }),
-                        )
+                        let note_id = format!("https://www.facebook.com/reel/{current_reel}");
+                        reel_probe_cdp(&note_id, "video@element")
                     }
                 } else if expression.contains("\"kind\":\"reel_cards\"") {
-                    reel_cards_cdp(if moved {
-                        "https://www.facebook.com/reel/2"
-                    } else {
-                        "https://www.facebook.com/reel/1"
-                    })
+                    let note_id = format!("https://www.facebook.com/reel/{current_reel}");
+                    reel_cards_cdp(&note_id)
                 } else {
                     json!({})
                 }
@@ -6128,6 +5947,14 @@ async fn spawn_facebook_reel_active_key_probe_cdp(
                 json!({})
             };
             requests.push(request);
+            if reel_probe_count == 1
+                && cancellation_after_first_probe.is_some()
+                && router_kind(requests.last().expect("captured request")).as_deref()
+                    == Some("reel_probe")
+                && let Some(cancellation) = cancellation_after_first_probe.as_ref()
+            {
+                cancellation.store(true, Ordering::Release);
+            }
             websocket
                 .send(Message::Text(
                     json!({"id":id,"result":result}).to_string().into(),
@@ -6140,38 +5967,25 @@ async fn spawn_facebook_reel_active_key_probe_cdp(
     (port, server)
 }
 
-async fn spawn_facebook_reel_missing_active_video_cdp() -> (u16, tokio::task::JoinHandle<Vec<Value>>)
-{
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
-    let port = listener.local_addr().expect("address").port();
-    let server = tokio::spawn(async move {
-        serve_target_listing_for(&listener, port, "https://www.facebook.com/reel/1").await;
-        let (stream, _) = listener.accept().await.expect("WebSocket request");
-        let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
-        let mut requests = Vec::new();
-        for _ in 0..3 {
-            requests.push(respond_to_call_capture(&mut websocket, json!({})).await);
-        }
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                router_cdp("reel_probe", json!({"ok": false, "reason": "no_target"})),
-            )
-            .await,
-        );
-        let _ = websocket.close(None).await;
-        requests
-    });
-    (port, server)
-}
-
 fn reel_probe_cdp(note_id: &str, _video_key: &str) -> Value {
     json!({"result":{"value":router_result(
         "reel_probe",
         json!({
             "ok": true,
             "noteId": note_id,
-            "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0}
+            "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
+            "inputSafe": true
+        })
+    )}})
+}
+
+fn structureless_reel_probe_cdp(reason: &str, input_safe: Option<bool>) -> Value {
+    json!({"result":{"value":router_result(
+        "reel_probe",
+        json!({
+            "ok": false,
+            "reason": reason,
+            "inputSafe": input_safe
         })
     )}})
 }
@@ -6187,48 +6001,6 @@ fn anonymous_reel_probe_with_safety_cdp(_video_key: &str, input_safe: Option<boo
             "ok": true,
             "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
             "inputSafe": input_safe
-        })
-    )}})
-}
-
-fn anonymous_reel_next_target_cdp(_video_key: &str, axis: &str) -> Value {
-    reel_axis_only_target_cdp(None, _video_key, axis, "next_control_not_click_safe")
-}
-
-fn reel_axis_only_target_cdp(
-    note_id: Option<&str>,
-    _video_key: &str,
-    axis: &str,
-    reason: &str,
-) -> Value {
-    json!({"result":{"value":router_result(
-        "reel_next_target",
-        json!({
-            "ok": true,
-            "noteId": note_id,
-            "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
-            "inputSafe": true,
-            "found": false,
-            "ambiguous": false,
-            "axis": axis,
-            "reason": reason
-        })
-    )}})
-}
-
-fn reel_next_target_cdp(note_id: &str, _video_key: &str, axis: &str, found: bool) -> Value {
-    json!({"result":{"value":router_result(
-        "reel_next_target",
-        json!({
-            "ok": true,
-            "noteId": note_id,
-            "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
-            "inputSafe": true,
-            "found": found,
-            "ambiguous": false,
-            "axis": axis,
-            "cx": found.then_some(1_230.0),
-            "cy": found.then_some(400.0)
         })
     )}})
 }

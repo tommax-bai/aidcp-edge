@@ -10,6 +10,8 @@
   // cookie 政策文案判据。既用于「页面上有没有同意条」，也用于界定按钮采集框——
   // 采集框必须由同意语义自身界定，不能由「是不是对话框」界定。
   const consentCookieCopy=/cookie\s*政策|cookie\s*policy|允许\s*facebook\s*使用\s*cookie|允许使用\s*cookie|使用\s*cookie|allow\s+the\s+use\s+of\s+cookies|use\s+of\s+cookies|allow\s+all\s+cookies|允许所有\s*cookie/i;
+  const consentAcceptAllLabel=/^(允许所有\s*cookie|允许全部\s*cookie|接受所有\s*cookie|同意所有\s*cookie|允许\s*facebook\s*使用\s*cookie|允许使用\s*cookie|allow\s+all\s+cookies|accept\s+all\s+cookies|allow\s+the\s+use\s+of\s+cookies)$/i;
+  const consentNecessaryOnlyLabel=/^(仅允许必要\s*cookie|只允许必要\s*cookie|仅接受必要\s*cookie|拒绝非必要\s*cookie|only\s+allow\s+essential\s+cookies|decline\s+optional\s+cookies|refuse\s+non-?essential\s+cookies)$/i;
   const consentProbe=()=>{
     const body=text(document.body,5000);
     const path=location.pathname.toLowerCase();
@@ -25,8 +27,8 @@
     const scope=all('[role="dialog"],[aria-modal="true"]').filter(visible)
       .find((container)=>consentCookieCopy.test(text(container,5000)))||document;
     const buttons=all('button,[role="button"],a[role="button"],div[aria-label],span[aria-label]',scope).filter(visible);
-    const acceptAll=buttons.filter((el)=>/^(允许所有\s*cookie|允许全部\s*cookie|接受所有\s*cookie|同意所有\s*cookie|允许\s*facebook\s*使用\s*cookie|允许使用\s*cookie|allow\s+all\s+cookies|accept\s+all\s+cookies|allow\s+the\s+use\s+of\s+cookies)$/i.test(label(el)));
-    const necessaryOnly=buttons.filter((el)=>/^(仅允许必要\s*cookie|只允许必要\s*cookie|仅接受必要\s*cookie|拒绝非必要\s*cookie|only\s+allow\s+essential\s+cookies|decline\s+optional\s+cookies|refuse\s+non-?essential\s+cookies)$/i.test(label(el)));
+    const acceptAll=buttons.filter((el)=>consentAcceptAllLabel.test(label(el)));
+    const necessaryOnly=buttons.filter((el)=>consentNecessaryOnlyLabel.test(label(el)));
     // 存在性判定的第四条合取项：至少有一个可点的接受按钮。缺了它，
     // 「cookie 文案在页但按钮词表全 miss」会被判成同意条阻断而不是放行；
     // 同时带 cookie 文案的登录墙也会因 present 假真而拿不到 login_required。

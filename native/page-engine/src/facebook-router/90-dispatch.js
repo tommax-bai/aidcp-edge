@@ -1,6 +1,6 @@
   const blocking=blockingProbe();
   const blocked=blocker(blocking);
-  if(!['identity_read','page_probe','auth_probe','auth_focus_guard','auth_totp_readback','auth_postcondition','consent_probe','feed_probe','identity_candidates','feed_home_target','feed_recovery_target','feed_like_target_probe','feed_like_commit','feed_like_verify','feed_like_picker_probe','feed_like_clear','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_action_probe','comment_editor_probe','comment_ack_probe','join_probe','join_click','first_post_group_root_probe','publish_home_probe','publish_entry_probe','publish_editor_probe','publish_bound_editor_probe','publish_upload_target_probe','publish_upload_preview_probe','publish_submit_probe','publish_submitted_probe','reel_probe','reel_next_target','reel_cards'].includes(kind)&&blocked){
+  if(!['identity_read','page_probe','auth_probe','auth_focus_guard','auth_totp_readback','auth_postcondition','consent_probe','feed_probe','identity_candidates','feed_home_target','feed_recovery_target','feed_like_target_probe','feed_like_commit','feed_like_verify','feed_like_picker_probe','feed_like_clear','like_probe','like_primary_commit','like_verify','like_picker_probe','follow_probe','comment_action_probe','comment_editor_probe','comment_ack_probe','join_probe','join_click','first_post_group_root_probe','publish_home_probe','publish_entry_probe','publish_editor_probe','publish_bound_editor_probe','publish_upload_target_probe','publish_upload_preview_probe','publish_submit_probe','publish_submitted_probe','reel_probe','reel_cards'].includes(kind)&&blocked){
     return fail(kind||'page',blocked);
   }
   if(kind==='auth_probe')return done({kind:'facebook_auth_observation',value:await authProbeBase(true)});
@@ -37,8 +37,7 @@
   if(kind==='publish_upload_preview_probe')return done({kind:'point_target',value:publishUploadPreviewProbe()});
   if(kind==='publish_submit_probe')return done({kind:'publish_submit_probe',value:publishSubmitProbe()});
   if(kind==='publish_submitted_probe')return done({kind:'publish_submitted_probe',value:publishSubmittedProbe()});
-  if(kind==='reel_probe')return done({kind:'reel_probe',value:reelProbeValue(activeReel())});
-  if(kind==='reel_next_target')return done({kind:'reel_next_target',value:reelNextTarget()});
+  if(kind==='reel_probe')return done({kind:'reel_probe',value:safeReelProbeValue()});
   if(kind==='reel_cards')return done(await feedCards());
   if(kind==='page_probe'){
     const surface=classify();

@@ -206,7 +206,7 @@ async fn execute_facebook_reels_entry(
     deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
     let initial_page = probe_facebook_page(session).await?;
-    if let Some(output) = facebook_reels_entry_blocker(session, command, &initial_page).await? {
+    if let Some(output) = facebook_reels_entry_route_blocker(session, command, &initial_page)? {
         return Ok((EffectPhase::NotStarted, output));
     }
     if let Some(result) = facebook_reels_entry_route_gate(cancellation, deadline_unix_ms, false)? {
@@ -235,7 +235,7 @@ async fn execute_facebook_reels_entry(
     }
 
     let unchanged_page = probe_facebook_page(session).await?;
-    if let Some(output) = facebook_reels_entry_blocker(session, command, &unchanged_page).await? {
+    if let Some(output) = facebook_reels_entry_route_blocker(session, command, &unchanged_page)? {
         return Ok((EffectPhase::Ambiguous, output));
     }
     if !facebook_same_page_context(&initial_page, &unchanged_page) {
@@ -266,7 +266,7 @@ async fn execute_facebook_reels_entry(
     }
 
     let retry_page = probe_facebook_page(session).await?;
-    if let Some(output) = facebook_reels_entry_blocker(session, command, &retry_page).await? {
+    if let Some(output) = facebook_reels_entry_route_blocker(session, command, &retry_page)? {
         return Ok((EffectPhase::Ambiguous, output));
     }
     if !facebook_same_page_context(&initial_page, &retry_page) {
@@ -300,7 +300,7 @@ async fn execute_facebook_reels_entry(
         .await;
     }
     let final_page = probe_facebook_page(session).await?;
-    if let Some(output) = facebook_reels_entry_blocker(session, command, &final_page).await? {
+    if let Some(output) = facebook_reels_entry_route_blocker(session, command, &final_page)? {
         return Ok((EffectPhase::Ambiguous, output));
     }
     Ok(facebook_scroll_failure(
@@ -338,16 +338,28 @@ fn facebook_reels_entry_route_gate(
     Ok(None)
 }
 
-async fn facebook_reels_entry_blocker(
-    session: &mut EngineSession,
+fn facebook_reels_entry_route_blocker(
+    session: &EngineSession,
     command: &NativeCommand,
     page: &crate::probe::ProbeResult,
 ) -> Result<Option<CommandOutput>, EngineError> {
-    let reason = match page.blocking_kind.as_deref() {
-        Some("login") => Some("login_required"),
-        Some("captcha") => Some("blocked_by_captcha"),
-        Some("unknown") => Some("blocked_by_unknown"),
-        _ => None,
+    let path = page.path.to_ascii_lowercase();
+    let reason = if matches!(
+        path.as_str(),
+        "/login" | "/login.php" | "/recover" | "/two_step_verification"
+    ) || path.starts_with("/login/")
+        || path.starts_with("/recover/")
+        || path.starts_with("/two_step_verification/")
+    {
+        Some("login_required")
+    } else if path == "/checkpoint" || path.starts_with("/checkpoint/") {
+        Some(if page.blocking_kind.as_deref() == Some("captcha") {
+            "blocked_by_captcha"
+        } else {
+            "blocked_by_unknown"
+        })
+    } else {
+        None
     };
     if let Some(reason) = reason {
         return facebook_gate_failure(session, command, reason).map(Some);
@@ -357,10 +369,6 @@ async fn facebook_reels_entry_blocker(
         "https://www.facebook.com" | "https://facebook.com"
     ) {
         return facebook_gate_failure(session, command, "target_not_found").map(Some);
-    }
-    let consent = probe_facebook_consent(session).await?;
-    if consent.present {
-        return facebook_gate_failure(session, command, "blocked_by_consent").map(Some);
     }
     Ok(None)
 }

@@ -76,57 +76,6 @@ impl FacebookReelProbe {
         self.reason.as_deref() != Some("not_reel")
     }
 
-    pub fn is_unique_anonymous_video(&self) -> bool {
-        self.ok && self.note_id.is_none()
-    }
-
-    pub fn is_keyboard_input_safe(&self) -> bool {
-        self.input_safe != Some(false)
-    }
-
-    pub fn is_explicitly_keyboard_input_safe(&self) -> bool {
-        self.input_safe == Some(true)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum FacebookReelAxis {
-    Vertical,
-    Horizontal,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct FacebookReelNextTarget {
-    pub ok: bool,
-    #[serde(default)]
-    pub reason: Option<String>,
-    #[serde(default)]
-    pub note_id: Option<String>,
-    #[serde(default)]
-    pub video_rect: Option<FacebookReelRect>,
-    #[serde(default)]
-    pub input_safe: Option<bool>,
-    #[serde(default)]
-    pub found: bool,
-    #[serde(default)]
-    pub ambiguous: bool,
-    #[serde(default)]
-    pub cx: Option<f64>,
-    #[serde(default)]
-    pub cy: Option<f64>,
-    #[serde(default)]
-    pub label: Option<String>,
-    #[serde(default)]
-    pub axis: Option<FacebookReelAxis>,
-}
-
-impl FacebookReelNextTarget {
-    pub fn is_keyboard_input_safe(&self) -> bool {
-        self.input_safe != Some(false)
-    }
-
     pub fn is_explicitly_keyboard_input_safe(&self) -> bool {
         self.input_safe == Some(true)
     }
@@ -740,10 +689,6 @@ pub fn reel_probe_expression() -> Result<String, EngineError> {
     router_expression(json!({ "kind": "reel_probe", "params": {} }))
 }
 
-pub fn reel_next_target_expression() -> Result<String, EngineError> {
-    router_expression(json!({ "kind": "reel_next_target", "params": {} }))
-}
-
 pub fn reel_cards_expression() -> Result<String, EngineError> {
     router_expression(json!({ "kind": "reel_cards", "params": {} }))
 }
@@ -788,11 +733,6 @@ pub fn result_from_cdp(result: &Value) -> Result<BrowserCommandResult, EngineErr
 pub fn reel_probe_from_cdp(result: &Value) -> Result<FacebookReelProbe, EngineError> {
     let result = result_from_cdp(result)?;
     typed_internal_value(result.output, "reel_probe")
-}
-
-pub fn reel_next_target_from_cdp(result: &Value) -> Result<FacebookReelNextTarget, EngineError> {
-    let result = result_from_cdp(result)?;
-    typed_internal_value(result.output, "reel_next_target")
 }
 
 pub fn feed_probe_from_cdp(result: &Value) -> Result<FacebookFeedProbe, EngineError> {
@@ -1368,45 +1308,6 @@ mod tests {
             ..anonymous_before.clone()
         };
         assert!(hydrated.moved_from(&anonymous_before));
-    }
-
-    #[test]
-    fn reel_next_target_decodes_only_declared_navigation_axes() {
-        let vertical: FacebookReelNextTarget = serde_json::from_value(json!({
-            "ok": true,
-            "noteId": "https://www.facebook.com/reel/1",
-            "inputSafe": true,
-            "found": true,
-            "ambiguous": false,
-            "cx": 1200.0,
-            "cy": 400.0,
-            "label": "Next",
-            "axis": "vertical"
-        }))
-        .expect("vertical target");
-        assert_eq!(vertical.axis, Some(FacebookReelAxis::Vertical));
-        assert!(vertical.is_keyboard_input_safe());
-
-        let horizontal: FacebookReelNextTarget = serde_json::from_value(json!({
-            "ok": true,
-            "inputSafe": false,
-            "found": false,
-            "ambiguous": false,
-            "axis": "horizontal"
-        }))
-        .expect("horizontal target");
-        assert_eq!(horizontal.axis, Some(FacebookReelAxis::Horizontal));
-        assert!(!horizontal.is_keyboard_input_safe());
-
-        assert!(
-            serde_json::from_value::<FacebookReelNextTarget>(json!({
-                "ok": true,
-                "found": false,
-                "ambiguous": false,
-                "axis": "diagonal"
-            }))
-            .is_err()
-        );
     }
 
     #[test]

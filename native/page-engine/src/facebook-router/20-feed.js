@@ -119,17 +119,20 @@
   const feedCards=async()=>{
     const cards=[];
     const seen=new Set();
-    const active=reelSurface()?activeReel():null;
-    const articles=active&&active.ok&&active.root?[active.root]:reelSurface()?[]:topArticles();
+    const reels=reelSurface();
+    const active=reels?safeActiveReel():null;
+    const articles=active&&active.ok&&active.root?[active.root]:reels?[]:topArticles();
     for(const article of articles){
-      const card=await cardOf(article,cards.length,active&&active.ok?active.noteId:'');
+      let card=null;
+      try{card=await cardOf(article,cards.length,active&&active.ok?active.noteId:'');}
+      catch(error){if(!reels)throw error;}
       const id=cardDedupeKey(card);
       if(!card||!id||seen.has(id))continue;
       seen.add(id);
       cards.push(card);
       if(cards.length>=60)break;
     }
-    const listKind=reelSurface()?'reels':'feed';
+    const listKind=reels?'reels':'feed';
     const generation=[
       location.pathname,
       active&&active.ok?active.noteId||'':'',
