@@ -87,6 +87,7 @@ function timingDeclarationDrift(
 function harness(options: {
   platform: 'xiaohongshu' | 'facebook';
   clock?: () => number;
+  random?: () => number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 } & {
   execute?: (
@@ -95,18 +96,20 @@ function harness(options: {
   ) => Promise<NativePageCommandExecution>;
 }) {
   const executions: NativePageCommand[] = [];
+  const runtimeTimeouts: number[] = [];
   const actions: ActionCompletedPayload[] = [];
   const logs: string[] = [];
   const runtime = {
     async execute(
       _ownerId: string,
       command: NativePageCommand,
-      _timeoutMs?: number,
+      timeoutMs?: number,
       _signal?: AbortSignal,
       _commitWindowHandler?: unknown,
       onDispatched?: () => void,
     ) {
       executions.push(command);
+      runtimeTimeouts.push(timeoutMs ?? 0);
       if (options.execute) return options.execute(command, onDispatched);
       onDispatched?.();
       if (command.kind === 'note_open') {
@@ -160,11 +163,11 @@ function harness(options: {
     startupId: 'startup-pacing-test',
     platform: options.platform,
     clock: options.clock ?? (() => 1_000),
-    random: () => 0.25, // gaussian(0.25,0.25) ≈ 0 ⇒ jitterAround 恒等，断言可读
+    random: options.random ?? (() => 0.25), // gaussian(0.25,0.25) ≈ 0 ⇒ jitterAround 恒等，断言可读
     sleep: options.sleep,
     logger: (line: string) => { logs.push(line); },
   });
-  return { session, executions, actions, logs };
+  return { session, executions, runtimeTimeouts, actions, logs };
 }
 
 /** 有界等待：缺了它，一条「本该等却没等」的回归会把用例挂死，而不是给出一行红。 */
@@ -282,6 +285,66 @@ test('每条登记为消费停留的命令，都以内容开始展示的时刻�
     await h.session.onCloudCommand(envelope(type, { reason: 'r', dwellMs: 6_000 }));
     assert.deepEqual(waits, [6_000], `${kind} 收下了云端停留却没有补足`);
   }
+});
+
+test('Facebook page_scroll 使用 11s 中心的有界采样、只补已用时间差额并保留独立 180s 执行预算', async () => {
+  let now = 1_000;
+  const waits: number[] = [];
+  let releaseSleep: (() => void) | undefined;
+  let markSleepStarted: (() => void) | undefined;
+  const sleepStarted = new Promise<void>((resolve) => { markSleepStarted = resolve; });
+  const h = harness({
+    platform: 'facebook',
+    clock: () => now,
+    random: () => 0.25,
+    sleep: async (ms) => {
+      waits.push(ms);
+      markSleepStarted?.();
+      await new Promise<void>((resolve) => { releaseSleep = resolve; });
+    },
+  });
+  await h.session.start();
+  h.logs.length = 0;
+  h.runtimeTimeouts.length = 0;
+  now = 3_000;
+
+  const pending = h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 11_000 }));
+  await within(sleepStarted, 100, 'Facebook dwell 等待应在 Native 执行前开始');
+  assert.deepEqual(waits, [9_000], '11s 目标减去已用 2s，只补 9s');
+  assert.equal(h.executions.filter((command) => command.kind === 'page_scroll').length, 0, '补等完成前不得启动页面命令');
+  assert.ok(
+    h.logs.some((line) => line.includes('event=command_dwell')
+      && line.includes('centerMs=11000')
+      && line.includes('targetMs=11000')
+      && line.includes('elapsedMs=2000')
+      && line.includes('waitMs=9000')
+      && line.includes('sampling=facebook_reflected')),
+    `应记录可核对的 Facebook dwell 诊断，实际=${JSON.stringify(h.logs)}`,
+  );
+
+  assert.ok(releaseSleep, '测试应已进入可取消等待');
+  releaseSleep();
+  await pending;
+  assert.equal(h.executions.filter((command) => command.kind === 'page_scroll').length, 1);
+  assert.deepEqual(h.runtimeTimeouts, [180_000], 'pacing 完成后 page_scroll 仍获得独立 180s 页面执行预算');
+  await h.session.stopAndWait();
+});
+
+test('更宽的有界分布只作用于 Facebook page_scroll，非 Facebook 继续使用既有无界 sigma=0.20', async () => {
+  async function pageScrollWait(platform: 'facebook' | 'xiaohongshu'): Promise<number> {
+    const waits: number[] = [];
+    const h = harness({ platform, random: () => 0, sleep: async (ms) => { waits.push(ms); } });
+    await h.session.start();
+    waits.length = 0;
+    await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 11_000 }));
+    await h.session.stopAndWait();
+    return waits[0];
+  }
+
+  const facebook = await pageScrollWait('facebook');
+  const xiaohongshu = await pageScrollWait('xiaohongshu');
+  assert.ok(facebook >= 6_050 && facebook <= 20_900, `Facebook 样本 ${facebook} 必须在相对边界内`);
+  assert.ok(xiaohongshu > 20_900, `非 Facebook 应保留既有 sigma=0.20 无界长尾，实际 ${xiaohongshu}`);
 });
 
 test('登记为不消费停留的命令确实一步都不等，而同一锚点对关帖仍然有效', async () => {

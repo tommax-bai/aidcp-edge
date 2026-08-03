@@ -2,7 +2,13 @@ import { performance } from 'node:perf_hooks';
 import type { EdgeBrowseSession } from '../browse/edge-browse-session.js';
 import type { EdgeClient } from '../client/edge-client.js';
 import type { CommitWindowGuard } from '../execution/commit-window.js';
-import { jitterAround, sampleDelay, type RandomFn, type TimingConfig } from '../humanize/timing.js';
+import {
+  jitterAround,
+  jitterAroundBounded,
+  sampleDelay,
+  type RandomFn,
+  type TimingConfig,
+} from '../humanize/timing.js';
 import type {
   ActionCompletedPayload,
   ActionResultPayload,
@@ -171,6 +177,10 @@ const DEFAULT_NATIVE_COMMAND_TIMEOUT_MS = 45_000;
  * 防止外层先把具名 Feed 结论合成为 CdpTimeout。
  */
 const FACEBOOK_FEED_SCROLL_TIMEOUT_MS = 180_000;
+const FACEBOOK_PAGE_SCROLL_DWELL_SIGMA = 0.30;
+const FACEBOOK_PAGE_SCROLL_DWELL_MIN_MULTIPLIER = 0.55;
+const FACEBOOK_PAGE_SCROLL_DWELL_MAX_MULTIPLIER = 1.90;
+const FACEBOOK_PAGE_SCROLL_DWELL_ABSOLUTE_MAX_MS = 60_000;
 const FACEBOOK_GROUP_JOIN_TIMEOUT_MS = 135_000;
 /**
  * 空关键词首帖开帖的原子上限（change restore-facebook-post-join-comment-continuity）。
@@ -639,14 +649,31 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     const hasCloudCenter = Number.isFinite(cloudCenterMs) && cloudCenterMs > 0;
     let remainingMs = 0;
     let anchor: 'batch_cards' | 'content_shown';
+    let centerMs: number | undefined;
+    let targetMs: number | undefined;
+    let elapsedMs: number | undefined;
+    let sampling: 'facebook_reflected' | 'standard_lognormal' | 'edge_fallback' | 'inline_read_floor' | undefined;
 
     if (command.kind === 'page_scroll') {
       anchor = 'batch_cards';
       if (this.lastCardsAt > 0 && hasCloudCenter) {
-        const targetMs = jitterAround(cloudCenterMs, 0.2, this.options.random);
-        remainingMs = Math.max(0, targetMs - Math.max(0, now - this.lastCardsAt));
+        centerMs = cloudCenterMs;
+        targetMs = this.options.platform === 'facebook'
+          ? jitterAroundBounded(
+            cloudCenterMs,
+            FACEBOOK_PAGE_SCROLL_DWELL_SIGMA,
+            FACEBOOK_PAGE_SCROLL_DWELL_MIN_MULTIPLIER,
+            FACEBOOK_PAGE_SCROLL_DWELL_MAX_MULTIPLIER,
+            FACEBOOK_PAGE_SCROLL_DWELL_ABSOLUTE_MAX_MS,
+            this.options.random,
+          )
+          : jitterAround(cloudCenterMs, 0.2, this.options.random);
+        sampling = this.options.platform === 'facebook' ? 'facebook_reflected' : 'standard_lognormal';
+        elapsedMs = Math.max(0, now - this.lastCardsAt);
+        remainingMs = Math.max(0, targetMs - elapsedMs);
       }
       if (this.inlineReadStartedAt > 0) {
+        sampling ??= 'inline_read_floor';
         remainingMs = Math.max(remainingMs, this.inlineReadFloorMs - Math.max(0, now - this.inlineReadStartedAt));
       }
     } else if (command.kind === 'note_close' || command.kind === 'navigation_back') {
@@ -654,18 +681,22 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       // 锚点缺席 = 此刻并没有打开中的内容（例如就停在列表面）。这时**不补一段停留**：
       // 凭空补等于把「读不到」当成「停留不足」，两态不得压成一态。
       if (this.contentShownAt <= 0) return;
-      const centerMs = hasCloudCenter
+      centerMs = hasCloudCenter
         // 云端已按内容算好、已烘入状态系数 ⇒ 只叠抖动。
         ? cloudCenterMs
         // 边缘本地采样兜底 ⇒ 这一支（且只有这一支）按当前档位放大。
         : sampleDelay(dwellFloorTiming(this.detailDwellFloorMs), this.options.random) * this.pacingTempo;
-      const targetMs = jitterAround(centerMs, 0.2, this.options.random);
-      remainingMs = Math.max(0, targetMs - Math.max(0, now - this.contentShownAt));
+      targetMs = jitterAround(centerMs, 0.2, this.options.random);
+      elapsedMs = Math.max(0, now - this.contentShownAt);
+      sampling = hasCloudCenter ? 'standard_lognormal' : 'edge_fallback';
+      remainingMs = Math.max(0, targetMs - elapsedMs);
     } else {
       return;
     }
 
-    if (remainingMs > 0) {
+    // Cloud dwell 即使已被评估耗时完全抵扣，也留一行 waitMs=0：否则真机上仍无法区分
+    // 「字段被正确消费但无需补等」与「字段在宿主层丢失」。内联 floor 单独生效时沿用旧的非零留证。
+    if (remainingMs > 0 || (command.kind === 'page_scroll' && targetMs !== undefined)) {
       // 这一层此前完全不留痕：命令回执上看不出等了多久，于是「云端下发的时长有没有被消费」
       // 在真机上无从判断（本 change 修的正是「收下就丢」）。留一行有界证据，也是真机验收
       // 观测「命令间隔分布 vs 会话看门狗余量」的唯一依据。
@@ -674,7 +705,13 @@ export class NativeBrowseSession implements EdgeBrowseSession {
         anchor,
         waitMs: Math.round(remainingMs),
         center: hasCloudCenter ? 'cloud' : 'edge_fallback',
+        centerMs: centerMs === undefined ? undefined : Math.round(centerMs),
+        targetMs: targetMs === undefined ? undefined : Math.round(targetMs),
+        elapsedMs: elapsedMs === undefined ? undefined : Math.round(elapsedMs),
+        sampling,
       });
+    }
+    if (remainingMs > 0) {
       await (this.options.sleep ?? abortableSleep)(remainingMs, signal);
     }
     // 锚点在**等完之后**才消费：接管异常从上面原样穿出，锚点原样留着。

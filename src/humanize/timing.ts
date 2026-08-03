@@ -124,3 +124,39 @@ export function jitterAround(centerMs: number, sigma = 0.25, random: RandomFn = 
   const noise = Math.exp(sigma * gaussian(random));
   return Math.round(Math.max(0, centerMs * noise));
 }
+
+/**
+ * 围绕调用方给定的中心值生成乘性 lognormal 抖动，并把越界样本反射回相对区间。
+ *
+ * 与 `sampleReflect` 不同，本函数不能用区间几何中点反推中心：Cloud 下发的 `centerMs`
+ * 已经是节奏 authority，median=1.0 的噪声必须围绕它生成。反射只承担安全边界，避免
+ * 硬裁剪在 min/max 处堆出可识别的墙尖峰。
+ */
+export function jitterAroundBounded(
+  centerMs: number,
+  sigma: number,
+  minMultiplier: number,
+  maxMultiplier: number,
+  absoluteMaxMs: number,
+  random: RandomFn = defaultRandom,
+): number {
+  const center = Number.isFinite(centerMs) ? Math.max(0, centerMs) : 0;
+  if (center === 0) return 0;
+
+  const firstMultiplier = Number.isFinite(minMultiplier) ? Math.max(0, minMultiplier) : 0;
+  const secondMultiplier = Number.isFinite(maxMultiplier) ? Math.max(0, maxMultiplier) : firstMultiplier;
+  const lowerMultiplier = Math.min(firstMultiplier, secondMultiplier);
+  const upperMultiplier = Math.max(firstMultiplier, secondMultiplier);
+  const absoluteCap = Number.isFinite(absoluteMaxMs) ? Math.max(0, absoluteMaxMs) : center * upperMultiplier;
+  const lo = Math.min(center * lowerMultiplier, absoluteCap);
+  const hi = Math.min(center * upperMultiplier, absoluteCap);
+  if (!(hi > lo)) return Math.round(Math.max(0, hi));
+
+  const raw = center * Math.exp(sigma * gaussian(random));
+  const span = hi - lo;
+  const period = 2 * span;
+  let t = (raw - lo) % period;
+  if (t < 0) t += period;
+  const folded = t <= span ? lo + t : hi - (t - span);
+  return Math.round(folded);
+}

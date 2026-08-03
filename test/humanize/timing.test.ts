@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sampleDelay, sampleReflect, samplePreset, TIMING_PRESETS, gaussian } from '../../src/humanize/timing.js';
+import {
+  gaussian,
+  jitterAroundBounded,
+  sampleDelay,
+  samplePreset,
+  sampleReflect,
+  TIMING_PRESETS,
+} from '../../src/humanize/timing.js';
 
 /** 简单种子化 PRNG（mulberry32），保证测试可复现 */
 function mulberry32(seed: number): () => number {
@@ -105,4 +112,27 @@ test('sampleReflect: 反射消掉硬左壁尖峰——边界处样本远少于�
   // 硬裁应在 min 处堆出可观尖峰（左尾质量），反射应几乎不在边界堆积。
   assert.ok(clampAtMin > n * 0.05, `硬裁应在 min 处有尖峰，实际 ${clampAtMin}/${n}`);
   assert.ok(reflectAtMin < clampAtMin / 10, `反射应把左壁尖峰摊平（reflect ${reflectAtMin} ≪ clamp ${clampAtMin}）`);
+});
+
+test('jitterAroundBounded: Cloud 中心是原始分布中位且所有样本落在相对边界内', () => {
+  const center = 11_000;
+  const rng = mulberry32(20260803);
+  const samples = Array.from(
+    { length: 20_000 },
+    () => jitterAroundBounded(center, 0.30, 0.55, 1.90, 60_000, rng),
+  );
+  assert.ok(samples.every((value) => value >= 6_050 && value <= 20_900));
+  assert.ok(Math.abs(median(samples) - center) / center < 0.05, `中位 ${median(samples)} 应接近 ${center}`);
+});
+
+test('jitterAroundBounded: z=0 精确保留中心，异常大中心受 60s 绝对上限保护', () => {
+  const atMedian = [0.25, 0.25];
+  assert.equal(jitterAroundBounded(11_000, 0.30, 0.55, 1.90, 60_000, () => atMedian.shift() ?? 0.25), 11_000);
+
+  const rng = mulberry32(17);
+  for (let i = 0; i < 10_000; i++) {
+    const value = jitterAroundBounded(40_000, 0.30, 0.55, 1.90, 60_000, rng);
+    assert.ok(value >= 22_000 && value <= 60_000, `样本 ${value} 越过 60s 绝对边界`);
+  }
+  assert.equal(jitterAroundBounded(200_000, 0.30, 0.55, 1.90, 60_000, rng), 60_000);
 });
