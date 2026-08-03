@@ -306,19 +306,6 @@ function createUiEventStream() {
 }
 
 /**
- * 控制面已连接但浏览器仍在等执行槽位时，账号身份与 Cloud 连接都只是前置条件，不是「已开工」。
- * 等待事实由主进程传入；事件解析器不自行猜浏览器状态。
- */
-function projectBrowserSlotWaitingEvent(event, waitingForSlot, connectedTarget) {
-  if (!event || !waitingForSlot || (event.type !== 'identity' && event.type !== 'connect')) return event;
-  const target = connectedTarget === 'dev' ? 'DEV' : connectedTarget === 'ol' ? 'OL' : '';
-  const copy = event.type === 'identity'
-    ? '账号身份已确认，等待浏览器槽位'
-    : target ? `自动化通道已连接 ${target}，等待浏览器槽位` : '自动化通道已连接，等待浏览器槽位';
-  return { ...event, sentence: copy, presence: copy };
-}
-
-/**
  * 合并计数补丁：partial patch 只带变化项，其余计数必须保留（修「一次 {views:+1} 把
  * 点赞/收藏清空」的老 bug——updateStatus 先 Object.assign 整体替换、再合并已替换对象）。
  * 纯函数供 main.cjs 与单测共用；数值兜底 0，绝不让 undefined 漏进渲染层。
@@ -341,5 +328,4 @@ module.exports = {
   UI_EVENT_PREFIX,
   clipTitle,
   mergeStats,
-  projectBrowserSlotWaitingEvent,
 };

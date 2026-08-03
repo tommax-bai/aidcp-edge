@@ -74,7 +74,7 @@ const {
   requestFacebookSelectedPersonaFill,
 } = require('./facebook-persona-auto-fill.cjs');
 const os = require('node:os');
-const { createUiEventStream, mergeStats, projectBrowserSlotWaitingEvent } = require('./ui-events.cjs');
+const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
 const {
   parseRuntimePosture,
   postureLatches,
@@ -638,46 +638,6 @@ const CONTROL_BOOTSTRAP_REASON_ZH = {
   binding_conflict: '该环境的账号绑定存在跨客户冲突',
   binding_unavailable: '云端账号绑定暂时不可用',
 };
-
-/**
- * 浏览器缺席启动的唯一账号来源：customer-auth 的 ownership + persistent binding 联接。
- * renderer、本地环境名/profileId/旧日志一律不参与；任何结构异常都 fail-closed。
- */
-async function resolveControlBootstrap(handle) {
-  if (!handle || handle.kind !== 'adspower') {
-    return { ok: false, reason: 'unsupported_environment', message: '该环境类型暂不支持无浏览器控制面启动' };
-  }
-  if (!clientAuthEnabled()) {
-    return { ok: false, reason: 'client_auth_disabled', message: '客户鉴权未配置，无法可信确认环境账号' };
-  }
-  if (!hasValidSession()) {
-    return { ok: false, reason: 'client_session_missing', message: '客户登录已失效，无法可信确认环境账号' };
-  }
-  const envKey = String(handle.profileId || '').trim();
-  if (!envKey) return { ok: false, reason: 'invalid_environment', message: '环境缺少分身 ID' };
-  const response = await clientAuthFetch(`/environments/${encodeURIComponent(envKey)}/control-bootstrap`, {
-    token: clientSession.token,
-  });
-  if (response.status === 401) onSessionInvalid();
-  if (!response.ok) {
-    const reason = response.data && typeof response.data.error === 'string'
-      ? response.data.error
-      : response.status === 0 ? 'cloud_unreachable' : 'bootstrap_rejected';
-    return {
-      ok: false,
-      reason,
-      message: CONTROL_BOOTSTRAP_REASON_ZH[reason]
-        || (reason === 'cloud_unreachable' ? '暂时无法连接账号绑定服务' : '云端拒绝控制面账号引导'),
-    };
-  }
-  const data = response.data && response.data.data;
-  const returnedEnvKey = data && typeof data.envKey === 'string' ? data.envKey.trim() : '';
-  const accountId = data && typeof data.accountId === 'string' ? data.accountId.trim() : '';
-  if (returnedEnvKey !== envKey || !accountId || accountId.length > 256 || /[\u0000-\u001f\u007f]/.test(accountId)) {
-    return { ok: false, reason: 'bootstrap_schema_invalid', message: '云端控制面引导响应不合法，已拒绝使用' };
-  }
-  return { ok: true, envKey, accountId };
-}
 
 // ── 视频号 InteractionWorkspace customer-auth bridge ────────────────────────
 // renderer 只能调用下方具名 IPC；路径、方法、query、body 与幂等 header 全部由主进程组装。
@@ -2229,7 +2189,6 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     spawnedAtMs: 0,
     browserAlreadyRunning: false,
     browserStateUnconfirmed: false,
-    browserOpenPending: false,
     coldStandbyTimer: null,
     coldStandbyWakeAt: 0,
     coldStandbyActive: false,
@@ -2237,11 +2196,10 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     // A missing/malformed later Cloud hint revokes reuse of the cached hint. An already sleeping
     // browser still completes its deterministic wake cycle before this marker is cleared.
     coldStandbyHintRevoked: false,
-    // 控制面与浏览器槽位解耦：核心/Cloud 已上线但浏览器从未启动。只有 lifecycle.standby ack 后
-    // controlPlaneBootstrapped 才为真，握手前退出不得被误洗成“正常待机退出”。
+    // 专用离场清理核心：Cloud 已上线但浏览器从未启动。普通首次排队绝不设置此标记。
+    // 只有 lifecycle.standby ack 后 controlPlaneBootstrapped 才为真，握手前退出不得被误洗成“正常待机退出”。
     controlPlaneOnly: false,
     controlPlaneBootstrapped: false,
-    controlPlaneStarting: false,
     // 最短持有时长（change standby-covers-idle-waits）：上次唤醒完成的时刻 + 一个「持有满足后重新判定」
     // 的定时器。被 min_hold 拦下时**绝不能把提示丢掉**——否则一次拦截就把该环境永久留在开启态、
     // 再也不会让出槽位（外层 !decision.ok 分支对「不在待机中」的普通 skip 是直接 return、什么都不做的）。
@@ -2691,7 +2649,6 @@ function advanceLifecycleGeneration(handle, reason) {
   handle.startFlowGeneration = 0;
   handle.launchQueued = false;
   handle.launchGeneration = 0;
-  handle.controlPlaneStarting = false;
   handle.coldStandbyWaking = false;
   handle.wakeGeneration = 0;
   releaseStartQueue(handle);
@@ -2747,7 +2704,7 @@ function maxQueuedStarts() {
 function occupiedSlots() {
   let n = 0;
   for (const h of envs.values()) {
-    // 初始 browser-absent 核心从未打开浏览器；coldStandbyPending 期间也不能虚占一个执行槽。
+    // 专用离场清理核心从未打开浏览器；coldStandbyPending 期间也不能虚占一个执行槽。
     if (fleet.childProcessIsRunning(h.child) && !usesTransientBrowserLane(h)
       && !h.coldStandbyActive && !h.controlPlaneOnly && !h.removed) n += 1;
   }
@@ -4213,7 +4170,6 @@ function onColdStandbyWoken(handle) {
   if (!isCurrentLifecycleGeneration(handle, generation)) return;
   // 批量 / 单环境关闭可能与已送达的 wake 回执竞态；关闭意图优先，迟到的 woken 不得把状态翻回已打开。
   if (handle.stopRequested || handle.removed || isQuitting) {
-    handle.browserOpenPending = false;
     releaseStartQueue(handle);
     handle.coldStandbyWaking = false;
     handle.wakeGeneration = 0;
@@ -4224,7 +4180,6 @@ function onColdStandbyWoken(handle) {
   const completedHint = hintRevoked
     ? null
     : (handle.status.browserStandby && handle.status.browserStandby.hint);
-  handle.browserOpenPending = false;
   releaseStartQueue(handle);
   handle.coldStandbyWaking = false;
   handle.wakeGeneration = 0;
@@ -4266,7 +4221,6 @@ function onColdStandbyWoken(handle) {
 function onColdStandbyWakeFailed(handle, reason, expectedGeneration = handle && handle.wakeGeneration) {
   if (!handle || handle.stopRequested || !isCurrentLifecycleGeneration(handle, expectedGeneration)
     || handle.wakeGeneration !== expectedGeneration) return;
-  handle.browserOpenPending = false;
   releaseStartQueue(handle);
   handle.coldStandbyWaking = false;
   handle.wakeGeneration = 0;
@@ -4289,98 +4243,6 @@ function onColdStandbyWakeFailed(handle, reason, expectedGeneration = handle && 
     lastMessage: `唤醒失败：${reason}。仍保持待机，可再次唤醒。`,
     ...presencePatch('待机中（唤醒失败）'),
   });
-}
-
-/**
- * 不占浏览器槽位地启动核心控制面。引导失败时保留原浏览器排队语义，绝不猜账号、绝不显示已连接。
- * retainStartQueueReservation=true 表示这个环境已经是有界浏览器等待队列的一员；核心上线不能偷释放名额。
- */
-async function startBrowserAbsentCore(handle, {
-  retainStartQueueReservation = false,
-  slotAdmission = null,
-  queueAdmission = null,
-  generation = handle && handle.lifecycleGeneration,
-} = {}) {
-  if (!handle || !isCurrentLifecycleGeneration(handle, generation) || handle.child || handle.controlPlaneStarting
-    || handle.removed || handle.stopRequested || isQuitting) return false;
-  handle.controlPlaneStarting = true;
-  updateStatus(handle, {
-    proxyRuntime: invalidateProxyRuntime(handle.status.proxyRuntime),
-  });
-  try {
-    const coreOnlyBootstrap = !slotAdmission && !queueAdmission;
-    const bootstrap = await resolveControlBootstrap(handle);
-    if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return false;
-    if (!bootstrap.ok) {
-      // 首次未绑定环境无法在浏览器缺席时可信确定平台账号，但这不改变已经取得的槽位排队资格。
-      // 等槽位后走真实浏览器启动与身份确认；此刻只呈现排队，绝不把正常前置条件写成引擎异常。
-      if (slotAdmission && bootstrap.reason === 'binding_unknown') {
-        parkForSlot(handle, slotAdmission);
-        return false;
-      }
-      if (!retainStartQueueReservation) releaseStartQueue(handle);
-      const browserState = coreOnlyBootstrap
-        ? '浏览器保持关闭'
-        : queueAdmission && queueAdmission.message
-        ? queueAdmission.message
-        : slotAdmission && slotAdmission.message
-          ? slotAdmission.message
-          : '浏览器仍在等待可用槽位';
-      updateStatus(handle, {
-        edge: 'idle',
-        cloud: 'disconnected',
-        session: 'idle',
-        loopStage: null,
-        lastMessage: `${browserState}；自动化引擎未连接：${bootstrap.message}。`,
-        ...edgeFailurePatch(`自动化引擎未连接：${bootstrap.message}`),
-        ...presencePatch('自动化引擎未连接，浏览器保持关闭'),
-      });
-      return false;
-    }
-
-    const network = await ensureStartupNetworkPreparation(handle);
-    if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return false;
-    if (network && network.state === 'unavailable') {
-      if (!retainStartQueueReservation) releaseStartQueue(handle);
-      stopStartForProxyFailure(handle, network);
-      return false;
-    }
-
-    handle.coldStandbyPending = true;
-    handle.coldStandbyActive = false;
-    handle.controlPlaneOnly = true;
-    handle.controlPlaneBootstrapped = false;
-    if (slotAdmission) {
-      parkForSlot(handle, slotAdmission);
-    } else {
-      updateStatus(handle, {
-        edge: 'starting',
-        session: 'resting',
-        loopStage: null,
-        browserStandby: coldStandbyStatus('scheduled', null, { reason: 'start_queue_full' }),
-        lastMessage: coreOnlyBootstrap
-          ? '正在连接自动化引擎；浏览器保持关闭。'
-          : `${queueAdmission?.message || '浏览器启动暂未入队'}；正在先连接自动化引擎。`,
-        ...presencePatch(coreOnlyBootstrap ? '正在连接自动化引擎…' : '正在连接自动化引擎，浏览器暂未入队'),
-        ...clearEdgeFailurePatch(handle),
-      });
-    }
-    const started = await spawnEdgeChild(handle, {
-      controlBootstrap: bootstrap,
-      retainStartQueueReservation,
-      generation,
-    });
-    if (!started) {
-      handle.coldStandbyPending = false;
-      handle.controlPlaneOnly = false;
-      handle.controlPlaneBootstrapped = false;
-      if (!retainStartQueueReservation) releaseStartQueue(handle);
-      return false;
-    }
-    return await started;
-  } finally {
-    if (isCurrentLifecycleGeneration(handle, generation)) handle.controlPlaneStarting = false;
-  }
 }
 
 /**
@@ -4505,11 +4367,9 @@ function startEdge(handle, { kind = 'resume', generation = handle && handle.life
         // 挂 12 个账号、只有 6 个槽位，本来就该有 6 个在等——等别人进冷待机让出槽位再顶上，
         // 这正是 1:2 能成立的前提。旧版在这里直接丢弃请求、环境永久趴在 warning 态，
         // 后来槽位空出来也没人去取，等于把 1:2 废掉了（多挂的账号一天都跑不了）。
-        return await startBrowserAbsentCore(handle, {
-          retainStartQueueReservation: true,
-          slotAdmission: admitted,
-          generation,
-        });
+        // 首次排队不是运行态：只登记本地 FIFO，不提前启动账号核心，也不连接 Cloud。
+        parkForSlot(handle, admitted);
+        return false;
       }
       clearSlotWaiting(handle);
       clearWakeDeadline(handle);
@@ -4527,7 +4387,6 @@ function startEdge(handle, { kind = 'resume', generation = handle && handle.life
 async function spawnEdgeChild(handle, {
   controlBootstrap = null,
   cleanupBootstrap = null,
-  retainStartQueueReservation = false,
   transientBrowserLease = false,
   generation = handle && handle.lifecycleGeneration,
 } = {}) {
@@ -4760,7 +4619,7 @@ async function spawnEdgeChild(handle, {
         authorityPipe.end(JSON.stringify(proxyAuthorityPayload));
       }
       // 核心已进入执行态：从启动排队移出；后续由浏览器并发槽位计数，不再占等待容量。
-      if (!retainStartQueueReservation) releaseStartQueue(handle);
+      releaseStartQueue(handle);
 
       // 发布卡在途状态随核心（重）启动清零（edge-companion-ui 8.1 评审修正）：离线窗口内的审批变化
       // （拒绝/失败）推送会如实丢失，旧 pending/approved 卡若不清会永久滞留成陈卡；真在候审/已批的
@@ -4794,7 +4653,7 @@ async function spawnEdgeChild(handle, {
         ...presencePatch(cleanupBootstrap
           ? '正在连接离场清理核心…'
           : transientBrowserLease ? '正在连接视频号…'
-          : controlBootstrap ? '正在连接云端，浏览器等待槽位' : '正在启动引擎…'),
+          : controlBootstrap ? '正在连接云端，浏览器保持关闭' : '正在启动引擎…'),
         ...clearEdgeFailurePatch(handle),
       });
       return true;
@@ -5214,7 +5073,6 @@ async function spawnEdgeChild(handle, {
     handle.status.proxyRuntime = invalidateProxyRuntime(handle.status.proxyRuntime);
     handle.runtimePosture = null; // 顺手清爽；真正的作用域判定在读侧（livePosture）
     settleTransientBrowserLease(handle, 'core_spawn_error', false);
-    handle.browserOpenPending = false;
     handle.coldStandbyPending = false;
     handle.controlPlaneOnly = false;
     handle.controlPlaneBootstrapped = false;
@@ -5317,7 +5175,7 @@ async function spawnEdgeChild(handle, {
       ? handle.status.loginFlow
       : null;
     const shouldResumeAfterStop = handle.resumeAfterStop && handle.automationIntent === 'enabled';
-    // 初始 browser-absent 核心只有在发出 lifecycle.standby ack 后才算真正待机成功。若 Cloud hello
+    // 专用 browser-absent 离场清理核心只有在发出 lifecycle.standby ack 后才算真正待机成功。若 Cloud hello
     // 失败即退出，pending 不能把它洗成“有意待机退出”——那会吞掉真实握手故障且永不重试。
     const controlPlaneNeverEstablished = handle.controlPlaneOnly && !handle.controlPlaneBootstrapped;
     const wasColdStandby = !controlPlaneNeverEstablished && (handle.coldStandbyPending || handle.coldStandbyActive);
@@ -5330,7 +5188,6 @@ async function spawnEdgeChild(handle, {
     // 这一句同样只是顺手清爽——`handle.child = undefined` 一执行，livePosture 就已经读不出闩了。
     handle.runtimePosture = null;
     settleTransientBrowserLease(handle, 'core_closed', false);
-    handle.browserOpenPending = false;
     if (controlPlaneNeverEstablished) {
       handle.coldStandbyPending = false;
       handle.coldStandbyActive = false;
@@ -5897,10 +5754,7 @@ function enqueueStartFlow(handle, generation = handle && handle.lifecycleGenerat
   const admission = reserveStartQueue(handle);
   if (!admission.ok) {
     showStartQueueFull(handle, admission);
-    // 浏览器启动队列容量只限制浏览器等待者，不限制 Cloud 控制面数。未进浏览器队列的环境仍尝试
-    // 用客户 ownership + persistent binding 启动 browser-absent 核心；失败也只保持诚实离线，绝不猜账号。
-    void startBrowserAbsentCore(handle, { queueAdmission: admission, generation });
-    return 'control-only';
+    return false;
   }
   handle.startFlowQueued = true;
   handle.startFlowGeneration = generation;
@@ -5939,7 +5793,6 @@ function queueStartEnv(handle, queuePosition) {
   clearColdStandbyTimer(handle);
   const queued = enqueueStartFlow(handle, generation);
   if (!queued) return false;
-  if (queued === 'control-only') return queued;
   updateStatus(handle, usesTransientBrowserLane(handle) ? {
     edge: 'starting',
     closeScope: null,
@@ -6054,7 +5907,6 @@ function handleEdgeLogLine(handle, message, isError = false) {
   }
   if (message.includes('[browser-parking] control-ready')) {
     handle.browserParkingReady = true;
-    handle.browserOpenPending = false;
     handle.browserPersonaNoticeState = null;
     syncBrowserPersonaNotice(handle, true);
   }
@@ -6173,11 +6025,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
 
   // UI 事件（活动流 / 在场感 / 发布卡 / 账号身份 / 计数）统一走该环境自己的 ui-events 实例：
   // 结构化 [ui-event] 行优先，中文日志行映射兜底；计数只认 ✓ 成功行。
-  const evt = projectBrowserSlotWaitingEvent(
-    handle.uiEvents.push(structuredMessage),
-    Boolean(handle.controlPlaneOnly && handle.slotWaitingSince),
-    next.connectedCloudKey || handle.status.connectedCloudKey,
-  );
+  const evt = handle.uiEvents.push(structuredMessage);
   let standbyHint = null;
   let standbyHintUpdated = false;
   if (evt) {
@@ -6508,7 +6356,6 @@ function stopAutomation(handle) {
   handle.resumeAfterStop = false;
   handle.automationPaused = false;
   handle.stopRequested = true;
-  handle.browserOpenPending = false;
   handle.restartPending = false;
   clearRespawnTimer(handle);
   clearColdStandbyTimer(handle);
@@ -6624,23 +6471,19 @@ function startAllEnvs({ envIds } = {}) {
   }
   [...closing, ...paused, ...standby].forEach((h) => resumeEdge(h));
   const accepted = [];
-  const controlOnly = [];
   const rejected = [];
   targets.forEach((handle) => {
     const result = queueStartEnv(handle, accepted.length + 1);
-    if (result === 'control-only') controlOnly.push(handle);
-    else if (result) accepted.push(handle);
+    if (result) accepted.push(handle);
     else rejected.push(handle);
   });
   const all = [...closing, ...paused, ...standby, ...accepted];
   return {
     ok: true,
     queued: all.length,
-    controlOnly: controlOnly.length,
     rejected: rejected.length,
     queueLimit: maxQueuedStarts(),
     envIds: all.map((h) => h.envId),
-    controlOnlyEnvIds: controlOnly.map((h) => h.envId),
     rejectedEnvIds: rejected.map((h) => h.envId),
   };
 }
@@ -6744,7 +6587,7 @@ function lifecycleAxes(handle) {
     ? (hasValidSession() ? 'ready' : 'signed_out')
     : 'ready';
   const coreState = handle.child
-    ? (status.edge === 'starting' || handle.controlPlaneStarting ? 'starting' : 'online')
+    ? (status.edge === 'starting' ? 'starting' : 'online')
     : (handle.respawnTimer ? 'restarting' : (handle.gaveUp || status.respawnGaveUp ? 'error' : 'stopped'));
   const engineLinkState = status.cloud === 'connected'
     ? 'connected'
@@ -6772,8 +6615,6 @@ function lifecycleAxes(handle) {
       ? 'error'
     : (handle.pausePending || (handle.engineStopReason === 'user_close' && handle.child))
     ? 'closing'
-    : handle.browserOpenPending
-    ? 'starting'
     : handle.coldStandbyWaking
     ? 'starting'
     : handle.executorFailure
@@ -6942,48 +6783,20 @@ ipcMain.handle('browser:open', (_event, envId) => {
     }
     return statusOf(handle);
   }
-  // 手动打开浏览器是高级登录/验证/检查动作：允许临时连接引擎，但自动化意图仍保持关闭。
+  // 手动打开浏览器也走同一条 FIFO：没拿到槽位前不启动核心、不连接 Cloud。
+  // 获准后核心与浏览器一起启动，但自动化仍保持关闭。
   handle.automationIntent = 'stopped';
   handle.engineStopReason = '';
   handle.resumeAfterStop = false;
   handle.automationPaused = true;
   handle.stopRequested = false;
-  const controlState = allowedEnvironmentControlStates.get(String(handle.profileId || '').trim());
-  if (controlState && controlState.bindingState === 'bound') {
-    // 先回可见受理态，再做可能等待客户接口 / Cloud 握手的 bootstrap。IPC 不再把按钮挂到握手结束。
-    handle.browserOpenPending = true;
-    updateStatus(handle, {
-      edge: 'starting',
-      session: 'idle',
-      lastMessage: '正在连接自动化引擎并打开浏览器；自动化保持关闭…',
-      ...presencePatch('正在打开浏览器…'),
-      ...clearEdgeFailurePatch(handle),
-    });
-    void startBrowserAbsentCore(handle).then((started) => {
-      if (!handle.browserOpenPending) return;
-      if (!started || handle.removed || handle.stopRequested || handle.automationIntent !== 'stopped' || !handle.child) {
-        handle.browserOpenPending = false;
-        updateStatus(handle, {});
-        return;
-      }
-      wakeColdStandby(handle, 'user_browser_open');
-    }).catch((error) => {
-      if (!handle.browserOpenPending) return;
-      handle.browserOpenPending = false;
-      updateStatus(handle, {
-        edge: 'warning',
-        lastMessage: `打开浏览器失败：${error?.message || error}`,
-        ...edgeFailurePatch(`打开浏览器失败：${error?.message || error}`),
-        ...presencePatch('浏览器打开失败'),
-      });
-    });
-    return statusOf(handle);
-  }
-  // 首次建立绑定必须显式打开真实页面。自动化保持关闭，只做 browser_lifecycle 启动；不由 Cloud 操作触发。
+  const bound = allowedEnvironmentControlStates.get(String(handle.profileId || '').trim())?.bindingState === 'bound';
   updateStatus(handle, {
     edge: 'starting',
     session: 'idle',
-    lastMessage: '正在打开浏览器完成首次登录；自动化保持关闭…',
+    lastMessage: bound
+      ? '正在排队打开浏览器；自动化保持关闭…'
+      : '正在排队打开浏览器完成首次登录；自动化保持关闭…',
     ...presencePatch('正在打开浏览器…'),
     ...clearEdgeFailurePatch(handle),
   });
@@ -8543,8 +8356,6 @@ function proxyTargetActive(userId) {
     || handle.startFlowQueued
     || handle.launchQueued
     || handle.slotWaitingSince
-    || handle.controlPlaneStarting
-    || handle.browserOpenPending
     || handle.coldStandbyWaking
   ));
 }

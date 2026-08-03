@@ -61,20 +61,19 @@ test('rapid close then start waits for the closing core and starts exactly from 
     '浏览器未确认关闭时不得继续开启新一代浏览器');
 });
 
-test('closed-task browser open returns a pending projection before bootstrap settles', () => {
+test('closed-task browser open joins the normal FIFO without a browser-absent core', () => {
   const start = main.indexOf("ipcMain.handle('browser:open'");
   const end = main.indexOf("ipcMain.handle('edge:start'", start);
   assert.ok(start >= 0 && end > start);
   const block = main.slice(start, end);
-  const pendingAt = block.indexOf('handle.browserOpenPending = true');
-  const startAt = block.indexOf('void startBrowserAbsentCore(handle)');
-  const returnAt = block.indexOf('return statusOf(handle)', startAt);
-  assert.ok(pendingAt >= 0 && startAt > pendingAt && returnAt > startAt);
-  assert.doesNotMatch(block, /await startBrowserAbsentCore/);
+  const statusAt = block.indexOf('updateStatus(handle');
+  const enqueueAt = block.indexOf('enqueueStartFlow(handle)');
+  const returnAt = block.indexOf('return statusOf(handle)', enqueueAt);
+  assert.ok(statusAt >= 0 && enqueueAt > statusAt && returnAt > enqueueAt);
   assert.match(block, /handle\.automationIntent = 'stopped'/);
-  assert.match(block, /handle\.automationIntent !== 'stopped'/);
-  assert.match(block, /handle\.stopRequested/);
-  assert.match(renderer, /fields\.sessionClose\.textContent = '浏览器开启中'/);
+  assert.match(block, /handle\.automationPaused = true/);
+  assert.match(block, /if \(handle\.child\)[\s\S]*wakeColdStandby\(handle, 'user_browser_open'\)/);
+  assert.doesNotMatch(block, /startBrowserAbsentCore|resolveControlBootstrap|controlBootstrap/);
   const pauseBlock = functionBlock('pauseEdge', 'resumeEdge');
   assert.match(pauseBlock, /handle\.automationIntent = 'paused'/, 'manual browser-open state must not change pause semantics');
 });

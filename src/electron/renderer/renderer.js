@@ -6921,15 +6921,12 @@ async function doStartAll() {
       fleetView.startAll = {
         ids: res.envIds,
         total: res.queued,
-        controlOnly: Number(res.controlOnly) || 0,
         rejected: Number(res.rejected) || 0,
         queueLimit: Number(res.queueLimit) || 0,
       };
       updateStartAllProgress();
     } else if (res.queued > 0) {
       setRailMsg(railStatus(`启动中 0/${res.queued}`, `${res.queued} 个排队`)); // 旧主进程无 envIds 时兜底
-    } else if (Number(res.controlOnly) > 0) {
-      setRailMsg(`${res.controlOnly} 个待槽位`);
     } else if (Number(res.rejected) > 0) {
       setRailMsg(railStatus(
         `${res.rejected} 个未加入`,
@@ -6986,7 +6983,6 @@ function updateStartAllProgress() {
   if (launched >= sa.total) {
     setRailMsg(railStatus(
       `已启动 ${sa.total}/${sa.total}`,
-      sa.controlOnly > 0 ? `${sa.controlOnly} 个待槽位` : '',
       sa.rejected > 0 ? `${sa.rejected} 个未加入` : '',
     ));
     fleetView.startAll = null;
@@ -6995,7 +6991,6 @@ function updateStartAllProgress() {
   setRailMsg(railStatus(
     `启动中 ${launched}/${sa.total}`,
     `${sa.total - launched} 个排队`,
-    sa.controlOnly > 0 ? `${sa.controlOnly} 个待槽位` : '',
     sa.rejected > 0 ? `${sa.rejected} 个未加入` : '',
   ));
 }

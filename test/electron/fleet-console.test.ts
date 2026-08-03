@@ -1668,7 +1668,6 @@ test('全部启动进度：所有状态用简短分段呈现，edge running 不�
     fleetStartAll: async () => ({
       ok: true,
       queued: 2,
-      controlOnly: 1,
       rejected: 2,
       envIds: ['env-a', 'env-b'],
     }),
@@ -1681,7 +1680,7 @@ test('全部启动进度：所有状态用简短分段呈现，edge running 不�
   await tick();
   assert.equal(
     w.document.querySelector('#rail-msg')!.textContent,
-    '启动中 0/2 · 2 个排队 · 1 个待槽位 · 2 个未加入',
+    '启动中 0/2 · 2 个排队 · 2 个未加入',
     '核心虽存活，启动/连接阶段仍是 0/2',
   );
 
@@ -1689,7 +1688,7 @@ test('全部启动进度：所有状态用简短分段呈现，edge running 不�
   await tick();
   assert.equal(
     w.document.querySelector('#rail-msg')!.textContent,
-    '启动中 1/2 · 1 个排队 · 1 个待槽位 · 2 个未加入',
+    '启动中 1/2 · 1 个排队 · 2 个未加入',
     '浏览器就绪的待任务环境计入完成',
   );
 
@@ -1697,12 +1696,12 @@ test('全部启动进度：所有状态用简短分段呈现，edge running 不�
   await tick();
   assert.equal(
     w.document.querySelector('#rail-msg')!.textContent,
-    '已启动 2/2 · 1 个待槽位 · 2 个未加入',
+    '已启动 2/2 · 2 个未加入',
     '真实运行完成批次',
   );
 });
 
-test('全部启动：旧回执与单独待槽位也使用短状态', async () => {
+test('全部启动：旧回执与队列满也使用短状态', async () => {
   const legacy = await boot({
     fleetStartAll: async () => ({ ok: true, queued: 2 }),
   });
@@ -1710,12 +1709,12 @@ test('全部启动：旧回执与单独待槽位也使用短状态', async () =>
   await tick();
   assert.equal(legacy.w.document.querySelector('#rail-msg')!.textContent, '启动中 0/2 · 2 个排队');
 
-  const controlOnly = await boot({
-    fleetStartAll: async () => ({ ok: true, queued: 0, controlOnly: 2 }),
+  const rejected = await boot({
+    fleetStartAll: async () => ({ ok: true, queued: 0, rejected: 2, queueLimit: 4 }),
   });
-  (controlOnly.w.document.querySelector('#rail-start-all') as HTMLButtonElement).click();
+  (rejected.w.document.querySelector('#rail-start-all') as HTMLButtonElement).click();
   await tick();
-  assert.equal(controlOnly.w.document.querySelector('#rail-msg')!.textContent, '2 个待槽位');
+  assert.equal(rejected.w.document.querySelector('#rail-msg')!.textContent, '2 个未加入 · 排队上限 4');
 });
 
 test('平台筛选：默认全部；切换后列表、计数、选中环境与全部启动范围同步', async () => {

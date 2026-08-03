@@ -14,36 +14,30 @@ function blockBetween(source: string, startNeedle: string, endNeedle: string): s
   return source.slice(start, end);
 }
 
-test('browser slot and start-queue rejection both keep a path to browser-absent Cloud control plane', () => {
+test('first-start slot and queue rejection stay local without spawning a core or connecting Cloud', () => {
   const startEdge = blockBetween(electronMain, 'function startEdge(', 'function spawnEdgeChild(');
-  assert.match(startEdge, /admitBrowserSlot\(handle\)[\s\S]*startBrowserAbsentCore\(handle/);
-  assert.match(startEdge, /retainStartQueueReservation:\s*true/);
+  const slotRejected = blockBetween(startEdge, 'if (!admitted.ok)', 'clearSlotWaiting(handle)');
+  assert.match(slotRejected, /parkForSlot\(handle, admitted\)/);
+  assert.match(slotRejected, /return false/);
+  assert.doesNotMatch(slotRejected, /spawnEdgeChild|controlBootstrap|clientAuthFetch/);
 
   const enqueue = blockBetween(electronMain, 'function enqueueStartFlow(', 'function queueStartEnv(');
-  assert.match(enqueue, /if \(!admission\.ok\)[\s\S]*startBrowserAbsentCore\(handle, \{ queueAdmission: admission, generation \}\)/);
-});
-
-test('binding_unknown while browser slots are full remains queued instead of becoming an engine error', () => {
-  const start = blockBetween(electronMain, 'async function startBrowserAbsentCore(', 'async function startRestrictedOffboardCleanupCore(');
-  assert.match(
-    start,
-    /if \(slotAdmission && bootstrap\.reason === 'binding_unknown'\) \{[\s\S]{0,180}parkForSlot\(handle, slotAdmission\);[\s\S]{0,80}return false;/,
-  );
-  const queueUnknown = start.indexOf("if (slotAdmission && bootstrap.reason === 'binding_unknown')");
-  const failureProjection = start.indexOf('...edgeFailurePatch(`自动化引擎未连接：${bootstrap.message}`)');
-  assert.ok(queueUnknown >= 0 && failureProjection > queueUnknown, '可恢复的首次绑定排队分支必须先于异常投影返回');
+  const queueRejected = blockBetween(enqueue, 'if (!admission.ok)', 'handle.startFlowQueued = true');
+  assert.match(queueRejected, /showStartQueueFull\(handle, admission\)/);
+  assert.match(queueRejected, /return false/);
+  assert.doesNotMatch(queueRejected, /spawnEdgeChild|controlBootstrap|clientAuthFetch/);
 
   const park = blockBetween(electronMain, 'function parkForSlot(', '/**\n * 到点告诉核心');
   assert.match(park, /clearEdgeFailurePatch\(handle\)/, '进入槽位队列时必须清除旧失败投影');
+  assert.match(park, /parked \? \{\} : \{ edge: 'idle', session: 'idle' \}/);
+  assert.doesNotMatch(electronMain, /startBrowserAbsentCore|resolveControlBootstrap/);
 });
 
-test('control bootstrap is customer-auth scoped, validated, and uses dedicated non-inherited env vars', () => {
-  const bootstrap = blockBetween(electronMain, 'async function resolveControlBootstrap(', '// ── 视频号 InteractionWorkspace');
-  assert.match(bootstrap, /clientAuthFetch\(`\/environments\/\$\{encodeURIComponent\(envKey\)\}\/control-bootstrap`/);
-  assert.match(bootstrap, /returnedEnvKey !== envKey/);
-  assert.match(electronMain, /binding_unknown:\s*'该环境尚未成功上报过登录账号'/);
-  assert.match(electronMain, /binding_conflict:\s*'该环境的账号绑定存在跨客户冲突'/);
-
+test('restricted offboard cleanup keeps its dedicated browserless core path', () => {
+  const cleanup = blockBetween(electronMain, 'async function startRestrictedOffboardCleanupCore(', '/**\n * 启动一个环境');
+  assert.match(cleanup, /\/offboarding\/\$\{encodeURIComponent\(pending\.offboardId\)\}\/cleanup-bootstrap/);
+  assert.match(cleanup, /data\.mode !== 'restricted_cleanup'/);
+  assert.match(cleanup, /spawnEdgeChild\(handle, \{[\s\S]*controlBootstrap: \{ accountId: data\.accountId \}/);
   assert.match(fleet, /'AIDCP_START_BROWSER_ABSENT'/);
   assert.match(fleet, /'AIDCP_CONTROL_ACCOUNT_ID'/);
   const spawn = blockBetween(electronMain, 'function spawnEdgeChild(', 'function stopLoginPoller(');
@@ -52,7 +46,7 @@ test('control bootstrap is customer-auth scoped, validated, and uses dedicated n
   assert.doesNotMatch(spawn, /spawnEnv\.AIDCP_ACCOUNT_ID\s*=/);
 });
 
-test('core browser-absent startup skips provider launch and acknowledges initial standby after valid Cloud connect', () => {
+test('restricted browserless core skips provider launch and acknowledges initial standby after valid Cloud connect', () => {
   assert.match(edgeMain, /const startBrowserAbsent = process\.env\.AIDCP_START_BROWSER_ABSENT === '1'/);
   assert.match(edgeMain, /if \(!startBrowserAbsent\) \{[\s\S]{0,180}provider\.launch\(launchOpts\)/);
   assert.match(edgeMain, /startBrowserAbsent \? createDetachedSession\(\) : await attachToPage/);
@@ -81,7 +75,7 @@ test('browser-absent core does not consume a browser slot and real wake clears t
   assert.match(occupied, /!h\.controlPlaneOnly/);
   const woken = blockBetween(electronMain, 'function onColdStandbyWoken(', 'function onColdStandbyWakeFailed(');
   assert.match(woken, /handle\.controlPlaneOnly = false/);
-  const wakeFailed = blockBetween(electronMain, 'function onColdStandbyWakeFailed(', '/**\n * 不占浏览器槽位地启动核心控制面');
+  const wakeFailed = blockBetween(electronMain, 'function onColdStandbyWakeFailed(', 'async function startRestrictedOffboardCleanupCore(');
   assert.match(wakeFailed, /setTimeout\(\(\) => drainSlotWaiters\(\), 0\)/);
 });
 
@@ -104,11 +98,13 @@ test('slot handoff keeps FIFO authority until the head actually passes launch ad
   assert.match(start, /admitBrowserSlot\(handle\)[\s\S]*clearSlotWaiting\(handle\)/);
 });
 
-test('browser-absent control plane projects waiting copy only while it owns slot-waiting state', () => {
-  assert.match(
-    electronMain,
-    /projectBrowserSlotWaitingEvent\([\s\S]{0,160}Boolean\(handle\.controlPlaneOnly && handle\.slotWaitingSince\)/,
-  );
+test('closing a first-start waiter cancels the local queue without sending lifecycle.close', () => {
+  const stop = blockBetween(electronMain, 'function stopAutomation(', 'function closeBrowserExecutor(');
+  assert.match(stop, /releaseStartQueue\(handle\)[\s\S]*clearSlotWaiting\(handle\)[\s\S]*if \(!handle\.child\)/);
+  const noChild = blockBetween(stop, 'if (!handle.child)', 'const child = handle.child');
+  assert.match(noChild, /edge: 'stopped'/);
+  assert.match(noChild, /session: 'closed'/);
+  assert.doesNotMatch(noChild, /sendCoreLifecycle|kill\(/);
 });
 
 test('wechat interaction runtime uses an independent transient lane and API/Cloud running proof', () => {
