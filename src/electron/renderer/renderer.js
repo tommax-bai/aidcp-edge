@@ -6583,6 +6583,10 @@ function setRailMsg(text) {
   if (fields.railMsg) fields.railMsg.textContent = text || '';
 }
 
+function railStatus(...segments) {
+  return segments.filter(Boolean).join(' · ');
+}
+
 fields.railToggle?.addEventListener('click', () => {
   fleetView.collapsed = !fleetView.collapsed;
   window.aidcpEdge.fleetSetRailCollapsed?.(fleetView.collapsed);
@@ -6612,7 +6616,7 @@ async function doStartAll() {
   if (typeof api !== 'function') return;
   const envIds = filteredRailEnvList().map((env) => env.envId);
   if (envIds.length === 0) {
-    setRailMsg('当前分类没有可开始自动化的环境。');
+    setRailMsg('当前分类无可启动环境');
     return;
   }
   const res = await api({ envIds });
@@ -6627,13 +6631,16 @@ async function doStartAll() {
       };
       updateStartAllProgress();
     } else if (res.queued > 0) {
-      setRailMsg(`已为 ${res.queued} 个环境排队开始自动化（浏览器执行器错峰取得）。`); // 旧主进程无 envIds 时兜底
+      setRailMsg(railStatus(`启动中 0/${res.queued}`, `${res.queued} 个排队`)); // 旧主进程无 envIds 时兜底
     } else if (Number(res.controlOnly) > 0) {
-      setRailMsg(`${res.controlOnly} 个自动化引擎正在等待浏览器执行槽位。`);
+      setRailMsg(`${res.controlOnly} 个待槽位`);
     } else if (Number(res.rejected) > 0) {
-      setRailMsg(`浏览器执行队列已满，本次有 ${res.rejected} 个环境未加入自动化（排队上限 ${res.queueLimit}）。`);
+      setRailMsg(railStatus(
+        `${res.rejected} 个未加入`,
+        Number(res.queueLimit) > 0 ? `排队上限 ${res.queueLimit}` : '',
+      ));
     } else {
-      setRailMsg('没有待开始的自动化。');
+      setRailMsg('无待启动环境');
     }
   }
 }
@@ -6645,25 +6652,25 @@ async function doCloseAll() {
   if (typeof api !== 'function' || fleetView.closeAllPending) return;
   const envIds = filteredRailEnvList().map((env) => env.envId);
   if (envIds.length === 0) {
-    setRailMsg('当前分类没有可关闭的环境。');
+    setRailMsg('当前分类无可关闭环境');
     return;
   }
   fleetView.closeAllPending = true;
   fleetView.lastRailSig = '';
-  setRailMsg(`正在关闭 ${envIds.length} 个环境…`);
+  setRailMsg(`关闭中 ${envIds.length} 个`);
   renderRail();
   try {
     const res = await api({ envIds });
     if (res && res.ok) {
       const accepted = Number(res.accepted) || 0;
       setRailMsg(accepted > 0
-        ? `已受理 ${accepted} 个环境的关闭请求，请查看各环境状态。`
-        : '没有仍可关闭的环境。');
+        ? `已受理 ${accepted} 个关闭请求`
+        : '无可关闭环境');
     } else {
-      setRailMsg(`全部关闭失败：${(res && res.error) || '请求未被主进程受理'}`);
+      setRailMsg(railStatus('关闭失败', (res && res.error) || '请求未被主进程受理'));
     }
   } catch (e) {
-    setRailMsg(`全部关闭失败：${(e && e.message) || e}`);
+    setRailMsg(railStatus('关闭失败', (e && e.message) || e));
   } finally {
     fleetView.closeAllPending = false;
     fleetView.lastRailSig = '';
@@ -6681,16 +6688,20 @@ function updateStartAllProgress() {
     return e && e.status && typeof uiLogic.batchStartReady === 'function' && uiLogic.batchStartReady(e.status);
   }).length;
   if (launched >= sa.total) {
-    const suffix = sa.controlOnly > 0
-      ? `；另 ${sa.controlOnly} 个自动化引擎已连接，浏览器暂未入队`
-      : sa.rejected > 0
-        ? `；另 ${sa.rejected} 个未加入自动化请求`
-        : '';
-    setRailMsg(`已有 ${sa.total} 个环境开始自动化${suffix}。`);
+    setRailMsg(railStatus(
+      `已启动 ${sa.total}/${sa.total}`,
+      sa.controlOnly > 0 ? `${sa.controlOnly} 个待槽位` : '',
+      sa.rejected > 0 ? `${sa.rejected} 个未加入` : '',
+    ));
     fleetView.startAll = null;
     return;
   }
-  setRailMsg(`自动化启动中 ${launched}/${sa.total} · 其余 ${sa.total - launched} 个正在启动或排队${sa.controlOnly > 0 ? ` · ${sa.controlOnly} 个自动化引擎已连接` : ''}${sa.rejected > 0 ? ` · ${sa.rejected} 个未加入` : ''}…`);
+  setRailMsg(railStatus(
+    `启动中 ${launched}/${sa.total}`,
+    `${sa.total - launched} 个排队`,
+    sa.controlOnly > 0 ? `${sa.controlOnly} 个待槽位` : '',
+    sa.rejected > 0 ? `${sa.rejected} 个未加入` : '',
+  ));
 }
 fields.railStartAll?.addEventListener('click', () => { void doStartAll(); });
 fields.railCloseAll?.addEventListener('click', () => { void doCloseAll(); });

@@ -1579,7 +1579,7 @@ test('全部启动：启动排队有界接收，超出部分如实提示且不�
   assert.match(w.document.querySelector('#rail-msg')!.textContent!, /2 个未加入|另 2 个/);
 });
 
-test('全部启动进度：edge running 不提前计数，待任务或运行才完成', async () => {
+test('全部启动进度：所有状态用简短分段呈现，edge running 不提前计数', async () => {
   const starting = (envId: string) => makeStatus({
     envId,
     edge: 'running',
@@ -1593,7 +1593,13 @@ test('全部启动进度：edge running 不提前计数，待任务或运行才�
   ];
   const { w, pushStatus } = await boot({
     fleetGet: async () => ({ provider: 'adspower', selectedEnvId: 'env-a', railCollapsed: false, environments }),
-    fleetStartAll: async () => ({ ok: true, queued: 2, envIds: ['env-a', 'env-b'] }),
+    fleetStartAll: async () => ({
+      ok: true,
+      queued: 2,
+      controlOnly: 1,
+      rejected: 2,
+      envIds: ['env-a', 'env-b'],
+    }),
   }, {
     railCollapsed: false,
     environments: environments.map((env) => ({ profileId: env.profileId, name: env.name, platform: env.platform })),
@@ -1601,15 +1607,43 @@ test('全部启动进度：edge running 不提前计数，待任务或运行才�
 
   (w.document.querySelector('#rail-start-all') as HTMLButtonElement).click();
   await tick();
-  assert.match(w.document.querySelector('#rail-msg')!.textContent!, /0\/2/, '核心虽存活，启动/连接阶段仍是 0/2');
+  assert.equal(
+    w.document.querySelector('#rail-msg')!.textContent,
+    '启动中 0/2 · 2 个排队 · 1 个待槽位 · 2 个未加入',
+    '核心虽存活，启动/连接阶段仍是 0/2',
+  );
 
   pushStatus(makeStatus({ envId: 'env-a', automationState: 'ready', engineLinkState: 'connected', browserState: 'ready' }));
   await tick();
-  assert.match(w.document.querySelector('#rail-msg')!.textContent!, /1\/2/, '浏览器就绪的待任务环境计入完成');
+  assert.equal(
+    w.document.querySelector('#rail-msg')!.textContent,
+    '启动中 1/2 · 1 个排队 · 1 个待槽位 · 2 个未加入',
+    '浏览器就绪的待任务环境计入完成',
+  );
 
   pushStatus(makeStatus({ envId: 'env-b', automationState: 'running', engineLinkState: 'connected', browserState: 'closed' }));
   await tick();
-  assert.match(w.document.querySelector('#rail-msg')!.textContent!, /2 个环境开始自动化/, '真实运行完成批次');
+  assert.equal(
+    w.document.querySelector('#rail-msg')!.textContent,
+    '已启动 2/2 · 1 个待槽位 · 2 个未加入',
+    '真实运行完成批次',
+  );
+});
+
+test('全部启动：旧回执与单独待槽位也使用短状态', async () => {
+  const legacy = await boot({
+    fleetStartAll: async () => ({ ok: true, queued: 2 }),
+  });
+  (legacy.w.document.querySelector('#rail-start-all') as HTMLButtonElement).click();
+  await tick();
+  assert.equal(legacy.w.document.querySelector('#rail-msg')!.textContent, '启动中 0/2 · 2 个排队');
+
+  const controlOnly = await boot({
+    fleetStartAll: async () => ({ ok: true, queued: 0, controlOnly: 2 }),
+  });
+  (controlOnly.w.document.querySelector('#rail-start-all') as HTMLButtonElement).click();
+  await tick();
+  assert.equal(controlOnly.w.document.querySelector('#rail-msg')!.textContent, '2 个待槽位');
 });
 
 test('平台筛选：默认全部；切换后列表、计数、选中环境与全部启动范围同步', async () => {
@@ -1780,7 +1814,7 @@ test('平台筛选：启动排队拒绝只发送当前分类的一次请求', as
   assert.deepEqual(JSON.parse(JSON.stringify(requests)), [
     { envIds: ['ads-fb'] },
   ]);
-  assert.match(w.document.querySelector('#rail-msg')!.textContent!, /1 个环境未加入|排队已满/);
+  assert.equal(w.document.querySelector('#rail-msg')!.textContent, '1 个未加入 · 排队上限 4');
 });
 
 test('平台筛选：全部关闭只提交当前分类，处理中可见且回执不冒充终态完成', async () => {
@@ -1811,14 +1845,24 @@ test('平台筛选：全部关闭只提交当前分类，处理中可见且回�
   assert.deepEqual(JSON.parse(JSON.stringify(requests)), [{ envIds: ['ads-fb'] }]);
   assert.equal(closeAll.disabled, true);
   assert.equal(closeAll.textContent, '关闭请求中…');
-  assert.match(w.document.querySelector('#rail-msg')!.textContent!, /正在关闭 1 个环境/);
+  assert.equal(w.document.querySelector('#rail-msg')!.textContent, '关闭中 1 个');
   settleClose({ ok: true, accepted: 1, envIds: ['ads-fb'] });
   await tick();
   await tick();
   assert.equal(closeAll.disabled, false);
   assert.equal(closeAll.textContent, '全部关闭');
-  assert.match(w.document.querySelector('#rail-msg')!.textContent!, /已受理 1 个环境的关闭请求/);
+  assert.equal(w.document.querySelector('#rail-msg')!.textContent, '已受理 1 个关闭请求');
   assert.doesNotMatch(w.document.querySelector('#rail-msg')!.textContent!, /全部.*已关闭|关闭完成/);
+});
+
+test('全部关闭失败：缩短状态前缀但保留具体原因', async () => {
+  const { w } = await boot({
+    fleetCloseAll: async () => ({ ok: false, error: '关闭通道不可用' }),
+  });
+  (w.document.querySelector('#rail-close-all') as HTMLButtonElement).click();
+  await tick();
+  await tick();
+  assert.equal(w.document.querySelector('#rail-msg')!.textContent, '关闭失败 · 关闭通道不可用');
 });
 
 test('同账号告警：选中环境带 sameAccountWarning → 主区域出告警条', async () => {
