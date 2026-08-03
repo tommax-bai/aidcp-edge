@@ -353,6 +353,29 @@ test('环境栏：fleet 快照建行、默认收起、点选切换主区域并�
   );
 });
 
+test('状态路由拒绝迟到的旧启动快照，不重复回放排队日志', async () => {
+  const { w, pushStatus } = await boot();
+  const base = Date.now() + 10_000;
+  const status = (updatedAtMs: number, lastMessage: string) => makeStatus({
+    envId: 'ads-p1',
+    envName: '环境一',
+    edge: 'starting',
+    session: 'idle',
+    updatedAt: new Date(updatedAtMs).toISOString(),
+    lastMessage,
+  });
+
+  pushStatus(status(base + 10, '已排队错峰启动（第 1 位，相邻间隔约 1.1s）…'));
+  pushStatus(status(base + 20, '正在启动指纹浏览器…'));
+  pushStatus(status(base + 30, '正在启动内置指纹浏览器运行时…'));
+  pushStatus(status(base + 10, '已排队错峰启动（第 1 位，相邻间隔约 1.1s）…'));
+
+  const logText = w.document.querySelector('#last-message')?.textContent || '';
+  assert.equal((logText.match(/已排队错峰启动/g) || []).length, 1);
+  assert.match(logText, /正在启动指纹浏览器.*正在启动内置指纹浏览器运行时/s);
+  assert.match(w.document.querySelector('#last-message')?.lastElementChild?.textContent || '', /正在启动内置指纹浏览器运行时/);
+});
+
 test('环境栏：现有框架按运行阶段分组，排队位次独立展示且每行只出现一次', async () => {
   const environments = [
     { envId: 'env-attn', name: '需处理环境', status: makeStatus({ envId: 'env-attn', overlayBlocked: true }) },

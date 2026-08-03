@@ -12,6 +12,7 @@
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
+const os = require('node:os');
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const DEFAULT_KERNEL_TYPE = 'Chrome';
@@ -345,10 +346,80 @@ function extractKernelList(out) {
   return null;
 }
 
+// 云端内核目录只负责发现/下载；本地已经存在的固定版本内核不应因目录暂时不可达而停摆。
+// 只接受无路径穿越的 Chrome 版本，并以平台可执行文件作为证明。目录存在本身不算就绪。
+function localKernelAvailable({
+  version,
+  kernelType = DEFAULT_KERNEL_TYPE,
+  homeDir = os.homedir(),
+  platform = process.platform,
+  stat = fs.statSync,
+  access = fs.accessSync,
+} = {}) {
+  const normalizedVersion = String(version == null ? '' : version).trim();
+  if (String(kernelType).toLowerCase() !== 'chrome' || !/^\d+(?:\.\d+){0,3}$/.test(normalizedVersion)) {
+    return { present: false };
+  }
+  const root = path.join(homeDir, '.adspowerCli', `chrome_${normalizedVersion}`);
+  const candidates = platform === 'darwin'
+    ? [path.join(root, 'SunBrowser.app', 'Contents', 'MacOS', 'SunBrowser')]
+    : platform === 'win32'
+      ? [path.join(root, 'SunBrowser.exe'), path.join(root, 'SunBrowser', 'SunBrowser.exe')]
+      : [path.join(root, 'SunBrowser'), path.join(root, 'chrome')];
+  for (const executable of candidates) {
+    try {
+      const info = stat(executable);
+      if (!info.isFile() || info.size <= 0) continue;
+      if (platform !== 'win32') access(executable, fs.constants.X_OK);
+      return { present: true, executable };
+    } catch {
+      /* 候选不存在 / 不完整 / 不可执行，继续查下一个；最终回落云端目录。 */
+    }
+  }
+  return { present: false };
+}
+
+function classifyKernelListFailure(r, list) {
+  if (isThrottled(r)) {
+    return { error: 'AdsPower 本地 API 限流，未取到内核列表', reason: 'throttled', throttled: true };
+  }
+  const text = stripAnsi(`${(r && r.error) || ''}\n${(r && r.err) || ''}\n${(r && r.out) || ''}`);
+  if (/timeout after|\bETIMEDOUT\b|timed?\s*out/i.test(text)) {
+    return { error: 'AdsPower 内核列表请求超时，请检查网络后重试', reason: 'timeout', throttled: false };
+  }
+  const networkCode = text.match(/\b(ECONNRESET|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EAI_AGAIN|CERT_[A-Z_]+|ERR_(?:TLS|SSL)_[A-Z_]+|SSL_ERROR_[A-Z_]+)\b/i)?.[1]?.toUpperCase();
+  if (networkCode || /\bTLS\b|SSL routines|certificate|socket disconnected|socket hang up|fetch failed|network error/i.test(text)) {
+    return {
+      error: `无法连接 AdsPower 内核服务${networkCode ? `（${networkCode}）` : ''}，请检查网络后重试`,
+      reason: 'network',
+      throttled: false,
+    };
+  }
+  if (Array.isArray(list)) {
+    return { error: 'AdsPower 内核列表为空，请稍后重试', reason: 'empty', throttled: false };
+  }
+  if (r && r.ok === false) {
+    const exitCode = Number.isInteger(r.code) ? `，code=${r.code}` : '';
+    return { error: `AdsPower 内核列表查询失败（get-kernel-list${exitCode}）`, reason: 'cli_failed', throttled: false };
+  }
+  return { error: 'AdsPower 内核列表响应格式异常（get-kernel-list）', reason: 'malformed', throttled: false };
+}
+
 // 查某内核是否已下载：{ ok, present, listed }。
-// get-kernel-list 走 LocalAPI 查云端内核清单；刚起服务/云端握手未稳/网络慢时可能一时取不到，
-// 故有界重试（不止限流那一种）；仍失败带 raw 回报，供上层落日志诊断。
-async function kernelDownloaded({ cliEntry, execPath, version, kernelType = DEFAULT_KERNEL_TYPE, run = runCli, tries = 6, retryDelayMs = 1500 } = {}) {
+// 先以本地可执行文件证明已安装内核；未命中才走 get-kernel-list 云端清单。
+// 刚起服务/云端握手未稳/网络慢时有界重试；终态返回安全分类，raw 仅保留在返回对象中供受控诊断。
+async function kernelDownloaded({
+  cliEntry,
+  execPath,
+  version,
+  kernelType = DEFAULT_KERNEL_TYPE,
+  run = runCli,
+  localKernel = localKernelAvailable,
+  tries = 6,
+  retryDelayMs = 1500,
+} = {}) {
+  const local = await Promise.resolve(localKernel({ version, kernelType }));
+  if (local && local.present) return { ok: true, present: true, source: 'local' };
   let r;
   let list = null;
   for (let i = 0; i < tries; i += 1) {
@@ -361,13 +432,12 @@ async function kernelDownloaded({ cliEntry, execPath, version, kernelType = DEFA
     if (i < tries - 1) await delay(retryDelayMs);
   }
   if (!Array.isArray(list) || !list.length) {
-    const throttled = isThrottled(r);
+    const classified = classifyKernelListFailure(r, list);
     return {
       ok: false,
-      error: throttled ? 'AdsPower 本地 API 限流，未取到内核列表' : '无法解析内核列表（get-kernel-list）',
+      ...classified,
       raw: (r && r.out) || '',
       rawErr: (r && r.err) || '',
-      throttled,
     };
   }
   const hit = list.find((k) => String(k.kernel) === String(version) && String(k.kernel_type || DEFAULT_KERNEL_TYPE) === String(kernelType));
@@ -376,8 +446,8 @@ async function kernelDownloaded({ cliEntry, execPath, version, kernelType = DEFA
 
 // 确保内核就绪：已下载则秒过；缺则 download-kernel 并把 { percent, state } 经 onProgress 上报；下完（completed）才 ok。
 // 返回 { ok, alreadyPresent } / { ok, downloaded } / { ok:false, error }。
-async function ensureKernel({ cliEntry, execPath, version, kernelType = DEFAULT_KERNEL_TYPE, onProgress, run = runCli } = {}) {
-  const chk = await kernelDownloaded({ cliEntry, execPath, version, kernelType, run });
+async function ensureKernel({ cliEntry, execPath, version, kernelType = DEFAULT_KERNEL_TYPE, onProgress, run = runCli, localKernel = localKernelAvailable } = {}) {
+  const chk = await kernelDownloaded({ cliEntry, execPath, version, kernelType, run, localKernel });
   if (!chk.ok) return chk;
   if (chk.present) return { ok: true, alreadyPresent: true };
   if (!chk.listed) return { ok: false, error: `内核 ${kernelType} ${version} 不在可下载列表中` };
@@ -416,6 +486,8 @@ module.exports = {
   getRuntime,
   ensureRuntime,
   stopRuntime,
+  localKernelAvailable,
+  classifyKernelListFailure,
   kernelDownloaded,
   ensureKernel,
   DEFAULT_KERNEL_TYPE,

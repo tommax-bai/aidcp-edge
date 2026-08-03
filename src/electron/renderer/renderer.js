@@ -5656,6 +5656,13 @@ function routeStatus(status) {
   if (!status) return;
   const key = status.envId || '__local__';
   let env = fleetView.envs.get(key);
+  if (env && env.status) {
+    const incomingAt = Date.parse(status.updatedAt || '');
+    const currentAt = Date.parse(env.status.updatedAt || '');
+    // status:update 推送可能先于 lifecycle IPC 的返回值到达。旧回执不得把环境状态和原始日志
+    // 倒放回较早阶段；旧包无时间戳 / 非法时间戳仍按兼容路径接收。
+    if (Number.isFinite(incomingAt) && Number.isFinite(currentAt) && incomingAt < currentAt) return;
+  }
   if (!env) {
     env = { envId: key, name: status.envName || '', platform: '', status };
     fleetView.envs.set(key, env);

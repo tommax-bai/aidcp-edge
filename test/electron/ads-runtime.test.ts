@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -51,14 +51,26 @@ const adsRuntime = require('../../src/electron/ads-runtime.cjs') as {
     stopTries?: number;
     stopIntervalMs?: number;
   }) => Promise<{ ok: boolean; stopped?: boolean; alreadyStopped?: boolean; error?: string }>;
-  kernelDownloaded: (o: { cliEntry: string; version: string; run?: RunFn }) => Promise<{ ok: boolean; present?: boolean; listed?: boolean; throttled?: boolean; error?: string }>;
+  localKernelAvailable: (o: { version: string; kernelType?: string; homeDir?: string; platform?: string }) => { present: boolean; executable?: string };
+  classifyKernelListFailure: (r: RunResult, list: unknown[] | null) => { error: string; reason: string; throttled: boolean };
+  kernelDownloaded: (o: {
+    cliEntry: string;
+    version: string;
+    run?: RunFn;
+    localKernel?: () => { present: boolean };
+    tries?: number;
+    retryDelayMs?: number;
+  }) => Promise<{ ok: boolean; present?: boolean; listed?: boolean; source?: string; reason?: string; throttled?: boolean; error?: string }>;
   ensureKernel: (o: {
     cliEntry: string;
     version: string;
     onProgress?: (p: { percent: number; state: string }) => void;
     run?: RunFn;
+    localKernel?: () => { present: boolean };
   }) => Promise<{ ok: boolean; alreadyPresent?: boolean; downloaded?: boolean; error?: string }>;
 };
+
+const NO_LOCAL_KERNEL = () => ({ present: false });
 
 test('resolveRuntimeExecPath keeps packaged clients self-contained', () => {
   const ownExecutable = 'C:\\Program Files\\AIDCP\\AIDCP.exe';
@@ -403,27 +415,100 @@ test('stopRuntime: stopped daemon is a no-op and stop failures stay honest', asy
 });
 
 // ── kernelDownloaded ──────────────────────────────────────
+test('localKernelAvailable requires a non-empty executable sentinel', () => {
+  const homeDir = mkdtempSync(join(tmpdir(), 'aidcp-local-kernel-'));
+  const executable = join(homeDir, '.adspowerCli', 'chrome_148', 'SunBrowser.app', 'Contents', 'MacOS', 'SunBrowser');
+  try {
+    mkdirSync(join(executable, '..'), { recursive: true });
+    writeFileSync(executable, '');
+    chmodSync(executable, 0o755);
+    assert.equal(adsRuntime.localKernelAvailable({ version: '148', homeDir, platform: 'darwin' }).present, false);
+
+    writeFileSync(executable, 'sun-browser');
+    chmodSync(executable, 0o755);
+    assert.deepEqual(
+      adsRuntime.localKernelAvailable({ version: '148', homeDir, platform: 'darwin' }),
+      { present: true, executable },
+    );
+    assert.equal(adsRuntime.localKernelAvailable({ version: '../148', homeDir, platform: 'darwin' }).present, false);
+    assert.equal(adsRuntime.localKernelAvailable({ version: '148', kernelType: 'Firefox', homeDir, platform: 'darwin' }).present, false);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test('kernelDownloaded: local executable bypasses the cloud catalogue', async () => {
+  const calls: string[][] = [];
+  const run = makeRun({ 'get-kernel-list': { ok: false, out: '', err: 'ECONNRESET' } }, calls);
+  const r = await adsRuntime.kernelDownloaded({
+    cliEntry: 'x',
+    version: '148',
+    run,
+    localKernel: () => ({ present: true }),
+  });
+  assert.deepEqual({ ok: r.ok, present: r.present, source: r.source }, { ok: true, present: true, source: 'local' });
+  assert.equal(calls.length, 0, 'installed kernels must not depend on get-kernel-list');
+});
+
+test('classifyKernelListFailure keeps transport, timeout, empty, malformed, and CLI failures distinct', () => {
+  assert.deepEqual(
+    adsRuntime.classifyKernelListFailure({ ok: false, out: '', err: 'Too many request per second' }, null).reason,
+    'throttled',
+  );
+  assert.deepEqual(
+    adsRuntime.classifyKernelListFailure({ ok: false, out: '', err: 'timeout after 30000ms' }, null).reason,
+    'timeout',
+  );
+  const network = adsRuntime.classifyKernelListFailure({ ok: false, out: '', err: 'socket disconnected ECONNRESET' }, null);
+  assert.equal(network.reason, 'network');
+  assert.match(network.error, /ECONNRESET/);
+  assert.equal(adsRuntime.classifyKernelListFailure({ ok: true, out: '{"list":[]}' }, []).reason, 'empty');
+  assert.equal(adsRuntime.classifyKernelListFailure({ ok: true, out: 'not-json' }, null).reason, 'malformed');
+  assert.equal(adsRuntime.classifyKernelListFailure({ ok: false, code: 17, out: '', err: '' }, null).reason, 'cli_failed');
+});
+
+test('kernelDownloaded: missing local kernel surfaces ECONNRESET as a network failure', async () => {
+  const run = makeRun({
+    'get-kernel-list': {
+      ok: false,
+      out: '',
+      err: 'Client network socket disconnected before secure TLS connection was established ECONNRESET',
+    },
+  });
+  const r = await adsRuntime.kernelDownloaded({
+    cliEntry: 'x',
+    version: '148',
+    run,
+    localKernel: NO_LOCAL_KERNEL,
+    tries: 1,
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'network');
+  assert.match(r.error || '', /无法连接 AdsPower 内核服务.*ECONNRESET/);
+  assert.doesNotMatch(r.error || '', /无法解析/);
+});
+
 test('kernelDownloaded: present', async () => {
   const run = makeRun({ 'get-kernel-list': { ok: true, out: kernelListOut([{ kernel: '148', is_downloaded: true }]) } });
-  const r = await adsRuntime.kernelDownloaded({ cliEntry: 'x', version: '148', run });
+  const r = await adsRuntime.kernelDownloaded({ cliEntry: 'x', version: '148', run, localKernel: NO_LOCAL_KERNEL });
   assert.deepEqual({ ok: r.ok, present: r.present, listed: r.listed }, { ok: true, present: true, listed: true });
 });
 
 test('kernelDownloaded: listed but not downloaded', async () => {
   const run = makeRun({ 'get-kernel-list': { ok: true, out: kernelListOut([{ kernel: '148', is_downloaded: false }]) } });
-  const r = await adsRuntime.kernelDownloaded({ cliEntry: 'x', version: '148', run });
+  const r = await adsRuntime.kernelDownloaded({ cliEntry: 'x', version: '148', run, localKernel: NO_LOCAL_KERNEL });
   assert.deepEqual({ present: r.present, listed: r.listed }, { present: false, listed: true });
 });
 
 test('kernelDownloaded: not listed', async () => {
   const run = makeRun({ 'get-kernel-list': { ok: true, out: kernelListOut([{ kernel: '147', is_downloaded: false }]) } });
-  const r = await adsRuntime.kernelDownloaded({ cliEntry: 'x', version: '999', run });
+  const r = await adsRuntime.kernelDownloaded({ cliEntry: 'x', version: '999', run, localKernel: NO_LOCAL_KERNEL });
   assert.deepEqual({ present: r.present, listed: r.listed }, { present: false, listed: false });
 });
 
 test('kernelDownloaded: throttle then success (retry)', async () => {
   const run = makeRun({ 'get-kernel-list': [THROTTLE_OUT, { ok: true, out: kernelListOut([{ kernel: '148', is_downloaded: true }]) }] });
-  const r = await adsRuntime.kernelDownloaded({ cliEntry: 'x', version: '148', run });
+  const r = await adsRuntime.kernelDownloaded({ cliEntry: 'x', version: '148', run, localKernel: NO_LOCAL_KERNEL });
   assert.equal(r.ok, true);
   assert.equal(r.present, true);
 });
@@ -432,7 +517,7 @@ test('kernelDownloaded: throttle then success (retry)', async () => {
 test('ensureKernel: already present → no download', async () => {
   const calls: string[][] = [];
   const run = makeRun({ 'get-kernel-list': { ok: true, out: kernelListOut([{ kernel: '148', is_downloaded: true }]) } }, calls);
-  const r = await adsRuntime.ensureKernel({ cliEntry: 'x', version: '148', run });
+  const r = await adsRuntime.ensureKernel({ cliEntry: 'x', version: '148', run, localKernel: NO_LOCAL_KERNEL });
   assert.equal(r.ok, true);
   assert.equal(r.alreadyPresent, true);
   assert.ok(!calls.some((a) => a[0] === 'download-kernel'), 'must NOT download when already present');
@@ -447,7 +532,7 @@ test('ensureKernel: missing → download with progress → completed', async () 
       { progress: [`${A}Kernel progress: 0% [downloading]${Z}\n`, `Kernel progress: 56% [downloading]\n`, `Kernel progress: 100% [installing]\n`] },
     ) as RunResult,
   });
-  const r = await adsRuntime.ensureKernel({ cliEntry: 'x', version: '148', run, onProgress: (p) => progress.push(p) });
+  const r = await adsRuntime.ensureKernel({ cliEntry: 'x', version: '148', run, localKernel: NO_LOCAL_KERNEL, onProgress: (p) => progress.push(p) });
   assert.equal(r.ok, true);
   assert.equal(r.downloaded, true);
   assert.deepEqual(progress.map((p) => p.percent), [0, 56, 100]);
@@ -457,7 +542,7 @@ test('ensureKernel: missing → download with progress → completed', async () 
 test('ensureKernel: not listed → honest error, no download', async () => {
   const calls: string[][] = [];
   const run = makeRun({ 'get-kernel-list': { ok: true, out: kernelListOut([{ kernel: '147', is_downloaded: false }]) } }, calls);
-  const r = await adsRuntime.ensureKernel({ cliEntry: 'x', version: '148', run });
+  const r = await adsRuntime.ensureKernel({ cliEntry: 'x', version: '148', run, localKernel: NO_LOCAL_KERNEL });
   assert.equal(r.ok, false);
   assert.match(r.error || '', /不在可下载列表/);
   assert.ok(!calls.some((a) => a[0] === 'download-kernel'));
@@ -468,6 +553,6 @@ test('ensureKernel: download fails (not completed) → honest failure', async ()
     'get-kernel-list': { ok: true, out: kernelListOut([{ kernel: '148', is_downloaded: false }]) },
     'download-kernel': { ok: false, out: `${A}Kernel progress: 38% [downloading]${Z}\n`, error: 'network error' },
   });
-  const r = await adsRuntime.ensureKernel({ cliEntry: 'x', version: '148', run });
+  const r = await adsRuntime.ensureKernel({ cliEntry: 'x', version: '148', run, localKernel: NO_LOCAL_KERNEL });
   assert.equal(r.ok, false);
 });
