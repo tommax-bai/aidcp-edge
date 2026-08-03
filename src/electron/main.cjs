@@ -62,7 +62,7 @@ const {
   requestFacebookSelectedPersonaFill,
 } = require('./facebook-persona-auto-fill.cjs');
 const os = require('node:os');
-const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
+const { createUiEventStream, mergeStats, projectBrowserSlotWaitingEvent } = require('./ui-events.cjs');
 const {
   parseRuntimePosture,
   postureLatches,
@@ -2809,6 +2809,14 @@ function settleLaunchReady(handle, ok) {
  * 浏览器执行准入。只比较同时执行数与本次 Edge 进程已经确定的并发上限；任务热路径不得重读内存。
  */
 function admitBrowserSlot(handle) {
+  const waiting = slotWaiters();
+  if (waiting.length > 0 && waiting[0] !== handle) {
+    return {
+      ok: false,
+      reason: 'slot_fifo_wait',
+      message: '已有更早进入队列的环境等待浏览器槽位',
+    };
+  }
   const cap = slotCapacity();
   const used = occupiedSlots();
   if (used >= cap) {
@@ -2958,7 +2966,8 @@ function drainSlotWaiters() {
   const head = waiting[0];
   if (!admitBrowserSlot(head).ok) return; // 队头还进不来 → 整队继续等，绝不让后面的插队
   console.log(`[slots] 槽位空出来了 → 放行队头 ${head.envId}（还有 ${waiting.length - 1} 个在等）`);
-  clearSlotWaiting(head);
+  // 保留 FIFO 资格直到启动 / 唤醒任务真正通过 admitBrowserSlot。这里提前清掉会留下一个窗口：
+  // 后到的高优先级启动任务可能先运行、看见空槽后直接占走，队头反而继续等待。
   // 两种等法：核心还活着、只是待机中（浏览器已关）→ 原地唤醒；核心也没了 → 完整启动。
   // 用**存下来的原始 reason** 重新驱动唤醒：即使调用方的死线早就到了（我们已如实回过话），浏览器也要起——
   // 云端的下一次重试正等着命中它。
@@ -6041,7 +6050,10 @@ function handleEdgeLogLine(handle, message, isError = false) {
 
   // UI 事件（活动流 / 在场感 / 发布卡 / 账号身份 / 计数）统一走该环境自己的 ui-events 实例：
   // 结构化 [ui-event] 行优先，中文日志行映射兜底；计数只认 ✓ 成功行。
-  const evt = handle.uiEvents.push(structuredMessage);
+  const evt = projectBrowserSlotWaitingEvent(
+    handle.uiEvents.push(structuredMessage),
+    Boolean(handle.controlPlaneOnly && handle.slotWaitingSince),
+  );
   let standbyHint = null;
   let standbyHintUpdated = false;
   if (evt) {

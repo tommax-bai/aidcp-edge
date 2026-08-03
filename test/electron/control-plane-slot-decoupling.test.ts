@@ -85,6 +85,32 @@ test('browser-absent core does not consume a browser slot and real wake clears t
   assert.match(wakeFailed, /setTimeout\(\(\) => drainSlotWaiters\(\), 0\)/);
 });
 
+test('slot handoff keeps FIFO authority until the head actually passes launch admission', () => {
+  const admit = blockBetween(electronMain, 'function admitBrowserSlot(', '// ── 等槽位队列');
+  assert.match(admit, /const waiting = slotWaiters\(\)/);
+  assert.match(admit, /waiting\.length > 0 && waiting\[0\] !== handle/);
+  assert.match(admit, /reason: 'slot_fifo_wait'/);
+
+  const drain = blockBetween(electronMain, 'function drainSlotWaiters(', 'function startSlotWaitTimer(');
+  assert.doesNotMatch(
+    drain,
+    /clearSlotWaiting\(head\)/,
+    '队头被唤醒任务真正准入前必须保留 FIFO 资格，后来任务不得趁空位直入',
+  );
+
+  const wake = blockBetween(electronMain, 'function wakeColdStandby(', '/** 核心已完成原地重建');
+  assert.match(wake, /admitBrowserSlot\(handle\)[\s\S]*clearSlotWaiting\(handle\)/);
+  const start = blockBetween(electronMain, 'function startEdge(', 'function spawnEdgeChild(');
+  assert.match(start, /admitBrowserSlot\(handle\)[\s\S]*clearSlotWaiting\(handle\)/);
+});
+
+test('browser-absent control plane projects waiting copy only while it owns slot-waiting state', () => {
+  assert.match(
+    electronMain,
+    /projectBrowserSlotWaitingEvent\([\s\S]{0,160}Boolean\(handle\.controlPlaneOnly && handle\.slotWaitingSince\)/,
+  );
+});
+
 test('wechat interaction runtime uses an independent transient lane and API/Cloud running proof', () => {
   assert.match(wechatRuntime, /new TransientBrowserLeaseClient\(\{/);
   assert.match(wechatRuntime, /initiallyHeld: env\.AIDCP_TRANSIENT_BROWSER_LEASE === '1'/);
