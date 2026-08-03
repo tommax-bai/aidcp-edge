@@ -90,6 +90,15 @@ test('K scale summaries parse exactly like the retired count parser', async () =
   assert.equal(await firstCardLikeCount(), 1_200);
 });
 
+test('French Like controls preserve the independent numeric reaction witness', async () => {
+  install(card(`
+    <div role="button" aria-label="J’aime"></div>
+    <div role="button" aria-label="J’aime : 44">44</div>
+  `));
+
+  assert.equal(await firstCardLikeCount(), 44);
+});
+
 test('a measured zero stays zero rather than being dropped', async () => {
   install(card(`
     <div role="button" aria-label="赞"></div>
@@ -163,20 +172,17 @@ test('the note detail payload reads the count through the same witness', async (
   assert.equal(detail.likeCount, 3_829);
 });
 
-test('the like actuator locator is left byte-for-byte alone', async () => {
+test('the like actuator locale vocabulary remains separate from reaction-count reading', async () => {
   const fragment = await readFile(
     resolve(repoRoot, 'native/page-engine/src/facebook-router/08-reaction-semantics.js'),
     'utf8',
   );
-  assert.ok(
-    fragment.includes(
-      `  const reactionButton=(root)=>{\n`
-      + `    const buttons=all('button,[role="button"]',root).filter(visible);\n`
-      + `    return buttons.find((button)=>/^(赞|讚|like|me gusta|thích)(\\b|\\s|$)/i.test(label(button)))||null;\n`
-      + `  };\n`,
-    ),
-    '读数改造 MUST NOT 动点赞执行器的定位器',
-  );
+  const locatorStart = fragment.indexOf('  const reactionButton=(root)=>{');
+  const countStart = fragment.indexOf('  const reactionCountPrefix=', locatorStart);
+  const locator = fragment.slice(locatorStart, countStart);
+  assert.ok(locatorStart >= 0 && countStart > locatorStart, '点赞执行器定位器与反应读数见证必须继续分开拥有');
+  assert.match(locator, /j\['’\]aime/, '法语 J’aime 必须只作为受支持的动作标签进入定位器');
+  assert.doesNotMatch(locator, /reactionCountWitness|\d/, '动作定位器不得借用数字或反应读数见证');
   assert.ok(
     !/likeCount:count\(text\(reaction/.test(
       await readFile(resolve(repoRoot, 'native/page-engine/src/facebook-router/20-feed.js'), 'utf8'),

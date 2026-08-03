@@ -225,10 +225,10 @@
     const rendered=text(element,256);
     const accessible=label(element);
     const source=accessible||rendered;
-    const match=source.match(/^(following|follow|已关注|關注中|关注|關注|đang theo dõi|theo dõi|dang theo doi|theo doi)\s*(.*)$/i);
+    const match=source.match(/^(ne plus suivre|suivi(?:\(e\))?|suivre|following|follow|已关注|關注中|关注|關注|đang theo dõi|theo dõi|dang theo doi|theo doi)\s*(.*)$/i);
     if(!match)return null;
     const token=match[1].toLowerCase();
-    const state=/^(following|已关注|關注中|đang theo dõi|dang theo doi)$/i.test(token)?'following':'follow';
+    const state=/^(ne plus suivre|suivi(?:\(e\))?|following|已关注|關注中|đang theo dõi|dang theo doi)$/i.test(token)?'following':'follow';
     return {element,state,author:norm(match[2],200),accessible,rendered};
   };
   const exactVisibleText=(value)=>all('a,span,div').filter((element)=>{

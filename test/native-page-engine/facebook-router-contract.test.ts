@@ -1424,6 +1424,8 @@ test('Facebook Native Reel primary Like accepts the proven localized labels in t
     ['en', 'Like', '44'],
     ['es', 'Me gusta', '44'],
     ['vi', 'Thích', '44'],
+    ['fr', 'J’aime', '44'],
+    ['fr-ascii-apostrophe', "J'aime", '44'],
   ]) {
     const dom = install(`
       <main>
@@ -1466,7 +1468,7 @@ test('Facebook Native Reel bare zh-CN Like needs numeric content and active-vide
       <video id="video" src="https://cdn.example/reel-777.mp4"></video>
       <button id="no-count" aria-label="赞">赞</button>
       <button id="off-rail" aria-label="赞">44</button>
-      <button id="unknown" aria-label="支持">44</button>
+      <button id="unknown" aria-label="J’aime cette vidéo">44</button>
     </main>
   `, 'https://www.facebook.com/reel/777');
   setRect(dom.window.document.querySelector('#video')!, { left: 500, top: 70, right: 940, bottom: 780 });
@@ -1534,7 +1536,7 @@ test('Facebook Native Reel like ignores generic active CSS as a selected-state w
   const dom = install(`
     <main>
       <video id="video" src="https://cdn.example/reel-777.mp4"></video>
-      <button id="like" class="active" aria-label="Like">Like</button>
+      <button id="like" class="active" aria-label="J’aime">J’aime</button>
     </main>
   `, 'https://www.facebook.com/reel/777');
   const like = dom.window.document.querySelector('#like')!;
@@ -1711,6 +1713,46 @@ test('Facebook Native Reel picker probe is scoped to one visible multi-reaction 
   assert.equal(picker.output.value.cy, 485);
 });
 
+test('Facebook Native Reel picker probe resolves the exact French Like item', async () => {
+  const dom = install(`
+    <main>
+      <video id="video" src="https://cdn.example/reel-777.mp4"></video>
+      <button id="primary" aria-label="J’aime">44</button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  const primary = dom.window.document.querySelector('#primary')!;
+  setRect(dom.window.document.querySelector('#video')!, { left: 500, top: 70, right: 940, bottom: 780 });
+  setRect(primary, { left: 980, top: 500, right: 1_040, bottom: 550 });
+  primary.addEventListener('click', () => {
+    const picker = dom.window.document.createElement('div');
+    picker.id = 'picker';
+    picker.setAttribute('role', 'dialog');
+    picker.setAttribute('aria-label', 'Réactions');
+    picker.innerHTML = `
+      <button id="picker-like" role="menuitemradio" aria-label="J’aime">J’aime</button>
+      <button id="picker-love" role="menuitemradio" aria-label="J’adore">J’adore</button>
+    `;
+    dom.window.document.querySelector('main')?.append(picker);
+    setRect(picker, { left: 900, top: 420, right: 1_120, bottom: 620 });
+    setRect(picker.querySelector('#picker-like')!, { left: 930, top: 460, right: 980, bottom: 510 });
+    setRect(picker.querySelector('#picker-love')!, { left: 990, top: 460, right: 1_040, bottom: 510 });
+  });
+
+  const committed = await run({
+    kind: 'like_primary_commit',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(committed.output.value.clicked, true);
+
+  const picker = await run({
+    kind: 'like_picker_probe',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(picker.output.value.ok, true);
+  assert.equal(picker.output.value.cx, 955);
+  assert.equal(picker.output.value.cy, 485);
+});
+
 test('Facebook Native Reel follow probe recognizes already-following author labels without clicking', async () => {
   const dom = install(`
     <main>
@@ -1741,11 +1783,14 @@ test('Facebook Native Reel follow probe retains every author-qualified locale an
     ['關注 Re Su', false],
     ['Theo dõi Re Su', false],
     ['Theo doi Re Su', false],
+    ['Suivre Re Su', false],
     ['Following Re Su', true],
     ['已关注 Re Su', true],
     ['關注中 Re Su', true],
     ['Đang theo dõi Re Su', true],
     ['Dang theo doi Re Su', true],
+    ['Suivi(e) Re Su', true],
+    ['Ne plus suivre Re Su', true],
   ] as const) {
     const dom = install(`
       <main>

@@ -508,6 +508,46 @@ test('Reels 关注定位[jsdom]：无空格 aria-label 仍由可见作者和活�
   assert.equal(result.label, '关注Salon de Comolis');
 });
 
+test('Reels 关注定位[jsdom]：法语 Suivre 与正向状态仍由同一作者绑定', () => {
+  for (const [label, state] of [
+    ['Suivre Voyage by Janvier', 'follow'],
+    ['Suivi(e) Voyage by Janvier', 'following'],
+    ['Ne plus suivre Voyage by Janvier', 'following'],
+  ] as const) {
+    const dom = new JSDOM(
+      `<video id="video"></video><a id="author">Voyage by Janvier</a><button id="follow" aria-label="${label}">${label}</button>`,
+      { url: REEL_1.noteId, runScripts: 'outside-only' },
+    );
+    Object.defineProperty(dom.window, 'innerWidth', { value: 1440 });
+    Object.defineProperty(dom.window, 'innerHeight', { value: 802 });
+    setRect(dom.window.document.querySelector('#video')!, { left: 557, top: 72, right: 959, bottom: 786 });
+    setRect(dom.window.document.querySelector('#author')!, { left: 580, top: 640, right: 700, bottom: 670 });
+    setRect(dom.window.document.querySelector('#follow')!, { left: 715, top: 638, right: 850, bottom: 672 });
+
+    const result = JSON.parse(String(dom.window.eval(buildReelFollowTargetJs()))) as Record<string, unknown>;
+    assert.equal(result.found, true, label);
+    assert.equal(result.ambiguous, false, label);
+    assert.equal(result.author, 'Voyage by Janvier', label);
+    assert.equal(result.state, state, label);
+  }
+});
+
+test('Reels 关注定位[jsdom]：法语自由文本和无作者控件不构成目标', () => {
+  const dom = new JSDOM(
+    '<video id="video"></video><button id="bare" aria-label="Suivre">Suivre</button><button id="decoy" aria-label="Suivre cette recommandation">Suivre cette recommandation</button>',
+    { url: REEL_1.noteId, runScripts: 'outside-only' },
+  );
+  Object.defineProperty(dom.window, 'innerWidth', { value: 1440 });
+  Object.defineProperty(dom.window, 'innerHeight', { value: 802 });
+  setRect(dom.window.document.querySelector('#video')!, { left: 557, top: 72, right: 959, bottom: 786 });
+  setRect(dom.window.document.querySelector('#bare')!, { left: 715, top: 638, right: 780, bottom: 672 });
+  setRect(dom.window.document.querySelector('#decoy')!, { left: 715, top: 680, right: 900, bottom: 714 });
+
+  const result = JSON.parse(String(dom.window.eval(buildReelFollowTargetJs()))) as Record<string, unknown>;
+  assert.equal(result.found, false);
+  assert.equal(result.ambiguous, false);
+});
+
 test('Reels 关注定位[jsdom]：同作者两个可信控件保持歧义', () => {
   const dom = new JSDOM(
     '<video id="video"></video><a id="author">Salon de Comolis</a><button id="follow1" aria-label="关注Salon de Comolis">关注</button><button id="follow2" aria-label="Follow Salon de Comolis">Follow</button>',

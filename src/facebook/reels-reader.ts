@@ -279,8 +279,8 @@ export function buildReelLikePickerTargetJs(expectedNoteId: string, runId: strin
     var primary=aidcpReelTagged(${JSON.stringify(runId)});if(!primary||!aidcpReelVisible(primary))return JSON.stringify({status:'target_lost',noteId:base.noteId});
     var primaryRect=primary.getBoundingClientRect(),activeRect=base.active.r;
     if(primaryRect.left<activeRect.right-20||primaryRect.left>activeRect.right+125||primaryRect.top<activeRect.top-10||primaryRect.bottom>activeRect.bottom+20)return JSON.stringify({status:'target_lost',noteId:base.noteId});
-    var reactionish=/(赞|讚|Like|Thích|Me gusta|Love|大爱|Care|加油|Haha|哈哈|Wow|哇|Sad|悲伤|Angry|怒)/i;
-    var likeItem=/(?:^|[:：]\\s*)(赞|讚|Like|Thích|Me gusta)$/i;
+    var reactionish=/(赞|讚|Like|Thích|Me gusta|Love|大爱|Care|加油|Haha|哈哈|Wow|哇|Sad|悲伤|Angry|怒|J['’]aime|J['’]adore|Wouah|Triste|Grrr)/i;
+    var likeItem=/(?:^|[:：]\\s*)(赞|讚|Like|Thích|Me gusta|J['’]aime)$/i;
     var vr=base.active.r,containers=Array.from(document.querySelectorAll('[role="dialog"],[role="menu"],[role="listbox"],[aria-label*="Reaction" i],[aria-label*="反应"],[aria-label*="心情"]')).filter(aidcpReelVisible);
     var qualified=[];
     containers.forEach(function(container){
@@ -319,7 +319,7 @@ export function buildReelFollowTargetJs(): string {
   function area(r){var l=Math.max(0,r.left),t=Math.max(0,r.top),rr=Math.min(innerWidth,r.right),b=Math.min(innerHeight,r.bottom);return Math.max(0,rr-l)*Math.max(0,b-t);}
   function distance(a,b){var dx=Math.max(0,a.left-b.right,b.left-a.right),dy=Math.max(0,a.top-b.bottom,b.top-a.bottom);return Math.sqrt(dx*dx+dy*dy);}
   function leafExact(value){return Array.from(document.querySelectorAll('a,span,div')).filter(function(el){if(!visible(el)||text(el)!==value)return false;return !Array.from(el.children||[]).some(function(c){return text(c)===value;});});}
-  function parseControl(el){var t=text(el),l=label(el),source=l||t,m=source.match(/^(following|follow|已关注|关注|đang theo dõi|theo dõi|dang theo doi|theo doi)\s*(.*)$/i);if(!m)return null;var token=m[1].toLowerCase(),author=String(m[2]||'').trim();var state=/^(following|已关注|đang theo dõi|dang theo doi)$/i.test(token)?'following':'follow';return {el:el,t:t,l:l,state:state,author:author};}
+  function parseControl(el){var t=text(el),l=label(el),source=l||t,m=source.match(/^(ne plus suivre|suivi(?:\(e\))?|suivre|following|follow|已关注|关注|đang theo dõi|theo dõi|dang theo doi|theo doi)\s*(.*)$/i);if(!m)return null;var token=m[1].toLowerCase(),author=String(m[2]||'').trim();var state=/^(ne plus suivre|suivi(?:\(e\))?|following|已关注|đang theo dõi|dang theo doi)$/i.test(token)?'following':'follow';return {el:el,t:t,l:l,state:state,author:author};}
   var id=canonical();if(!id)return JSON.stringify({ok:false,found:false});
   var videos=Array.from(document.querySelectorAll('video')).map(function(v){var r=v.getBoundingClientRect();return {v:v,r:r,a:area(r),d:Math.abs((r.top+r.bottom)/2-innerHeight/2)};}).filter(function(x){return x.a>0;}).sort(function(a,b){return b.a-a.a||a.d-b.d;});
   if(!videos.length)return JSON.stringify({ok:false,noteId:id,found:false});

@@ -1,9 +1,9 @@
-  const neutralLike=/^\s*(?:(?:给.+的帖子)?\s*(?:留下心情|赞一个|点赞|讚|like|react|reaccionar|me gusta|thích)|bày tỏ cảm xúc thích(?: về bài viết của .+)?|bay to cam xuc thich(?: ve bai viet cua .+)?)\s*$/i;
+  const neutralLike=/^\s*(?:(?:给.+的帖子)?\s*(?:留下心情|赞一个|点赞|讚|like|react|reaccionar|me gusta|thích|j['’]aime)|bày tỏ cảm xúc thích(?: về bài viết của .+)?|bay to cam xuc thich(?: ve bai viet cua .+)?)\s*$/i;
   const unlike=/(取消赞|收回赞|收回|移除心情|移除赞|已赞|remove like|unlike|undo|gỡ thích|bỏ thích)/i;
-  const reactedWord=/^\s*(赞|讚|大赞|超赞|like|love|care|haha|wow|me gusta|me encanta|thích)\s*$/i;
-  const reactionPickerLabel=/^\s*(?:给.+的帖子)?\s*(?:留下心情|react|reaccionar)\s*$/i;
-  const pickerLike=/^\s*(赞|讚|like|me gusta|thích)\s*$/i;
-  const pickerReaction=/^\s*(赞|讚|like|love|care|haha|wow|sad|angry|me gusta|me encanta|thích|yêu thích|thương thương|buồn|phẫn nộ)\s*$/i;
+  const reactedWord=/^\s*(赞|讚|大赞|超赞|like|love|care|haha|wow|me gusta|me encanta|thích|j['’]aime|j['’]adore|wouah|triste|grrr)\s*$/i;
+  const reactionPickerLabel=/^\s*(?:给.+的帖子)?\s*(?:留下心情|react|reaccionar|réagir)\s*$/i;
+  const pickerLike=/^\s*(赞|讚|like|me gusta|thích|j['’]aime)\s*$/i;
+  const pickerReaction=/^\s*(赞|讚|like|love|care|haha|wow|sad|angry|me gusta|me encanta|thích|yêu thích|thương thương|buồn|phẫn nộ|j['’]aime|j['’]adore|wouah|triste|grrr)\s*$/i;
   const postComment=/(发表评论|發表評論|写评论|寫留言|评论.+帖子|comment|write a comment|comment.+post|comentar|viết bình luận|bình luận(?: về bài viết của .+)?|binh luan(?: ve bai viet cua .+)?)/i;
   const explicitReactionWitness=(button)=>{
     if(!button||!visible(button))return '';
@@ -27,11 +27,11 @@
   };
   const reactionButton=(root)=>{
     const buttons=all('button,[role="button"]',root).filter(visible);
-    return buttons.find((button)=>/^(赞|讚|like|me gusta|thích)(\b|\s|$)/i.test(label(button)))||null;
+    return buttons.find((button)=>/^(赞|讚|like|me gusta|thích|j['’]aime)(\b|\s|$)/i.test(label(button)))||null;
   };
   // 反应汇总语义的标签前缀（去变音符后的形态）。与 reactionButton 的锚点分开维护：
   // 那一个必须继续选中可切换的中性控件（点它 = 赞），这一个只用于读数、绝不派发点击。
-  const reactionCountPrefix=/^(?:赞|讚|like|me gusta|thich|bay to cam xuc thich)/i;
+  const reactionCountPrefix=/^(?:赞|讚|like|me gusta|thich|bay to cam xuc thich|j['’]aime)/i;
   /**
    * 反应计数见证（只读数）。判据是两条**合取**：
    *   ① accessible label 或渲染文本里至少有一个数字；
