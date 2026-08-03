@@ -1842,9 +1842,13 @@ test('慢启动行：静态节点在 #daily-summary 内、#quota-windows 之后'
     '慢启动行应排在 #quota-windows 之后');
 });
 
-test('慢启动行：常驻说明明确设置跟随环境与当前账号档位', () => {
-  const copy = new JSDOM(html).window.document.querySelector('.slow-start-copy')?.textContent?.trim();
-  assert.equal(copy, '设置跟随当前环境。开启后头 7 天按曲线逐日放开量，7天后按当前账号档位运行。');
+test('慢启动行：曲线帮助与说明存在但默认隐藏', () => {
+  const dom = new JSDOM(html);
+  const help = dom.window.document.querySelector('.slow-start-help') as HTMLElement;
+  const copy = dom.window.document.querySelector('.slow-start-copy') as HTMLElement;
+  assert.equal(copy.textContent?.trim(), '设置跟随当前环境。开启后头 7 天按曲线逐日放开量，7天后按当前账号档位运行。');
+  assert.ok(help.classList.contains('hidden'));
+  assert.ok(copy.classList.contains('hidden'));
 });
 
 test('解除受限行：位于今日进展底部且只有一个恢复主动作与一个问号说明', () => {
@@ -1937,6 +1941,8 @@ test('慢启动 HTTP 未返回状态 → 显示读取失败且绝不默认成「
   assert.equal(toggle.disabled, true);
   assert.equal(toggle.indeterminate, true, '读取失败不得显示成已关闭');
   assert.match($(w, '#slow-start-reason').textContent || '', /未返回慢启动状态/);
+  assert.ok(hidden($(w, '.slow-start-help')));
+  assert.ok(hidden($(w, '.slow-start-copy')));
 });
 
 // 能力缺失时仍展示慢启动详情占位，不默认成「关」、不卡在「正在读取」。
@@ -1961,6 +1967,8 @@ test('慢启动行：Facebook 环境未启动 + 无 env-scoped 读能力 → 显
   assert.equal(toggle.disabled, true);
   assert.equal(toggle.indeterminate, true, '未知态必须用 indeterminate，不能显示成已关闭');
   assert.match($(w, '#slow-start-reason').textContent || '', /登录客户端后读取 Cloud 慢启动状态/);
+  assert.ok(hidden($(w, '.slow-start-help')));
+  assert.ok(hidden($(w, '.slow-start-copy')));
 });
 
 // 停止的环境（内核未运行、无云链路，dailyUsage=null）+ 有绑定 → 经不依赖边缘的 env-scoped 读渲染真态，
@@ -2352,6 +2360,8 @@ test('慢启动行：停止的环境经 env-scoped 读渲染真态、开关可�
   assert.equal(toggle.indeterminate, false);
   assert.equal(toggle.checked, true);
   assert.match($(w, '#slow-start-badge').textContent || '', /慢启动 · 第 3\/7 天/);
+  assert.equal(hidden($(w, '.slow-start-help')), false);
+  assert.equal(hidden($(w, '.slow-start-copy')), false);
 });
 
 test('慢启动行：binding_unknown + active → 环境配置保持勾选可操作，不冒充账号已生效', async () => {
@@ -2386,6 +2396,8 @@ test('慢启动行：binding_unknown + off → 未绑定环境可在登录前预
   const toggle = $(w, '#slow-start-toggle') as unknown as HTMLInputElement;
   assert.equal(toggle.disabled, false);
   assert.equal(toggle.checked, false);
+  assert.ok(hidden($(w, '.slow-start-help')), '确认 off 时不得显示曲线帮助');
+  assert.ok(hidden($(w, '.slow-start-copy')), '确认 off 时不得显示曲线说明');
   toggle.click();
   await tick();
   assert.equal(JSON.stringify(calls), JSON.stringify([{ envKey: 'fb_env', enabled: true }]));
@@ -2397,6 +2409,8 @@ test('慢启动行：env-scoped 读够不到云端 → 就地如实展示失败�
   assert.ok(!hidden($(w, '#slow-start-row')));
   assert.match($(w, '#slow-start-reason').textContent || '', /够不到云端/);
   assert.ok($(w, '#slow-start-reason').classList.contains('is-error'));
+  assert.ok(hidden($(w, '.slow-start-help')));
+  assert.ok(hidden($(w, '.slow-start-copy')));
 });
 
 test('慢启动行：停止的环境离线写入成功 → 呈现为已生效，不显示「已保存/待应用」', async () => {
@@ -2436,6 +2450,22 @@ test('慢启动行：active 态渲染徽章与勾选', async () => {
   assert.ok(!hidden($(w, '#slow-start-row')));
   assert.equal(($(w, '#slow-start-toggle') as unknown as HTMLInputElement).checked, true);
   assert.match($(w, '#slow-start-badge').textContent || '', /慢启动 · 第 3\/7 天/);
+  assert.equal(hidden($(w, '.slow-start-help')), false);
+  assert.equal(hidden($(w, '.slow-start-copy')), false);
+});
+
+test('慢启动行：graduated 仍是已确认冷启动配置，保留曲线帮助与说明', async () => {
+  const w = await boot(stoppedFbEnv(async () => ({
+    ok: true,
+    data: { data: { envKey: 'fb_env', slowStart: {
+      state: 'graduated', totalDays: 7, since: Date.now() - 8 * 86_400_000, eligible: true,
+    } } },
+  })));
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(($(w, '#slow-start-toggle') as unknown as HTMLInputElement).checked, true);
+  assert.match($(w, '#slow-start-badge').textContent || '', /慢启动 · 已完成/);
+  assert.equal(hidden($(w, '.slow-start-help')), false);
+  assert.equal(hidden($(w, '.slow-start-copy')), false);
 });
 
 test('慢启动行：小红书即使收到 active 快照也整行隐藏', async () => {
@@ -2500,6 +2530,8 @@ test('慢启动行：开启等待期间保留普通人设，成功回执才对�
   assert.ok(policyRow.classList.contains('is-pending'));
   assert.doesNotMatch($(w, '#slow-start-badge').textContent || '', /第 1\/7 天/, 'pending 不得本地冒充 D1');
   assert.match($(w, '#facebook-operation-policy-status').textContent || '', /等待 Cloud 回读确认/);
+  assert.ok(hidden($(w, '.slow-start-help')), '从 off 开启在途仍沿用最后确认的隐藏态');
+  assert.ok(hidden($(w, '.slow-start-copy')));
 
   pushStatus?.(initial); // PUT 仍在途时到达写前旧快照
   await tick();
@@ -2523,6 +2555,8 @@ test('慢启动行：开启等待期间保留普通人设，成功回执才对�
   assert.equal(toggle.checked, true);
   assert.equal(toggle.disabled, false);
   assert.match($(w, '#slow-start-badge').textContent || '', /慢启动 · 第 1\/7 天/);
+  assert.equal(hidden($(w, '.slow-start-help')), false, '写后回读确认 active 才显示帮助');
+  assert.equal(hidden($(w, '.slow-start-copy')), false);
   assert.equal($(w, '#views-cap').textContent, '/20', '成功回执的 dayQuotas 应当场更新，不等下一次快照');
 });
 
@@ -2546,6 +2580,8 @@ test('慢启动行：选择普通人设失败后保留权威开启态，并保�
   assert.equal(mode.value, 'slow_start');
   assert.equal(toggle.checked, true, 'pending 时仍显示权威 slow_start');
   assert.match($(w, '#facebook-operation-policy-status').textContent || '', /等待 Cloud 回读确认/);
+  assert.equal(hidden($(w, '.slow-start-help')), false, '从 active 关闭在途仍沿用最后确认的显示态');
+  assert.equal(hidden($(w, '.slow-start-copy')), false);
 
   for (let i = 0; i < 3; i++) await tick();
   assert.equal(toggle.checked, true, '失败后必须回到未被篡改的权威 active 状态');
@@ -2597,6 +2633,8 @@ test('慢启动行：A 环境写入反馈不串到 B，A 回执也不改写当�
   assert.equal(mode.value, 'persona');
   assert.equal(toggle.checked, false);
   assert.doesNotMatch($(w, '#slow-start-reason').textContent || '', /等待云端确认/);
+  assert.ok(hidden($(w, '.slow-start-help')), 'B 的 off 真态不得沿用 A 的提示');
+  assert.ok(hidden($(w, '.slow-start-copy')));
 
   writeA.resolve({
     ok: true,
@@ -2605,6 +2643,8 @@ test('慢启动行：A 环境写入反馈不串到 B，A 回执也不改写当�
   await tick();
   assert.equal(mode.value, 'persona');
   assert.equal(toggle.checked, false, 'A 回执到达时当前 B 仍应保持 off');
+  assert.ok(hidden($(w, '.slow-start-help')), 'A 晚到回执不得向 B 泄漏提示');
+  assert.ok(hidden($(w, '.slow-start-copy')));
 
   const rowA = w.document.querySelector('.rail-row[data-env-id="A"]') as unknown as HTMLElement;
   rowA.dispatchEvent(new w.Event('click', { bubbles: true }));
@@ -2612,6 +2652,8 @@ test('慢启动行：A 环境写入反馈不串到 B，A 回执也不改写当�
   assert.equal(mode.value, 'slow_start');
   assert.equal(toggle.checked, true, '切回 A 后应看到 A 的成功写后真态');
   assert.match($(w, '#slow-start-badge').textContent || '', /第 1\/7 天/);
+  assert.equal(hidden($(w, '.slow-start-help')), false);
+  assert.equal(hidden($(w, '.slow-start-copy')), false);
 });
 
 // 这条守的是 design D8 点名的那个坑：整卡点击委托只认 closest('button')，checkbox / label 都不是

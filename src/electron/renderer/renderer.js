@@ -11,6 +11,8 @@ const fields = {
   slowStartToggle: document.querySelector('#slow-start-toggle'),
   slowStartBadge: document.querySelector('#slow-start-badge'),
   slowStartReason: document.querySelector('#slow-start-reason'),
+  slowStartHelp: document.querySelector('#slow-start-row .slow-start-help'),
+  slowStartCopy: document.querySelector('#slow-start-row .slow-start-copy'),
   facebookPersonaModeRow: document.querySelector('#facebook-persona-mode-row'),
   facebookPersonaModeToggleWrap: document.querySelector('#facebook-persona-mode-toggle-wrap'),
   facebookPersonaModeToggle: document.querySelector('#facebook-persona-mode-toggle'),
@@ -1340,8 +1342,14 @@ async function ensureEnvironmentRiskHttpFetch(envKey) {
   }
 }
 
+function setSlowStartGuidanceVisible(visible) {
+  if (fields.slowStartHelp) fields.slowStartHelp.classList.toggle('hidden', !visible);
+  if (fields.slowStartCopy) fields.slowStartCopy.classList.toggle('hidden', !visible);
+}
+
 function hideSlowStartRow() {
   if (!fields.slowStartRow) return;
+  setSlowStartGuidanceVisible(false);
   fields.slowStartRow.classList.add('hidden');
   fields.slowStartRow.classList.remove('is-stale', 'is-pending');
   fields.slowStartRow.removeAttribute('aria-busy');
@@ -1352,6 +1360,7 @@ function hideSlowStartRow() {
 // （'正在读取慢启动状态…'）；该构建未提供不依赖边缘的读时的退化态（'启动环境…'，绝不卡死在读中）。读毕由
 // ensureSlowStartHttpFetch 重绘为真态 / binding_unknown / 读失败。
 function renderSlowStartPlaceholder(text) {
+  setSlowStartGuidanceVisible(false);
   fields.slowStartRow.classList.remove('hidden', 'is-stale', 'is-pending');
   fields.slowStartRow.removeAttribute('aria-busy');
   if (fields.slowStartToggle) {
@@ -1372,6 +1381,7 @@ function renderSlowStartPlaceholder(text) {
 // 慢启动 env-scoped 读失败（够不到云端）：整行可见、就地如实说明，绝不静默吞。读不到真态即无从渲染可信开关，
 // 故禁用是 ESSENTIAL（不知道现在是开是关，不能给一个会撒谎的勾选框）——这与被摘掉的「内核在线闸」形状不同。
 function renderSlowStartHttpError(message) {
+  setSlowStartGuidanceVisible(false);
   fields.slowStartRow.classList.remove('hidden', 'is-stale', 'is-pending');
   fields.slowStartRow.removeAttribute('aria-busy');
   if (fields.slowStartToggle) {
@@ -1882,6 +1892,9 @@ function renderSlowStart(status) {
 function applySlowStartView(view, context) {
   const feedback = slowStartFeedbackByEnv.get(context.envKey);
   const pending = feedback && feedback.kind === 'pending' ? feedback : null;
+  // 曲线说明只跟随最后一次 Cloud 确认真态。pending.checked 是本地目标，不是生效事实：开启在途仍隐藏，
+  // 关闭在途仍保留，直到完整写后回读把 view.checked 改掉。
+  setSlowStartGuidanceVisible(Boolean(view.checked));
   fields.slowStartRow.classList.remove('hidden');
   fields.slowStartRow.classList.toggle('is-stale', Boolean(view.stale) && !pending);
   fields.slowStartRow.classList.toggle('is-pending', Boolean(pending));
