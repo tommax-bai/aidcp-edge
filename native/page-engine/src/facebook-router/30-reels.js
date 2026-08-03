@@ -70,11 +70,19 @@
     }
     return !postComment.test(context)&&!reelLikeExcluded.test(context);
   };
+  const reelReactionPickerItem=(element)=>{
+    if(element.closest('[role="menu"],[role="listbox"]'))return true;
+    const dialog=element.closest('[role="dialog"]');
+    if(!dialog)return false;
+    const items=all('[role="menuitemradio"],[role="menuitem"],[role="option"],button,[role="button"]',dialog)
+      .filter(visible).filter((item)=>pickerReaction.test(label(item)));
+    return items.length>=2;
+  };
   const reelLikeTarget=()=>{
     const active=expectedActiveReel();
     if(!active.ok)return active;
     const matches=all('button,[role="button"],[role="radio"]').filter((button)=>
-      reelLikeAssociated(active,button)&&Boolean(reelReactionState(button))
+      !reelReactionPickerItem(button)&&reelLikeAssociated(active,button)&&Boolean(reelReactionState(button))
     );
     if(matches.length!==1)return {
       ok:false,
@@ -95,8 +103,6 @@
       },
     };
   };
-  const reelLikeMarker='data-aidcp-native-reel-like-target';
-  const reelLikeCommitState='__aidcpNativeReelLikeCommit';
   const likeProbe=()=>{
     if(String(p.noteId||'')&&reelSurface()){
       const target=reelLikeTarget();
@@ -126,12 +132,8 @@
     };
   };
   const likePrimaryCommit=()=>{
-    window[reelLikeCommitState]=undefined;
     const target=reelLikeTarget();
     if(!target.ok)return {ok:false,reason:target.reason,noteId:target.noteId,clicked:false};
-    all(`[${reelLikeMarker}]`).forEach((element)=>element.removeAttribute(reelLikeMarker));
-    target.button.setAttribute(reelLikeMarker,postId(target.noteId));
-    window[reelLikeCommitState]={noteId:target.noteId,videoKey:target.active.videoKey};
     if(target.state==='reacted')return {
       ok:true,
       noteId:target.noteId,
@@ -160,40 +162,19 @@
     }
   };
   const likeVerify=()=>{
-    const active=expectedActiveReel();
-    if(!active.ok)return {ok:false,reason:active.reason,noteId:active.noteId,selected:false};
-    const commit=window[reelLikeCommitState];
-    if(!commit||commit.noteId!==active.noteId||commit.videoKey!==active.videoKey){
-      return {ok:false,reason:'reel_moved',noteId:active.noteId,selected:false};
-    }
-    const marker=postId(active.noteId);
-    const marked=all(`[${reelLikeMarker}]`).filter((button)=>
-      button.getAttribute(reelLikeMarker)===marker&&reelLikeAssociated(active,button)
-    );
-    if(marked.length!==1)return {
-      ok:false,
-      reason:marked.length?'ambiguous_target':'target_not_found',
-      noteId:active.noteId,
-      selected:false,
-    };
-    const button=marked[0];
-    const witness=explicitReactionWitness(button);
-    return {ok:true,noteId:active.noteId,selected:Boolean(witness),...(witness?{witness}:{})};
+    const target=reelLikeTarget();
+    if(!target.ok)return {ok:false,reason:target.reason,noteId:target.noteId,selected:false};
+    const witness=explicitReactionWitness(target.button);
+    return {ok:true,noteId:target.noteId,selected:Boolean(witness),...(witness?{witness}:{})};
   };
   const likePickerProbe=()=>{
     if(String(p.noteId||'')&&reelSurface()){
-      const active=expectedActiveReel();
-      if(!active.ok)return {ok:false,reason:active.reason};
-      const commit=window[reelLikeCommitState];
-      if(!commit||commit.noteId!==active.noteId||commit.videoKey!==active.videoKey){
-        return {ok:false,reason:'reel_moved'};
-      }
-      const marker=postId(active.noteId);
-      const primaries=all(`[${reelLikeMarker}]`).filter((button)=>
-        button.getAttribute(reelLikeMarker)===marker&&reelLikeAssociated(active,button)
-      );
-      if(primaries.length!==1)return {ok:false,reason:primaries.length?'ambiguous_target':'like_primary_target_lost'};
-      const primaryRect=primaries[0].getBoundingClientRect();
+      const primary=reelLikeTarget();
+      if(!primary.ok)return {
+        ok:false,
+        reason:primary.reason==='ambiguous_target'?'ambiguous_target':'like_primary_target_lost',
+      };
+      const primaryRect=primary.button.getBoundingClientRect();
       const pickers=all('[role="menu"],[role="listbox"],[role="dialog"]').filter(visible).map((container)=>{
         const items=all('[role="menuitemradio"],[role="menuitem"],[role="option"],button,[role="button"]',container)
           .filter(visible).filter((item)=>pickerReaction.test(label(item)));
@@ -261,7 +242,6 @@
         ok:true,
         already:true,
         noteId:target.noteId,
-        videoKey:target.active.videoKey,
         author:target.candidate.author,
       };
       const coordinates=point(target.candidate.element);
@@ -271,7 +251,6 @@
         reason:coordinates?undefined:'follow_button_not_found',
         already:false,
         noteId:target.noteId,
-        videoKey:target.active.videoKey,
         author:target.candidate.author,
       };
     }

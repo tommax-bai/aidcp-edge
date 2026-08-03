@@ -260,7 +260,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
    * 首屏 / 刷新 / 返回是「新批」——重置后按当前批重新播种。
    */
   private seenPostIds = new Set<string>();
-  /** Reels 路由可能晚于视频切换；用 route+videoKey 去重，不能只按暂未更新的地址栏拒绝新视频。 */
+  /** 会话级已上报 Reel 规范身份；媒体 URL 或 DOM 换壳不产生第二个业务稿件。 */
   private seenReelIdentities = new Set<string>();
   /** 已投影为“读”的 Reel postId；随后打开同一详情仍上报 Cloud，但不重复生成活动或本地浏览数。 */
   private reelViewActivityPostIds = new Set<string>();
@@ -1421,7 +1421,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
   }
 
   private reelIdentity(card: FacebookReelCard): string {
-    return `${canonicalPostId(card.noteId) || card.noteId}\n${card.videoKey}`;
+    return canonicalPostId(card.noteId) || card.noteId;
   }
 
   private toReelPageCards(card: FacebookReelCard): PageCardsPayload {

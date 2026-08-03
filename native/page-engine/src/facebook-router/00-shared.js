@@ -384,19 +384,6 @@ async function(input){
     const dy=Math.max(0,left.top-right.bottom,right.top-left.bottom);
     return Math.sqrt(dx*dx+dy*dy);
   };
-  const reelVideoKey=(video)=>{
-    let state=window.__aidcpNativeReelVideoKeys;
-    if(!state){
-      state={seq:0,keys:new WeakMap()};
-      window.__aidcpNativeReelVideoKeys=state;
-    }
-    let elementId=state.keys.get(video);
-    if(!elementId){
-      elementId=++state.seq;
-      state.keys.set(video,elementId);
-    }
-    return `${String(video.currentSrc||video.src||video.poster||video.getAttribute('src')||'').slice(0,2048)}@element:${elementId}`;
-  };
   const reelPermalinkOf=(root)=>{
     const matches=all('a[href]',root).map((link)=>cleanPermalink(link.href||link.getAttribute('href')||''))
       .filter((href)=>postId(href).startsWith('reel:'));
@@ -434,7 +421,6 @@ async function(input){
     return {
       ok:true,
       ...(noteId?{noteId}:{}),
-      videoKey:reelVideoKey(active.video),
       videoRect:{
         left:active.rect.left,
         top:active.rect.top,
@@ -460,7 +446,6 @@ async function(input){
     ok:Boolean(probe&&probe.ok),
     ...(probe&&probe.reason?{reason:probe.reason}:{}),
     ...(probe&&probe.noteId?{noteId:probe.noteId}:{}),
-    ...(probe&&probe.videoKey?{videoKey:probe.videoKey}:{}),
     ...(probe&&probe.videoRect?{videoRect:probe.videoRect}:{}),
     ...(probe&&probe.ok?{inputSafe:reelKeyboardInputSafe()}:{}),
   });

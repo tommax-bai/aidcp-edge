@@ -132,7 +132,7 @@
     const listKind=reelSurface()?'reels':'feed';
     const generation=[
       location.pathname,
-      active&&active.ok?active.videoKey:'',
+      active&&active.ok?active.noteId||'':'',
       cards.length,
       ...cards.slice(-8).map((card)=>card.noteId),
     ].join('|').slice(0,256);

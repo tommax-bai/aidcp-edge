@@ -90,7 +90,6 @@ const PRODUCTION_FORBIDDEN_MARKERS = Object.freeze([
   'facebook-comment-lifecycle-verify',
   'target_not_facebook',
   'data-aidcp-native-feed-like',
-  'data-aidcp-native-reel-like-target',
   'targetGroupScope',
   'composer_editor_not_found',
 ]);

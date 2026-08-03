@@ -131,12 +131,6 @@ pub(crate) async fn execute(
             }
         }
         NativeCommand::PageScroll(params)
-            if facebook_reels_entry_reason(params.reason.as_deref())
-                && session.facebook.pending_reel_transition.is_some() =>
-        {
-            execute_facebook_page_scroll(session, command, cancellation, deadline_unix_ms).await
-        }
-        NativeCommand::PageScroll(params)
             if facebook_reels_entry_reason(params.reason.as_deref()) =>
         {
             execute_facebook_reels_entry(session, command, cancellation, deadline_unix_ms).await

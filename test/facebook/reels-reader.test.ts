@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import type { BrowseCdp } from '../../src/browse/cdp-util.js';
 import {
-  buildNextTargetJs,
   buildReelFollowTargetJs,
   buildReelLikePickerTargetJs,
   buildReelLikeTargetJs,
@@ -17,10 +16,9 @@ const REEL_1 = {
   summary: 'Ở Trung Quốc lạ lắm mọi người ơi. #xuhuongfacebook',
   author: 'Bao',
   reactionText: '5.8K',
-  videoKey: 'video-111',
   videoRect: { left: 557, top: 72, right: 959, bottom: 786 },
 };
-const REEL_2 = { ...REEL_1, noteId: 'https://www.facebook.com/reel/222', summary: 'Second reel', videoKey: 'video-222' };
+const REEL_2 = { ...REEL_1, noteId: 'https://www.facebook.com/reel/222', summary: 'Second reel' };
 const REEL_1_FOLLOW = {
   ok: true,
   noteId: REEL_1.noteId,
@@ -126,7 +124,6 @@ test('Reels：活动视频摘要映射为唯一当前卡', async () => {
     summary: REEL_1.summary,
     author: 'Bao',
     reactionText: '5.8K',
-    videoKey: 'video-111',
   });
 });
 
@@ -301,7 +298,7 @@ test('Reels 关注：点击后 Reel 或作者漂移回 verify_indeterminate', as
 
 test('Reels 下一条：ArrowDown 成功后停止，不再滚轮或点按钮', async () => {
   const scripted = scriptedCdp({
-    probes: [REEL_1, REEL_1, REEL_2],
+    probes: [REEL_1, REEL_2],
   });
   const reader = new FacebookReelsReader(
     { cdp: scripted.cdp, sleep: async () => {} },
@@ -314,75 +311,15 @@ test('Reels 下一条：ArrowDown 成功后停止，不再滚轮或点按钮', a
   assert.equal(scripted.evaluations.some((value) => value.includes('__AIDCP_REEL_NEXT_TARGET__')), false);
 });
 
-test('Reels 下一条：键盘不动才发一次 70px 滚轮，滚轮成功后不点按钮', async () => {
-  const scripted = scriptedCdp({ probes: [REEL_1, REEL_1, REEL_1, REEL_1, REEL_2] });
-  const reader = new FacebookReelsReader(
-    { cdp: scripted.cdp, sleep: async () => {}, random: () => 0 },
-    { navigationRounds: 1, navigationMs: 1 },
-  );
-  assert.equal((await reader.next())?.noteId, REEL_2.noteId);
-  assert.deepEqual(scripted.clicks.map((event) => event.type), ['mouseWheel']);
-  assert.equal(scripted.clicks[0]?.deltaY, 70);
-  assert.equal(scripted.evaluations.some((value) => value.includes('__AIDCP_REEL_NEXT_TARGET__')), false);
-});
-
-test('Reels 下一条：滚轮随机上界钳制为 100px', async () => {
-  const scripted = scriptedCdp({ probes: [REEL_1, REEL_1, REEL_1, REEL_1, REEL_2] });
-  const reader = new FacebookReelsReader(
-    { cdp: scripted.cdp, sleep: async () => {}, random: () => 1 },
-    { navigationRounds: 1, navigationMs: 1 },
-  );
-  assert.equal((await reader.next())?.noteId, REEL_2.noteId);
-  assert.equal(scripted.clicks[0]?.deltaY, 100);
-});
-
-test('Reels 下一条：键盘后的迟到位移在滚轮前胜出，禁止第二次写', async () => {
-  const scripted = scriptedCdp({ probes: [REEL_1, REEL_1, REEL_1, REEL_2] });
+test('Reels 下一条：canonical noteId 未变化时结束本命令，不追加滚轮或按钮输入', async () => {
+  const scripted = scriptedCdp({ probes: [REEL_1, REEL_1] });
   const reader = new FacebookReelsReader(
     { cdp: scripted.cdp, sleep: async () => {} },
     { navigationRounds: 1, navigationMs: 1 },
   );
-  assert.equal((await reader.next())?.noteId, REEL_2.noteId);
-  assert.equal(scripted.clicks.length, 0);
-});
-
-test('Reels 下一条：键盘和滚轮不动后才点按钮，按钮后身份变化才成功', async () => {
-  const scripted = scriptedCdp({
-    probes: [REEL_1, REEL_1, REEL_1, REEL_1, REEL_1, REEL_1, REEL_2],
-    nextTarget: { ...REEL_1, found: true, ambiguous: false, cx: 1404, cy: 461, label: '下一张牌' },
-  });
-  const reader = new FacebookReelsReader(
-    { cdp: scripted.cdp, sleep: async () => {}, random: () => 0.5 },
-    { navigationRounds: 1, navigationMs: 1 },
-  );
-  assert.equal((await reader.next())?.noteId, REEL_2.noteId);
-  assert.deepEqual(scripted.clicks.map((event) => event.type), ['mouseWheel', 'mouseMoved', 'mousePressed', 'mouseReleased']);
-  assert.equal(scripted.clicks[0]?.deltaY, 85);
-});
-
-test('Reels 下一条：按钮歧义零点击；全部输入后身份不变仍不报成功', async () => {
-  const unchangedBeforeButton = [REEL_1, REEL_1, REEL_1, REEL_1, REEL_1, REEL_1];
-  const ambiguous = scriptedCdp({
-    probes: unchangedBeforeButton,
-    nextTarget: { ...REEL_1, found: false, ambiguous: true },
-  });
-  const ambiguousReader = new FacebookReelsReader(
-    { cdp: ambiguous.cdp, sleep: async () => {} },
-    { navigationRounds: 1, navigationMs: 1 },
-  );
-  assert.equal(await ambiguousReader.next(), null);
-  assert.deepEqual(ambiguous.clicks.map((event) => event.type), ['mouseWheel']);
-
-  const unchanged = scriptedCdp({
-    probes: [...unchangedBeforeButton, REEL_1],
-    nextTarget: { ...REEL_1, found: true, ambiguous: false, cx: 1404, cy: 461, label: '下一张牌' },
-  });
-  const unchangedReader = new FacebookReelsReader(
-    { cdp: unchanged.cdp, sleep: async () => {} },
-    { navigationRounds: 1, navigationMs: 1 },
-  );
-  assert.equal(await unchangedReader.next(), null);
-  assert.deepEqual(unchanged.clicks.map((event) => event.type), ['mouseWheel', 'mouseMoved', 'mousePressed', 'mouseReleased']);
+  assert.equal(await reader.next(), null);
+  assert.deepEqual(scripted.keys.map((event) => event.type), ['rawKeyDown', 'keyUp']);
+  assert.deepEqual(scripted.clicks, []);
 });
 
 function setRect(element: Element, rect: { left: number; top: number; right: number; bottom: number }): void {
@@ -430,7 +367,7 @@ test('Reels 点赞状态[jsdom]：中性控件里的通用图片不证明已赞�
 test('Reels 点赞浮层定位[jsdom]：只取 scoped picker 的 Like，忽略文档外部同名按钮', () => {
   const dom = reelLikeDom(`
     <video id="video"></video>
-    <button id="primary" aria-label="Like" data-aidcp-reel-like-target="test-run"></button>
+    <button id="primary" aria-label="Like"></button>
     <button id="decoy" aria-label="Like"></button>
     <div id="picker" role="dialog" aria-label="Reactions">
       <button id="picker-like" role="button" aria-label="Like"></button>
@@ -445,7 +382,7 @@ test('Reels 点赞浮层定位[jsdom]：只取 scoped picker 的 Like，忽略�
   setRect(doc.querySelector('#picker-like')!, { left: 940, top: 280, right: 980, bottom: 320 });
   setRect(doc.querySelector('#picker-love')!, { left: 990, top: 280, right: 1030, bottom: 320 });
 
-  const result = JSON.parse(String(dom.window.eval(buildReelLikePickerTargetJs(REEL_1.noteId, 'test-run')))) as Record<string, unknown>;
+  const result = JSON.parse(String(dom.window.eval(buildReelLikePickerTargetJs(REEL_1.noteId)))) as Record<string, unknown>;
   assert.deepEqual(result, {
     status: 'found',
     noteId: REEL_1.noteId,
@@ -458,7 +395,7 @@ test('Reels 点赞浮层定位[jsdom]：只取 scoped picker 的 Like，忽略�
 
 test('Reels 点赞浮层定位[jsdom]：多个 scoped picker 歧义，部分屏外 Like 拒绝坐标提交', () => {
   const ambiguous = reelLikeDom(`
-    <video id="video"></video><button id="primary" aria-label="Like" data-aidcp-reel-like-target="test-run"></button>
+    <video id="video"></video><button id="primary" aria-label="Like"></button>
     <div id="picker-a" role="dialog"><button id="a-like" aria-label="Like"></button><button id="a-love" aria-label="Love"></button></div>
     <div id="picker-b" role="dialog"><button id="b-like" aria-label="Like"></button><button id="b-love" aria-label="Love"></button></div>
   `);
@@ -471,11 +408,11 @@ test('Reels 点赞浮层定位[jsdom]：多个 scoped picker 歧义，部分屏�
   for (const [id, left] of [['#a-like', 930], ['#a-love', 970], ['#b-like', 1050], ['#b-love', 1090]] as const) {
     setRect(ambiguousDoc.querySelector(id)!, { left, top: 280, right: left + 30, bottom: 320 });
   }
-  const ambiguousResult = JSON.parse(String(ambiguous.window.eval(buildReelLikePickerTargetJs(REEL_1.noteId, 'test-run')))) as { status?: string };
+  const ambiguousResult = JSON.parse(String(ambiguous.window.eval(buildReelLikePickerTargetJs(REEL_1.noteId)))) as { status?: string };
   assert.equal(ambiguousResult.status, 'ambiguous');
 
   const offscreen = reelLikeDom(`
-    <video id="video"></video><button id="primary" aria-label="Like" data-aidcp-reel-like-target="test-run"></button>
+    <video id="video"></video><button id="primary" aria-label="Like"></button>
     <div id="picker" role="dialog"><button id="like" aria-label="Like"></button><button id="love" aria-label="Love"></button></div>
   `);
   const offscreenDoc = offscreen.window.document;
@@ -484,7 +421,7 @@ test('Reels 点赞浮层定位[jsdom]：多个 scoped picker 歧义，部分屏�
   setRect(offscreenDoc.querySelector('#picker')!, { left: 920, top: 790, right: 1120, bottom: 960 });
   setRect(offscreenDoc.querySelector('#like')!, { left: 940, top: 880, right: 980, bottom: 940 });
   setRect(offscreenDoc.querySelector('#love')!, { left: 990, top: 840, right: 1030, bottom: 880 });
-  const offscreenResult = JSON.parse(String(offscreen.window.eval(buildReelLikePickerTargetJs(REEL_1.noteId, 'test-run')))) as { status?: string };
+  const offscreenResult = JSON.parse(String(offscreen.window.eval(buildReelLikePickerTargetJs(REEL_1.noteId)))) as { status?: string };
   assert.equal(offscreenResult.status, 'offscreen');
 });
 
@@ -565,49 +502,19 @@ test('Reels 关注定位[jsdom]：同作者两个可信控件保持歧义', () =
   assert.equal(result.ambiguous, true);
 });
 
-test('Reels 活动视频身份[jsdom]：同一 video 元素仅发生位移动画时 key 保持稳定', () => {
-  const dom = new JSDOM('<video></video>', { url: REEL_1.noteId, runScripts: 'outside-only' });
+test('Reels 活动视频探针[jsdom]：只返回 canonical noteId，不暴露媒体或 DOM 身份', () => {
+  const dom = new JSDOM('<video src="first.m3u8"></video>', { url: REEL_1.noteId, runScripts: 'outside-only' });
   Object.defineProperty(dom.window, 'innerWidth', { value: 1440 });
   Object.defineProperty(dom.window, 'innerHeight', { value: 802 });
   const video = dom.window.document.querySelector('video')!;
   setRect(video, { left: 557, top: 72, right: 959, bottom: 786 });
-  const before = JSON.parse(String(dom.window.eval(buildReelProbeJs()))) as { videoKey: string };
+  const before = JSON.parse(String(dom.window.eval(buildReelProbeJs()))) as Record<string, unknown>;
+  video.setAttribute('src', 'second-segment.m3u8');
   setRect(video, { left: 557, top: -200, right: 959, bottom: 514 });
-  const duringAnimation = JSON.parse(String(dom.window.eval(buildReelProbeJs()))) as { videoKey: string };
-  assert.equal(duringAnimation.videoKey, before.videoKey);
-});
+  const after = JSON.parse(String(dom.window.eval(buildReelProbeJs()))) as Record<string, unknown>;
 
-test('Reels 下一按钮[jsdom]：排除顶栏，首条上一张禁用时唯一命中下一张', () => {
-  const dom = new JSDOM(
-    '<video></video><div id="menu" role="button" aria-label="Facebook上的菜单"></div><div id="notice" role="button" aria-label="通知"></div><div id="previous" role="button" aria-label="上一张牌" aria-disabled="true"></div><div id="next" role="button" aria-label="下一张牌"></div>',
-    { url: REEL_1.noteId, runScripts: 'outside-only' },
-  );
-  Object.defineProperty(dom.window, 'innerWidth', { value: 1440 });
-  Object.defineProperty(dom.window, 'innerHeight', { value: 802 });
-  setRect(dom.window.document.querySelector('video')!, { left: 557, top: 72, right: 959, bottom: 786 });
-  setRect(dom.window.document.querySelector('#menu')!, { left: 1240, top: 8, right: 1280, bottom: 48 });
-  setRect(dom.window.document.querySelector('#notice')!, { left: 1336, top: 8, right: 1376, bottom: 48 });
-  setRect(dom.window.document.querySelector('#previous')!, { left: 1380, top: 373, right: 1428, bottom: 421 });
-  setRect(dom.window.document.querySelector('#next')!, { left: 1380, top: 437, right: 1428, bottom: 485 });
-  const result = JSON.parse(String(dom.window.eval(buildNextTargetJs()))) as Record<string, unknown>;
-  assert.equal(result.found, true);
-  assert.equal(result.ambiguous, false);
-  assert.equal(result.label, '下一张牌');
-  assert.equal(result.cx, 1404);
-  assert.equal(result.cy, 461);
-});
-
-test('Reels 下一按钮[jsdom]：多个可信下一张保持歧义并零目标', () => {
-  const dom = new JSDOM(
-    '<video></video><div id="next1" role="button" aria-label="Next card"></div><div id="next2" role="button" aria-label="下一张牌"></div>',
-    { url: REEL_1.noteId, runScripts: 'outside-only' },
-  );
-  Object.defineProperty(dom.window, 'innerWidth', { value: 1440 });
-  Object.defineProperty(dom.window, 'innerHeight', { value: 802 });
-  setRect(dom.window.document.querySelector('video')!, { left: 557, top: 72, right: 959, bottom: 786 });
-  setRect(dom.window.document.querySelector('#next1')!, { left: 1380, top: 373, right: 1428, bottom: 421 });
-  setRect(dom.window.document.querySelector('#next2')!, { left: 1380, top: 437, right: 1428, bottom: 485 });
-  const result = JSON.parse(String(dom.window.eval(buildNextTargetJs()))) as Record<string, unknown>;
-  assert.equal(result.found, false);
-  assert.equal(result.ambiguous, true);
+  assert.equal(before.noteId, REEL_1.noteId);
+  assert.equal(after.noteId, REEL_1.noteId);
+  assert.equal('videoKey' in before, false);
+  assert.equal('videoKey' in after, false);
 });

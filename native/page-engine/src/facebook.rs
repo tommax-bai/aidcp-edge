@@ -62,32 +62,14 @@ pub struct FacebookReelProbe {
     #[serde(default)]
     pub note_id: Option<String>,
     #[serde(default)]
-    pub video_key: Option<String>,
-    #[serde(default)]
     pub video_rect: Option<FacebookReelRect>,
     #[serde(default)]
     pub input_safe: Option<bool>,
 }
 
 impl FacebookReelProbe {
-    pub fn active_video_moved_from(&self, previous: &Self) -> bool {
-        self.ok
-            && previous.ok
-            && self.video_key.is_some()
-            && previous.video_key.is_some()
-            && self.video_key != previous.video_key
-    }
-
     pub fn moved_from(&self, previous: &Self) -> bool {
-        self.ok
-            && previous.ok
-            && self.note_id.is_some()
-            && self.video_key.is_some()
-            && if previous.note_id.is_none() {
-                self.active_video_moved_from(previous)
-            } else {
-                self.note_id != previous.note_id || self.video_key != previous.video_key
-            }
+        self.ok && previous.ok && self.note_id.is_some() && self.note_id != previous.note_id
     }
 
     pub fn is_reels_surface(&self) -> bool {
@@ -95,7 +77,7 @@ impl FacebookReelProbe {
     }
 
     pub fn is_unique_anonymous_video(&self) -> bool {
-        self.ok && self.video_key.is_some() && self.note_id.is_none()
+        self.ok && self.note_id.is_none()
     }
 
     pub fn is_keyboard_input_safe(&self) -> bool {
@@ -122,8 +104,6 @@ pub struct FacebookReelNextTarget {
     pub reason: Option<String>,
     #[serde(default)]
     pub note_id: Option<String>,
-    #[serde(default)]
-    pub video_key: Option<String>,
     #[serde(default)]
     pub video_rect: Option<FacebookReelRect>,
     #[serde(default)]
@@ -352,8 +332,6 @@ pub struct FacebookFollowProbe {
     pub reason: Option<String>,
     #[serde(default)]
     pub note_id: Option<String>,
-    #[serde(default)]
-    pub video_key: Option<String>,
     #[serde(default)]
     pub author: Option<String>,
     #[serde(default)]
@@ -1359,45 +1337,37 @@ mod tests {
     }
 
     #[test]
-    fn reel_probe_distinguishes_anonymous_video_motion_from_reportable_progress() {
+    fn reel_probe_uses_only_canonical_note_identity_for_progress() {
         let before = FacebookReelProbe {
             ok: true,
             reason: None,
             note_id: Some("https://www.facebook.com/reel/1".to_owned()),
-            video_key: Some("video-1@element:1".to_owned()),
             video_rect: None,
             input_safe: None,
         };
         assert!(!before.moved_from(&before));
 
-        let video_moved = FacebookReelProbe {
-            video_key: Some("video-2@element:2".to_owned()),
+        let moved = FacebookReelProbe {
+            note_id: Some("https://www.facebook.com/reel/2".to_owned()),
             ..before.clone()
         };
-        assert!(video_moved.moved_from(&before));
+        assert!(moved.moved_from(&before));
 
         let missing_identity = FacebookReelProbe {
             note_id: None,
-            ..video_moved
+            ..moved
         };
-        assert!(missing_identity.active_video_moved_from(&before));
         assert!(!missing_identity.moved_from(&before));
 
         let anonymous_before = FacebookReelProbe {
             note_id: None,
-            video_key: Some("video-1@element:1".to_owned()),
             ..before.clone()
         };
-        let hydrated_same_video = FacebookReelProbe {
+        let hydrated = FacebookReelProbe {
             note_id: Some("https://www.facebook.com/reel/2".to_owned()),
             ..anonymous_before.clone()
         };
-        assert!(!hydrated_same_video.moved_from(&anonymous_before));
-        let hydrated_next_video = FacebookReelProbe {
-            video_key: Some("video-2@element:2".to_owned()),
-            ..hydrated_same_video
-        };
-        assert!(hydrated_next_video.moved_from(&anonymous_before));
+        assert!(hydrated.moved_from(&anonymous_before));
     }
 
     #[test]
@@ -1405,7 +1375,6 @@ mod tests {
         let vertical: FacebookReelNextTarget = serde_json::from_value(json!({
             "ok": true,
             "noteId": "https://www.facebook.com/reel/1",
-            "videoKey": "video-1@element:1",
             "inputSafe": true,
             "found": true,
             "ambiguous": false,
@@ -1420,7 +1389,6 @@ mod tests {
 
         let horizontal: FacebookReelNextTarget = serde_json::from_value(json!({
             "ok": true,
-            "videoKey": "video-1@element:1",
             "inputSafe": false,
             "found": false,
             "ambiguous": false,
@@ -1433,7 +1401,6 @@ mod tests {
         assert!(
             serde_json::from_value::<FacebookReelNextTarget>(json!({
                 "ok": true,
-                "videoKey": "video-1@element:1",
                 "found": false,
                 "ambiguous": false,
                 "axis": "diagonal"
@@ -1448,7 +1415,6 @@ mod tests {
             ok: false,
             reason: Some("not_reel".to_owned()),
             note_id: None,
-            video_key: None,
             video_rect: None,
             input_safe: None,
         };

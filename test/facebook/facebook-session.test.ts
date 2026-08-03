@@ -892,13 +892,11 @@ test('首页明确空态只上报观察；Cloud 专用授权后进入 Reels，�
     noteId: 'https://www.facebook.com/reel/111',
     summary: 'first reel summary',
     author: 'Bao',
-    videoKey: 'video-111',
   };
   const second: FacebookReelCard = {
     noteId: 'https://www.facebook.com/reel/222',
     summary: 'second reel summary',
     author: 'Lan',
-    videoKey: 'video-222',
   };
   const h = makeSession({
     mode: 'on',
@@ -973,7 +971,6 @@ test('配置 Reels 主入口 reason 复用现有 enterReels 路径', async () =>
     noteId: 'https://www.facebook.com/reel/primary-1',
     summary: 'configured primary reel',
     author: 'Bao',
-    videoKey: 'video-primary-1',
   };
   const h = makeSession({
     mode: 'on',
@@ -993,7 +990,6 @@ test('Reels 路由先到、首卡晚到时保持 pending，恢复当前卡前不
     noteId: 'https://www.facebook.com/reel/333',
     summary: 'late hydrated reel',
     author: 'Ming',
-    videoKey: 'video-333',
   };
   const h = makeSession({
     mode: 'on',
@@ -1032,7 +1028,6 @@ test('Reels 关注：shadow 标志与 reader 的真实终态原样回执', async
     noteId: 'https://www.facebook.com/reel/111',
     summary: 'reel summary',
     author: 'Salon de Comolis',
-    videoKey: 'video-111',
   };
   const h = makeSession({
     mode: 'shadow',
@@ -1054,7 +1049,6 @@ test('Reels 关注：already_followed 是已满足的幂等终态，缺 noteId �
   const reel: FacebookReelCard = {
     noteId: 'https://www.facebook.com/reel/111',
     summary: 'reel summary',
-    videoKey: 'video-111',
   };
   const h = makeSession({
     mode: 'on',
@@ -1079,7 +1073,6 @@ test('Reels 全部导航方式均未证明下一条时，session 诚实回 scrol
   const first: FacebookReelCard = {
     noteId: 'https://www.facebook.com/reel/111',
     summary: 'first reel summary',
-    videoKey: 'video-111',
   };
   const h = makeSession({
     mode: 'on',
@@ -1100,16 +1093,14 @@ test('Reels 全部导航方式均未证明下一条时，session 诚实回 scrol
   assert.equal(reelViews.length, 1, '未证明切到下一条时不能伪造第二条读活动');
 });
 
-test('Reels 视频已切但路由尚未水合时，route+videoKey 新身份仍可进入下一轮', async () => {
+test('Reels 重复 canonical noteId 不因媒体或 DOM 换壳进入下一轮', async () => {
   const first: FacebookReelCard = {
     noteId: 'https://www.facebook.com/reel/111',
     summary: 'first reel summary',
-    videoKey: 'video-element-1',
   };
   const transitioned: FacebookReelCard = {
     noteId: first.noteId,
     summary: 'transitioned reel summary',
-    videoKey: 'video-element-2',
   };
   const h = makeSession({
     mode: 'on',
@@ -1120,8 +1111,8 @@ test('Reels 视频已切但路由尚未水合时，route+videoKey 新身份仍�
   await h.session.start();
   await h.session.onCloudCommand(makeEnv('page.scroll', { reason: 'empty_feed_reels_fallback' }));
   await h.session.onCloudCommand(makeEnv('page.scroll', {}));
-  assert.equal(h.cards.length, 3);
-  assert.equal(h.cards.at(-1)?.cards[0].title, transitioned.summary);
+  assert.equal(h.cards.length, 2);
+  assert.equal(h.actions.at(-1)?.reason, 'no_target');
 });
 
 test('首页 0 卡但 feed_unknown 时不报告 empty，也不进入 Reels', async () => {
@@ -1129,7 +1120,7 @@ test('首页 0 卡但 feed_unknown 时不报告 empty，也不进入 Reels', asy
     mode: 'on',
     settleBatches: [{ cards: [], degraded: false, reason: 'no_feed' }],
     homeState: { state: 'feed_unknown' },
-    reelCards: [{ noteId: 'https://www.facebook.com/reel/111', summary: 'x', videoKey: 'v1' }],
+    reelCards: [{ noteId: 'https://www.facebook.com/reel/111', summary: 'x' }],
   });
   await h.session.start();
   assert.equal(h.cards.length, 0);

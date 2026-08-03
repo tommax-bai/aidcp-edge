@@ -286,10 +286,7 @@ async fn facebook_reels_entry_does_not_foreground_a_reached_surface_without_acti
     let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("entry receipt") else {
         panic!("expected entry action receipt")
     };
-    assert_eq!(
-        receipt.reason.as_deref(),
-        Some("reels_entry_active_video_missing")
-    );
+    assert_eq!(receipt.reason.as_deref(), Some("reels_target_unavailable"));
     assert_eq!(method_count(&requests, "Page.navigate"), 1);
     assert_eq!(method_count(&requests, "Page.bringToFront"), 0);
     assert_eq!(method_count(&requests, "Input.dispatchKeyEvent"), 0);
@@ -333,102 +330,12 @@ async fn facebook_reels_entry_advances_anonymous_horizontal_and_vertical_landing
 }
 
 #[tokio::test]
-async fn facebook_reels_entry_precommit_identity_hydration_suppresses_input() {
-    let (outcome, requests) =
-        run_facebook_reels_entry(FacebookReelsEntryScenario::AnonymousHydratesBeforeCommit).await;
-    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
-    let CommandOutput::PageCards(cards) = outcome.output.expect("hydrated entry Reel cards") else {
-        panic!("expected hydrated entry Reel cards")
-    };
-    assert_eq!(cards.cards.len(), 1);
-    assert_eq!(
-        cards.cards[0].note_id.as_deref(),
-        Some("https://www.facebook.com/reel/1")
-    );
-    assert_eq!(method_count(&requests, "Input.dispatchKeyEvent"), 0);
-    assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
-    assert_eq!(method_count(&requests, "Page.navigate"), 1);
-}
-
-#[tokio::test]
-async fn facebook_reels_entry_collects_a_naturally_moved_next_target_without_input() {
-    for scenario in [
-        FacebookReelsEntryScenario::AnonymousMovesAtNextTarget,
-        FacebookReelsEntryScenario::AnonymousMovesWithIdentityAtNextTarget,
-    ] {
-        let (outcome, requests) = run_facebook_reels_entry(scenario).await;
-        assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
-        let CommandOutput::PageCards(cards) = outcome.output.expect("naturally moved Reel cards")
-        else {
-            panic!("expected naturally moved Reel cards")
-        };
-        assert_eq!(
-            cards.cards[0].note_id.as_deref(),
-            Some("https://www.facebook.com/reel/2")
-        );
-        assert_eq!(method_count(&requests, "Input.dispatchKeyEvent"), 0);
-        assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
-    }
-}
-
-#[tokio::test]
-async fn facebook_reels_entry_pending_transition_is_recovered_read_only() {
-    let (first, second, requests) = run_facebook_reels_entry_pending_recovery(
-        FacebookReelsEntryScenario::AnonymousMovesBeforeIdentity,
-    )
-    .await;
-    assert_eq!(first.effect_phase, EffectPhase::Ambiguous);
-    let CommandOutput::ActionReceipt(receipt) = first.output.expect("pending entry receipt") else {
-        panic!("expected pending entry receipt")
-    };
-    assert_eq!(
-        receipt.reason.as_deref(),
-        Some("reels_post_transition_identity_pending")
-    );
-
-    assert_eq!(second.effect_phase, EffectPhase::Confirmed);
-    let CommandOutput::PageCards(cards) = second.output.expect("recovered Reel cards") else {
-        panic!("expected recovered Reel cards")
-    };
-    assert_eq!(cards.cards.len(), 1);
-    assert_eq!(
-        cards.cards[0].note_id.as_deref(),
-        Some("https://www.facebook.com/reel/2")
-    );
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|request| {
-                request["method"] == "Input.dispatchKeyEvent"
-                    && request["params"]["type"] == "rawKeyDown"
-            })
-            .count(),
-        1,
-        "the recovery command must not dispatch another navigation key"
-    );
-    assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
-    assert_eq!(method_count(&requests, "Page.navigate"), 1);
-}
-
-#[tokio::test]
 async fn facebook_reels_entry_rejects_disappeared_ambiguous_and_unproven_safe_targets() {
-    for (scenario, expected_reason) in [
-        (
-            FacebookReelsEntryScenario::AnonymousDisappears,
-            "reels_entry_active_video_missing",
-        ),
-        (
-            FacebookReelsEntryScenario::AnonymousAmbiguous,
-            "reels_entry_active_video_ambiguous",
-        ),
-        (
-            FacebookReelsEntryScenario::AnonymousUnsafe,
-            "reels_entry_input_unsafe",
-        ),
-        (
-            FacebookReelsEntryScenario::AnonymousInputSafetyMissing,
-            "reels_entry_input_unsafe",
-        ),
+    for scenario in [
+        FacebookReelsEntryScenario::AnonymousDisappears,
+        FacebookReelsEntryScenario::AnonymousAmbiguous,
+        FacebookReelsEntryScenario::AnonymousUnsafe,
+        FacebookReelsEntryScenario::AnonymousInputSafetyMissing,
     ] {
         let (outcome, requests) = run_facebook_reels_entry(scenario).await;
         assert_eq!(outcome.effect_phase, EffectPhase::Ambiguous);
@@ -436,14 +343,14 @@ async fn facebook_reels_entry_rejects_disappeared_ambiguous_and_unproven_safe_ta
         else {
             panic!("expected entry failure receipt")
         };
-        assert_eq!(receipt.reason.as_deref(), Some(expected_reason));
+        assert_eq!(receipt.reason.as_deref(), Some("reels_target_unavailable"));
         assert_eq!(method_count(&requests, "Input.dispatchKeyEvent"), 0);
         assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
     }
 }
 
 #[tokio::test]
-async fn facebook_reels_entry_collects_same_video_identity_after_first_key_without_second_input() {
+async fn facebook_reels_entry_collects_canonical_identity_after_one_key_without_second_input() {
     let (outcome, requests) =
         run_facebook_reels_entry(FacebookReelsEntryScenario::AnonymousHydratesAfterFirstKey).await;
     assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
@@ -468,143 +375,6 @@ async fn facebook_reels_entry_collects_same_video_identity_after_first_key_witho
 }
 
 #[tokio::test]
-async fn facebook_reels_entry_boundary_identity_does_not_open_a_second_hydration_window() {
-    let (outcome, requests) = run_facebook_reels_entry(
-        FacebookReelsEntryScenario::AnonymousHydratesBeforeCommitWithoutCard,
-    )
-    .await;
-    assert_eq!(outcome.effect_phase, EffectPhase::Ambiguous);
-    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("boundary identity receipt")
-    else {
-        panic!("expected boundary identity receipt")
-    };
-    assert_eq!(
-        receipt.reason.as_deref(),
-        Some("reels_entry_identity_pending")
-    );
-    assert_eq!(method_count(&requests, "Input.dispatchKeyEvent"), 0);
-    assert!(
-        router_call_count(&requests, "reel_cards") < 70,
-        "the 15-second entry hydration window must not restart at its boundary"
-    );
-}
-
-#[tokio::test]
-async fn facebook_reels_pending_surface_loss_never_falls_through_to_feed_input() {
-    let (first, second, requests) = run_facebook_reels_entry_pending_recovery(
-        FacebookReelsEntryScenario::AnonymousMovesThenSurfaceLost,
-    )
-    .await;
-    assert_eq!(first.effect_phase, EffectPhase::Ambiguous);
-    assert_eq!(second.effect_phase, EffectPhase::Ambiguous);
-    let CommandOutput::ActionReceipt(receipt) = second.output.expect("surface-lost receipt") else {
-        panic!("expected surface-lost receipt")
-    };
-    assert_eq!(
-        receipt.reason.as_deref(),
-        Some("reels_pending_surface_lost")
-    );
-    assert_eq!(router_call_count(&requests, "feed_scroll"), 0);
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|request| {
-                request["method"] == "Input.dispatchKeyEvent"
-                    && request["params"]["type"] == "rawKeyDown"
-            })
-            .count(),
-        1
-    );
-    assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
-}
-
-#[tokio::test]
-async fn facebook_reels_pending_identity_rejects_a_second_video_drift() {
-    let (first, second, requests) = run_facebook_reels_entry_pending_recovery(
-        FacebookReelsEntryScenario::AnonymousMovesThenDrifts,
-    )
-    .await;
-    assert_eq!(first.effect_phase, EffectPhase::Ambiguous);
-    assert_eq!(second.effect_phase, EffectPhase::Ambiguous);
-    let CommandOutput::ActionReceipt(receipt) = second.output.expect("target-drift receipt") else {
-        panic!("expected target-drift receipt")
-    };
-    assert_eq!(
-        receipt.reason.as_deref(),
-        Some("reels_pending_target_changed")
-    );
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|request| {
-                request["method"] == "Input.dispatchKeyEvent"
-                    && request["params"]["type"] == "rawKeyDown"
-            })
-            .count(),
-        1
-    );
-    assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
-}
-
-#[tokio::test]
-async fn facebook_reels_post_transition_hydration_rejects_drift_even_if_target_returns() {
-    let (first, second, requests) = run_facebook_reels_entry_pending_recovery(
-        FacebookReelsEntryScenario::AnonymousMovesDriftsAndReturnsDuringHydration,
-    )
-    .await;
-    assert_eq!(first.effect_phase, EffectPhase::Ambiguous);
-    assert_eq!(second.effect_phase, EffectPhase::Ambiguous);
-    let CommandOutput::ActionReceipt(first_receipt) = first.output.expect("target-drift receipt")
-    else {
-        panic!("expected target-drift receipt")
-    };
-    assert_eq!(
-        first_receipt.reason.as_deref(),
-        Some("reels_pending_target_changed")
-    );
-    let CommandOutput::ActionReceipt(second_receipt) =
-        second.output.expect("persistent target-drift receipt")
-    else {
-        panic!("expected persistent target-drift receipt")
-    };
-    assert_eq!(
-        second_receipt.reason.as_deref(),
-        Some("reels_pending_target_changed")
-    );
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|request| {
-                request["method"] == "Input.dispatchKeyEvent"
-                    && request["params"]["type"] == "rawKeyDown"
-            })
-            .count(),
-        1
-    );
-    assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
-}
-
-#[tokio::test]
-async fn facebook_reels_pending_unconfirmed_movement_blocks_a_second_navigation_invocation() {
-    let (first, second, requests) =
-        run_facebook_reels_entry_pending_recovery(FacebookReelsEntryScenario::AnonymousNeverMoves)
-            .await;
-    assert_eq!(first.effect_phase, EffectPhase::Ambiguous);
-    assert_eq!(second.effect_phase, EffectPhase::Ambiguous);
-    let raw_keys = requests
-        .iter()
-        .filter(|request| {
-            request["method"] == "Input.dispatchKeyEvent"
-                && request["params"]["type"] == "rawKeyDown"
-        })
-        .filter_map(|request| request["params"]["key"].as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(raw_keys, vec!["ArrowRight", "ArrowDown"]);
-    assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
-    assert_eq!(method_count(&requests, "Page.navigate"), 1);
-}
-
-#[tokio::test]
 async fn facebook_reels_entry_unchanged_anonymous_video_stops_after_one_bounded_invocation() {
     let (outcome, requests) =
         run_facebook_reels_entry(FacebookReelsEntryScenario::AnonymousNeverMoves).await;
@@ -613,10 +383,7 @@ async fn facebook_reels_entry_unchanged_anonymous_video_stops_after_one_bounded_
     else {
         panic!("expected unchanged entry receipt")
     };
-    assert_eq!(
-        receipt.reason.as_deref(),
-        Some("reels_entry_navigation_unconfirmed")
-    );
+    assert_eq!(receipt.reason.as_deref(), Some("reels_identity_unresolved"));
     let raw_keys = requests
         .iter()
         .filter(|request| {
@@ -625,7 +392,7 @@ async fn facebook_reels_entry_unchanged_anonymous_video_stops_after_one_bounded_
         })
         .filter_map(|request| request["params"]["key"].as_str())
         .collect::<Vec<_>>();
-    assert_eq!(raw_keys, vec!["ArrowRight", "ArrowDown"]);
+    assert_eq!(raw_keys, vec!["ArrowRight"]);
     assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
     assert_eq!(method_count(&requests, "Page.navigate"), 1);
 }
@@ -1175,7 +942,7 @@ async fn facebook_anonymous_reel_axis_only_navigation_uses_horizontal_arrow() {
 }
 
 #[tokio::test]
-async fn facebook_reel_competing_controls_still_discover_horizontal_key() {
+async fn facebook_reel_competing_axes_fail_before_input() {
     let (port, server) =
         spawn_facebook_reel_active_key_probe_cdp(FacebookReelKeyScenario::RightMoves).await;
     let mut engine = Engine::default();
@@ -1200,101 +967,10 @@ async fn facebook_reel_competing_controls_still_discover_horizontal_key() {
         .await
         .expect("competing-control Reel scroll");
 
-    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
     engine.shutdown().await;
     let requests = server.await.expect("competing-control Reel fake CDP");
-    assert_eq!(dispatched_keys(&requests), vec!["ArrowRight", "ArrowRight"]);
-    assert!(
-        requests
-            .iter()
-            .all(|request| request["method"] != "Input.dispatchMouseEvent")
-    );
-}
-
-#[tokio::test]
-async fn facebook_reel_moved_with_stale_identity_is_recovered_before_another_scroll() {
-    let (first, second, requests) = run_facebook_reel_pending_identity_recovery().await;
-    assert_eq!(first.effect_phase, EffectPhase::Ambiguous);
-    let CommandOutput::ActionReceipt(receipt) = first.output.expect("pending identity receipt")
-    else {
-        panic!("expected pending identity receipt")
-    };
-    assert_eq!(
-        receipt.reason.as_deref(),
-        Some("reels_navigation_unconfirmed")
-    );
-
-    assert_eq!(second.effect_phase, EffectPhase::Confirmed);
-    let CommandOutput::PageCards(cards) = second.output.expect("recovered Reel cards") else {
-        panic!("expected recovered Reel cards")
-    };
-    assert_eq!(
-        cards.cards[0].note_id.as_deref(),
-        Some("https://www.facebook.com/reel/2")
-    );
-    assert_eq!(dispatched_keys(&requests), vec!["ArrowRight", "ArrowRight"]);
-    assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
-}
-
-#[tokio::test]
-async fn facebook_reel_unknown_axis_tries_down_only_after_fresh_right_miss() {
-    let (outcome, requests) =
-        run_facebook_reel_active_key_probe(FacebookReelKeyScenario::RightMissesDownMoves).await;
-
-    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
-    assert_eq!(
-        dispatched_keys(&requests),
-        vec!["ArrowRight", "ArrowRight", "ArrowDown", "ArrowDown"]
-    );
-    let key_up_right = requests
-        .iter()
-        .position(|request| {
-            request["method"] == "Input.dispatchKeyEvent"
-                && request["params"]["type"] == "keyUp"
-                && request["params"]["key"] == "ArrowRight"
-        })
-        .expect("right keyUp");
-    let key_down_down = requests
-        .iter()
-        .position(|request| {
-            request["method"] == "Input.dispatchKeyEvent"
-                && request["params"]["type"] == "rawKeyDown"
-                && request["params"]["key"] == "ArrowDown"
-        })
-        .expect("down rawKeyDown");
-    assert!(
-        requests[key_up_right + 1..key_down_down]
-            .iter()
-            .any(|request| request["method"] == "Runtime.evaluate")
-    );
-}
-
-#[tokio::test]
-async fn facebook_reel_late_right_transition_suppresses_down_key() {
-    let (outcome, requests) =
-        run_facebook_reel_active_key_probe(FacebookReelKeyScenario::RightMovesLate).await;
-
-    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
-    assert_eq!(dispatched_keys(&requests), vec!["ArrowRight", "ArrowRight"]);
-}
-
-#[tokio::test]
-async fn facebook_reel_unknown_axis_is_ambiguous_after_both_keys_leave_it_unchanged() {
-    let (outcome, requests) =
-        run_facebook_reel_active_key_probe(FacebookReelKeyScenario::NeitherMoves).await;
-
-    assert_eq!(outcome.effect_phase, EffectPhase::Ambiguous);
-    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("scroll receipt") else {
-        panic!("expected scroll action receipt")
-    };
-    assert_eq!(
-        receipt.reason.as_deref(),
-        Some("reels_navigation_unconfirmed")
-    );
-    assert_eq!(
-        dispatched_keys(&requests),
-        vec!["ArrowRight", "ArrowRight", "ArrowDown", "ArrowDown"]
-    );
+    assert!(dispatched_keys(&requests).is_empty());
     assert!(
         requests
             .iter()
@@ -1318,64 +994,6 @@ async fn facebook_reel_newly_unsafe_next_target_blocks_keys_before_dispatch() {
 
     assert_eq!(outcome.effect_phase, EffectPhase::NotStarted);
     assert!(dispatched_keys(&requests).is_empty());
-}
-
-#[tokio::test]
-async fn facebook_reel_scroll_uses_one_active_video_wheel_after_both_keys_miss() {
-    let (outcome, requests) =
-        run_facebook_reel_active_key_probe(FacebookReelKeyScenario::VerticalWheelMoves).await;
-    let CommandOutput::PageCards(cards) = outcome.output.expect("Reel cards") else {
-        panic!("expected Reel cards")
-    };
-    assert_eq!(
-        cards.cards[0].note_id.as_deref(),
-        Some("https://www.facebook.com/reel/2")
-    );
-
-    assert!(
-        requests
-            .iter()
-            .all(|request| request["method"] != "Page.bringToFront"),
-        "routine Reels wheel fallback must remain in the background"
-    );
-    let wheel_requests = requests
-        .iter()
-        .filter(|request| {
-            request["method"] == "Input.dispatchMouseEvent"
-                && request["params"]["type"] == "mouseWheel"
-        })
-        .collect::<Vec<_>>();
-    // 兜底滚轮走共享惯性手势：8~15 帧、滚前先把光标移到可滚区中心、总位移在基线 ±20% 内。
-    // 单帧精确位移与「墙钟毫秒取模」的伪随机都不再允许。
-    assert!((8..=15).contains(&wheel_requests.len()));
-    assert!(
-        wheel_requests
-            .iter()
-            .all(|request| { request["params"]["x"] == 590.0 && request["params"]["y"] == 420.0 })
-    );
-    let total: f64 = wheel_requests
-        .iter()
-        .map(|request| request["params"]["deltaY"].as_f64().expect("wheel delta"))
-        .sum();
-    assert!(
-        (68.0..=102.0).contains(&total),
-        "总位移 {total} 越出基线 ±20%"
-    );
-    let first_wheel = requests
-        .iter()
-        .position(|request| {
-            request["method"] == "Input.dispatchMouseEvent"
-                && request["params"]["type"] == "mouseWheel"
-        })
-        .expect("wheel frame");
-    let first_move = requests
-        .iter()
-        .position(|request| {
-            request["method"] == "Input.dispatchMouseEvent"
-                && request["params"]["type"] == "mouseMoved"
-        })
-        .expect("pointer move before the wheel");
-    assert!(first_move < first_wheel);
 }
 
 #[tokio::test]
@@ -1579,7 +1197,7 @@ async fn facebook_reel_scroll_without_active_video_does_not_foreground_or_dispat
     let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("scroll receipt") else {
         panic!("expected scroll action receipt")
     };
-    assert_eq!(receipt.reason.as_deref(), Some("no_target"));
+    assert_eq!(receipt.reason.as_deref(), Some("reels_target_unavailable"));
 
     engine.shutdown().await;
     let requests = server
@@ -1594,8 +1212,7 @@ async fn facebook_reel_scroll_without_active_video_does_not_foreground_or_dispat
 }
 
 #[tokio::test]
-async fn facebook_reel_scroll_returns_ambiguous_after_dispatched_methods_without_fabricated_cards()
-{
+async fn facebook_reel_scroll_returns_ambiguous_after_one_key_without_fabricated_cards() {
     let (outcome, requests) =
         run_facebook_reel_active_key_probe(FacebookReelKeyScenario::VerticalNeitherMoves).await;
 
@@ -1621,18 +1238,67 @@ async fn facebook_reel_scroll_returns_ambiguous_after_dispatched_methods_without
             .iter()
             .all(|request| request["method"] != "Page.navigate")
     );
-    // 兜底滚轮已是多帧惯性手势，帧数按分布采样；可断言的是「确实滚了一次手势」而非帧数常量。
-    assert!(
-        (8..=15).contains(
-            &requests
-                .iter()
-                .filter(|request| {
-                    request["method"] == "Input.dispatchMouseEvent"
-                        && request["params"]["type"] == "mouseWheel"
-                })
-                .count()
-        )
+    assert_eq!(dispatched_keys(&requests), vec!["ArrowDown", "ArrowDown"]);
+    assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
+}
+
+#[tokio::test]
+async fn facebook_reel_unconfirmed_scroll_does_not_block_the_next_command() {
+    let (port, server) = spawn_facebook_reel_active_key_probe_cdp(
+        FacebookReelKeyScenario::VerticalSecondCommandMoves,
+    )
+    .await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 25_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let command = |id: &str, command_id: u64| CommandRecord {
+        protocol_version: 2,
+        id: id.to_owned(),
+        session_id: "session-1".to_owned(),
+        task_id: "browse-1".to_owned(),
+        command_id,
+        deadline_unix_ms: unix_time_ms() + 25_000,
+        command: NativeCommand::PageScroll(PageScrollParams {
+            reason: Some("feed_scroll".to_owned()),
+            dwell_ms: None,
+        }),
+    };
+    let first = engine
+        .execute(&command("reel-scroll-1", 1))
+        .await
+        .expect("first scroll");
+    assert_eq!(first.effect_phase, EffectPhase::Ambiguous);
+    let CommandOutput::ActionReceipt(first_receipt) = first.output.expect("first receipt") else {
+        panic!("expected first failed receipt")
+    };
+    assert_eq!(
+        first_receipt.reason.as_deref(),
+        Some("reels_navigation_unconfirmed")
     );
+
+    let second = engine
+        .execute(&command("reel-scroll-2", 2))
+        .await
+        .expect("second scroll");
+    assert_eq!(second.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::PageCards(cards) = second.output.expect("second cards") else {
+        panic!("expected second Reel cards")
+    };
+    assert_eq!(
+        cards.cards[0].note_id.as_deref(),
+        Some("https://www.facebook.com/reel/2")
+    );
+
+    engine.shutdown().await;
+    let requests = server.await.expect("independent Reel command fake CDP");
+    assert_eq!(
+        dispatched_keys(&requests),
+        vec!["ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown"]
+    );
+    assert_eq!(method_count(&requests, "Input.dispatchMouseEvent"), 0);
 }
 
 #[tokio::test]
@@ -3423,7 +3089,6 @@ async fn spawn_facebook_interaction_cdp(
                         json!({
                             "ok": true,
                             "noteId": "https://www.facebook.com/reel/1",
-                            "videoKey": "video-1@element:1",
                             "author": author,
                             "already": matches!(
                                 scenario,
@@ -3580,6 +3245,14 @@ fn method_count(requests: &[Value], method: &str) -> usize {
         .iter()
         .filter(|request| request["method"] == method)
         .count()
+}
+
+fn dispatched_keys(requests: &[Value]) -> Vec<&str> {
+    requests
+        .iter()
+        .filter(|request| request["method"] == "Input.dispatchKeyEvent")
+        .filter_map(|request| request["params"]["key"].as_str())
+        .collect()
 }
 
 fn method_index(requests: &[Value], method: &str, occurrence: usize) -> usize {
@@ -5612,20 +5285,6 @@ async fn spawn_facebook_reel_arrow_cdp() -> (u16, tokio::task::JoinHandle<Vec<Va
         requests.push(
             respond_to_call_capture(
                 &mut websocket,
-                reel_probe_cdp("https://www.facebook.com/reel/2", "video-2@element:2"),
-            )
-            .await,
-        );
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                reel_probe_cdp("https://www.facebook.com/reel/2", "video-2@element:2"),
-            )
-            .await,
-        );
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
                 reel_cards_cdp("https://www.facebook.com/reel/2"),
             )
             .await,
@@ -5674,20 +5333,6 @@ async fn spawn_facebook_reel_anonymous_horizontal_cdp() -> (u16, tokio::task::Jo
         requests.push(
             respond_to_call_capture(
                 &mut websocket,
-                reel_probe_cdp("https://www.facebook.com/reel/2", "video-2@element:2"),
-            )
-            .await,
-        );
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
-                reel_probe_cdp("https://www.facebook.com/reel/2", "video-2@element:2"),
-            )
-            .await,
-        );
-        requests.push(
-            respond_to_call_capture(
-                &mut websocket,
                 reel_cards_cdp("https://www.facebook.com/reel/2"),
             )
             .await,
@@ -5706,6 +5351,7 @@ async fn spawn_facebook_reel_anonymous_horizontal_cdp() -> (u16, tokio::task::Jo
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 enum FacebookReelsEntryScenario {
     FirstNavigationSucceeds,
     RetryNavigationSucceeds,
@@ -5806,50 +5452,6 @@ async fn run_facebook_reels_entry_with_cancellation(
     engine.shutdown().await;
     let requests = server.await.expect("cancelled Reels entry fake CDP");
     (outcome, requests)
-}
-
-async fn run_facebook_reels_entry_pending_recovery(
-    scenario: FacebookReelsEntryScenario,
-) -> (StoredCommandResult, StoredCommandResult, Vec<Value>) {
-    let (port, server) = spawn_facebook_reels_entry_cdp(scenario).await;
-    let mut engine = Engine::default();
-    let mut open = session_open(port);
-    open.params.platform = Platform::Facebook;
-    open.params.timeout_ms = FACEBOOK_REELS_ENTRY_TEST_TIMEOUT_MS;
-    engine.open(&open).await.expect("open Facebook session");
-    let first = engine
-        .execute(&CommandRecord {
-            protocol_version: 2,
-            id: "reels-entry-pending-1".to_owned(),
-            session_id: "session-1".to_owned(),
-            task_id: "browse-1".to_owned(),
-            command_id: 1,
-            deadline_unix_ms: unix_time_ms() + FACEBOOK_REELS_ENTRY_TEST_TIMEOUT_MS,
-            command: NativeCommand::PageScroll(PageScrollParams {
-                reason: Some("facebook_reels_primary".to_owned()),
-                dwell_ms: None,
-            }),
-        })
-        .await
-        .expect("anonymous Reels entry command");
-    let second = engine
-        .execute(&CommandRecord {
-            protocol_version: 2,
-            id: "reels-entry-pending-2".to_owned(),
-            session_id: "session-1".to_owned(),
-            task_id: "browse-1".to_owned(),
-            command_id: 2,
-            deadline_unix_ms: unix_time_ms() + FACEBOOK_REELS_ENTRY_TEST_TIMEOUT_MS,
-            command: NativeCommand::PageScroll(PageScrollParams {
-                reason: Some("idle_recover_nudge".to_owned()),
-                dwell_ms: None,
-            }),
-        })
-        .await
-        .expect("pending Reels read-only recovery");
-    engine.shutdown().await;
-    let requests = server.await.expect("pending Reels entry fake CDP");
-    (first, second, requests)
 }
 
 async fn spawn_facebook_reels_entry_cdp(
@@ -6296,6 +5898,7 @@ fn reel_empty_cards_cdp() -> Value {
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 enum FacebookReelKeyScenario {
     RightMoves,
     RightMovesIdentityPending,
@@ -6306,6 +5909,7 @@ enum FacebookReelKeyScenario {
     UnsafeNextTarget,
     VerticalWheelMoves,
     VerticalNeitherMoves,
+    VerticalSecondCommandMoves,
 }
 
 async fn run_facebook_reel_active_key_probe(
@@ -6315,7 +5919,7 @@ async fn run_facebook_reel_active_key_probe(
     let mut engine = Engine::default();
     let mut open = session_open(port);
     open.params.platform = Platform::Facebook;
-    open.params.timeout_ms = 10_000;
+    open.params.timeout_ms = 25_000;
     engine.open(&open).await.expect("open Facebook session");
     let outcome = engine
         .execute(&CommandRecord {
@@ -6324,7 +5928,7 @@ async fn run_facebook_reel_active_key_probe(
             session_id: "session-1".to_owned(),
             task_id: "browse-1".to_owned(),
             command_id: 1,
-            deadline_unix_ms: unix_time_ms() + 10_000,
+            deadline_unix_ms: unix_time_ms() + 25_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("feed_scroll".to_owned()),
                 dwell_ms: None,
@@ -6335,60 +5939,6 @@ async fn run_facebook_reel_active_key_probe(
     engine.shutdown().await;
     let requests = server.await.expect("active Reels key fake CDP");
     (outcome, requests)
-}
-
-async fn run_facebook_reel_pending_identity_recovery()
--> (StoredCommandResult, StoredCommandResult, Vec<Value>) {
-    let (port, server) = spawn_facebook_reel_active_key_probe_cdp(
-        FacebookReelKeyScenario::RightMovesIdentityPending,
-    )
-    .await;
-    let mut engine = Engine::default();
-    let mut open = session_open(port);
-    open.params.platform = Platform::Facebook;
-    open.params.timeout_ms = FACEBOOK_REELS_ENTRY_TEST_TIMEOUT_MS;
-    engine.open(&open).await.expect("open Facebook session");
-    let first = engine
-        .execute(&CommandRecord {
-            protocol_version: 2,
-            id: "reel-pending-identity-1".to_owned(),
-            session_id: "session-1".to_owned(),
-            task_id: "browse-1".to_owned(),
-            command_id: 1,
-            deadline_unix_ms: unix_time_ms() + FACEBOOK_REELS_ENTRY_TEST_TIMEOUT_MS,
-            command: NativeCommand::PageScroll(PageScrollParams {
-                reason: Some("feed_scroll".to_owned()),
-                dwell_ms: None,
-            }),
-        })
-        .await
-        .expect("Reels movement with pending identity");
-    let second = engine
-        .execute(&CommandRecord {
-            protocol_version: 2,
-            id: "reel-pending-identity-2".to_owned(),
-            session_id: "session-1".to_owned(),
-            task_id: "browse-1".to_owned(),
-            command_id: 2,
-            deadline_unix_ms: unix_time_ms() + FACEBOOK_REELS_ENTRY_TEST_TIMEOUT_MS,
-            command: NativeCommand::PageScroll(PageScrollParams {
-                reason: Some("idle_recover_nudge".to_owned()),
-                dwell_ms: None,
-            }),
-        })
-        .await
-        .expect("read-only Reels identity recovery");
-    engine.shutdown().await;
-    let requests = server.await.expect("pending Reels identity fake CDP");
-    (first, second, requests)
-}
-
-fn dispatched_keys(requests: &[Value]) -> Vec<&str> {
-    requests
-        .iter()
-        .filter(|request| request["method"] == "Input.dispatchKeyEvent")
-        .filter_map(|request| request["params"]["key"].as_str())
-        .collect()
 }
 
 async fn spawn_facebook_reel_active_key_probe_cdp(
@@ -6404,6 +5954,7 @@ async fn spawn_facebook_reel_active_key_probe_cdp(
         let mut last_key = String::new();
         let mut probes_after_key = 0_u32;
         let mut moved = false;
+        let mut forward_key_count = 0_u32;
         let mut pending_identity_ready = false;
         while let Some(message) = websocket.next().await {
             let Ok(Message::Text(text)) = message else {
@@ -6414,6 +5965,7 @@ async fn spawn_facebook_reel_active_key_probe_cdp(
             if request["method"] == "Input.dispatchKeyEvent"
                 && request["params"]["type"] == "rawKeyDown"
             {
+                forward_key_count += 1;
                 last_key = request["params"]["key"]
                     .as_str()
                     .unwrap_or_default()
@@ -6425,7 +5977,12 @@ async fn spawn_facebook_reel_active_key_probe_cdp(
                         | FacebookReelKeyScenario::RightMovesIdentityPending
                 ) && last_key == "ArrowRight"
                     || matches!(scenario, FacebookReelKeyScenario::RightMissesDownMoves)
-                        && last_key == "ArrowDown";
+                        && last_key == "ArrowDown"
+                    || matches!(
+                        scenario,
+                        FacebookReelKeyScenario::VerticalSecondCommandMoves
+                    ) && last_key == "ArrowDown"
+                        && forward_key_count >= 2;
             } else if request["method"] == "Input.dispatchMouseEvent"
                 && request["params"]["type"] == "mouseWheel"
                 && matches!(scenario, FacebookReelKeyScenario::VerticalWheelMoves)
@@ -6453,7 +6010,6 @@ async fn spawn_facebook_reel_active_key_probe_cdp(
                             json!({
                                 "ok": true,
                                 "noteId": "https://www.facebook.com/reel/1",
-                                "videoKey": "video-1@element:1",
                                 "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
                                 "inputSafe": false
                             }),
@@ -6475,7 +6031,6 @@ async fn spawn_facebook_reel_active_key_probe_cdp(
                             json!({
                                 "ok": true,
                                 "noteId": "https://www.facebook.com/reel/1",
-                                "videoKey": "video-1@element:1",
                                 "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
                                 "inputSafe": false,
                                 "found": false,
@@ -6486,6 +6041,7 @@ async fn spawn_facebook_reel_active_key_probe_cdp(
                         scenario,
                         FacebookReelKeyScenario::VerticalWheelMoves
                             | FacebookReelKeyScenario::VerticalNeitherMoves
+                            | FacebookReelKeyScenario::VerticalSecondCommandMoves
                     ) {
                         reel_next_target_cdp(
                             "https://www.facebook.com/reel/1",
@@ -6499,7 +6055,6 @@ async fn spawn_facebook_reel_active_key_probe_cdp(
                             json!({
                                 "ok": true,
                                 "noteId": "https://www.facebook.com/reel/1",
-                                "videoKey": "video-1@element:1",
                                 "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
                                 "inputSafe": true,
                                 "found": false,
@@ -6508,13 +6063,11 @@ async fn spawn_facebook_reel_active_key_probe_cdp(
                         )
                     }
                 } else if expression.contains("\"kind\":\"reel_cards\"") {
-                    if matches!(scenario, FacebookReelKeyScenario::RightMovesIdentityPending)
-                        && !pending_identity_ready
-                    {
-                        reel_cards_cdp("https://www.facebook.com/reel/1")
+                    reel_cards_cdp(if moved {
+                        "https://www.facebook.com/reel/2"
                     } else {
-                        reel_cards_cdp("https://www.facebook.com/reel/2")
-                    }
+                        "https://www.facebook.com/reel/1"
+                    })
                 } else {
                     json!({})
                 }
@@ -6559,41 +6112,39 @@ async fn spawn_facebook_reel_missing_active_video_cdp() -> (u16, tokio::task::Jo
     (port, server)
 }
 
-fn reel_probe_cdp(note_id: &str, video_key: &str) -> Value {
+fn reel_probe_cdp(note_id: &str, _video_key: &str) -> Value {
     json!({"result":{"value":router_result(
         "reel_probe",
         json!({
             "ok": true,
             "noteId": note_id,
-            "videoKey": video_key,
             "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0}
         })
     )}})
 }
 
-fn anonymous_reel_probe_cdp(video_key: &str) -> Value {
-    anonymous_reel_probe_with_safety_cdp(video_key, Some(true))
+fn anonymous_reel_probe_cdp(_video_key: &str) -> Value {
+    anonymous_reel_probe_with_safety_cdp(_video_key, Some(true))
 }
 
-fn anonymous_reel_probe_with_safety_cdp(video_key: &str, input_safe: Option<bool>) -> Value {
+fn anonymous_reel_probe_with_safety_cdp(_video_key: &str, input_safe: Option<bool>) -> Value {
     json!({"result":{"value":router_result(
         "reel_probe",
         json!({
             "ok": true,
-            "videoKey": video_key,
             "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
             "inputSafe": input_safe
         })
     )}})
 }
 
-fn anonymous_reel_next_target_cdp(video_key: &str, axis: &str) -> Value {
-    reel_axis_only_target_cdp(None, video_key, axis, "next_control_not_click_safe")
+fn anonymous_reel_next_target_cdp(_video_key: &str, axis: &str) -> Value {
+    reel_axis_only_target_cdp(None, _video_key, axis, "next_control_not_click_safe")
 }
 
 fn reel_axis_only_target_cdp(
     note_id: Option<&str>,
-    video_key: &str,
+    _video_key: &str,
     axis: &str,
     reason: &str,
 ) -> Value {
@@ -6602,7 +6153,6 @@ fn reel_axis_only_target_cdp(
         json!({
             "ok": true,
             "noteId": note_id,
-            "videoKey": video_key,
             "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
             "inputSafe": true,
             "found": false,
@@ -6613,13 +6163,12 @@ fn reel_axis_only_target_cdp(
     )}})
 }
 
-fn reel_next_target_cdp(note_id: &str, video_key: &str, axis: &str, found: bool) -> Value {
+fn reel_next_target_cdp(note_id: &str, _video_key: &str, axis: &str, found: bool) -> Value {
     json!({"result":{"value":router_result(
         "reel_next_target",
         json!({
             "ok": true,
             "noteId": note_id,
-            "videoKey": video_key,
             "videoRect": {"left": 200.0, "top": 80.0, "right": 980.0, "bottom": 760.0},
             "inputSafe": true,
             "found": found,

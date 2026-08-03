@@ -71,7 +71,6 @@ const cleartextSentinels = [
     reason: 'CDP 方法名在 src/cdp.rs 分域存放、运行时 join("."); 源码里出现拼好的字面量即回归',
   },
   { marker: 'data-aidcp-native-feed-like', presence: 'live' },
-  { marker: 'data-aidcp-native-reel-like-target', presence: 'live' },
   { marker: 'targetGroupScope', presence: 'live' },
 ];
 const forbiddenCleartextMarkers = cleartextSentinels.map((sentinel) => sentinel.marker);

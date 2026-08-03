@@ -360,25 +360,6 @@ pub(crate) struct FacebookSessionState {
     pub(crate) seen_post_ids: HashSet<String>,
     pub(crate) consumed_auth_signal_ids: HashSet<String>,
     pub(crate) last_refresh_reload_at_ms: u64,
-    pub(crate) preferred_reel_axis: Option<facebook::FacebookReelAxis>,
-    /// Reel 导航已派发或已证明移动、但规范身份尚未完成时的只读闩锁。
-    /// 后续滚动必须先收敛这一条观测，不能让 Cloud 的 idle nudge 再推进一条。
-    pub(crate) pending_reel_transition: Option<FacebookPendingReelTransition>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum FacebookPendingReelTransition {
-    /// 输入已经派发，但活动视频是否前进仍未确定。只允许随后认领一次晚到的视频变化。
-    AwaitingMovement { original_video_key: String },
-    /// 活动视频已经前进。只允许为这个精确视频补齐规范身份，不能跟随第二次漂移。
-    AwaitingIdentity {
-        moved_video_key: String,
-        /// 普通浏览切换时禁止再次上报的上一条 canonical Reel ID；匿名入口为 `None`。
-        forbidden_reel_id: Option<String>,
-    },
-    /// 已绑定的目标发生第二次漂移。该状态在会话内保持失败闭合；即使页面回到原目标，
-    /// 后续滚动也不能把这条失去连续观测链的 Reel 重新确认为成功。
-    TargetChanged { expected_video_key: String },
 }
 
 impl Default for FacebookSessionState {
@@ -388,8 +369,6 @@ impl Default for FacebookSessionState {
             seen_post_ids: HashSet::new(),
             consumed_auth_signal_ids: HashSet::new(),
             last_refresh_reload_at_ms: 0,
-            preferred_reel_axis: None,
-            pending_reel_transition: None,
         }
     }
 }
@@ -4002,7 +3981,7 @@ mod tests {
     use crate::facebook::group_join::{
         FacebookJoinPostDecision, facebook_join_post_decision, facebook_join_readiness_decisive,
     };
-    use crate::facebook::reels::{reel_forward_key, reel_identity_moved, reel_key_order};
+    use crate::facebook::reels::reel_forward_key;
     use crate::facebook::shared::{canonical_facebook_post_id, facebook_scroll_failure};
 
     #[test]
@@ -4401,48 +4380,6 @@ mod tests {
     }
 
     #[test]
-    fn reel_target_movement_uses_note_and_video_identity() {
-        let before = facebook::FacebookReelProbe {
-            ok: true,
-            reason: None,
-            note_id: Some("https://www.facebook.com/reel/1".to_owned()),
-            video_key: Some("video-1@element:1".to_owned()),
-            video_rect: None,
-            input_safe: None,
-        };
-        assert!(!reel_identity_moved(
-            Some("https://www.facebook.com/reel/1"),
-            Some("video-1@element:1"),
-            &before
-        ));
-        assert!(reel_identity_moved(
-            Some("https://www.facebook.com/reel/2"),
-            Some("video-2@element:2"),
-            &before
-        ));
-        assert!(!reel_identity_moved(
-            None,
-            Some("video-2@element:2"),
-            &before
-        ));
-
-        let anonymous_before = facebook::FacebookReelProbe {
-            note_id: None,
-            ..before
-        };
-        assert!(!reel_identity_moved(
-            Some("https://www.facebook.com/reel/2"),
-            Some("video-1@element:1"),
-            &anonymous_before
-        ));
-        assert!(reel_identity_moved(
-            Some("https://www.facebook.com/reel/2"),
-            Some("video-2@element:2"),
-            &anonymous_before
-        ));
-    }
-
-    #[test]
     fn reel_axis_maps_to_one_forward_key() {
         assert_eq!(
             reel_forward_key(facebook::FacebookReelAxis::Vertical),
@@ -4452,18 +4389,6 @@ mod tests {
             reel_forward_key(facebook::FacebookReelAxis::Horizontal),
             ("ArrowRight", 39)
         );
-    }
-
-    #[test]
-    fn reel_key_order_uses_structure_then_session_preference_then_safe_default() {
-        use facebook::FacebookReelAxis::{Horizontal, Vertical};
-
-        assert_eq!(
-            reel_key_order(Some(Vertical), Some(Horizontal)),
-            [Vertical, Horizontal]
-        );
-        assert_eq!(reel_key_order(None, Some(Vertical)), [Vertical, Horizontal]);
-        assert_eq!(reel_key_order(None, None), [Horizontal, Vertical]);
     }
 
     #[test]

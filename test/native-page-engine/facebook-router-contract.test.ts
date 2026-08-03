@@ -654,7 +654,7 @@ test('Facebook Reels probe and cards bind to one active video identity', async (
   assert.equal(probe.output.kind, 'reel_probe');
   assert.equal(probe.output.value.ok, true);
   assert.equal(probe.output.value.noteId, 'https://www.facebook.com/reel/777');
-  assert.match(String(probe.output.value.videoKey), /reel-777\.mp4@element:1$/);
+  assert.equal('videoKey' in probe.output.value, false);
 
   const cardsResult = await run({ kind: 'reel_cards', params: {} });
   assert.equal(cardsResult.output.value.listKind, 'reels');
@@ -705,7 +705,7 @@ test('Facebook Reels anonymous landing video is targetable but not reportable', 
   const probe = await run({ kind: 'reel_probe', params: {} });
   assert.equal(probe.output.value.ok, true);
   assert.equal(probe.output.value.noteId, undefined);
-  assert.match(String(probe.output.value.videoKey), /unknown-reel\.mp4@element:1$/);
+  assert.equal('videoKey' in probe.output.value, false);
   assert.deepEqual(probe.output.value.videoRect, { left: 557, top: 72, right: 959, bottom: 786 });
 
   const cardsResult = await run({ kind: 'reel_cards', params: {} });
@@ -1604,7 +1604,7 @@ test('Facebook Native Reel like fresh commit and verify remain bound to the same
   assert.equal(verified.output.value.selected, true);
 });
 
-test('Facebook Native Reel like verification rejects same-route active video movement', async () => {
+test('Facebook Native Reel like verification ignores same-note media DOM replacement', async () => {
   const dom = install(`
     <main>
       <div id="video-root"><video id="before" src="https://cdn.example/reel-777.mp4"></video></div>
@@ -1631,8 +1631,7 @@ test('Facebook Native Reel like verification rejects same-route active video mov
     kind: 'like_verify',
     params: { noteId: 'https://www.facebook.com/reel/777' },
   });
-  assert.equal(verified.output.value.ok, false);
-  assert.equal(verified.output.value.reason, 'reel_moved');
+  assert.equal(verified.output.value.ok, true);
   assert.equal(verified.output.value.selected, false);
 });
 
@@ -1659,7 +1658,7 @@ test('Facebook Native Reel like verification rejects a primary control leaving t
     params: { noteId: 'https://www.facebook.com/reel/777' },
   });
   assert.equal(verified.output.value.ok, false);
-  assert.equal(verified.output.value.reason, 'target_not_found');
+  assert.equal(verified.output.value.reason, 'like_button_not_found');
 
   const picker = await run({
     kind: 'like_picker_probe',
@@ -1773,7 +1772,7 @@ test('Facebook Native Reel follow probe recognizes already-following author labe
   assert.equal(follow.output.value.already, true);
   assert.equal(follow.output.value.noteId, 'https://www.facebook.com/reel/777');
   assert.equal(follow.output.value.author, 'Re Su');
-  assert.match(String(follow.output.value.videoKey), /reel-777\.mp4@element:/);
+  assert.equal('videoKey' in follow.output.value, false);
 });
 
 test('Facebook Native Reel follow probe retains every author-qualified locale and state family', async () => {
