@@ -7,6 +7,7 @@ const require = createRequire(import.meta.url);
 const fleet = require('../../src/electron/fleet.cjs');
 const uiLogic = require('../../src/electron/renderer/ui-logic.js');
 const mainSource = readFileSync(new URL('../../src/electron/main.cjs', import.meta.url), 'utf8');
+const childStartupSource = readFileSync(new URL('../../src/electron/core-child-startup.cjs', import.meta.url), 'utf8');
 
 // ---------------------------------------------------------------------------
 // change browser-slot-scheduling：槽位池 + 串行启动队列
@@ -46,12 +47,22 @@ test('子进程对象等待 close 时不再虚占 OS 已退出的浏览器槽位
     mainSource.indexOf('async function spawnEdgeChild('),
     mainSource.indexOf('\nfunction stopLoginPoller()', mainSource.indexOf('async function spawnEdgeChild(')),
   );
-  assert.match(spawn, /child\.on\('exit',[\s\S]{0,420}broadcastFleet\(\)[\s\S]{0,120}drainSlotWaiters\(\)/,
+  const onExit = spawn.slice(
+    spawn.indexOf('function onChildExit('),
+    spawn.indexOf('function onChildClose(', spawn.indexOf('function onChildExit(')),
+  );
+  const onClose = spawn.slice(
+    spawn.indexOf('function onChildClose('),
+    spawn.indexOf('// 串行启动队列在此等待', spawn.indexOf('function onChildClose(')),
+  );
+  assert.match(childStartupSource, /child\.on\('exit', observers\.exit\)/);
+  assert.match(onExit, /broadcastFleet\(\)[\s\S]{0,120}drainSlotWaiters\(\)/,
     'OS exit 必须立即推进槽位 FIFO，不得等 stdio close');
   assert.match(spawn, /CORE_CLOSE_DRAIN_GRACE_MS = 2_000/);
-  assert.match(spawn, /setTimeout\([\s\S]{0,360}finalizeCoreExit\(code, signal\)[\s\S]{0,80}CORE_CLOSE_DRAIN_GRACE_MS/,
+  assert.match(onExit, /setTimeout\([\s\S]{0,360}finalizeCoreExit\(code, signal\)[\s\S]{0,80}CORE_CLOSE_DRAIN_GRACE_MS/,
     'close 缺席时必须有界完成终局归因并清理 handle');
-  assert.match(spawn, /child\.on\('close',[\s\S]{0,120}coreExitFinalized \|\| handle\.child !== child/,
+  assert.match(childStartupSource, /child\.on\('close', observers\.close\)/);
+  assert.match(onClose, /coreExitFinalized \|\| handle\.child !== child/,
     '旧进程迟到的 close 不得 settle 新一代核心的启动队列');
 });
 

@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 const here = dirname(fileURLToPath(import.meta.url));
 const electronDir = join(here, '../../src/electron');
 const main = readFileSync(join(electronDir, 'main.cjs'), 'utf8');
+const childStartup = readFileSync(join(electronDir, 'core-child-startup.cjs'), 'utf8');
 const preload = readFileSync(join(electronDir, 'preload.cjs'), 'utf8');
 const edgeMain = readFileSync(join(here, '../../src/main.ts'), 'utf8');
 
@@ -42,6 +43,35 @@ test('managed AdsPower child uses the parent FIFO without receiving the API key'
   const staleGenerationGate = spawn.indexOf('if (!currentGeneration && !currentStopReply) return;');
   assert.ok(brokerBranch >= 0 && staleGenerationGate > brokerBranch,
     'the still-current child must retain broker access while close/restore advances lifecycle generation');
+});
+
+test('spawned core is observed before fallible post-spawn setup', () => {
+  const spawn = functionSource('spawnEdgeChild', 'stopLoginPoller');
+  const childOwnership = childStartup.indexOf('handle.child = child;');
+  const launchReady = childStartup.indexOf('const launchReady = createLaunchReady();');
+  const observerRegistrations = [
+    "child.on('error'",
+    "child.on('exit', observers.exit);",
+    "child.on('close', observers.close);",
+    "child.on('message', observers.message);",
+    "child.stdout?.on?.('data', observers.stdout);",
+    "child.stderr?.on?.('data', observers.stderr);",
+  ].map((needle) => childStartup.indexOf(needle));
+  const prepareCall = childStartup.indexOf('return { ok: prepare() !== false, launchReady };');
+
+  assert.ok(childOwnership >= 0, 'spawn must establish current-child ownership');
+  assert.ok(launchReady > childOwnership, 'launch readiness must exist after ownership');
+  for (const registration of observerRegistrations) {
+    assert.ok(registration > launchReady, 'every child observer must be registered after readiness exists');
+    assert.ok(registration < prepareCall, 'every child observer must precede fallible setup');
+  }
+  assert.match(childStartup, /catch \(error\) \{[\s\S]*?onSetupFailure\(error\)[\s\S]*?settleLaunchFailure[\s\S]*?releaseStartReservation[\s\S]*?requestTermination/);
+  assert.match(spawn, /initializeOwnedCoreChild\(\{[\s\S]*?prepare\(\) \{[\s\S]*?if \(proxyAuthorityPayload\)[\s\S]*?edge: 'starting'/);
+  assert.match(spawn, /const retryableSetupFailure = Boolean\(setupRetryRequested\) && !intentional;[\s\S]*?exitCode: retryableSetupFailure \? setupDisposition\.respawnExitCode/,
+    'graceful cleanup code=0 must still reach bounded respawn, unless a user terminal overrides it');
+  assert.match(spawn, /finalizeNonRetryableSetupTerminal\(\{[\s\S]*?childStillOwned: handle\.child === child[\s\S]*?stopStartForProxyFailure[\s\S]*?broadcastFleet/,
+    'known proxy terminal must be reprojected after ownership clears and must not auto-respawn');
+  assert.match(spawn, /return startup\.launchReady;/);
 });
 
 test('Facebook TOTP IPC is current-child/profile bound and projects no raw AdsPower material', () => {

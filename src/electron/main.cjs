@@ -1,5 +1,10 @@
 const { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, Notification, shell, screen, safeStorage } = require('electron');
 const { spawn } = require('node:child_process');
+const {
+  finalizeNonRetryableSetupTerminal,
+  initializeOwnedCoreChild,
+  setupTerminalExitDisposition,
+} = require('./core-child-startup.cjs');
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
@@ -2173,6 +2178,7 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     platform: platform || 'xiaohongshu',
     cascadeIndex: cascadeIndex || 0,
     child: undefined,
+    coreSetupTerminal: null,
     spawnCloudKey: '',
     spawnAuthenticatedTarget: '',
     status: makeStatus(kind === 'self' ? 'self' : 'adspower'),
@@ -4697,6 +4703,8 @@ async function spawnEdgeChild(handle, {
   // 同理清「本次运行遇同账号并发占用拒启」标记：只反映本 core run 是否撞过 in-use 拒启，退出处据此判终局。
   handle.envInUseThisRun = false;
   handle.envInUseHolder = null;
+  // 终局原因只属于接下来这一条 ChildProcess；旧 run 的 setup failure 绝不能污染新 run。
+  handle.coreSetupTerminal = null;
   handle.spawnedAtMs = Date.now();
   // 换会话把人设绑定态重置回**未知**（change persona-bound-tristate）：上一会话的 stale-true 不能残留成
   // 误显示「已设置」，但也绝不能归零成 false——那等于替云端宣布「未绑」，正是「已设置账号被反复误弹向导」
@@ -4704,6 +4712,11 @@ async function spawnEdgeChild(handle, {
   handle.status.personaBound = null;
   handle.status.personaWritingLanguage = undefined;
   handle.interactionRuntime = null;
+  const CORE_CLOSE_DRAIN_GRACE_MS = 2_000;
+  const SETUP_TERMINATION_GRACE_MS = 2_000;
+  let coreExitFinalized = false;
+  let closeDrainTimer = null;
+  let setupTerminationTimer = null;
   const child = spawn(process.execPath, [edgeEntry], {
     cwd: edgeCwd,
     env: spawnEnv,
@@ -4713,65 +4726,167 @@ async function spawnEdgeChild(handle, {
       : ['pipe', 'pipe', 'pipe', 'ipc'],
     windowsHide: true,
   });
-  if (proxyAuthorityPayload) {
-    const authorityPipe = child.stdio[4];
-    if (!authorityPipe || typeof authorityPipe.end !== 'function') {
-      try { child.kill(); } catch { /* best-effort */ }
-      stopStartForProxyFailure(handle, { reason: 'proxy_authority_unavailable' });
-      return false;
-    }
-    authorityPipe.on('error', () => {
-      // 子进程侧读取不到完整 payload 会在 AdsPower start 前 fail closed；这里只投影稳定原因，不打印内容。
+  const startup = initializeOwnedCoreChild({
+    handle,
+    child,
+    createLaunchReady: () => awaitLaunchReady(handle),
+    observers: {
+      stdout: onChildStdout,
+      stderr: onChildStderr,
+      message: onChildMessage,
+      spawnError: onChildSpawnError,
+      runtimeError: onChildRuntimeError,
+      exit: onChildExit,
+      close: onChildClose,
+    },
+    prepare() {
+      if (proxyAuthorityPayload) {
+        const authorityPipe = child.stdio[4];
+        if (!authorityPipe || typeof authorityPipe.end !== 'function') {
+          markCoreSetupTerminal('proxy_authority_unavailable', proxyPreflightFailureText('proxy_authority_unavailable'), false);
+          settleLaunchReady(handle, false);
+          releaseStartQueue(handle);
+          stopStartForProxyFailure(handle, { reason: 'proxy_authority_unavailable' });
+          requestSetupTermination();
+          return false;
+        }
+        authorityPipe.on('error', () => {
+          // 子进程侧读取不到完整 payload 会在 AdsPower start 前 fail closed；这里只投影稳定原因，不打印内容。
+          updateStatus(handle, {
+            lastMessage: '原环境代理安全通道写入失败；浏览器不会启动。',
+            ...edgeFailurePatch('原环境代理安全通道不可用'),
+          });
+        });
+        authorityPipe.end(JSON.stringify(proxyAuthorityPayload));
+      }
+      // 核心已进入执行态：从启动排队移出；后续由浏览器并发槽位计数，不再占等待容量。
+      if (!retainStartQueueReservation) releaseStartQueue(handle);
+
+      // 发布卡在途状态随核心（重）启动清零（edge-companion-ui 8.1 评审修正）：离线窗口内的审批变化
+      // （拒绝/失败）推送会如实丢失，旧 pending/approved 卡若不清会永久滞留成陈卡；真在候审/已批的
+      // 草稿由重连后的云端 hello 快照重新推回。lastPublish 历史态不清（持久数据）。
       updateStatus(handle, {
-        lastMessage: '原环境代理安全通道写入失败；浏览器不会启动。',
-        ...edgeFailurePatch('原环境代理安全通道不可用'),
+        edge: 'starting',
+        authReason: null,
+        loginFlow: null,
+        session: handle.automationPaused ? 'paused' : (controlBootstrap ? 'resting' : 'running'),
+        closeScope: null,
+        // 新核心 = 还没连上过云端，哪怕上一个核心连上过（change honest-first-connect-label）。不复位这一位，
+        // 崩溃重起 / 显式重启的整个冷启动窗口会顶着上一轮的「连过」资格，被讲成「正在重新连接」。
+        cloudEverConnected: false,
+        browserStandby: controlBootstrap
+          ? coldStandbyStatus('scheduled', null, { reason: 'browser_absent_at_start' })
+          : null,
+        publish: null,
+        publishPreview: null,
+        proxyRuntime: null,
+        respawnGaveUp: false,
+        connectedCloudKey: '',
+        targetCloudKey: handle.spawnCloudKey,
+        cloudRebind: null,
+        lastMessage: cleanupBootstrap
+          ? '正在启动受限离场清理核心；浏览器保持关闭。'
+          : transientBrowserLease
+          ? '正在校验视频号会话并连接数据服务；仅在需要重新登录时打开浏览器。'
+          : controlBootstrap
+          ? '正在连接自动化引擎；浏览器保持关闭，等待执行槽位。'
+          : '正在启动 aidcp-edge…',
+        ...presencePatch(cleanupBootstrap
+          ? '正在连接离场清理核心…'
+          : transientBrowserLease ? '正在连接视频号…'
+          : controlBootstrap ? '正在连接云端，浏览器等待槽位' : '正在启动引擎…'),
+        ...clearEdgeFailurePatch(handle),
       });
-    });
-    authorityPipe.end(JSON.stringify(proxyAuthorityPayload));
-  }
-  handle.child = child;
-  // 核心已进入执行态：从启动排队移出；后续由浏览器并发槽位计数，不再占等待容量。
-  if (!retainStartQueueReservation) releaseStartQueue(handle);
-
-  // 发布卡在途状态随核心（重）启动清零（edge-companion-ui 8.1 评审修正）：离线窗口内的审批变化
-  // （拒绝/失败）推送会如实丢失，旧 pending/approved 卡若不清会永久滞留成陈卡；真在候审/已批的
-  // 草稿由重连后的云端 hello 快照重新推回。lastPublish 历史态不清（持久数据）。
-  updateStatus(handle, {
-    edge: 'starting',
-    authReason: null,
-    loginFlow: null,
-    session: handle.automationPaused ? 'paused' : (controlBootstrap ? 'resting' : 'running'),
-    closeScope: null,
-    // 新核心 = 还没连上过云端，哪怕上一个核心连上过（change honest-first-connect-label）。不复位这一位，
-    // 崩溃重起 / 显式重启的整个冷启动窗口会顶着上一轮的「连过」资格，被讲成「正在重新连接」。
-    cloudEverConnected: false,
-    browserStandby: controlBootstrap
-      ? coldStandbyStatus('scheduled', null, { reason: 'browser_absent_at_start' })
-      : null,
-    publish: null,
-    publishPreview: null,
-    proxyRuntime: null,
-    respawnGaveUp: false,
-    connectedCloudKey: '',
-    targetCloudKey: resolvedCloudKey,
-    cloudRebind: null,
-    lastMessage: cleanupBootstrap
-      ? '正在启动受限离场清理核心；浏览器保持关闭。'
-      : transientBrowserLease
-      ? '正在校验视频号会话并连接数据服务；仅在需要重新登录时打开浏览器。'
-      : controlBootstrap
-      ? '正在连接自动化引擎；浏览器保持关闭，等待执行槽位。'
-      : '正在启动 aidcp-edge…',
-    ...presencePatch(cleanupBootstrap
-      ? '正在连接离场清理核心…'
-      : transientBrowserLease ? '正在连接视频号…'
-      : controlBootstrap ? '正在连接云端，浏览器等待槽位' : '正在启动引擎…'),
-    ...clearEdgeFailurePatch(handle),
+      return true;
+    },
+    onSetupFailure: onPostSpawnSetupFailure,
+    settleLaunchFailure: () => settleLaunchReady(handle, false),
+    releaseStartReservation: () => releaseStartQueue(handle),
+    requestTermination: requestSetupTermination,
+    onCleanupError(label, error) {
+      appendEdgeLog(handle.envId, `${label}: ${(error && error.message) || String(error)}`, true);
+    },
   });
+  if (!startup.ok) return false;
 
-  child.stdout.on('data', (chunk) => handleEdgeOutput(handle, chunk.toString(), false, generation));
-  child.stderr.on('data', (chunk) => handleEdgeOutput(handle, chunk.toString(), true, generation));
-  child.on('message', (message) => {
+  function markCoreSetupTerminal(kind, summary, retry) {
+    handle.coreSetupTerminal = { child, kind, summary, retry: retry === true };
+  }
+  function currentCoreSetupTerminal() {
+    return handle.coreSetupTerminal && handle.coreSetupTerminal.child === child
+      ? handle.coreSetupTerminal
+      : null;
+  }
+  function clearSetupTerminationTimer() {
+    if (setupTerminationTimer) clearTimeout(setupTerminationTimer);
+    setupTerminationTimer = null;
+  }
+  function takeCoreSetupTerminal() {
+    const terminal = currentCoreSetupTerminal();
+    if (terminal) handle.coreSetupTerminal = null;
+    clearSetupTerminationTimer();
+    return terminal;
+  }
+  function onPostSpawnSetupFailure(error) {
+    const message = (error && error.message) || String(error);
+    markCoreSetupTerminal('post_spawn_setup', '核心进程启动后初始化失败', true);
+    appendEdgeLog(handle.envId, `post-spawn setup error: ${message}`, true);
+    updateStatus(handle, {
+      edge: 'warning',
+      cloud: 'disconnected',
+      session: 'idle',
+      lastMessage: '核心进程启动后初始化失败，正在安全回收并按策略重试。',
+      ...edgeFailurePatch('核心进程启动后初始化失败'),
+      ...presencePatch('启动初始化失败，正在回收'),
+    });
+  }
+  function noteSetupTerminationFailure(error) {
+    const message = (error && error.message) || String(error);
+    appendEdgeLog(handle.envId, `post-spawn termination error: ${message}`, true);
+    const terminal = currentCoreSetupTerminal();
+    if (terminal && terminal.retry) {
+      try {
+        updateStatus(handle, {
+          edge: 'warning',
+          lastMessage: '核心进程启动后初始化失败；回收请求尚未确认，已保留进程所有权并等待退出。',
+          ...edgeFailurePatch(terminal.summary),
+          ...presencePatch('启动初始化失败，等待进程退出'),
+        });
+      } catch (statusError) {
+        appendEdgeLog(handle.envId, `post-spawn termination projection error: ${(statusError && statusError.message) || String(statusError)}`, true);
+      }
+    }
+  }
+  function requestSetupTermination() {
+    let delivered = false;
+    let deliveryError = null;
+    try {
+      delivered = child.kill('SIGTERM');
+    } catch (error) {
+      deliveryError = error;
+    }
+    if (!delivered) noteSetupTerminationFailure(deliveryError || new Error('SIGTERM was not delivered'));
+    if (setupTerminationTimer) return;
+    setupTerminationTimer = setTimeout(() => {
+      setupTerminationTimer = null;
+      if (coreExitFinalized || handle.child !== child || !currentCoreSetupTerminal()) return;
+      appendEdgeLog(handle.envId, 'post-spawn setup child did not exit after SIGTERM; requesting SIGKILL', true);
+      try {
+        if (!child.kill('SIGKILL')) noteSetupTerminationFailure(new Error('SIGKILL was not delivered'));
+      } catch (error) {
+        noteSetupTerminationFailure(error);
+      }
+    }, SETUP_TERMINATION_GRACE_MS);
+    setupTerminationTimer.unref?.();
+  }
+
+  function onChildStdout(chunk) {
+    handleEdgeOutput(handle, chunk.toString(), false, generation);
+  }
+  function onChildStderr(chunk) {
+    handleEdgeOutput(handle, chunk.toString(), true, generation);
+  }
+  function onChildMessage(message) {
     if (handle.child !== child || !message || typeof message !== 'object') return;
     const currentGeneration = isCurrentLifecycleGeneration(handle, generation);
     // Close/pause advances the lifecycle generation before the still-current child stops/restores AdsPower.
@@ -5072,16 +5187,27 @@ async function spawnEdgeChild(handle, {
       });
       return;
     }
-  });
+  }
   // spawn 失败（EAGAIN 多环境 fork 压力 / ENOENT 产物缺失）：'error' 事件无监听会被 EventEmitter
   // 重抛为未捕获异常 → 整个监督者进程崩、连累全部兄弟环境（破坏崩溃隔离）；即便 Electron 幸存，
   // 'error' 后不发 'exit'，handle.child 永远钉住 → 该环境卡死在 starting、重起/放弃永不触发（静默假成功）。
   // 故必须挂 'error'：诚实呈现失败 + 走同一条有界重起/放弃路径。exit 与 error 用 `handle.child===child`
   // 互斥，谁先触发谁处理、另一个 no-op。
-  child.on('error', (err) => {
+  // ChildProcess 在已成功 spawn 后也会因 kill/send 失败发出 'error'。这种 error 不是进程终局；
+  // 清 handle 并重起会让仍活着的旧核心与新核心并存，所以只记录并继续等 exit/close。
+  function onChildRuntimeError(err) {
+    if (handle.child !== child) return;
+    if (currentCoreSetupTerminal()) {
+      noteSetupTerminationFailure(err);
+      return;
+    }
+    appendEdgeLog(handle.envId, `child process runtime error: ${(err && err.message) || String(err)}`, true);
+  }
+  function onChildSpawnError(err) {
     if (handle.child !== child) return;
     const staleGeneration = !isCurrentLifecycleGeneration(handle, generation);
     settleLaunchReady(handle, false); // 起不来：立刻放行启动队列的下一个，绝不占着队列干等
+    takeCoreSetupTerminal();
     handle.child = undefined;
     handle.status.authReason = null;
     handle.status.loginFlow = null;
@@ -5165,7 +5291,7 @@ async function spawnEdgeChild(handle, {
       surfaceFailure(`AIDCP Edge${handle.name ? `（${handle.name}）` : ''} 启动失败`, `核心进程无法启动：${msg}`);
     }
     scheduleRespawnIfNeeded(handle, decision);
-  });
+  }
   // 终局归因优先挂 'close'：Node 只保证 'close' 在 stdio 全部 drain 后触发、且必在 'exit' 之后；
   // 'exit' 可能早于末尾 stdout/stderr 'data'，那样内核缺失退出时 kernelMissThisRun/neededKernel 尚未由
   // handleEdgeLogLine 写入 → 被误判为硬失败、弹出本 change 意在消除的启动失败通知。改挂 'close' 后，
@@ -5173,10 +5299,7 @@ async function spawnEdgeChild(handle, {
   // 经 handle.child===child 互斥兜底。）资源归还则不能等 'close'：真实机器上孙进程/管道可能让 close
   // 长时间不来，OS 进程早已退出却仍被统计为公共槽位，最终把整机卡成 4/4 幽灵占用。
   // exit 当场释放执行容量；末尾日志只再给 2 秒 drain，超时后仍按已观察到的退出码完成终局归因。
-  const CORE_CLOSE_DRAIN_GRACE_MS = 2_000;
-  let coreExitFinalized = false;
-  let closeDrainTimer = null;
-  const finalizeCoreExit = (code, signal) => {
+  function finalizeCoreExit(code, signal) {
     if (coreExitFinalized || handle.child !== child) return; // 已被 'error' 处理器接管
     coreExitFinalized = true;
     if (closeDrainTimer) clearTimeout(closeDrainTimer);
@@ -5186,6 +5309,10 @@ async function spawnEdgeChild(handle, {
     const wasPausing = handle.pausePending;
     const wasRestarting = handle.restartPending;
     const stopReason = handle.engineStopReason;
+    const setupTerminal = takeCoreSetupTerminal();
+    const setupDisposition = setupTerminalExitDisposition(setupTerminal, code, signal);
+    const setupRetryRequested = setupDisposition && setupDisposition.retry;
+    const terminalSetupFailure = setupDisposition && !setupDisposition.retry;
     const terminalLoginFailure = handle.status.loginFlow && handle.status.loginFlow.state === 'failed'
       ? handle.status.loginFlow
       : null;
@@ -5218,14 +5345,31 @@ async function spawnEdgeChild(handle, {
     // 主动重启、自动化暂停/关闭、冷待机、浏览器关闭、移出花名册、退出应用都是「有意停止」，不算异常。
     const intentional = isQuitting || wasRestarting || wasPausing || wasParked || wasColdStandby || wasClosing
       || Boolean(stopReason) || handle.automationIntent !== 'enabled' || handle.removed;
+    const explicitTerminalOverride = isQuitting || wasRestarting || wasPausing || wasParked || wasClosing
+      || Boolean(stopReason) || handle.removed;
+    const retryableSetupFailure = Boolean(setupRetryRequested) && !intentional;
     handle.pausePending = false;
     handle.coreParked = false;
     handle.closePending = false;
-    const exitedAbnormally = Boolean(terminalLoginFailure)
+    const exitedAbnormally = retryableSetupFailure || Boolean(terminalLoginFailure)
       || (!intentional && (signal != null || (code != null && code !== 0)));
     handle.browserStateUnconfirmed = exitedAbnormally;
-    const message = exitMessage(code, signal);
+    const message = retryableSetupFailure ? setupDisposition.message : exitMessage(code, signal);
     if (handle.removed) return; // 已摘除的环境不再投影状态
+
+    // 已知的启动前置终局（例如代理权威管道缺失）已经投影了可操作原因。SIGTERM 只是回收手段，
+    // 不能把它改写成“异常退出”并触发无意义的自动重启。
+    if (terminalSetupFailure && finalizeNonRetryableSetupTerminal({
+      terminal: setupTerminal,
+      explicitOverride: explicitTerminalOverride,
+      childStillOwned: handle.child === child,
+      projectFailure: (terminal) => stopStartForProxyFailure(handle, { reason: terminal.kind }),
+      broadcast: () => broadcastFleet(),
+    })) {
+      handle.respawnStreak = 0;
+      handle.browserStateUnconfirmed = false;
+      return;
+    }
 
     if (wasColdStandby && !isQuitting && !wasRestarting && !wasPausing && !wasParked && !wasClosing && !stopReason) {
       handle.coldStandbyPending = false;
@@ -5272,7 +5416,13 @@ async function spawnEdgeChild(handle, {
       ? { action: 'stop', streak: 0 }
       : exitedAbnormally
         ? fleet.decideRespawn(
-            { exitCode: signal != null && code == null ? null : code, uptimeMs: Date.now() - handle.spawnedAtMs, prevStreak: handle.respawnStreak, shuttingDown: isQuitting },
+            {
+              // 核心可能把 setup-failure SIGTERM 优雅处理成 code=0；对重试策略仍必须表达“启动失败”。
+              exitCode: retryableSetupFailure ? setupDisposition.respawnExitCode : (signal != null && code == null ? null : code),
+              uptimeMs: Date.now() - handle.spawnedAtMs,
+              prevStreak: handle.respawnStreak,
+              shuttingDown: isQuitting,
+            },
             RESPAWN_OPTS,
           )
         : { action: 'stop', streak: 0 };
@@ -5372,6 +5522,11 @@ async function spawnEdgeChild(handle, {
         ? edgeFailurePatch(`登录认证异常：${terminalLoginFailure.reason}`)
         : envInUse
         ? edgeFailurePatch(inUseMsg)
+        : retryableSetupFailure
+          ? edgeFailurePatch(setupDisposition.failureSummary, {
+              exitCode: setupDisposition.observedExitCode,
+              signal: setupDisposition.observedSignal,
+            })
         : exitedAbnormally
           ? abnormalExitFailurePatch(handle, code, signal)
           : clearEdgeFailurePatch(handle)),
@@ -5412,10 +5567,11 @@ async function spawnEdgeChild(handle, {
       handle.restartPending = false;
       if (!isQuitting) void enqueueStartFlow(handle);
     }
-  };
-  child.on('exit', (code, signal) => {
+  }
+  function onChildExit(code, signal) {
     if (handle.child !== child) return;
     // OS 执行态已经结束：公共槽位与串行启动队列立即前进，不等待 stdio close。
+    clearSetupTerminationTimer();
     settleLaunchReady(handle, false);
     broadcastFleet();
     setTimeout(() => drainSlotWaiters(), 0);
@@ -5424,17 +5580,17 @@ async function spawnEdgeChild(handle, {
       finalizeCoreExit(code, signal);
     }, CORE_CLOSE_DRAIN_GRACE_MS);
     if (typeof closeDrainTimer.unref === 'function') closeDrainTimer.unref();
-  });
-  child.on('close', (code, signal) => {
+  }
+  function onChildClose(code, signal) {
     if (coreExitFinalized || handle.child !== child) return;
     // 正常路径：stdio 已 drain，保留完整末尾日志后再分类；若 close 异常缺席则由上面的有界兜底完成。
     settleLaunchReady(handle, false);
     setTimeout(() => drainSlotWaiters(), 0);
     finalizeCoreExit(code, signal);
-  });
+  }
 
   // 串行启动队列在此等待：起完一个（云端已连上）或诚实失败，才放行下一个。
-  return awaitLaunchReady(handle);
+  return startup.launchReady;
 }
 
 function stopLoginPoller() {

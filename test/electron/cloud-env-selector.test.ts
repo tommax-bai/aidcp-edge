@@ -40,6 +40,8 @@ test('core spawn overwrites inherited AIDCP_CLOUD_URL after env merging with the
   const spawnCallIndex = spawn.indexOf('spawn(process.execPath');
   assert.ok(mergeIndex >= 0 && injectIndex > mergeIndex && spawnCallIndex > injectIndex);
   assert.match(spawn, /handle\.spawnCloudKey = cloudSel\.key/);
+  assert.match(spawn, /targetCloudKey:\s*handle\.spawnCloudKey/);
+  assert.doesNotMatch(spawn, /\bresolvedCloudKey\b/);
   assert.match(spawn, /handle\.spawnAuthenticatedTarget = hasValidSession\(\) \? clientSession\.deploymentTarget : ''/);
   assert.doesNotMatch(spawn, /if \(cloudSel\.fromSelection\)/);
   assert.doesNotMatch(spawn, /process\.env\.AIDCP_CLOUD_URL/);

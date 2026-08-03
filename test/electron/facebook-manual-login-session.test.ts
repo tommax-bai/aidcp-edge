@@ -94,7 +94,7 @@ test('Electron accepts only enumerated Facebook manual reasons and keeps their b
     /message\.type === 'lifecycle\.auth_failed'[\s\S]*?loginFlow: \{ state: 'failed', reason \}/,
     'terminal authentication failure must enter an explicit projected state');
   assert.match(shell,
-    /const terminalLoginFailure = handle\.status\.loginFlow[\s\S]*?const exitedAbnormally = Boolean\(terminalLoginFailure\)/,
+    /const terminalLoginFailure = handle\.status\.loginFlow[\s\S]*?const exitedAbnormally = retryableSetupFailure \|\| Boolean\(terminalLoginFailure\)/,
     'current-generation authentication failure must outrank an older intentional stop reason');
   assert.match(shell,
     /const decision = terminalLoginFailure[\s\S]*?\{ action: 'stop', streak: 0 \}/,
