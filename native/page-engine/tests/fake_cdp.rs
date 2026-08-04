@@ -161,10 +161,15 @@ async fn facebook_initial_scan_resets_a_persisted_reel_to_home_feed() {
     let mut engine = Engine::default();
     let mut open = session_open(port);
     open.params.platform = Platform::Facebook;
+    // 这条命令真的会导航，因此必须装得下文档就绪等待的首探前置（3s）。
+    // 共用桩预算 2s 比内层还短 —— 那样测到的是「外层墙钟先到」，不是这条路径本身。
+    open.params.timeout_ms = 30_000;
     engine.open(&open).await.expect("open Facebook session");
 
+    let mut command = browse_command(1);
+    command.deadline_unix_ms = unix_time_ms() + 30_000;
     let outcome = engine
-        .execute(&browse_command(1))
+        .execute(&command)
         .await
         .expect("Facebook initial scan");
     assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);

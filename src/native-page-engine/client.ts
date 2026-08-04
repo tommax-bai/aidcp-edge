@@ -26,6 +26,12 @@ const DEFAULT_NATIVE_TIMEOUT_MS = 5_000;
  * 静默失配——而窗口比命令短的后果是「已发出的写入被当成没发生 ⇒ 上游重投 ⇒ 重复评论」。
  */
 export const MAX_NATIVE_TIMEOUT_MS = 45_000;
+/**
+ * Facebook 未专门化命令的准入上限（change unify-facebook-page-readiness-probe）。
+ * 与 `MAX_NATIVE_TIMEOUT_MS` 分开，是因为提交窗口的兜底预算派生自后者——
+ * 为了给 Facebook 的 30s 文档就绪窗腾地方而抬那个通用值，会连带改写小红书的写入窗口口径。
+ */
+const MAX_FACEBOOK_DEFAULT_COMMAND_TIMEOUT_MS = 90_000;
 const MAX_FACEBOOK_FEED_SCROLL_TIMEOUT_MS = 180_000;
 const MAX_FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS = 60_000;
 const MAX_FACEBOOK_COMMENT_TIMEOUT_MS = 180_000;
@@ -1650,7 +1656,7 @@ function validateCommandTimeout(
             : command.kind === 'note_open'
               && command.params.selection === FACEBOOK_FIRST_POST_SELECTION
               ? MAX_FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS
-              : MAX_NATIVE_TIMEOUT_MS;
+              : MAX_FACEBOOK_DEFAULT_COMMAND_TIMEOUT_MS;
   validateTimeout(timeoutMs, maxTimeoutMs);
 }
 

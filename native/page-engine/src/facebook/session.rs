@@ -5,7 +5,6 @@ use crate::facebook;
 use crate::model::{IdentityObservation, IdentityObservationSource, IdentityPageEffect};
 use crate::protocol::{EffectPhase, NativeCommand};
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
 
 pub(crate) async fn execute(
     session: &mut EngineSession,
@@ -73,7 +72,7 @@ pub(crate) async fn execute_facebook_identity(
         && !location.starts_with("https://facebook.com/")
     {
         session.cdp.navigate("https://www.facebook.com/").await?;
-        wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+        wait_for_facebook_ready(session).await?;
     }
     session.cdp.enable_network().await?;
     let cookies = session.cdp.all_cookies().await?;

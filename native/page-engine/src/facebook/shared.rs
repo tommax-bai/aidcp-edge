@@ -809,6 +809,20 @@ pub(crate) async fn evaluate_facebook_router_until_requested_detail(
     }
 }
 
+/// 文档就绪窗（change unify-facebook-page-readiness-probe）。
+///
+/// **一个窗口，所有调用点共用**：8s 曾经只在 Reels 入口被抬到 30s，其余十几处原样留着，
+/// 于是会话首屏扫描照旧在 8s 处判死——同一条缺陷换个入口又发作一次。窗口不再由调用点传入，
+/// 就没有哪个调用点能悄悄漂回短窗。
+/// 抬高它前先算各族外层原子上限还剩多少余量（见 `src/native-page-engine/browse-session.ts`
+/// 的时间表与 `test/native-page-engine/timeout-chain-contract.test.ts`）：
+/// 只放宽内层而不抬外层，等于把边端一个具名失败改判成外层合成失败。
+pub(crate) const FACEBOOK_READY_TIMEOUT: Duration = Duration::from_secs(30);
+/// 首探前置等待：导航刚发出的头几秒里文档不可能就绪，那几十次探测只是白烧 CDP 往返。
+pub(crate) const FACEBOOK_READY_FIRST_PROBE_DELAY: Duration = Duration::from_secs(3);
+/// 首探之后的探测间隔。
+pub(crate) const FACEBOOK_READY_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+
 /// 文档就绪等待。**判据只有文档状态，不含任何地址判据** —— 这是刻意的：
 /// 它有十几个调用点（feed / session / runtime），各自跳向互不相同的目的地，
 /// 给它加「必须落到某个地址」会一次性改写全部调用方的语义。
@@ -816,9 +830,9 @@ pub(crate) async fn evaluate_facebook_router_until_requested_detail(
 /// （群根见 `wait_for_facebook_group_root_landing`）。
 pub(crate) async fn wait_for_facebook_ready(
     session: &mut EngineSession,
-    timeout: Duration,
 ) -> Result<(), EngineError> {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + FACEBOOK_READY_TIMEOUT;
+    tokio::time::sleep(FACEBOOK_READY_FIRST_PROBE_DELAY).await;
     loop {
         let expression = facebook::page_probe_expression()?;
         let raw = session.cdp.evaluate(&expression, true).await?;
@@ -836,7 +850,7 @@ pub(crate) async fn wait_for_facebook_ready(
                 "native Facebook navigation did not reach a ready document",
             ));
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(FACEBOOK_READY_PROBE_INTERVAL).await;
     }
 }
 
@@ -1221,6 +1235,24 @@ pub(crate) fn facebook_scroll_failure_on_surface(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 就绪窗与探测节奏（change unify-facebook-page-readiness-probe）。
+    ///
+    /// 这三个数是**跨语言时间链的一端**：另一端在
+    /// `test/native-page-engine/timeout-chain-contract.test.ts` 里按源码字面量对账，
+    /// 由它证明 30s 装得进各族外层预算。这里只钉数值本身，改数必须两处一起过。
+    #[test]
+    fn document_readiness_window_and_probe_cadence_are_pinned() {
+        assert_eq!(FACEBOOK_READY_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(FACEBOOK_READY_FIRST_PROBE_DELAY, Duration::from_secs(3));
+        assert_eq!(FACEBOOK_READY_PROBE_INTERVAL, Duration::from_secs(2));
+        let first_probe = FACEBOOK_READY_FIRST_PROBE_DELAY;
+        let window = FACEBOOK_READY_TIMEOUT;
+        assert!(
+            first_probe < window,
+            "首探前置等待若吃满整个窗口，这个等待就一次也探不到，等于把窗口做成纯 sleep",
+        );
+    }
 
     /// 已派发的提交失败 MUST NOT 带上「命令层等同于未开始」的错误码 —— 不管底层 CDP
     /// 失败自称是什么。判据按引用取用（`error_code_means_not_started`），不是抄一份码表：

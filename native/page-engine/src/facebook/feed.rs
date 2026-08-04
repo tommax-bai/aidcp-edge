@@ -29,10 +29,6 @@ const FACEBOOK_FEED_RECOVERY_TIMEOUT: Duration = Duration::from_secs(12);
 /// Reels 入口路由：首次导航与失效后的重试导航共用同一个目标。**MUST NOT 各写一份字面量**——
 /// 两处一旦漂开，重试就变成「换个地方再试一次」，而回执仍按同一个入口解读。
 const FACEBOOK_REELS_ENTRY_URL: &str = "https://www.facebook.com/reel/?s=tab";
-/// Facebook may pass through `/reels/` and anonymous `/reel/` documents before the
-/// canonical Reel route becomes ready. Keep this longer window local to Reels entry;
-/// unrelated Facebook navigations retain their existing eight-second boundary.
-const FACEBOOK_REELS_ENTRY_READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// 恢复等待必须给「把诚实回执交出去」留出的余量。
 ///
 /// 这一层是本 change 的核心命题在小尺度上的复现：**外层原子上限先到点，会把一个具名回执
@@ -83,7 +79,7 @@ pub(crate) async fn execute(
             let target_post_id = canonical_facebook_post_id(url.as_str())
                 .ok_or_else(invalid_facebook_navigation_target)?;
             session.cdp.navigate(url.as_str()).await?;
-            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+            wait_for_facebook_ready(session).await?;
             evaluate_facebook_router_until_requested_detail(
                 session,
                 command,
@@ -124,7 +120,7 @@ pub(crate) async fn execute(
                 ..NoteOpenParams::default()
             });
             session.cdp.navigate(url.as_str()).await?;
-            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+            wait_for_facebook_ready(session).await?;
             match evaluate_facebook_router_until_requested_detail(
                 session,
                 &detail_command,
@@ -221,7 +217,7 @@ async fn execute_facebook_reels_entry(
     }
 
     session.cdp.navigate(FACEBOOK_REELS_ENTRY_URL).await?;
-    wait_for_facebook_ready(session, FACEBOOK_REELS_ENTRY_READY_TIMEOUT).await?;
+    wait_for_facebook_ready(session).await?;
     let first = probe_facebook_reel(session).await?;
     if first.is_reels_surface() {
         if let Some(result) = facebook_reels_entry_route_gate(cancellation, deadline_unix_ms, true)?
@@ -284,7 +280,7 @@ async fn execute_facebook_reels_entry(
     }
 
     session.cdp.navigate(FACEBOOK_REELS_ENTRY_URL).await?;
-    wait_for_facebook_ready(session, FACEBOOK_REELS_ENTRY_READY_TIMEOUT).await?;
+    wait_for_facebook_ready(session).await?;
     let retried = probe_facebook_reel(session).await?;
     if retried.is_reels_surface() {
         if let Some(result) = facebook_reels_entry_route_gate(cancellation, deadline_unix_ms, true)?
@@ -416,7 +412,7 @@ async fn execute_facebook_note_navigation(
         ));
     };
     session.cdp.navigate(url.as_str()).await?;
-    wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    wait_for_facebook_ready(session).await?;
 
     let landed = probe_facebook_feed(session).await?;
     let observation = crate::model::ActionEvidence {
@@ -457,7 +453,7 @@ pub(crate) async fn execute_facebook_initial_feed(
     session.cdp.navigate(FACEBOOK_HOME_URL).await?;
     session.facebook.active_list_url = FACEBOOK_HOME_URL.to_owned();
     session.facebook.seen_post_ids.clear();
-    wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    wait_for_facebook_ready(session).await?;
     let command = NativeCommand::BrowseScroll(crate::command::ReasonParams {
         reason: Some("initial_scan".to_owned()),
     });
@@ -522,7 +518,7 @@ pub(crate) async fn execute_facebook_search(
     session.cdp.navigate(url.as_str()).await?;
     session.facebook.active_list_url = url.to_string();
     session.facebook.seen_post_ids.clear();
-    wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    wait_for_facebook_ready(session).await?;
     if let Some(output) = ensure_facebook_action_gate(session, command).await? {
         return Ok((EffectPhase::NotStarted, output));
     }
@@ -712,7 +708,7 @@ pub(crate) async fn execute_facebook_back_to_list(
     let current = probe_facebook_feed(session).await?;
     if current.url != target || !matches!(current.surface.as_str(), "home" | "search" | "group") {
         session.cdp.navigate(&target).await?;
-        wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+        wait_for_facebook_ready(session).await?;
     }
     let command = NativeCommand::NavigationBack(crate::command::NavigationBackParams {
         reason: None,
@@ -743,7 +739,7 @@ pub(crate) async fn execute_facebook_feed_refresh(
     if session.facebook.active_list_url != FACEBOOK_HOME_URL {
         session.cdp.navigate(FACEBOOK_HOME_URL).await?;
         session.facebook.active_list_url = FACEBOOK_HOME_URL.to_owned();
-        wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+        wait_for_facebook_ready(session).await?;
     }
     let command = NativeCommand::FeedRefresh(crate::command::FeedRefreshParams {
         reason: None,
@@ -784,7 +780,7 @@ pub(crate) async fn execute_facebook_feed_refresh(
         session.facebook.last_refresh_reload_at_ms = now;
         session.cdp.reload().await?;
     }
-    wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    wait_for_facebook_ready(session).await?;
     let after = settle_facebook_feed(session, FACEBOOK_FEED_SETTLE_IN_PLACE).await?;
     let after_top = after
         .cards
@@ -822,7 +818,7 @@ async fn ensure_facebook_active_list(session: &mut EngineSession) -> Result<(), 
     if !on_list || probe.url != session.facebook.active_list_url {
         let target = session.facebook.active_list_url.clone();
         session.cdp.navigate(&target).await?;
-        wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+        wait_for_facebook_ready(session).await?;
     }
     Ok(())
 }
@@ -1592,9 +1588,55 @@ mod tests {
     use super::*;
     use crate::model::{FacebookListKind, FacebookListState};
 
+    /// 本文件里**每一处**就绪等待都必须走共用窗口（change unify-facebook-page-readiness-probe）。
+    ///
+    /// 前身是「Reels 入口那两处是 30s」。那条断言只盯住作者当时在治的那半边，
+    /// 于是首屏扫描那处 8s 一直没人看见，同一条缺陷换个入口又发作了一次。
+    /// 现在按**补集**判：只要还有任何一处自带窗口参数，这里就红。
+    /// 生产段：断言必须只看非测试代码，否则断言自身写下的那几个字面量会被数进去。
+    fn production_source() -> &'static str {
+        include_str!("feed.rs")
+            .split_once("#[cfg(test)]")
+            .expect("测试模块标记不在了")
+            .0
+    }
+
     #[test]
-    fn reels_entry_document_readiness_window_is_thirty_seconds() {
-        assert_eq!(FACEBOOK_REELS_ENTRY_READY_TIMEOUT, Duration::from_secs(30));
+    fn every_readiness_wait_in_this_file_uses_the_shared_window() {
+        let source = production_source();
+        assert!(
+            !source.contains("wait_for_facebook_ready(session,"),
+            "就绪等待不接受调用点自带窗口——窗口只有 shared.rs 那一个",
+        );
+        assert_eq!(
+            source.matches("wait_for_facebook_ready(session)").count(),
+            11,
+            "本文件的就绪等待处数变了：新增导航请确认它确实该等文档就绪，再更新此数",
+        );
+    }
+
+    /// Reels 入口的「初次 + 唯一一次重试」边界（change extend-facebook-reels-entry-readiness-window）。
+    /// 它守的是**重试次数**，与窗口大小是两件事，窗口统一后这条仍须成立。
+    #[test]
+    fn reels_entry_keeps_exactly_two_navigation_attempts() {
+        let entry = production_source()
+            .split_once("async fn execute_facebook_reels_entry")
+            .expect("Reels 入口函数不在了：本断言必须当场失败，而不是静默放行")
+            .1;
+        let entry = entry
+            .split_once("\nfn facebook_reels_entry_route_gate")
+            .expect("Reels 入口后面那个函数改名了，函数段落就划不出来了")
+            .0;
+        assert_eq!(
+            entry.matches("navigate(FACEBOOK_REELS_ENTRY_URL)").count(),
+            2,
+            "Reels 入口只许初次导航 + 一次重试，且两次共用同一个入口常量",
+        );
+        assert_eq!(
+            entry.matches("wait_for_facebook_ready(session)").count(),
+            2,
+            "两次导航各自等一轮就绪",
+        );
     }
 
     #[test]

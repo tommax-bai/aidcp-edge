@@ -48,6 +48,14 @@ const MAX_CAPTCHA_SNAPSHOTS: usize = 8;
 /// （Facebook 时间预算整体 ×1.5 就调过一次，30_000 → 45_000），任何手抄一份的地方都会在
 /// 下一次调整时静默失配——而窗口比命令短的后果是「已发出的写入被当成没发生 ⇒ 重复评论」。
 pub const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 45_000;
+/// Facebook 未专门化命令（详情开帖 / 就地读回落 / 搜索 / 刷新 / 返回列表 / 身份引导…）的天花板。
+/// 与通用默认档分开，是因为这些路径全都含一个 30s 文档就绪窗（change
+/// unify-facebook-page-readiness-probe），再叠上各自既有的内层等待——最坏的是刷新首页：
+/// 两个 30s 就绪窗 + 两次判稳 ≈ 67s，详情开帖是 30s + 23s 水合 = 53s。留在 45s 的话，
+/// 内层还没跑完外层就先到点，一条**具名**回执会被改判成信息量更低的合成 CdpTimeout。
+/// 该值是三处同步之一，另两处：`src/native-page-engine/browse-session.ts`（请求值）
+/// 与 `src/native-page-engine/client.ts`（准入校验，超上限直接 invalid_request、命令根本不下发）。
+const FACEBOOK_DEFAULT_COMMAND_TIMEOUT_MS: u64 = 90_000;
 const FACEBOOK_FEED_SCROLL_TIMEOUT_MS: u64 = 180_000;
 const FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS: u64 = 60_000;
 const FACEBOOK_COMMENT_TIMEOUT_MS: u64 = 180_000;
@@ -3984,11 +3992,13 @@ fn command_timeout_ceiling(platform: Platform, command: &NativeCommand) -> u64 {
             })
         )
     {
-        // 空关键词首帖开帖是一串串行有界窗（就绪 8s + 四轮下滚 + 可选二次导航就绪 8s +
-        // 评论框绑定 12s + 身份回读 20s ≈ 62s），沿用默认 30s 会在内层跑完前先到点。
+        // 空关键词首帖开帖是一串串行有界窗（两次导航就绪各 30s + 四轮下滚 +
+        // 评论框绑定 12s + 身份回读 20s），沿用默认档会在内层跑完前先到点。
         // 该值是三处同步之一，另两处：边缘 src/native-page-engine/browse-session.ts（请求值）
         // 与 src/native-page-engine/client.ts（准入校验，超上限直接 invalid_request、命令不下发）。
         FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS
+    } else if platform == Platform::Facebook {
+        FACEBOOK_DEFAULT_COMMAND_TIMEOUT_MS
     } else {
         DEFAULT_COMMAND_TIMEOUT_MS
     }
@@ -4234,8 +4244,16 @@ mod tests {
             command_timeout_ceiling(Platform::Facebook, &page_scroll),
             FACEBOOK_FEED_SCROLL_TIMEOUT_MS
         );
+        // Facebook 的兜底档是**它自己那一档**（change unify-facebook-page-readiness-probe）：
+        // 该平台每次导航都带一个 30s 文档就绪窗，通用 45s 装不下。这里仍守住原命题——
+        // 兜底不得漏成任何一个能力专属天花板。
         assert_eq!(
             command_timeout_ceiling(Platform::Facebook, &probe),
+            FACEBOOK_DEFAULT_COMMAND_TIMEOUT_MS
+        );
+        // 另一半：Facebook 那一档 MUST NOT 漏到别的平台去。
+        assert_eq!(
+            command_timeout_ceiling(Platform::Xiaohongshu, &probe),
             DEFAULT_COMMAND_TIMEOUT_MS
         );
         assert_eq!(
@@ -4307,9 +4325,16 @@ mod tests {
             command_timeout_ceiling(Platform::Facebook, &first_post),
             FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS
         );
+        // 按 URL 开帖走 Facebook 兜底档：它的内层是 30s 就绪 + 23s 详情水合，
+        // 但**仍不得**跟着首帖那一档放开——那一档另外还含两次纠正导航与编辑框绑定。
         assert_eq!(
             command_timeout_ceiling(Platform::Facebook, &open_by_url),
-            DEFAULT_COMMAND_TIMEOUT_MS
+            FACEBOOK_DEFAULT_COMMAND_TIMEOUT_MS
+        );
+        assert!(
+            command_timeout_ceiling(Platform::Facebook, &open_by_url)
+                < command_timeout_ceiling(Platform::Facebook, &first_post),
+            "兜底档一旦追平首帖档，这条区分就没人守得住了"
         );
         assert_eq!(
             command_timeout_ceiling(Platform::Xiaohongshu, &first_post),

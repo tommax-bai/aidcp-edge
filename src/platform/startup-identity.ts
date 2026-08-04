@@ -1,7 +1,15 @@
 import type { ReadSelfIdentityOptions } from '../cdp/self-identity.js';
 
-/** Facebook 首次页面 bootstrap 的有界等待；只影响握手前首读/新浏览器代次唤醒。 */
-export const FACEBOOK_STARTUP_IDENTITY_HYDRATE_MS = 12_000;
+/**
+ * Facebook 首次页面 bootstrap 的有界等待；只影响握手前首读 / 新浏览器代次唤醒。
+ *
+ * 它是这条命令的**请求值**，必须大于命令内层最长的那个具名窗口。首读在「当前不在
+ * facebook.com」时会先导航再等文档就绪，而就绪窗已统一到 30s（change
+ * unify-facebook-page-readiness-probe）。原值 12s 比内层还短：外层先到点，
+ * 一次可具名的就绪失败会被改判成合成超时，且这一步恰好在启动最早处，最容易被读成
+ * 「这个环境起不来」。40s = 30s 就绪 + cookie / 身份读取 + 传输余量。
+ */
+export const FACEBOOK_STARTUP_IDENTITY_HYDRATE_MS = 40_000;
 
 /**
  * 启动身份首读策略：

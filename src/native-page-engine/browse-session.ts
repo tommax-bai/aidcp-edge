@@ -176,6 +176,16 @@ const DEFAULT_BLOCKING_POLL_MS = 250;
 // 抬默认档只放大**容错**，不改变任何成功路径的行为；对另两个平台的唯一影响是诚实失败晚 15s 暴露。
 const DEFAULT_NATIVE_COMMAND_TIMEOUT_MS = 45_000;
 /**
+ * Facebook 未专门化命令的原子上限（change unify-facebook-page-readiness-probe）。
+ *
+ * 与跨平台默认档分开，因为这些路径现在**每一次导航**都带一个 30s 文档就绪窗，
+ * 后面还各自跟着既有内层等待：刷新首页最坏是两个就绪窗 + 两次判稳 ≈ 67s，
+ * 详情开帖是 30s 就绪 + 23s 水合 = 53s，搜索是 30s 就绪 + 判稳 + 八轮下滚。
+ * 留在 45s 会让外层先到点，把这些路径各自的**具名**失败改判成合成 CdpTimeout。
+ * 90s 仍远低于 Facebook 会话 180s 与云端 240s 空转看门狗。
+ */
+const FACEBOOK_DEFAULT_COMMAND_TIMEOUT_MS = 90_000;
+/**
  * Facebook Feed 到底确认最多经历八轮固定 12.5s 五样本序列；再叠加滚轮、判稳、
  * 身份采集与恢复，合法有界路径可超过 135s。沿用 Facebook 会话现有 180s 上限，
  * 防止外层先把具名 Feed 结论合成为 CdpTimeout。
@@ -189,10 +199,13 @@ const FACEBOOK_GROUP_JOIN_TIMEOUT_MS = 135_000;
 /**
  * 空关键词首帖开帖的原子上限（change restore-facebook-post-join-comment-continuity）。
  *
- * 该命令内部是一串**串行**有界窗口，最坏路径：群页导航后就绪 12s + 首次探测约 2s +
- * 四轮下滚约 12s + 可选固链导航后就绪 12s + 评论框绑定 18s + 身份回读 30s ≈ 86s。
+ * 该命令内部是一串**串行**有界窗口，最坏路径：群页导航后就绪 30s + 群根落地 10s +
+ * 四轮下滚约 12s + 可选固链导航后就绪（顺利时按首探 3s + 一轮间隔计）+ 评论框绑定 18s +
+ * 身份回读 30s。**就绪窗按「一条命令里只有一次病态」计**（见
+ * `test/native-page-engine/timeout-chain-contract.test.ts` 的口径说明）：跑满 30s 的那次
+ * 必然以失败收尾、命令当场结束，不会再叠下一个满窗。
  * 只放宽内层而不抬这一层等于没改：外层先到点，把边端一个具名失败改判成外层合成失败。
- * 取值与加群命令同为 135s，避免上限种类膨胀。普通开帖（带 url / noteId）仍取默认值。
+ * 取值与加群命令同为 135s，避免上限种类膨胀。普通开帖（带 url / noteId）走 Facebook 兜底档。
  */
 const FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS = 135_000;
 const FACEBOOK_FIRST_POST_SELECTION = 'first_commentable_group_post';
@@ -964,7 +977,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     ) {
       return FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS;
     }
-    if (command.kind !== 'interaction_comment') return DEFAULT_NATIVE_COMMAND_TIMEOUT_MS;
+    if (command.kind !== 'interaction_comment') return FACEBOOK_DEFAULT_COMMAND_TIMEOUT_MS;
     const body = typeof command.params.text === 'string' ? command.params.text.trim() : '';
     const groupChatCode = typeof command.params.groupChatCode === 'string'
       ? command.params.groupChatCode.trim()

@@ -280,7 +280,7 @@ async fn execute_first_commentable_group_post(
         // 验证码 / 登录墙本身就会让落地判据不成立，若因此只报「没落地」，真正的原因就被盖掉了。
         let landing_failure = pending_failure.take();
         if landing_failure.is_none() {
-            wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+            wait_for_facebook_ready(session).await?;
         }
         if let Some(output) = ensure_facebook_action_gate(session, command).await? {
             return Ok((EffectPhase::NotStarted, output));
@@ -346,7 +346,7 @@ async fn execute_first_commentable_group_post(
             return Err(cancelled_before_dispatch());
         }
         session.cdp.navigate(candidate_url.as_str()).await?;
-        wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+        wait_for_facebook_ready(session).await?;
     }
 
     let editor_reason = wait_for_first_post_editor(

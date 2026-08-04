@@ -253,20 +253,27 @@ test('permits only the capability-specific Facebook long command ceilings', asyn
       return true;
     },
   );
+  // Facebook 兜底档 = 90s（change unify-facebook-page-readiness-probe）：该平台每次导航
+  // 都含一个 30s 文档就绪窗，45s 装不下。这里守的仍是「兜底档有边界」，只是边界换了值。
+  await session.execute({ kind: 'page_probe', params: {} }, 90_000);
   await assert.rejects(
-    session.execute({ kind: 'page_probe', params: {} }, 90_000),
+    session.execute({ kind: 'page_probe', params: {} }, 90_001),
     (error: unknown) => {
       assert.ok(error instanceof NativePageEngineError);
       assert.equal(error.code, 'invalid_request');
       return true;
     },
   );
-  // 放宽必须**只**落在首帖那一形态：按 URL 开帖仍走默认档上限，绝不跟着放开。
+  // 放宽必须**只**落在首帖那一形态：按 URL 开帖走 Facebook 兜底档，绝不跟着首帖那档放开。
+  await session.execute({
+    kind: 'note_open',
+    params: { url: 'https://www.facebook.com/groups/42/posts/7' },
+  }, 90_000);
   await assert.rejects(
     session.execute({
       kind: 'note_open',
       params: { url: 'https://www.facebook.com/groups/42/posts/7' },
-    }, 90_000),
+    }, 90_001),
     (error: unknown) => {
       assert.ok(error instanceof NativePageEngineError);
       assert.equal(error.code, 'invalid_request');

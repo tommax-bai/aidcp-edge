@@ -301,12 +301,14 @@ test('Native Facebook keeps Join, comments, and ordinary refresh on their comman
   assert.equal(h.executions[1]?.timeoutMs, 60_970);
   assert.equal(h.executions[2]?.command.kind, 'interaction_comment');
   assert.equal(h.executions[2]?.timeoutMs, 157_000);
-  assert.equal(h.executions[3]?.timeoutMs, 45_000);
+  // 刷新首页走 Facebook 兜底档 90s（change unify-facebook-page-readiness-probe）：
+  // 它最坏含两次导航就绪窗（各 30s）＋两次判稳，45s 会让外层先到点。
+  assert.equal(h.executions[3]?.timeoutMs, 90_000);
 });
 
 test('Native Facebook gives the first-post open its own long budget; 普通开帖仍取默认', async () => {
-  // 首帖开帖内部是一串串行有界窗（就绪 8s + 四轮下滚 + 可选二次导航就绪 8s + 绑定 12s + 身份回读 20s）。
-  // 沿用默认 30s ⇒ 外层先到点，把边端一个具名失败改判成合成失败：只放宽内层窗口等于没改。
+  // 首帖开帖内部是一串串行有界窗（两次导航就绪各 30s + 四轮下滚 + 绑定 18s + 身份回读 30s）。
+  // 沿用兜底档 ⇒ 外层先到点，把边端一个具名失败改判成合成失败：只放宽内层窗口等于没改。
   const h = harness(async () => ({
     ok: false,
     effectPhase: 'not_started',

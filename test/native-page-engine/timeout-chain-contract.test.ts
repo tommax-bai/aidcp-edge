@@ -35,9 +35,19 @@ function constMs(source: string, name: string): number {
 }
 
 function durationMs(source: string, name: string): number {
-  const match = new RegExp(`\\b${name}\\b[^=\\n]*=\\s*Duration::from_secs\\((\\d+)\\)`).exec(source);
-  assert.ok(match, `未在源码中找到 Duration 常量 ${name}`);
-  return Number(match![1]) * 1_000;
+  const secs = new RegExp(`\\b${name}\\b[^=\\n]*=\\s*Duration::from_secs\\((\\d+)\\)`).exec(source);
+  if (secs) return Number(secs[1]) * 1_000;
+  const millis = new RegExp(`\\b${name}\\b[^=\\n]*=\\s*Duration::from_millis\\(([0-9_]+)\\)`)
+    .exec(source);
+  assert.ok(millis, `未在源码中找到 Duration 常量 ${name}`);
+  return Number(millis![1]!.replace(/_/g, ''));
+}
+
+/** 取 `const NAME: usize = 8;` 这类计数常量。 */
+function countConst(source: string, name: string): number {
+  const match = new RegExp(`\\b${name}\\b[^=\\n]*=\\s*([0-9_]+)`).exec(source);
+  assert.ok(match, `未在源码中找到计数常量 ${name}`);
+  return Number(match![1]!.replace(/_/g, ''));
 }
 
 const browseSession = read('src/native-page-engine/browse-session.ts');
@@ -46,6 +56,9 @@ const runtime = read('src/native-page-engine/runtime.ts');
 const engine = read('native/page-engine/src/engine.rs');
 const facebookFeed = read('native/page-engine/src/facebook/feed.rs');
 const facebookReels = read('native/page-engine/src/facebook/reels.rs');
+const facebookShared = read('native/page-engine/src/facebook/shared.rs');
+const facebookRuntime = read('native/page-engine/src/facebook/runtime.rs');
+const facebookSession = read('native/page-engine/src/facebook/session.rs');
 
 /** 每个命令族：① 请求值 → ② 准入上限 → ④ 引擎天花板。 */
 const FAMILIES = [
@@ -66,6 +79,12 @@ const FAMILIES = [
     request: constMs(browseSession, 'FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS'),
     admission: constMs(client, 'MAX_FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS'),
     ceiling: constMs(engine, 'FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS'),
+  },
+  {
+    name: 'Facebook 未专门化命令',
+    request: constMs(browseSession, 'FACEBOOK_DEFAULT_COMMAND_TIMEOUT_MS'),
+    admission: constMs(client, 'MAX_FACEBOOK_DEFAULT_COMMAND_TIMEOUT_MS'),
+    ceiling: constMs(engine, 'FACEBOOK_DEFAULT_COMMAND_TIMEOUT_MS'),
   },
   {
     name: '普通命令（默认档）',
@@ -141,30 +160,103 @@ const SESSION_LANES = [
   },
 ];
 
-test('Reels entry 的两个 30s 就绪窗与两个 15s 身份窗装得进现有滚动预算', () => {
-  const readyMs = durationMs(facebookFeed, 'FACEBOOK_REELS_ENTRY_READY_TIMEOUT');
-  const identityMs = durationMs(facebookReels, 'FACEBOOK_REEL_IDENTITY_HYDRATION_TIMEOUT');
-  const entryReadyUses = facebookFeed.match(
-    /wait_for_facebook_ready\(session, FACEBOOK_REELS_ENTRY_READY_TIMEOUT\)/g,
-  )?.length ?? 0;
-  const namedWaitsMs = readyMs * 2 + identityMs * 2;
-  const nonWaitMarginMs = 30_000;
-  const scroll = FAMILIES.find((family) => family.name === 'Feed 滚动');
+const READY_MS = durationMs(facebookShared, 'FACEBOOK_READY_TIMEOUT');
+const READY_FIRST_PROBE_MS = durationMs(facebookShared, 'FACEBOOK_READY_FIRST_PROBE_DELAY');
+const READY_INTERVAL_MS = durationMs(facebookShared, 'FACEBOOK_READY_PROBE_INTERVAL');
+/** 一次**顺利**导航的就绪开销：首探前置 + 一轮间隔的抖动余量。 */
+const READY_NOMINAL_MS = READY_FIRST_PROBE_MS + READY_INTERVAL_MS;
 
-  assert.equal(readyMs, 30_000, 'Reels entry 每次文档就绪窗必须是 30s');
-  assert.equal(entryReadyUses, 2, '初次与唯一重试导航必须共用同一个 30s 就绪窗');
-  assert.ok(scroll, '未找到 Facebook Feed/Reels 滚动预算');
+test('Facebook 文档就绪窗只有一个，且没有调用点自带窗口', () => {
+  // 前一版把 30s 只给了 Reels 入口，其余十三处留在 8s——于是会话首屏扫描照旧 8s 判死，
+  // 同一条缺陷换个入口又发作。改成「窗口不进签名」之后，漂移就不再需要靠人去逐处核对。
+  // 只看生产段：Rust 单测里逐字写着同一个字面量（它们也在守这件事），连测试一起扫会自证失败。
+  const productionOnly = (source: string): string => source.split('#[cfg(test)]')[0]!;
+  const nativeFacebook = [facebookFeed, facebookReels, facebookShared, facebookRuntime, facebookSession]
+    .map(productionOnly);
+  for (const source of nativeFacebook) {
+    assert.ok(
+      !/wait_for_facebook_ready\(session,/.test(source),
+      '就绪等待 MUST NOT 接受调用点传入的窗口——那正是上一轮漂移的入口',
+    );
+  }
+  assert.equal(READY_MS, 30_000, '共用文档就绪窗必须是 30s');
+  assert.equal(READY_FIRST_PROBE_MS, 3_000, '首探前置等待必须是 3s');
+  assert.equal(READY_INTERVAL_MS, 2_000, '首探之后的探测间隔必须是 2s');
   assert.ok(
-    namedWaitsMs + nonWaitMarginMs <= scroll!.request,
-    `Reels entry 具名等待 ${namedWaitsMs}ms + 非等待余量 ${nonWaitMarginMs}ms`
-      + ` > 滚动请求预算 ${scroll!.request}ms`,
+    READY_FIRST_PROBE_MS < READY_MS,
+    '首探前置等待若吃满整个窗口，这个等待就一次也探不到',
   );
-  assert.ok(scroll!.request <= scroll!.admission, 'Reels entry 请求必须穿过 Edge 准入上限');
-  assert.ok(scroll!.request <= scroll!.ceiling, 'Reels entry 请求必须穿过 Native 命令天花板');
-  assert.ok(
-    scroll!.request <= facebookSessionTimeout,
-    'Facebook 会话上限不得夹短 Reels entry 请求',
-  );
+});
+
+/**
+ * 各族「最坏内层链 ≤ 本族外层预算」。
+ *
+ * 模型口径（写死在这里，改窗口时必须重算）：**一条命令里只按一次病态就绪计**——
+ * 就绪窗跑满 30s 的那次必然以失败告终、命令当场收尾；其余导航按顺利情形计
+ * （首探 3s + 一轮间隔）。两次同时病态的命令会撞上外层墙钟，拿到的是合成超时而不是具名回执；
+ * 这一档**明确接受**：那种形态下命令本来就要失败，且滚动 / 开帖类失败是非终局、云端会重驱。
+ */
+const INNER_CHAINS = [
+  {
+    name: '首屏扫描（Feed 滚动族）',
+    family: 'Feed 滚动',
+    waits: () => READY_MS
+      + durationMs(facebookShared, 'FACEBOOK_FEED_SETTLE_NAV')
+      + countConst(facebookShared, 'FACEBOOK_FEED_SCROLL_ROUNDS')
+        * durationMs(facebookShared, 'FACEBOOK_FEED_SETTLE_IN_PLACE')
+      + durationMs(facebookShared, 'FACEBOOK_IDENTITY_COMMAND_BUDGET'),
+  },
+  {
+    name: 'Reels 入口（Feed 滚动族）',
+    family: 'Feed 滚动',
+    waits: () => READY_MS + READY_NOMINAL_MS
+      + durationMs(facebookReels, 'FACEBOOK_REEL_IDENTITY_HYDRATION_TIMEOUT') * 2,
+  },
+  {
+    name: '详情开帖',
+    family: 'Facebook 未专门化命令',
+    waits: () => READY_MS + durationMs(facebookShared, 'FACEBOOK_DETAIL_HYDRATION_TIMEOUT'),
+  },
+  {
+    name: '首页刷新（两次导航）',
+    family: 'Facebook 未专门化命令',
+    waits: () => READY_MS + READY_NOMINAL_MS
+      + durationMs(facebookShared, 'FACEBOOK_FEED_SETTLE_IN_PLACE') * 2,
+  },
+  {
+    name: '搜索',
+    family: 'Facebook 未专门化命令',
+    waits: () => READY_MS
+      + durationMs(facebookShared, 'FACEBOOK_FEED_SETTLE_NAV')
+      + countConst(facebookShared, 'FACEBOOK_FEED_SCROLL_ROUNDS')
+        * durationMs(facebookShared, 'FACEBOOK_FEED_SETTLE_IN_PLACE'),
+  },
+  {
+    name: '群内首帖开帖（含一次纠正导航）',
+    family: '首帖开帖',
+    waits: () => READY_MS + READY_NOMINAL_MS * 2
+      + durationMs(facebookShared, 'FACEBOOK_GROUP_ROOT_LANDING_TIMEOUT') * 2
+      + durationMs(facebookRuntime, 'FIRST_POST_EDITOR_TIMEOUT')
+      + durationMs(facebookRuntime, 'FIRST_POST_DETAIL_TIMEOUT'),
+  },
+];
+
+test('每条内层链在其所属命令族的预算内留得下诚实回执', () => {
+  const receiptMarginMs = 10_000;
+  for (const chain of INNER_CHAINS) {
+    const family = FAMILIES.find((entry) => entry.name === chain.family);
+    assert.ok(family, `${chain.name}：找不到所属命令族 ${chain.family}`);
+    const total = chain.waits() + receiptMarginMs;
+    assert.ok(
+      total <= family!.request,
+      `${chain.name}：具名内层链 + 回执余量 ${total}ms > ${chain.family} 请求预算 ${family!.request}ms`
+        + '（外层先到点 ⇒ 具名失败被改判成合成超时）',
+    );
+    assert.ok(
+      family!.request <= facebookSessionTimeout,
+      `${chain.family}：请求 ${family!.request}ms 会被 Facebook 会话上限 ${facebookSessionTimeout}ms 静默夹回`,
+    );
+  }
 });
 
 test('每个 Facebook 命令族的请求值都能穿过准入校验与引擎天花板', () => {

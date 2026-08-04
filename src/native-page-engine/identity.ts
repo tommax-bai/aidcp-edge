@@ -4,6 +4,17 @@ import { NativePageRuntime } from './runtime.js';
 const FACEBOOK_ID = /^\d{5,}$/;
 
 /**
+ * 身份引导的请求预算（change unify-facebook-page-readiness-probe）。
+ *
+ * 这条命令在「当前不在 facebook.com」时会先导航再等文档就绪，而就绪窗已统一到 30s。
+ * 原来的 12s 请求值比内层那一个窗口还短：外层先到点，一次可具名的就绪失败会被改判成
+ * 合成超时，而它恰好落在**启动最早**的一步上——最容易被读成「这个环境起不来」。
+ * 上限同步抬到准入档，避免调用方传入的值被静默夹回到比内层还短。
+ */
+const FACEBOOK_IDENTITY_TIMEOUT_MS = 40_000;
+const FACEBOOK_IDENTITY_MAX_TIMEOUT_MS = 45_000;
+
+/**
  * Facebook identity is page-derived product logic, so the TypeScript runtime only
  * validates the Native receipt and adapts it to the existing handshake contract.
  */
@@ -11,7 +22,10 @@ export async function readNativeFacebookIdentity(
   runtime: NativePageRuntime,
   options: ReadSelfIdentityOptions = {},
 ): Promise<SelfIdentityResult> {
-  const timeoutMs = Math.max(1_000, Math.min(30_000, options.hydrateTimeoutMs ?? 12_000));
+  const timeoutMs = Math.max(
+    1_000,
+    Math.min(FACEBOOK_IDENTITY_MAX_TIMEOUT_MS, options.hydrateTimeoutMs ?? FACEBOOK_IDENTITY_TIMEOUT_MS),
+  );
   try {
     const execution = await runtime.execute(
       'startup-identity',
