@@ -161,7 +161,10 @@ test('Reels entry 的两个 30s 就绪窗与两个 15s 身份窗装得进现有�
   );
   assert.ok(scroll!.request <= scroll!.admission, 'Reels entry 请求必须穿过 Edge 准入上限');
   assert.ok(scroll!.request <= scroll!.ceiling, 'Reels entry 请求必须穿过 Native 命令天花板');
-  assert.ok(scroll!.request <= sessionTimeout, 'Facebook 会话上限不得夹短 Reels entry 请求');
+  assert.ok(
+    scroll!.request <= facebookSessionTimeout,
+    'Facebook 会话上限不得夹短 Reels entry 请求',
+  );
 });
 
 test('每个 Facebook 命令族的请求值都能穿过准入校验与引擎天花板', () => {
