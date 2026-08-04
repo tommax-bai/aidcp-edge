@@ -1471,6 +1471,62 @@ async fn facebook_reel_like_direct_commit_uses_one_primary_write_and_no_picker_w
 }
 
 #[tokio::test]
+async fn facebook_reel_like_waits_for_a_replacement_control_without_replaying_the_write() {
+    let (port, server) =
+        spawn_facebook_interaction_cdp(FacebookInteractionScenario::LikeTransientVerify).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 8_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&facebook_like_command(1))
+        .await
+        .expect("transient Reel like verification");
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("like receipt") else {
+        panic!("expected action receipt")
+    };
+    assert!(receipt.ok);
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook interaction fake CDP");
+    assert_eq!(router_call_count(&requests, "like_primary_commit"), 1);
+    assert_eq!(router_call_count(&requests, "like_verify"), 2);
+    assert_eq!(router_call_count(&requests, "like_picker_probe"), 0);
+    assert_eq!(mouse_dispatch_count(&requests), 0);
+}
+
+#[tokio::test]
+async fn facebook_reel_like_stops_when_verification_observes_another_reel() {
+    let (port, server) =
+        spawn_facebook_interaction_cdp(FacebookInteractionScenario::LikeMovedDuringVerify).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 8_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&facebook_like_command(1))
+        .await
+        .expect("moved Reel like verification");
+    assert_eq!(outcome.effect_phase, EffectPhase::Ambiguous);
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("like receipt") else {
+        panic!("expected action receipt")
+    };
+    assert!(!receipt.ok);
+    assert_eq!(receipt.reason.as_deref(), Some("verify_indeterminate"));
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook interaction fake CDP");
+    assert_eq!(router_call_count(&requests, "like_primary_commit"), 1);
+    assert_eq!(router_call_count(&requests, "like_verify"), 1);
+    assert_eq!(router_call_count(&requests, "like_picker_probe"), 0);
+}
+
+#[tokio::test]
 async fn facebook_reel_like_picker_commit_is_bounded_to_one_trusted_pointer_write() {
     let (port, server) =
         spawn_facebook_interaction_cdp(FacebookInteractionScenario::LikePicker).await;
@@ -1811,6 +1867,61 @@ async fn facebook_reel_follow_uses_one_pointer_write_and_same_author_postconditi
     assert_eq!(pointer_event_count(&requests, "mousePressed"), 1);
     assert_eq!(pointer_event_count(&requests, "mouseReleased"), 1);
     assert!(mouse_dispatch_count(&requests) > 3, "点击必须逐帧移动");
+}
+
+#[tokio::test]
+async fn facebook_reel_follow_waits_for_a_replacement_control_without_replaying_the_write() {
+    let (port, server) =
+        spawn_facebook_interaction_cdp(FacebookInteractionScenario::FollowTransientVerify).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 8_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&facebook_follow_command(1))
+        .await
+        .expect("transient Reel follow verification");
+    assert_eq!(outcome.effect_phase, EffectPhase::Confirmed);
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("follow receipt") else {
+        panic!("expected action receipt")
+    };
+    assert!(receipt.ok);
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook interaction fake CDP");
+    assert_eq!(router_call_count(&requests, "follow_probe"), 4);
+    assert_eq!(pointer_event_count(&requests, "mousePressed"), 1);
+    assert_eq!(pointer_event_count(&requests, "mouseReleased"), 1);
+}
+
+#[tokio::test]
+async fn facebook_reel_follow_stops_when_verification_observes_another_author() {
+    let (port, server) =
+        spawn_facebook_interaction_cdp(FacebookInteractionScenario::FollowMovedDuringVerify).await;
+    let mut engine = Engine::default();
+    let mut open = session_open(port);
+    open.params.platform = Platform::Facebook;
+    open.params.timeout_ms = 8_000;
+    engine.open(&open).await.expect("open Facebook session");
+
+    let outcome = engine
+        .execute(&facebook_follow_command(1))
+        .await
+        .expect("moved Reel follow verification");
+    assert_eq!(outcome.effect_phase, EffectPhase::Ambiguous);
+    let CommandOutput::ActionReceipt(receipt) = outcome.output.expect("follow receipt") else {
+        panic!("expected action receipt")
+    };
+    assert!(!receipt.ok);
+    assert_eq!(receipt.reason.as_deref(), Some("verify_indeterminate"));
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook interaction fake CDP");
+    assert_eq!(router_call_count(&requests, "follow_probe"), 3);
+    assert_eq!(pointer_event_count(&requests, "mousePressed"), 1);
+    assert_eq!(pointer_event_count(&requests, "mouseReleased"), 1);
 }
 
 #[tokio::test]
@@ -3145,9 +3256,13 @@ async fn spawn_router_result_cdp(
 #[derive(Clone, Copy)]
 enum FacebookInteractionScenario {
     LikeDirect,
+    LikeMovedDuringVerify,
+    LikeTransientVerify,
     LikePicker,
     FollowMovedBeforeDispatch,
+    FollowMovedDuringVerify,
     FollowConfirmed,
+    FollowTransientVerify,
 }
 
 async fn spawn_facebook_interaction_cdp(
@@ -3161,6 +3276,7 @@ async fn spawn_facebook_interaction_cdp(
         let mut websocket = accept_async(stream).await.expect("WebSocket handshake");
         let mut requests = Vec::new();
         let mut follow_probes = 0_u32;
+        let mut like_verifies = 0_u32;
         let mut picker_committed = false;
 
         while let Some(message) = websocket.next().await {
@@ -3211,51 +3327,83 @@ async fn spawn_facebook_interaction_cdp(
                         "clicked": true
                     }),
                 ),
-                Some("like_verify") => router_cdp(
-                    "like_verify",
-                    json!({
-                        "ok": true,
-                        "noteId": "https://www.facebook.com/reel/1",
-                        "selected": matches!(scenario, FacebookInteractionScenario::LikeDirect)
-                            || picker_committed,
-                        "witness": if matches!(scenario, FacebookInteractionScenario::LikeDirect)
-                            || picker_committed
-                        {
-                            Some("aria_pressed")
-                        } else {
-                            None
-                        }
-                    }),
-                ),
+                Some("like_verify") => {
+                    like_verifies += 1;
+                    let moved =
+                        matches!(scenario, FacebookInteractionScenario::LikeMovedDuringVerify);
+                    let transiently_unreadable =
+                        matches!(scenario, FacebookInteractionScenario::LikeTransientVerify)
+                            && like_verifies == 1;
+                    let selected = matches!(scenario, FacebookInteractionScenario::LikeDirect)
+                        || matches!(scenario, FacebookInteractionScenario::LikeTransientVerify)
+                            && like_verifies >= 2
+                        || picker_committed;
+                    router_cdp(
+                        "like_verify",
+                        json!({
+                            "ok": !transiently_unreadable && !moved,
+                            "reason": transiently_unreadable.then_some("like_button_not_found"),
+                            "noteId": if moved {
+                                "https://www.facebook.com/reel/2"
+                            } else {
+                                "https://www.facebook.com/reel/1"
+                            },
+                            "selected": selected,
+                            "witness": selected.then_some("aria_pressed")
+                        }),
+                    )
+                }
                 Some("like_picker_probe") => router_cdp(
                     "point_target",
                     json!({"ok": true, "cx": 955.0, "cy": 485.0}),
                 ),
                 Some("follow_probe") => {
                     follow_probes += 1;
-                    let author = if matches!(
-                        scenario,
-                        FacebookInteractionScenario::FollowMovedBeforeDispatch
-                    ) && follow_probes == 2
+                    if matches!(scenario, FacebookInteractionScenario::FollowTransientVerify)
+                        && follow_probes == 3
                     {
-                        "Other Author"
+                        router_cdp(
+                            "follow_probe",
+                            json!({
+                                "ok": false,
+                                "reason": "target_not_found",
+                                "noteId": "https://www.facebook.com/reel/1",
+                                "already": false
+                            }),
+                        )
                     } else {
-                        "Re Su"
-                    };
-                    router_cdp(
-                        "follow_probe",
-                        json!({
-                            "ok": true,
-                            "noteId": "https://www.facebook.com/reel/1",
-                            "author": author,
-                            "already": matches!(
+                        let author = if matches!(
+                            scenario,
+                            FacebookInteractionScenario::FollowMovedBeforeDispatch
+                        ) && follow_probes == 2
+                            || matches!(
                                 scenario,
-                                FacebookInteractionScenario::FollowConfirmed
-                            ) && follow_probes >= 3,
-                            "cx": 730.0,
-                            "cy": 670.0
-                        }),
-                    )
+                                FacebookInteractionScenario::FollowMovedDuringVerify
+                            ) && follow_probes == 3
+                        {
+                            "Other Author"
+                        } else {
+                            "Re Su"
+                        };
+                        router_cdp(
+                            "follow_probe",
+                            json!({
+                                "ok": true,
+                                "noteId": "https://www.facebook.com/reel/1",
+                                "author": author,
+                                "already": matches!(
+                                    scenario,
+                                    FacebookInteractionScenario::FollowConfirmed
+                                ) && follow_probes >= 3
+                                    || matches!(
+                                        scenario,
+                                        FacebookInteractionScenario::FollowTransientVerify
+                                    ) && follow_probes >= 4,
+                                "cx": 730.0,
+                                "cy": 670.0
+                            }),
+                        )
+                    }
                 }
                 _ => json!({}),
             };

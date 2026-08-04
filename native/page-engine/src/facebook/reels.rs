@@ -129,9 +129,28 @@ pub(crate) async fn execute_facebook_follow(
     };
     dispatch_facebook_click(session, x, y).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let expected_post_id = fresh
+        .note_id
+        .as_deref()
+        .and_then(canonical_facebook_post_id);
+    let expected_author = fresh.author.clone();
     loop {
         let after = probe_facebook_follow(session, Some(expected_note_id)).await?;
-        if after.note_id != fresh.note_id || after.author != fresh.author {
+        let observed_post_id = after
+            .note_id
+            .as_deref()
+            .and_then(canonical_facebook_post_id);
+        let observed_another_reel = observed_post_id
+            .as_deref()
+            .is_some_and(|observed| expected_post_id.as_deref() != Some(observed));
+        let observed_another_author = after
+            .author
+            .as_deref()
+            .filter(|author| !author.is_empty())
+            .is_some_and(|author| expected_author.as_deref() != Some(author));
+        // Re-render gaps may recover inside the existing window, but an observed different Reel
+        // or author is conclusive target movement and must stop verification immediately.
+        if observed_another_reel || observed_another_author {
             return Ok(facebook_action_result(
                 EffectPhase::Ambiguous,
                 "follow",
@@ -141,7 +160,11 @@ pub(crate) async fn execute_facebook_follow(
                 None,
             ));
         }
-        if after.ok && after.already {
+        let probe_readable = after.ok
+            && observed_post_id.is_some()
+            && observed_post_id == expected_post_id
+            && after.author == expected_author;
+        if probe_readable && after.already {
             return Ok(facebook_action_result(
                 EffectPhase::Confirmed,
                 "follow",
@@ -151,27 +174,16 @@ pub(crate) async fn execute_facebook_follow(
                 None,
             ));
         }
-        if !after.ok
-            && matches!(
-                after.reason.as_deref(),
-                Some("target_not_found" | "ambiguous_target")
-            )
-        {
-            return Ok(facebook_action_result(
-                EffectPhase::Ambiguous,
-                "follow",
-                false,
-                "verify_indeterminate",
-                fresh.note_id,
-                None,
-            ));
-        }
         if tokio::time::Instant::now() >= deadline {
             return Ok(facebook_action_result(
                 EffectPhase::Ambiguous,
                 "follow",
                 false,
-                "follow_unconfirmed",
+                if probe_readable {
+                    "follow_unconfirmed"
+                } else {
+                    "verify_indeterminate"
+                },
                 fresh.note_id,
                 None,
             ));

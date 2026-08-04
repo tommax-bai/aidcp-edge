@@ -1382,6 +1382,64 @@ test('Facebook Native Reel like verification ignores same-note media DOM replace
   assert.equal(verified.output.value.selected, false);
 });
 
+test('Facebook Native Reel like verification reads a replacement control on the same Reel', async () => {
+  const dom = install(`
+    <main>
+      <video id="video" src="https://cdn.example/reel-777.mp4"></video>
+      <button id="before" aria-label="留下心情" aria-pressed="false"></button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  const before = dom.window.document.querySelector('#before')!;
+  setRect(dom.window.document.querySelector('#video')!, { left: 500, top: 70, right: 940, bottom: 780 });
+  setRect(before, { left: 980, top: 500, right: 1_040, bottom: 550 });
+
+  const committed = await run({
+    kind: 'like_primary_commit',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(committed.output.value.clicked, true);
+
+  const replacement = dom.window.document.createElement('button');
+  replacement.id = 'after';
+  replacement.setAttribute('aria-label', '取消赞');
+  replacement.setAttribute('aria-pressed', 'true');
+  before.replaceWith(replacement);
+  setRect(replacement, { left: 980, top: 500, right: 1_040, bottom: 550 });
+
+  const verified = await run({
+    kind: 'like_verify',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(verified.output.value.ok, true);
+  assert.equal(verified.output.value.selected, true);
+});
+
+test('Facebook Native Reel like verification rejects a different canonical Reel', async () => {
+  const dom = install(`
+    <main>
+      <video id="video" src="https://cdn.example/reel-777.mp4"></video>
+      <button id="like" aria-label="留下心情" aria-pressed="false"></button>
+    </main>
+  `, 'https://www.facebook.com/reel/777');
+  setRect(dom.window.document.querySelector('#video')!, { left: 500, top: 70, right: 940, bottom: 780 });
+  setRect(dom.window.document.querySelector('#like')!, { left: 980, top: 500, right: 1_040, bottom: 550 });
+
+  const committed = await run({
+    kind: 'like_primary_commit',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(committed.output.value.clicked, true);
+
+  dom.window.history.pushState({}, '', '/reel/888');
+  const verified = await run({
+    kind: 'like_verify',
+    params: { noteId: 'https://www.facebook.com/reel/777' },
+  });
+  assert.equal(verified.output.value.ok, false);
+  assert.equal(verified.output.value.reason, 'target_not_found');
+  assert.equal(verified.output.value.noteId, 'https://www.facebook.com/reel/888');
+});
+
 test('Facebook Native Reel like verification rejects a primary control leaving the action rail', async () => {
   const dom = install(`
     <main>

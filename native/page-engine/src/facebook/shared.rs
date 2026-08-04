@@ -109,18 +109,34 @@ pub(crate) async fn wait_for_facebook_reel_like(
     timeout: Duration,
 ) -> Result<FacebookReelLikeVerification, EngineError> {
     let deadline = tokio::time::Instant::now() + timeout;
+    let expected_post_id = canonical_facebook_post_id(note_id);
     loop {
         let expression = facebook::like_verify_expression(note_id)?;
         let raw = session.cdp.evaluate(&expression, true).await?;
         let probe = facebook::like_verify_from_cdp(&raw)?;
-        if !probe.ok {
+        let observed_post_id = probe
+            .note_id
+            .as_deref()
+            .and_then(canonical_facebook_post_id);
+        // A missing replacement control is only an observation gap; a different canonical Reel
+        // is the evidence that makes continued verification unsafe.
+        if observed_post_id
+            .as_deref()
+            .is_some_and(|observed| expected_post_id.as_deref() != Some(observed))
+        {
             return Ok(FacebookReelLikeVerification::Indeterminate);
         }
-        if probe.selected {
+        let probe_readable =
+            probe.ok && observed_post_id.is_some() && observed_post_id == expected_post_id;
+        if probe_readable && probe.selected {
             return Ok(FacebookReelLikeVerification::Selected);
         }
         if tokio::time::Instant::now() >= deadline {
-            return Ok(FacebookReelLikeVerification::Unchanged);
+            return Ok(if probe_readable {
+                FacebookReelLikeVerification::Unchanged
+            } else {
+                FacebookReelLikeVerification::Indeterminate
+            });
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
