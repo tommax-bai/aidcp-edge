@@ -63,6 +63,7 @@ import {
   type CoreLifecycleCommand,
 } from './client/core-lifecycle.js';
 import { LifecycleAuthInterruptTracker } from './client/lifecycle-auth-interrupt.js';
+import { settleStartupAuthLifecycleInterrupt } from './client/startup-auth-lifecycle.js';
 import { deriveEdgeId } from './client/edge-id.js';
 import { EdgeTaskCoordinator } from './execution/edge-task-coordinator.js';
 import { CommitWindowGuard, combineCommitWindows } from './execution/commit-window.js';
@@ -103,7 +104,12 @@ import {
   PERIODIC_IDENTITY_READ_HYDRATE_MS,
   type IdentityInvalidReason,
 } from './native-page-engine/identity-guard.js';
-import { deliverLifecycleIpc, publishPostureWithFallback, type RuntimePosture } from './client/runtime-posture.js';
+import {
+  deliverLifecycleIpc,
+  deliverLifecycleIpcAcknowledged,
+  publishPostureWithFallback,
+  type RuntimePosture,
+} from './client/runtime-posture.js';
 import {
   guardCommandsUnderIdentity,
   guardPublishCommandsUnderIdentity,
@@ -138,9 +144,28 @@ async function main(): Promise<void> {
   // Electron 子进程 IPC 可能在浏览器/身份初始化完成前抵达；先窄解析并排队，待生命周期资源
   // 全部就绪后按原顺序交付。绝不把未知 IPC 当生命周期命令。
   const pendingLifecycleCommands: CoreLifecycleCommand[] = [];
+  let pendingLifecycleCommandWaiter: (() => void) | undefined;
+  const enqueuePendingLifecycleCommand = (command: CoreLifecycleCommand): void => {
+    pendingLifecycleCommands.push(command);
+    const wake = pendingLifecycleCommandWaiter;
+    pendingLifecycleCommandWaiter = undefined;
+    wake?.();
+  };
+  const takePendingLifecycleCommand = async (): Promise<CoreLifecycleCommand> => {
+    while (pendingLifecycleCommands.length === 0) {
+      await new Promise<void>((resolve) => { pendingLifecycleCommandWaiter = resolve; });
+    }
+    return pendingLifecycleCommands.shift()!;
+  };
+  const removePendingLifecycleCommand = (command: CoreLifecycleCommand): void => {
+    const index = pendingLifecycleCommands.indexOf(command);
+    if (index >= 0) pendingLifecycleCommands.splice(index, 1);
+  };
   const lifecycleAuthInterrupts = new LifecycleAuthInterruptTracker();
   /** 子进程 IPC 的唯一送达判据；人工登录态在完整运行时装配前也需要使用。 */
   const sendLifecycleIpc = (payload: Record<string, unknown>): boolean => deliverLifecycleIpc(process, payload);
+  const sendLifecycleIpcAcknowledged = (payload: Record<string, unknown>): Promise<boolean> =>
+    deliverLifecycleIpcAcknowledged(process, payload);
   let dispatchLifecycleCommand: ((command: CoreLifecycleCommand) => void) | undefined;
   type CloudRebindRequest = {
     type: 'lifecycle.cloud_rebind';
@@ -189,7 +214,7 @@ async function main(): Promise<void> {
     if (!command) return;
     lifecycleAuthInterrupts.note(command);
     if (dispatchLifecycleCommand) dispatchLifecycleCommand(command);
-    else pendingLifecycleCommands.push(command);
+    else enqueuePendingLifecycleCommand(command);
   });
 
   const cloudUrl = process.env.AIDCP_CLOUD_URL ?? 'ws://121.89.85.150:8787';
@@ -414,35 +439,59 @@ async function main(): Promise<void> {
     let remainingLoginWaitMs = loginWaitMs;
     let manualLoginRequiredReason: string | undefined;
     if (platformDriver.platform === 'facebook' && provider.kind === 'adspower') {
-      const authStartedAt = Date.now();
-      const authResult = await reconcileFacebookAuthIfNeeded(firstLoginPolicyApplied, loginWaitMs);
-      remainingLoginWaitMs = Math.max(0, loginWaitMs - (Date.now() - authStartedAt));
-      if (authResult.kind !== 'authenticated' && authResult.kind !== 'disabled') {
-        if (authResult.kind === 'manual_required') {
-          manualLoginRequiredReason = authResult.reason;
-          sendLifecycleIpc({
-            type: 'lifecycle.auth_required',
-            kind: 'manual_login_required',
-            reason: authResult.reason,
-            platform: platformDriver.platform,
+      for (;;) {
+        const authStartedAt = Date.now();
+        const authResult = await reconcileFacebookAuthIfNeeded(firstLoginPolicyApplied, remainingLoginWaitMs);
+        remainingLoginWaitMs = Math.max(0, remainingLoginWaitMs - (Date.now() - authStartedAt));
+        if (authResult.kind === 'interrupted') {
+          const command = lifecycleAuthInterrupts.current();
+          if (!command) {
+            console.error('[aidcp-edge] Facebook 首登辅助收到无对应生命周期意图的中断；诚实停止。');
+            return terminateNow(1);
+          }
+          removePendingLifecycleCommand(command);
+          console.log(`[aidcp-edge] Facebook 首登辅助被中断（${authResult.reason}）→ 正在关闭并确认自有浏览器。`);
+          const settlement = await settleStartupAuthLifecycleInterrupt(command, {
+            closeOwnedBrowser: () => chrome ? chrome.killAndConfirmDead() : Promise.resolve(false),
+            reportBrowserClosed: () => sendLifecycleIpcAcknowledged({ type: 'lifecycle.browser_closed' }),
+            reportPaused: () => { sendLifecycleIpc({ type: 'lifecycle.paused' }); },
+            reportResumed: () => { sendLifecycleIpc({ type: 'lifecycle.resumed' }); },
+            reportCloseFailed: () => { sendLifecycleIpc({ type: 'lifecycle.close_failed' }); },
+            releaseInterrupt: (settledCommand) => lifecycleAuthInterrupts.release(settledCommand),
+            nextCommand: takePendingLifecycleCommand,
+            exit: (code) => { terminateNow(code); },
           });
-          console.log(requiresFacebookAdDataReview(authResult.reason)
-            ? `[aidcp-edge] Facebook 广告数据选择待人工确认（${authResult.reason}）；保留浏览器与 CDP，等待页面完成。`
-            : `[aidcp-edge] Facebook 需要人工登录（${authResult.reason}）；保留浏览器与 CDP，等待登录完成。`);
-        } else if (authResult.kind === 'timeout') {
-          reportFacebookAuthFailure('facebook_auth_timeout');
-          console.error(
-            `[aidcp-edge] ✗ Facebook 首登辅助在 ${Math.round(loginWaitMs / 1000)}s 有界预算内未完成 → 干净停止。`,
-          );
-          terminateNow(0);
-        } else if (authResult.kind === 'interrupted') {
-          console.log(`[aidcp-edge] Facebook 首登辅助被中断（${authResult.reason}）→ 干净停止。`);
-          terminateNow(0);
-        } else {
-          reportFacebookAuthFailure(authResult.reason);
-          console.error(`[aidcp-edge] ✗ Facebook 首登辅助安全停手（${authResult.reason}）。`);
-          terminateNow(1);
+          if (settlement === 'resume') {
+            console.log('[aidcp-edge] 启动认证关闭未确认后收到显式恢复；在同一浏览器代重新开始认证协调。');
+            continue;
+          }
+          return;
         }
+        if (authResult.kind !== 'authenticated' && authResult.kind !== 'disabled') {
+          if (authResult.kind === 'manual_required') {
+            manualLoginRequiredReason = authResult.reason;
+            sendLifecycleIpc({
+              type: 'lifecycle.auth_required',
+              kind: 'manual_login_required',
+              reason: authResult.reason,
+              platform: platformDriver.platform,
+            });
+            console.log(requiresFacebookAdDataReview(authResult.reason)
+              ? `[aidcp-edge] Facebook 广告数据选择待人工确认（${authResult.reason}）；保留浏览器与 CDP，等待页面完成。`
+              : `[aidcp-edge] Facebook 需要人工登录（${authResult.reason}）；保留浏览器与 CDP，等待登录完成。`);
+          } else if (authResult.kind === 'timeout') {
+            reportFacebookAuthFailure('facebook_auth_timeout');
+            console.error(
+              `[aidcp-edge] ✗ Facebook 首登辅助在 ${Math.round(loginWaitMs / 1000)}s 有界预算内未完成 → 干净停止。`,
+            );
+            terminateNow(0);
+          } else {
+            reportFacebookAuthFailure(authResult.reason);
+            console.error(`[aidcp-edge] ✗ Facebook 首登辅助安全停手（${authResult.reason}）。`);
+            terminateNow(1);
+          }
+        }
+        break;
       }
     }
     // Facebook AdsPower 可能刚附着在 about:blank：首读显式允许一次消费端首页 bootstrap，再有界等本人锚点；
@@ -527,7 +576,9 @@ async function main(): Promise<void> {
           const browserClosed = chrome
             ? await chrome.killAndConfirmDead().catch(() => false)
             : false;
-          if (browserClosed) {
+          const browserCloseReported = browserClosed
+            && await sendLifecycleIpcAcknowledged({ type: 'lifecycle.browser_closed' });
+          if (browserCloseReported) {
             if (command === 'pause' || command === 'pause_and_exit') {
               sendLifecycleIpc({ type: 'lifecycle.paused' });
             }
@@ -1735,6 +1786,7 @@ async function main(): Promise<void> {
         process.send({ type: 'lifecycle.close_failed' });
       }
     },
+    reportBrowserClosed: () => sendLifecycleIpcAcknowledged({ type: 'lifecycle.browser_closed' }),
     onStandby: () => {
       client.reportBrowserStatus({ state: 'absent', reason: 'cold_standby' });
       if (typeof process.send === 'function' && process.connected) {

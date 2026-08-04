@@ -248,6 +248,33 @@ test('edge close stops automation engine while explicit browser close only relea
     'manual browser close keeps a running engine connected');
 });
 
+test('startup-auth close requires generation-bound browser death evidence before Electron claims closure', () => {
+  assert.match(edgeMain, /settleStartupAuthLifecycleInterrupt\(command, \{/);
+  assert.match(edgeMain, /closeOwnedBrowser: \(\) => chrome \? chrome\.killAndConfirmDead\(\) : Promise\.resolve\(false\)/,
+    'startup authentication must reuse the authoritative provider teardown');
+  assert.match(edgeMain, /reportBrowserClosed: \(\) => sendLifecycleIpcAcknowledged\(\{ type: 'lifecycle\.browser_closed' \}\)/,
+    'the core must flush browser-death evidence before it may exit');
+
+  const spawn = functionSource('spawnEdgeChild', 'stopLoginPoller');
+  assert.match(spawn, /message\.type === 'lifecycle\.browser_closed'[\s\S]*?handle\.browserCloseConfirmedGeneration = handle\.lifecycleGeneration/,
+    'Electron must bind the receipt to the current stop generation');
+  assert.match(spawn, /const browserCloseConfirmed = handle\.browserCloseConfirmedGeneration === handle\.lifecycleGeneration/);
+  assert.match(spawn, /const closeEvidenceMissing = \(stopReason === 'user_close' \|\| stopReason === 'user_pause'\)[\s\S]*?!browserCloseConfirmed/);
+  assert.match(spawn, /lastMessage: closeEvidenceMissing[\s\S]*?浏览器关闭状态未能确认[\s\S]*?stopReason === 'user_close'[\s\S]*?引擎和浏览器已关闭/,
+    'missing evidence must win over the normal user-close success projection');
+
+  const occupied = functionSource('occupiedSlots', 'queuedStartCount');
+  assert.match(occupied, /liveCoreBrowser \|\| h\.browserStateUnconfirmed/,
+    'an orphaned browser must retain its concurrency slot');
+  const admit = functionSource('admitBrowserSlot', 'slotWaiters');
+  assert.match(admit, /occupiedSlots\(\) - \(handle\.browserStateUnconfirmed \? 1 : 0\)/,
+    'the same profile may reacquire its retained slot to recover and close the browser');
+
+  const shellConfirmation = functionSource('confirmOwnedProfileClosedFromShell', 'stopAutomation');
+  assert.match(shellConfirmation, /handle\.browserStateUnconfirmed = false;[\s\S]*?drainSlotWaiters\(\)/,
+    'read-only confirmation of browser death must release queued starts');
+});
+
 test('browser cold standby uses lifecycle.standby and manual controls cancel timers', () => {
   assert.match(main, /browserColdStandbyEnabled:\s*DEFAULT_BROWSER_COLD_STANDBY_ENABLED/);
   assert.match(main, /sendCoreLifecycle\(handle, 'standby'/);

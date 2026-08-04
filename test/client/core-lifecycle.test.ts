@@ -6,12 +6,14 @@ import { LifecycleAuthInterruptTracker } from '../../src/client/lifecycle-auth-i
 function harness() {
   let deactivations = 0;
   let browserCloses = 0;
+  let browserCloseReports = 0;
   let pausedAcks = 0;
   const exits: number[] = [];
   const logs: string[] = [];
   const controller = new CoreLifecycleController({
     deactivate: async () => { deactivations++; },
     closeOwnedBrowser: async () => { browserCloses++; return true; },
+    reportBrowserClosed: async () => { browserCloseReports++; return true; },
     exit: (code) => { exits.push(code); },
     onPaused: () => { pausedAcks++; },
     logger: (message) => { logs.push(message); },
@@ -20,6 +22,7 @@ function harness() {
     controller,
     get deactivations() { return deactivations; },
     get browserCloses() { return browserCloses; },
+    get browserCloseReports() { return browserCloseReports; },
     get pausedAcks() { return pausedAcks; },
     exits,
     logs,
@@ -84,6 +87,7 @@ test('pause-and-exit stops automation, closes browser, and disconnects the engin
   await h.controller.request('pause_and_exit');
   assert.equal(h.deactivations, 1);
   assert.equal(h.browserCloses, 1);
+  assert.equal(h.browserCloseReports, 1);
   assert.equal(h.pausedAcks, 1);
   assert.deepEqual(h.exits, [0]);
   assert.equal(h.controller.state, 'finished');
@@ -252,6 +256,22 @@ test('explicit close without confirmation stays paused and does not claim exit',
   const controller = new CoreLifecycleController({
     deactivate: async () => undefined,
     closeOwnedBrowser: async () => false,
+    exit: (code) => { exits.push(code); },
+    onCloseFailed: () => { closeFailed++; },
+  });
+  await controller.request('close');
+  assert.equal(controller.state, 'paused');
+  assert.equal(closeFailed, 1);
+  assert.deepEqual(exits, []);
+});
+
+test('explicit close waits when confirmed browser-close evidence is not delivered', async () => {
+  let closeFailed = 0;
+  const exits: number[] = [];
+  const controller = new CoreLifecycleController({
+    deactivate: async () => undefined,
+    closeOwnedBrowser: async () => true,
+    reportBrowserClosed: async () => false,
     exit: (code) => { exits.push(code); },
     onCloseFailed: () => { closeFailed++; },
   });

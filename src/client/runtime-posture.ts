@@ -99,7 +99,10 @@ export const POSTURE_HALT_PHRASES: Readonly<Record<'identity_halted' | 'automati
  * 就是它本身。
  */
 export interface IpcCapableProcess {
-  send?: (payload: Record<string, unknown>) => unknown;
+  send?: {
+    (payload: Record<string, unknown>): unknown;
+    (payload: Record<string, unknown>, callback: (error: Error | null) => void): unknown;
+  };
   connected?: boolean;
 }
 
@@ -107,6 +110,21 @@ export function deliverLifecycleIpc(proc: IpcCapableProcess, payload: Record<str
   if (typeof proc.send !== 'function' || !proc.connected) return false;
   proc.send(payload);
   return true;
+}
+
+/** Waits until Node confirms that a terminal lifecycle fact reached the parent IPC channel. */
+export function deliverLifecycleIpcAcknowledged(
+  proc: IpcCapableProcess,
+  payload: Record<string, unknown>,
+): Promise<boolean> {
+  if (typeof proc.send !== 'function' || !proc.connected) return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => {
+    try {
+      proc.send!(payload, (error: Error | null) => resolve(!error));
+    } catch {
+      resolve(false);
+    }
+  });
 }
 
 /**

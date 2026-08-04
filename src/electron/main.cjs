@@ -2170,6 +2170,9 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     // 与已创建多少环境无关，同一环境重复请求也不会重复占排队名额。
     lifecycleGeneration: 0,
     lifecycleGenerationReason: 'initial',
+    // Only a child receipt emitted after authoritative browser death may satisfy a user pause/close.
+    // Bind it to the shell's current operation generation so a late receipt cannot bless a later close.
+    browserCloseConfirmedGeneration: -1,
     startQueueReserved: false,
     startFlowQueued: false,
     startFlowGeneration: 0,
@@ -2700,13 +2703,14 @@ function slotCapacity() {
 function maxQueuedStarts() {
   return slotSettingsView().maxQueuedStarts;
 }
-/** 当前真正占着浏览器的环境数：有核心子进程 且 不在冷待机（待机中浏览器已被释放、槽位已还回池子）。 */
+/** 当前真正占着浏览器的环境数：活核心持有的浏览器，或核心退出后仍未确认关闭的浏览器。 */
 function occupiedSlots() {
   let n = 0;
   for (const h of envs.values()) {
     // 专用离场清理核心从未打开浏览器；coldStandbyPending 期间也不能虚占一个执行槽。
-    if (fleet.childProcessIsRunning(h.child) && !usesTransientBrowserLane(h)
-      && !h.coldStandbyActive && !h.controlPlaneOnly && !h.removed) n += 1;
+    const liveCoreBrowser = fleet.childProcessIsRunning(h.child) && !usesTransientBrowserLane(h)
+      && !h.coldStandbyActive && !h.controlPlaneOnly;
+    if (!h.removed && (liveCoreBrowser || h.browserStateUnconfirmed)) n += 1;
   }
   return n;
 }
@@ -2808,7 +2812,8 @@ function admitBrowserSlot(handle) {
     };
   }
   const cap = slotCapacity();
-  const used = occupiedSlots();
+  // An unconfirmed orphan already owns its slot. Reacquiring that same profile is recovery, not a new browser.
+  const used = Math.max(0, occupiedSlots() - (handle.browserStateUnconfirmed ? 1 : 0));
   if (used >= cap) {
     return { ok: false, reason: 'slots_full', message: `浏览器并发已满（${used}/${cap}）：需等其它环境进入待机让出执行位` };
   }
@@ -4548,6 +4553,7 @@ async function spawnEdgeChild(handle, {
   // 三句手工赋值扛着，而三处同一字面串让源码扫描只要求「存在其一」——删掉任意一句既扫不出也测不到。
   handle.runtimePosture = null;
   handle.runtimePostureCore = null;
+  handle.browserCloseConfirmedGeneration = -1;
   handle.browserStateUnconfirmed = false;
   handle.status.authReason = null;
   handle.status.loginFlow = null;
@@ -4759,9 +4765,16 @@ async function spawnEdgeChild(handle, {
     const currentStopReply = !currentGeneration && handle.stopRequested && (
       (message.type === 'lifecycle.close_failed'
         && (handle.engineStopReason === 'user_close' || handle.engineStopReason === 'user_pause'))
+      || (message.type === 'lifecycle.browser_closed'
+        && (handle.engineStopReason === 'user_close' || handle.engineStopReason === 'user_pause'))
       || (message.type === 'lifecycle.paused' && handle.engineStopReason === 'user_pause')
     );
     if (!currentGeneration && !currentStopReply) return;
+    if (message.type === 'lifecycle.browser_closed') {
+      handle.browserCloseConfirmedGeneration = handle.lifecycleGeneration;
+      handle.browserStateUnconfirmed = false;
+      return;
+    }
     if (message.type === 'lifecycle.auth_progress') {
       if (message.kind !== 'automatic_login'
           || message.platform !== 'facebook'
@@ -5029,6 +5042,8 @@ async function spawnEdgeChild(handle, {
       // 旧浏览器未确认关闭时绝不开新一代浏览器，因此“关闭后再启动”也在这里取消。
       handle.stopRequested = false;
       handle.engineStopReason = '';
+      handle.browserCloseConfirmedGeneration = -1;
+      handle.browserStateUnconfirmed = true;
       handle.resumeAfterStop = false;
       handle.automationIntent = pauseCloseFailed ? 'paused' : 'stopped';
       handle.automationPaused = true;
@@ -5167,6 +5182,10 @@ async function spawnEdgeChild(handle, {
     const wasPausing = handle.pausePending;
     const wasRestarting = handle.restartPending;
     const stopReason = handle.engineStopReason;
+    const browserCloseConfirmed = handle.browserCloseConfirmedGeneration === handle.lifecycleGeneration;
+    const closeEvidenceMissing = (stopReason === 'user_close' || stopReason === 'user_pause')
+      && !browserCloseConfirmed;
+    handle.browserCloseConfirmedGeneration = -1;
     const setupTerminal = takeCoreSetupTerminal();
     const setupDisposition = setupTerminalExitDisposition(setupTerminal, code, signal);
     const setupRetryRequested = setupDisposition && setupDisposition.retry;
@@ -5194,7 +5213,7 @@ async function spawnEdgeChild(handle, {
       handle.controlPlaneOnly = false;
       handle.controlPlaneBootstrapped = false;
     }
-    // 核心退出 = 它的浏览器也没了 = 槽位空出来了：立刻叫队头（停止 / 暂停 / 崩溃都算）。
+    // 核心退出只释放进程；浏览器槽位还要看确认回执。缺回执时 occupiedSlots 会保守保留这一格。
     setTimeout(() => drainSlotWaiters(), 0);
     handle.browserParkingReady = false;
     handle.browserPersonaNoticeState = null;
@@ -5210,7 +5229,7 @@ async function spawnEdgeChild(handle, {
     handle.closePending = false;
     const exitedAbnormally = retryableSetupFailure || Boolean(terminalLoginFailure)
       || (!intentional && (signal != null || (code != null && code !== 0)));
-    handle.browserStateUnconfirmed = exitedAbnormally;
+    handle.browserStateUnconfirmed = exitedAbnormally || closeEvidenceMissing;
     const message = retryableSetupFailure ? setupDisposition.message : exitMessage(code, signal);
     if (handle.removed) return; // 已摘除的环境不再投影状态
 
@@ -5315,11 +5334,13 @@ async function spawnEdgeChild(handle, {
     }
 
     updateStatus(handle, {
-      edge: exitedAbnormally ? 'warning' : 'stopped',
+      edge: closeEvidenceMissing || exitedAbnormally ? 'warning' : 'stopped',
       cloud: 'disconnected',
       loopStage: null,
       loginFlow: terminalLoginFailure,
-      session: terminalLoginFailure
+      session: closeEvidenceMissing
+        ? 'paused'
+        : terminalLoginFailure
         ? 'idle'
         : stopReason === 'user_pause'
         ? 'paused'
@@ -5337,7 +5358,9 @@ async function spawnEdgeChild(handle, {
       ...(handle.kind === 'adspower' ? { auth: 'checking' } : {}),
       overlayBlocked: false,
       respawnGaveUp: gaveUp,
-      lastMessage: terminalLoginFailure
+      lastMessage: closeEvidenceMissing
+        ? '自动化引擎已停止，但浏览器关闭状态未能确认；请重新启动接管后再关闭。'
+        : terminalLoginFailure
         ? `登录认证异常：${terminalLoginFailure.reason}。自动化已停止，需要处理后重新启动。`
         : envInUse
         ? inUseMsg
@@ -5355,7 +5378,9 @@ async function spawnEdgeChild(handle, {
           ? `${message} 将在 ${Math.round((decision.delayMs || 0) / 1000)}s 后自动重启（第 ${decision.streak}/${RESPAWN_OPTS.maxConsecutiveFailures} 次）。`
           : message,
       ...presencePatch(
-        terminalLoginFailure
+        closeEvidenceMissing
+          ? '引擎已停止，浏览器关闭未确认'
+          : terminalLoginFailure
           ? '登录认证异常，需要处理'
           : stopReason === 'user_pause'
           ? '自动化已暂停'
@@ -5375,7 +5400,9 @@ async function spawnEdgeChild(handle, {
               ? '已暂停，随时可以恢复'
               : '引擎已停止',
       ),
-      ...(terminalLoginFailure
+      ...(closeEvidenceMissing
+        ? edgeFailurePatch('自动化引擎已停止，但浏览器关闭状态未确认')
+        : terminalLoginFailure
         ? edgeFailurePatch(`登录认证异常：${terminalLoginFailure.reason}`)
         : envInUse
         ? edgeFailurePatch(inUseMsg)
@@ -6160,6 +6187,7 @@ function pauseEdge(handle) {
   if (!handle) return;
   if (handle.automationIntent === 'paused' || handle.pausePending) return;
   advanceLifecycleGeneration(handle, 'user_pause');
+  handle.browserCloseConfirmedGeneration = -1;
   // 暂停属于自动化通道生命周期：停止任务、断开引擎连接，并释放当前浏览器执行器。
   // 客户会话和所有 request-scoped HTTP 数据管理能力保持可用。
   handle.automationIntent = 'paused';
@@ -6332,6 +6360,7 @@ async function confirmOwnedProfileClosedFromShell(handle) {
       ...presencePatch('已关闭浏览器'),
       ...clearEdgeFailurePatch(handle),
     });
+    setTimeout(() => drainSlotWaiters(), 0);
     return;
   }
   // 拿不到结构良好的列表（不可达 / 响应不完整）：不确定，绝不假报已关。
@@ -6351,6 +6380,7 @@ function stopAutomation(handle) {
   // 先冻结本轮事实，随后只收敛本机自动化意图；绝不能把远端 active 当成本机遗留浏览器去确认/接管/关闭。
   const externallyOccupiedBeforeAcquire = !handle.child && handle.envInUseThisRun === true;
   advanceLifecycleGeneration(handle, 'user_close');
+  handle.browserCloseConfirmedGeneration = -1;
   handle.automationIntent = 'stopped';
   handle.engineStopReason = 'user_close';
   handle.resumeAfterStop = false;

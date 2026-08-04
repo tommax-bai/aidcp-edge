@@ -23,7 +23,7 @@ test('startup assembly runs Facebook auth after Native runtime construction and 
   const runtimeAt = mainSource.indexOf('const nativePageRuntime = NativePageRuntime.fromEnvironment(');
   const startupBlockAt = mainSource.indexOf('if (startBrowserAbsent) {', runtimeAt);
   const authAt = mainSource.indexOf(
-    'await reconcileFacebookAuthIfNeeded(firstLoginPolicyApplied, loginWaitMs)',
+    'await reconcileFacebookAuthIfNeeded(firstLoginPolicyApplied, remainingLoginWaitMs)',
     startupBlockAt,
   );
   const identityAt = mainSource.indexOf(

@@ -22,6 +22,8 @@ export interface CoreLifecycleDependencies {
   onStandby?(): void;
   onWoken?(): void;
   onWakeFailed?(reason: string): void;
+  /** Report confirmed owned-browser death to the supervisor before an intentional process exit. */
+  reportBrowserClosed?(): Promise<boolean> | boolean;
   onCloseFailed?(): void;
   logger?(message: string): void;
 }
@@ -210,12 +212,28 @@ export class CoreLifecycleController {
     this.currentState = 'finalizing';
     await this.ensureDeactivated(opts.reason);
 
+    let browserClosed = false;
     if (opts.preserveBrowser) {
       this.log(`[aidcp-edge] lifecycle exit preserves owned browser (reason=${opts.reason})`);
     } else {
       const confirmed = await this.deps.closeOwnedBrowser();
       if (!confirmed) {
         this.log('[aidcp-edge] lifecycle close could not confirm the owned browser is closed');
+        if (opts.requireConfirmedClose) {
+          this.finalizing = false;
+          this.currentState = 'paused';
+          this.deps.onCloseFailed?.();
+          return;
+        }
+      } else {
+        browserClosed = true;
+      }
+    }
+
+    if (browserClosed) {
+      const reported = await Promise.resolve(this.deps.reportBrowserClosed?.() ?? true).catch(() => false);
+      if (!reported) {
+        this.log('[aidcp-edge] lifecycle browser close was confirmed but supervisor evidence was not delivered');
         if (opts.requireConfirmedClose) {
           this.finalizing = false;
           this.currentState = 'paused';
