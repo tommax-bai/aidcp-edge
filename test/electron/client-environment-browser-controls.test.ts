@@ -61,7 +61,7 @@ test('rapid close then start waits for the closing core and starts exactly from 
     '浏览器未确认关闭时不得继续开启新一代浏览器');
 });
 
-test('closed-task browser open joins the normal FIFO without a browser-absent core', () => {
+test('closed-task browser open joins the normal FIFO without downgrading an accepted automation start', () => {
   const start = main.indexOf("ipcMain.handle('browser:open'");
   const end = main.indexOf("ipcMain.handle('edge:start'", start);
   assert.ok(start >= 0 && end > start);
@@ -70,8 +70,11 @@ test('closed-task browser open joins the normal FIFO without a browser-absent co
   const enqueueAt = block.indexOf('enqueueStartFlow(handle)');
   const returnAt = block.indexOf('return statusOf(handle)', enqueueAt);
   assert.ok(statusAt >= 0 && enqueueAt > statusAt && returnAt > enqueueAt);
-  assert.match(block, /handle\.automationIntent = 'stopped'/);
-  assert.match(block, /handle\.automationPaused = true/);
+  assert.match(block, /fleet\.shouldPreserveEnabledAutomationOnBrowserOpen\(handle\)/);
+  assert.match(block, /if \(!preserveEnabledAutomation\) \{[\s\S]*handle\.automationIntent = 'stopped'[\s\S]*handle\.automationPaused = true/,
+    '只有真正从关闭态手动打开浏览器时才关闭自动化；已受理的 enabled 启动不得被覆盖');
+  assert.match(block, /preserveEnabledAutomation \? \{\} : \{ session: 'idle' \}/,
+    '复用已受理启动时不得把真实会话阶段改写成未启动或提前宣称运行中');
   assert.match(block, /if \(handle\.child\)[\s\S]*wakeColdStandby\(handle, 'user_browser_open'\)/);
   assert.doesNotMatch(block, /startBrowserAbsentCore|resolveControlBootstrap|controlBootstrap/);
   const pauseBlock = functionBlock('pauseEdge', 'resumeEdge');

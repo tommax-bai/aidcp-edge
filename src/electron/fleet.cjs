@@ -409,6 +409,15 @@ function maxQueuedStartsForSlots(slots) {
   return Math.max(0, Math.floor(Number(slots) || 0)) * QUEUED_STARTS_PER_SLOT;
 }
 
+/**
+ * “打开浏览器”可以与已经受理的自动化启动发生在同一个无子进程窗口。
+ * 此时必须复用原启动资格，不能把 enabled 覆盖成手动浏览器模式的 stopped。
+ */
+function shouldPreserveEnabledAutomationOnBrowserOpen(handle) {
+  if (!handle || handle.automationIntent !== 'enabled') return false;
+  return Boolean(handle.startFlowQueued || handle.launchQueued || handle.slotWaitingSince);
+}
+
 /** 启动排队的纯准入判定。同一环境已在队列中时幂等，不重复占容量。 */
 function startQueueAdmission({ queuedCount, limit, alreadyQueued = false } = {}) {
   const queued = Math.max(0, Math.floor(Number(queuedCount) || 0));
@@ -730,6 +739,7 @@ module.exports = {
   createSerialLaunchQueue,
   resolveSlotCapacity,
   maxQueuedStartsForSlots,
+  shouldPreserveEnabledAutomationOnBrowserOpen,
   startQueueAdmission,
   childProcessIsRunning,
   resolveSlotSettings,

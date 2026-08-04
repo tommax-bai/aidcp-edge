@@ -30,6 +30,26 @@ test('自动启动排队上限 = 2 × 浏览器并发；这不是账号/环境�
   assert.equal(fleet.maxQueuedStartsForSlots(8), 16);
 });
 
+test('重复打开浏览器复用已启用的启动队列，不把自动化意图降级成 stopped', () => {
+  for (const queuedState of [
+    { startFlowQueued: true },
+    { launchQueued: true },
+    { slotWaitingSince: Date.now() },
+  ]) {
+    assert.equal(fleet.shouldPreserveEnabledAutomationOnBrowserOpen({
+      automationIntent: 'enabled',
+      ...queuedState,
+    }), true);
+  }
+  assert.equal(fleet.shouldPreserveEnabledAutomationOnBrowserOpen({
+    automationIntent: 'enabled',
+  }), false, '只有已受理的启动队列才保留 enabled');
+  assert.equal(fleet.shouldPreserveEnabledAutomationOnBrowserOpen({
+    automationIntent: 'stopped',
+    startFlowQueued: true,
+  }), false, '真正的手动浏览器模式仍保持自动化关闭');
+});
+
 test('子进程对象等待 close 时不再虚占 OS 已退出的浏览器槽位', () => {
   assert.equal(fleet.childProcessIsRunning({ exitCode: null, signalCode: null }), true);
   assert.equal(fleet.childProcessIsRunning({ exitCode: 0, signalCode: null }), false);

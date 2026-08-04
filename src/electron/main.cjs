@@ -6784,20 +6784,27 @@ ipcMain.handle('browser:open', (_event, envId) => {
     return statusOf(handle);
   }
   // 手动打开浏览器也走同一条 FIFO：没拿到槽位前不启动核心、不连接 Cloud。
-  // 获准后核心与浏览器一起启动，但自动化仍保持关闭。
-  handle.automationIntent = 'stopped';
-  handle.engineStopReason = '';
-  handle.resumeAfterStop = false;
-  handle.automationPaused = true;
-  handle.stopRequested = false;
+  // 若自动化启动已经受理，则只复用原队列资格；不能把 enabled 覆盖成 stopped，
+  // 否则核心与 Cloud 仍会启动，但随后冷待机会被错误投影成“离线”。
+  const preserveEnabledAutomation = fleet.shouldPreserveEnabledAutomationOnBrowserOpen(handle);
+  if (!preserveEnabledAutomation) {
+    // 真正从关闭态手动打开：核心与浏览器一起启动，但自动化保持关闭。
+    handle.automationIntent = 'stopped';
+    handle.engineStopReason = '';
+    handle.resumeAfterStop = false;
+    handle.automationPaused = true;
+    handle.stopRequested = false;
+  }
   const bound = allowedEnvironmentControlStates.get(String(handle.profileId || '').trim())?.bindingState === 'bound';
   updateStatus(handle, {
     edge: 'starting',
-    session: 'idle',
-    lastMessage: bound
-      ? '正在排队打开浏览器；自动化保持关闭…'
-      : '正在排队打开浏览器完成首次登录；自动化保持关闭…',
-    ...presencePatch('正在打开浏览器…'),
+    ...(preserveEnabledAutomation ? {} : { session: 'idle' }),
+    lastMessage: preserveEnabledAutomation
+      ? '自动化启动已在排队；轮到当前环境后会打开浏览器并继续启动。'
+      : bound
+        ? '正在排队打开浏览器；自动化保持关闭…'
+        : '正在排队打开浏览器完成首次登录；自动化保持关闭…',
+    ...presencePatch(preserveEnabledAutomation ? '排队启动中…' : '正在打开浏览器…'),
     ...clearEdgeFailurePatch(handle),
   });
   enqueueStartFlow(handle);
