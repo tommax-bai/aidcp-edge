@@ -3,12 +3,17 @@ import { dirname, isAbsolute, join } from 'node:path';
 import {
   NativePageEngineClient,
   type NativeCommitWindowHandler,
+  type NativeEngineDiagnosticSink,
   type NativePageCommand,
   type NativePageCommandExecution,
   type NativePageEngineManifest,
   type NativePageEngineSession,
   type NativePagePlatform,
 } from './client.js';
+import {
+  createEngineDiagnosticForwarder,
+  type EngineDiagnosticForwarder,
+} from './diagnostic-forwarder.js';
 
 export interface NativePageEndpoint {
   host: string;
@@ -71,13 +76,38 @@ async function discardSession(session: NativePageEngineSession): Promise<void> {
   }
 }
 
+/**
+ * 引擎诊断行的落点：**核心进程自己的 stderr**。
+ *
+ * 为什么是 stderr 而不是 stdout：核心 stdout 已被两条前缀桥占用（建号人设回执 / 发布审批回执），
+ * 它们按前缀拦截并按 id 关联 pending，多一路自由文本只会给那两条桥添误命中的机会。
+ * stderr 同样被桌面外壳逐行 tee，且不与任何 stdout 协议桥交织。
+ *
+ * 到得了哪儿，如实说：外壳把未命中已知前缀的行**原样落进 `edge.log`**，并把它作为该环境的
+ * 「最近一条消息」呈现。它**到不了**那条按句子播报的活动流 —— 那条流只吃结构化的 `[ui-event]`
+ * 记录。本通路的读者是排障，不是实时看板，这个落点够用。
+ *
+ * 「走了 stderr」是传输事实、不是语义事实：外壳侧已按**内容**判定徽标与失败归因，
+ * 一条良性诊断不会因为走了这根管子就把环境染红。
+ */
+function writeEngineDiagnostic(line: string): void {
+  process.stderr.write(`${line}\n`);
+}
+
 export class NativePageRuntime {
   private readonly client: NativePageEngineClient;
+  /**
+   * 本运行时的诊断转发器。**公开的理由是装配闸**：它要按引用核对客户端手上那个出口
+   * 就是这里造的这一个 —— 「选项加了、生产没传」是本改动最像成功的失败形态，
+   * 而断言「选项可被接受」对它完全无感。
+   */
+  readonly diagnosticForwarder: EngineDiagnosticForwarder;
   private owner?: OpenOwner;
   private tail: Promise<void> = Promise.resolve();
   private activeAbort?: AbortController;
 
   constructor(private readonly options: NativePageRuntimeOptions) {
+    this.diagnosticForwarder = createEngineDiagnosticForwarder(writeEngineDiagnostic);
     this.client = new NativePageEngineClient({
       binaryPath: options.binaryPath,
       processTimeoutMs: options.processTimeoutMs ?? 31_000,
@@ -92,9 +122,17 @@ export class NativePageRuntime {
           return undefined;
         }
       },
+      // 引擎子进程错误输出的逐行出口。**必须在这里传**：客户端只提供可选项，
+      // 生产装配漏传 = 通路不存在，而所有单测照绿。
+      onDiagnosticLine: this.diagnosticForwarder.sink,
       ...(options.binaryArgs ? { binaryArgs: options.binaryArgs } : {}),
       ...(options.env ? { env: options.env } : {}),
     });
+  }
+
+  /** 客户端**实际持有**的诊断出口，供装配闸按引用核对（见 `diagnosticForwarder` 的注释）。 */
+  engineDiagnosticSink(): NativeEngineDiagnosticSink | undefined {
+    return this.client.diagnosticSink();
   }
 
   static fromEnvironment(
@@ -143,11 +181,14 @@ export class NativePageRuntime {
     onCommandDispatched?: () => void,
   ): Promise<NativePageCommandExecution> {
     return this.serial(async () => {
+      // 建会话发生在盖章**之前**：那一段没有命令在飞，诊断行如实标 `cmd=none`，
+      // MUST NOT 顺手挂到接下来这条命令上 —— 那是把「不知道」写成「知道」。
       const session = await this.sessionFor(ownerId);
       const controller = new AbortController();
       this.activeAbort = controller;
       const forwardAbort = (): void => controller.abort();
       signal?.addEventListener('abort', forwardAbort, { once: true });
+      this.diagnosticForwarder.beginCommand(command.kind);
       try {
         return await session.execute(
           command,
@@ -157,6 +198,7 @@ export class NativePageRuntime {
           onCommandDispatched,
         );
       } finally {
+        this.diagnosticForwarder.endCommand();
         signal?.removeEventListener('abort', forwardAbort);
         if (this.activeAbort === controller) this.activeAbort = undefined;
       }
@@ -186,6 +228,9 @@ export class NativePageRuntime {
       this.owner = undefined;
       if (current) await discardSession(current.session);
     });
+    // 收摊时把还没结账的抑制计数冲出去：关闭期若正好有一批诊断被压掉，
+    // 计数悬在内存里没人报 = 又一次静默闭嘴。
+    this.diagnosticForwarder.flush();
   }
 
   private async sessionFor(ownerId: string): Promise<NativePageEngineSession> {

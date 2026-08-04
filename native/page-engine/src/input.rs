@@ -1065,10 +1065,49 @@ struct PointerFrame {
     delay_ms: u64,
 }
 
+/// 一条规划好的指针轨迹**为什么**没达到拟人形态。
+///
+/// 存在的理由是「两态被压成一态」：`distance <= POINTER_DEGENERATE_DISTANCE_PX`（目标就在
+/// 指针脚下，单帧是**正确**行为）与 `budget == 1`（预算只够一帧，单帧是**降级**）此前返回
+/// 完全相同的形状。压成一态之后，任何消费者——包括留痕本身——都分不出正常与退化，
+/// 于是拟人化在预算收紧时悄悄失效，而没有任何证据。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PointerDegradation {
+    /// 没有降级。含「目标已在脚下」那一支：那不是退化，是对的。
+    None,
+    /// 帧数被预算压到拟人下限以下（剩余预算约 ≤480ms），但还没塌成单帧。
+    BelowHumaneFloor { frames: usize, floor: usize },
+    /// 预算只够一帧（剩余预算约 ≤63ms）：移动塌成一帧后直接按下。
+    CollapsedToSingleFrame,
+}
+
 #[derive(Debug, PartialEq)]
 struct PointerPath {
     frames: Vec<PointerFrame>,
     landing: PointerPoint,
+    /// 本条轨迹的降级成因。**不进回执**：降级是反检测质量的损失，不是业务失败，
+    /// 点击真落在目标上、真按下抬起，`ok=true` 属实（见规格 “degradation MUST NOT
+    /// change the receipt's business truth”）。
+    degradation: PointerDegradation,
+}
+
+/// 指针降级的记账行。没降级就是 `None` —— 让「一切正常」与「降级了但没人看见」在类型上分得开。
+///
+/// 形态对齐 `typing_degradation_note`：纯函数、只吃规划结果、脱机可断言（不需要浏览器、
+/// 不需要派发、不需要跑引擎进程）。
+///
+/// **刻意不带业务标签**：引擎自己说不清这次点击属于哪条命令的哪一步。那半条事实由宿主在转发时
+/// 盖章补上，两半合起来才完整；任何一半单独做都只得到半条信息。
+fn pointer_degradation_note(path: &PointerPath) -> Option<String> {
+    match path.degradation {
+        PointerDegradation::None => None,
+        PointerDegradation::BelowHumaneFloor { frames, floor } => Some(format!(
+            "state=below_humane_floor:frames={frames}:humane_floor={floor}"
+        )),
+        PointerDegradation::CollapsedToSingleFrame => Some(format!(
+            "state=collapsed_to_single_frame:frames=1:humane_floor={POINTER_FRAME_COUNT_MIN}"
+        )),
+    }
 }
 
 /// 拟人化左键点击：沿三阶贝塞尔轨迹逐帧移动 → 瞄准停顿 → 提交式左键（按下 / 抬起配平）。
@@ -1100,6 +1139,15 @@ pub(crate) async fn dispatch_pointer_click(
         pointer_frame_budget(allowance_ms),
         &mut rhythm,
     );
+    // 降级留痕打在**这一个**分发入口，不打在 12 个调用点上。调用点几乎全是
+    // `if let Err(failure) = …` 形式、把 `Ok` 值直接丢弃；把降级穿回去等于开 12 个
+    // 可以忘记的口子，还要动一个串行单写热点文件的 12 个位置。入口只有一个，忘不掉。
+    //
+    // 打点在派发**之前**：路径已经规划完，降级已成定局；而按下之后的任何一步都可能
+    // 提前返回（取消 / 死线 / 派发失败），打在后面等于让「降级了但这次点击没打成」变成无声。
+    if let Some(note) = pointer_degradation_note(&path) {
+        eprintln!("native_page_engine_pointer_path_degraded:{note}");
+    }
     let spent_ms: u64 = path.frames.iter().map(|frame| frame.delay_ms).sum();
     for frame in &path.frames {
         ensure_pointer_input_active(cancellation, deadline_unix_ms)?;
@@ -1225,7 +1273,9 @@ fn generate_pointer_path(
     let delta_y = landing.y - from.y;
     let distance = delta_x.hypot(delta_y);
     let budget = frame_budget.max(1);
-    if distance <= POINTER_DEGENERATE_DISTANCE_PX || budget == 1 {
+    // 两个判据必须分开写，且**距离在前**：目标已在指针脚下时，单帧是正确行为，
+    // 即使此刻预算也只剩一帧 —— 那不是降级，不该留降级的痕。
+    if distance <= POINTER_DEGENERATE_DISTANCE_PX {
         return PointerPath {
             frames: vec![PointerFrame {
                 x: landing.x,
@@ -1233,11 +1283,33 @@ fn generate_pointer_path(
                 delay_ms: rhythm.frame_delay_ms(),
             }],
             landing,
+            degradation: PointerDegradation::None,
+        };
+    }
+    if budget == 1 {
+        return PointerPath {
+            frames: vec![PointerFrame {
+                x: landing.x,
+                y: landing.y,
+                delay_ms: rhythm.frame_delay_ms(),
+            }],
+            landing,
+            degradation: PointerDegradation::CollapsedToSingleFrame,
         };
     }
     let count = ((distance / POINTER_FRAME_DISTANCE_DIVISOR).round() as usize)
         .clamp(POINTER_FRAME_COUNT_MIN, POINTER_FRAME_COUNT_MAX)
         .min(budget);
+    // 中间态：`min(budget)` 把帧数压到拟人下限以下。此前这一支完全无声 —— 轨迹还是曲线、
+    // 帧数已经不像人，而没有任何地方说得出来。
+    let degradation = if count < POINTER_FRAME_COUNT_MIN {
+        PointerDegradation::BelowHumaneFloor {
+            frames: count,
+            floor: POINTER_FRAME_COUNT_MIN,
+        }
+    } else {
+        PointerDegradation::None
+    };
     let normal_x = -delta_y / distance;
     let normal_y = delta_x / distance;
     let first_offset = rhythm.control_offset(distance);
@@ -1271,7 +1343,11 @@ fn generate_pointer_path(
         // 抵达后先越过落点，再回拉——末帧恒为落点。
         frames.insert(frames.len() - 1, overshoot);
     }
-    PointerPath { frames, landing }
+    PointerPath {
+        frames,
+        landing,
+        degradation,
+    }
 }
 
 fn ease_in_out(progress: f64) -> f64 {
@@ -1935,6 +2011,80 @@ mod tests {
                 "禁过冲时不得越过落点：seed={seed}"
             );
         }
+    }
+
+    /// 「目标已在脚下」与「预算只够一帧」**必须两态可分**。
+    ///
+    /// 两者此前返回完全相同的形状：一个是正确行为、一个是降级，压成一态之后
+    /// 任何消费者（包括留痕本身）都分不出来 —— 拟人化在预算收紧时悄悄失效而无人可知。
+    #[test]
+    fn pointer_path_separates_degeneracy_from_budget_degradation() {
+        // ① 目标就在指针脚下：单帧是对的，**不是**降级 —— 哪怕此刻预算也只剩一帧。
+        let mut rhythm = PointerRhythm::from_seed(5);
+        let under_cursor = generate_pointer_path(
+            PointerPoint { x: 300.0, y: 300.0 },
+            PointerPoint { x: 300.0, y: 300.0 },
+            true,
+            1,
+            &mut rhythm,
+        );
+        assert_eq!(under_cursor.frames.len(), 1);
+        assert_eq!(under_cursor.degradation, PointerDegradation::None);
+        assert_eq!(pointer_degradation_note(&under_cursor), None);
+
+        // ② 目标很远、预算只够一帧：塌成单帧，是降级。
+        let mut rhythm = PointerRhythm::from_seed(6);
+        let collapsed = generate_pointer_path(
+            PointerPoint { x: 0.0, y: 0.0 },
+            PointerPoint { x: 900.0, y: 0.0 },
+            true,
+            1,
+            &mut rhythm,
+        );
+        assert_eq!(collapsed.frames.len(), 1);
+        assert_eq!(
+            collapsed.degradation,
+            PointerDegradation::CollapsedToSingleFrame
+        );
+        assert_eq!(
+            pointer_degradation_note(&collapsed).as_deref(),
+            Some("state=collapsed_to_single_frame:frames=1:humane_floor=15")
+        );
+
+        // ③ 预算 ∈ [2, 拟人下限)：帧数被压到下限以下 —— 此前完全无声的中间态。
+        let mut rhythm = PointerRhythm::from_seed(7);
+        let squeezed = generate_pointer_path(
+            PointerPoint { x: 0.0, y: 0.0 },
+            PointerPoint { x: 900.0, y: 0.0 },
+            false,
+            9,
+            &mut rhythm,
+        );
+        assert_eq!(squeezed.frames.len(), 9);
+        assert_eq!(
+            squeezed.degradation,
+            PointerDegradation::BelowHumaneFloor {
+                frames: 9,
+                floor: POINTER_FRAME_COUNT_MIN,
+            }
+        );
+        assert_eq!(
+            pointer_degradation_note(&squeezed).as_deref(),
+            Some("state=below_humane_floor:frames=9:humane_floor=15")
+        );
+
+        // ④ 预算充足：正常拟人路径不留降级痕，否则记账会被噪声淹掉。
+        let mut rhythm = PointerRhythm::from_seed(8);
+        let healthy = generate_pointer_path(
+            PointerPoint { x: 0.0, y: 0.0 },
+            PointerPoint { x: 900.0, y: 0.0 },
+            false,
+            POINTER_FRAME_COUNT_MAX,
+            &mut rhythm,
+        );
+        assert!(healthy.frames.len() >= POINTER_FRAME_COUNT_MIN);
+        assert_eq!(healthy.degradation, PointerDegradation::None);
+        assert_eq!(pointer_degradation_note(&healthy), None);
     }
 
     /// 极近距离退化为一帧；帧预算耗尽时同样缩到一帧（缩帧而非跳过配平）。

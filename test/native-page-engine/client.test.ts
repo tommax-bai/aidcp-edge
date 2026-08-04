@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
   NativePageEngineClient,
   NativePageEngineError,
+  type NativeEngineDiagnosticLine,
+  type NativePageEngineClientOptions,
 } from '../../src/native-page-engine/client.js';
 
 const fixture = fileURLToPath(
@@ -466,4 +470,270 @@ test('reports exit before readiness honestly', async () => {
     assert.equal(error.detail?.exitCode, 23);
     return true;
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 引擎诊断行的转发通路（change surface-native-engine-diagnostics）
+//
+// 中心断言在第一条：引擎在**命令成功、进程不退出**的路径上写的那一行，今天必然收不到
+//（错误输出只进 2048 字符滚动尾缓冲，而尾缓冲只在构造进程级失败对象时才挂出去）。
+//
+// 这里用进程内假引擎而不是真子进程：读边界是这批用例的被测对象之一，真管道给不出确定的
+// chunk 切分，而「两个 chunk 拼成一行」若靠运气合并，用例就永远绿、永远什么都没证明。
+// ─────────────────────────────────────────────────────────────────────────────
+
+const probeResultValue = {
+  targetId: 'target-1',
+  origin: 'https://www.xiaohongshu.com',
+  path: '/explore',
+  readyState: 'complete',
+  pageKind: 'explore',
+  signals: {
+    feedCardCount: 12,
+    noteDetailCount: 0,
+    loginWallCount: 0,
+    captchaSignalCount: 0,
+    dialogCount: 0,
+    profileSignalCount: 0,
+    notificationSignalCount: 0,
+    publishSignalCount: 0,
+    errorSignalCount: 0,
+    mainCount: 1,
+  },
+};
+
+class FakeEngineChild extends EventEmitter {
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  readonly stdin = new PassThrough();
+  killed = false;
+  exitCode: number | null = null;
+  signalCode: NodeJS.Signals | null = null;
+  /** 收到 command 请求、在回应答**之前**执行；诊断用例在这里模拟引擎写 stderr。 */
+  beforeCommandResult: (() => void) | undefined;
+  /** 置真则收到 command 后不回应答（用来撞 IPC 死线）。 */
+  swallowCommands = false;
+
+  constructor() {
+    super();
+    this.stdin.on('data', (chunk: Buffer) => {
+      for (const line of chunk.toString().split('\n')) {
+        if (line.trim()) this.handleRequest(JSON.parse(line));
+      }
+    });
+  }
+
+  kill(): boolean {
+    this.killed = true;
+    return true;
+  }
+
+  ready(): void {
+    this.stdout.write(`${JSON.stringify({
+      type: 'ready',
+      protocolVersion: 2,
+      manifest: {
+        engineVersion: 'test',
+        platformAdapterVersion: 'multi-platform-test',
+        platformAdapters: [{ platform: 'xiaohongshu', adapterVersion: 'xiaohongshu-test' }],
+        capabilityDigest: 'a'.repeat(64),
+      },
+    })}\n`);
+  }
+
+  private handleRequest(request: Record<string, string | number>): void {
+    if (request.type === 'session_open') {
+      this.stdout.write(`${JSON.stringify({
+        type: 'response',
+        protocolVersion: 2,
+        id: request.id,
+        ok: true,
+        result: {
+          sessionId: request.sessionId,
+          taskId: request.taskId,
+          state: 'ready',
+          targetId: 'target-1',
+          lastCommandId: 0,
+        },
+      })}\n`);
+      return;
+    }
+    if (request.type === 'command') {
+      this.beforeCommandResult?.();
+      if (this.swallowCommands) return;
+      this.stdout.write(`${JSON.stringify({
+        type: 'command_result',
+        protocolVersion: 2,
+        id: request.id,
+        sessionId: request.sessionId,
+        taskId: request.taskId,
+        commandId: request.commandId,
+        ok: true,
+        effectPhase: 'confirmed',
+        reasonCode: 'confirmed',
+        result: { kind: 'page_probe', value: probeResultValue },
+      })}\n`);
+      return;
+    }
+    if (request.type === 'shutdown') {
+      this.stdout.write(`${JSON.stringify({
+        type: 'response', protocolVersion: 2, id: request.id, ok: true, result: {},
+      })}\n`);
+    }
+  }
+}
+
+async function openFakeSession(sink?: (line: NativeEngineDiagnosticLine) => void): Promise<{
+  child: FakeEngineChild;
+  session: Awaited<ReturnType<NativePageEngineClient['openSession']>>;
+}> {
+  const child = new FakeEngineChild();
+  const engine = new NativePageEngineClient({
+    binaryPath: '/tmp/fake-native-page-engine',
+    processTimeoutMs: 2_000,
+    spawnImpl: (() => {
+      queueMicrotask(() => child.ready());
+      return child;
+    }) as unknown as NonNullable<NativePageEngineClientOptions['spawnImpl']>,
+    ...(sink ? { onDiagnosticLine: sink } : {}),
+  });
+  const session = await engine.openSession({ ...input, sessionId: 'diag_session', taskId: 'diag_task' });
+  return { child, session };
+}
+
+test('forwards an engine diagnostic written while the command succeeds', async () => {
+  const forwarded: NativeEngineDiagnosticLine[] = [];
+  const { child, session } = await openFakeSession((line) => forwarded.push(line));
+  child.beforeCommandResult = () => {
+    child.stderr.write('native_page_engine_xhs_typing_degraded:comment:degraded_sends=2\n');
+  };
+  const execution = await session.execute({ kind: 'page_probe', params: {} }, 500);
+  // 命令自身的结论不受影响：转发是 tee，不改回执。
+  assert.equal(execution.ok, true);
+  assert.equal(execution.effectPhase, 'confirmed');
+  assert.deepEqual(forwarded, [{
+    seq: 1,
+    text: 'native_page_engine_xhs_typing_degraded:comment:degraded_sends=2',
+    kind: 'known',
+    truncated: false,
+    incomplete: false,
+  }]);
+});
+
+test('keeps behavior identical when no diagnostic sink is supplied', async () => {
+  const { child, session } = await openFakeSession();
+  child.beforeCommandResult = () => {
+    child.stderr.write('native_page_engine_xhs_typing_degraded:comment:degraded_sends=2\n');
+  };
+  const execution = await session.execute({ kind: 'page_probe', params: {} }, 500);
+  assert.equal(execution.ok, true);
+});
+
+test('rejoins a diagnostic line split across two read chunks', async () => {
+  const forwarded: NativeEngineDiagnosticLine[] = [];
+  const { child, session } = await openFakeSession((line) => forwarded.push(line));
+  child.beforeCommandResult = () => {
+    child.stderr.write('native_page_engine_xhs_wheel_abo');
+    child.stderr.write('rted:comments:cancelled\n');
+  };
+  await session.execute({ kind: 'page_probe', params: {} }, 500);
+  // 半行必须被识别为半行：两个 chunk 出去的是**一行**，不是两行。
+  assert.equal(forwarded.length, 1);
+  assert.equal(forwarded[0]?.text, 'native_page_engine_xhs_wheel_aborted:comments:cancelled');
+  assert.equal(forwarded[0]?.incomplete, false);
+});
+
+test('marks an over-long line as truncated instead of shortening it silently', async () => {
+  const forwarded: NativeEngineDiagnosticLine[] = [];
+  const { child, session } = await openFakeSession((line) => forwarded.push(line));
+  child.beforeCommandResult = () => {
+    child.stderr.write(`native_page_engine_${'x'.repeat(4_000)}\n`);
+    child.stderr.write('native_page_engine_after_overlong:1\n');
+  };
+  await session.execute({ kind: 'page_probe', params: {} }, 500);
+  assert.equal(forwarded.length, 2);
+  assert.equal(forwarded[0]?.truncated, true);
+  assert.equal(forwarded[0]?.text.length, 2_048);
+  // 超长行的尾巴 MUST NOT 变成一条引擎从未写过的诊断；下一条必须是真正的下一行。
+  assert.equal(forwarded[1]?.text, 'native_page_engine_after_overlong:1');
+  assert.equal(forwarded[1]?.truncated, false);
+});
+
+test('flushes a partial line at process exit marked incomplete', async () => {
+  const forwarded: NativeEngineDiagnosticLine[] = [];
+  const { child } = await openFakeSession((line) => forwarded.push(line));
+  child.stderr.write("thread 'main' panicked at src/engine.rs:1:1:\nhalf-written-fragment");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  child.stderr.end();
+  child.emit('exit', 101, null);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(forwarded.length, 2);
+  // 崩溃前那半行往往最有价值：冲出来并如实标不完整，绝不丢弃。
+  assert.equal(forwarded[1]?.text, 'half-written-fragment');
+  assert.equal(forwarded[1]?.incomplete, true);
+});
+
+test('forwards panic output classified as unrecognized instead of dropping it', async () => {
+  const forwarded: NativeEngineDiagnosticLine[] = [];
+  const { child, session } = await openFakeSession((line) => forwarded.push(line));
+  child.beforeCommandResult = () => {
+    child.stderr.write("thread 'main' panicked at src/engine.rs:1:1:\n");
+    child.stderr.write('note: run with `RUST_BACKTRACE=1`\n');
+    child.stderr.write('native_page_engine_request_rejected:InvalidRequest\n');
+  };
+  await session.execute({ kind: 'page_probe', params: {} }, 500);
+  assert.deepEqual(forwarded.map((line) => line.kind), ['other', 'other', 'known']);
+  assert.equal(forwarded[0]?.text, "thread 'main' panicked at src/engine.rs:1:1:");
+});
+
+test('still attaches the rolling stderr tail to process-level failures', async () => {
+  // ① 进程崩溃
+  const crash = await openFakeSession(() => undefined);
+  crash.child.swallowCommands = true;
+  crash.child.beforeCommandResult = () => {
+    crash.child.stderr.write('native_page_engine_stdin_failed\n');
+    setTimeout(() => crash.child.emit('exit', 101, null), 5);
+  };
+  await assert.rejects(
+    crash.session.execute({ kind: 'page_probe', params: {} }, 500),
+    (error: unknown) => {
+      assert.ok(error instanceof NativePageEngineError);
+      assert.equal(error.code, 'engine_exited');
+      assert.match(String(error.detail?.stderr), /native_page_engine_stdin_failed/);
+      return true;
+    },
+  );
+
+  // ② IPC 死线
+  const timeout = await openFakeSession(() => undefined);
+  timeout.child.swallowCommands = true;
+  timeout.child.beforeCommandResult = () => {
+    timeout.child.stderr.write('native_page_engine_session_open_failed:CdpTimeout\n');
+  };
+  await assert.rejects(
+    timeout.session.execute({ kind: 'page_probe', params: {} }, 60),
+    (error: unknown) => {
+      assert.ok(error instanceof NativePageEngineError);
+      assert.equal(error.code, 'engine_timeout');
+      assert.match(String(error.detail?.stderr), /native_page_engine_session_open_failed/);
+      return true;
+    },
+  );
+
+  // ③ 协议非法
+  const protocolViolation = await openFakeSession(() => undefined);
+  protocolViolation.child.swallowCommands = true;
+  protocolViolation.child.beforeCommandResult = () => {
+    protocolViolation.child.stderr.write('native_page_engine_request_rejected:InvalidProtocol\n');
+    setTimeout(() => protocolViolation.child.stdout.write('not-json\n'), 5);
+  };
+  await assert.rejects(
+    protocolViolation.session.execute({ kind: 'page_probe', params: {} }, 500),
+    (error: unknown) => {
+      assert.ok(error instanceof NativePageEngineError);
+      assert.equal(error.code, 'invalid_protocol');
+      assert.match(String(error.detail?.stderr), /native_page_engine_request_rejected/);
+      return true;
+    },
+  );
 });

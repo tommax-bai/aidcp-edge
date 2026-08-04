@@ -41,6 +41,14 @@ const FACEBOOK_FIRST_POST_SELECTION = 'first_commentable_group_post';
 const MAX_FACEBOOK_PUBLISH_FILL_TIMEOUT_MS = 600_000;
 const MAX_STDERR_CHARS = 2_048;
 const MAX_RECORD_CHARS = 64 * 1024;
+/**
+ * 逐行转发的**单行**上限。与 `MAX_STDERR_CHARS` 同值但**不是同一件事**：
+ * 后者是进程级失败归因用的滚动尾缓冲（允许被挤掉、允许截断成半行），前者是转发通路的行界。
+ * 两者并行存在，改一个不会自动改另一个。
+ */
+const MAX_DIAGNOSTIC_LINE_CHARS = 2_048;
+/** 引擎具名诊断族的前缀（`native/page-engine/src/**` 的 `eprintln!` 全族共用）。 */
+const ENGINE_DIAGNOSTIC_FAMILY_PREFIX = 'native_page_engine_';
 
 export type NativePageKind =
   | 'home'
@@ -355,6 +363,38 @@ type SpawnEngine = (
   options: SpawnOptionsWithoutStdio,
 ) => ChildProcessWithoutNullStreams;
 
+/**
+ * 引擎子进程错误输出的**一整行**，已成帧、已定界、已分类。
+ *
+ * 这是纯协议客户端交给外界的全部内容：只有字符串 / 数字 / 布尔，没有落点、没有格式。
+ * 写到哪里、盖什么归因章、怎么排版，全由注入方（`runtime.ts`）决定 —— 客户端不认识 `console`，
+ * 也不认识文件系统。
+ */
+export interface NativeEngineDiagnosticLine {
+  /**
+   * 同一个引擎进程内单调递增的序号，从 1 起。
+   * 序号存在的意义是**让缺口可见**：转发被上限压掉时，读者看得出中间少了多少行。
+   */
+  seq: number;
+  /**
+   * 引擎自己写的那一行，去掉行尾换行；已按单行上限定界。
+   * 宿主**不校验内容** —— 无页面派生内容是引擎侧的义务，这里只保证长度与成帧。
+   */
+  text: string;
+  /** `known` = 命中引擎具名诊断族；`other` = 其余（panic / backtrace / 任何未知输出）。 */
+  kind: 'known' | 'other';
+  /** 源行超过单行上限、被截断到上限长度。**绝不静默**：注入方必须把它渲染出来。 */
+  truncated: boolean;
+  /** 进程退出时行缓冲里还剩的半行，被冲出而非丢弃。同样必须渲染出来。 */
+  incomplete: boolean;
+}
+
+/**
+ * 诊断出口。缺席即**逐字保持今天的行为**（只拼尾缓冲、不转发）。
+ * 抛异常不会影响传输：出口坏了是出口的事，不能反过来把协议通道打断。
+ */
+export type NativeEngineDiagnosticSink = (line: NativeEngineDiagnosticLine) => void;
+
 export interface NativePageEngineClientOptions {
   /** Absolute path resolved by the caller from development output or process.resourcesPath. */
   binaryPath: string;
@@ -377,6 +417,15 @@ export interface NativePageEngineClientOptions {
    * （引擎会沿用建会话时的端点，附着仍受实例身份复核约束）。
    */
   resolveEndpoint?: () => { host: string; port: number } | undefined;
+  /**
+   * 引擎子进程错误输出的逐行出口。**可选**：缺席时本客户端的行为与本项引入之前逐字相同
+   *（错误输出仍只进滚动尾缓冲、仍只在进程级失败时挂进 detail）。
+   *
+   * 引入它的理由：引擎写的诊断绝大多数落在**命令正常返回、进程不退出**的路径上，
+   * 只靠尾缓冲那条出口，它们随进程一起被丢掉 —— 「写了但结构上没人看得到」等于没写。
+   * 转发是 tee 不是搬迁：尾缓冲一字不改。
+   */
+  onDiagnosticLine?: NativeEngineDiagnosticSink;
 }
 
 interface ReadyRecord {
@@ -454,6 +503,11 @@ class NativeProcessTransport {
   private readonly processTimeoutMs: number;
   private stdoutBuffer = '';
   private stderr = '';
+  /** 转发通路自己的行缓冲，与 `stderr` 尾缓冲互不影响（后者允许半行、允许被挤掉）。 */
+  private stderrLine = '';
+  /** 当前这一行已作为超长行发出，剩余部分丢弃到行尾为止 —— 而不是把尾巴当成新的一行。 */
+  private stderrLineDropping = false;
+  private diagnosticSeq = 0;
   private ready = false;
   private settledReady = false;
   private exited = false;
@@ -472,6 +526,8 @@ class NativeProcessTransport {
     private readonly expectedManifest?: NativePageEngineManifest,
     /** 会话期内可重复取值的端点解析入口；缺席等价于恒定解析不出来。 */
     private readonly resolveEndpointImpl?: () => { host: string; port: number } | undefined,
+    /** 逐行诊断出口；缺席即不转发（行为与本项引入前逐字相同）。 */
+    private readonly diagnosticSink?: NativeEngineDiagnosticSink,
   ) {
     this.processTimeoutMs = processTimeoutMs;
     this.readyPromise = new Promise((resolve, reject) => {
@@ -515,6 +571,7 @@ class NativeProcessTransport {
       processTimeoutMs,
       options.expectedManifest,
       options.resolveEndpoint,
+      options.onDiagnosticLine,
     );
     await transport.readyPromise;
     return transport;
@@ -658,8 +715,17 @@ class NativeProcessTransport {
       }
     });
     this.child.stderr.on('data', (chunk: Buffer | string) => {
-      this.stderr = `${this.stderr}${chunk.toString()}`.slice(-MAX_STDERR_CHARS);
+      const text = chunk.toString();
+      // ① 进程级失败归因用的滚动尾缓冲：**一字不改**。
+      this.stderr = `${this.stderr}${text}`.slice(-MAX_STDERR_CHARS);
+      // ② 并行的逐行出口。它不依赖进程死亡，因此成功路径上的诊断第一次有了收件人。
+      this.consumeStderrForDiagnostics(text);
     });
+    // 半行冲刷挂在**流结束**上而不是进程 `exit` 上：`exit` 可能先于 stderr 把剩余数据递完，
+    // 那时冲刷会把一条完整行劈成两半、并给前半段打上假的「不完整」标。
+    // `close`（全部 stdio 关闭后才触发）作为兜底，冲刷本身对空缓冲是 no-op。
+    this.child.stderr.once('end', () => this.flushStderrLine(true));
+    this.child.once('close', () => this.flushStderrLine(true));
     this.child.once('error', (error) => {
       this.failProcess(new NativePageEngineError(
         'engine_exited',
@@ -677,6 +743,72 @@ class NativeProcessTransport {
         { exitCode, signal, stderr: this.stderr || undefined },
       ));
     });
+  }
+
+  /**
+   * 把一个 chunk 切成行喂给转发出口。**按行成帧，不是按 chunk 拼接**：
+   * 一行被读边界劈成两半时必须重新拼回一行，否则读者会看到两条互相都不成立的诊断。
+   */
+  private consumeStderrForDiagnostics(chunk: string): void {
+    if (!this.diagnosticSink) return;
+    let rest = chunk;
+    for (;;) {
+      const newline = rest.indexOf('\n');
+      if (newline < 0) {
+        this.appendStderrFragment(rest);
+        return;
+      }
+      this.appendStderrFragment(rest.slice(0, newline));
+      rest = rest.slice(newline + 1);
+      this.flushStderrLine(false);
+    }
+  }
+
+  private appendStderrFragment(fragment: string): void {
+    if (!fragment) return;
+    // 超长行的尾巴：已经作为截断行发出去了，剩下的丢到行尾为止。
+    // MUST NOT 把它当成新的一行 —— 那会凭空造出一条引擎从未写过的诊断。
+    if (this.stderrLineDropping) return;
+    const room = MAX_DIAGNOSTIC_LINE_CHARS - this.stderrLine.length;
+    if (fragment.length <= room) {
+      this.stderrLine += fragment;
+      return;
+    }
+    this.emitDiagnosticLine(this.stderrLine + fragment.slice(0, room), true, false);
+    this.stderrLine = '';
+    this.stderrLineDropping = true;
+  }
+
+  private flushStderrLine(incomplete: boolean): void {
+    if (this.stderrLineDropping) {
+      // 超长行的收尾：整行已发过，这里只是把状态复位，不再补发一条。
+      this.stderrLineDropping = false;
+      this.stderrLine = '';
+      return;
+    }
+    const line = this.stderrLine.replace(/\r+$/, '');
+    this.stderrLine = '';
+    if (!line) return;
+    this.emitDiagnosticLine(line, false, incomplete);
+  }
+
+  private emitDiagnosticLine(text: string, truncated: boolean, incomplete: boolean): void {
+    const sink = this.diagnosticSink;
+    if (!sink) return;
+    this.diagnosticSeq += 1;
+    try {
+      sink({
+        seq: this.diagnosticSeq,
+        text,
+        // 全量转发、只做分类：只放行具名族会把 panic 与 backtrace 静默丢掉，
+        // 而那恰恰是引擎能产出的最有价值的输出。
+        kind: text.startsWith(ENGINE_DIAGNOSTIC_FAMILY_PREFIX) ? 'known' : 'other',
+        truncated,
+        incomplete,
+      });
+    } catch {
+      // 出口自身抛异常不得反噬协议通道。这里吞掉的是出口的故障，不是引擎的诊断。
+    }
   }
 
   private handleLine(line: string): void {
@@ -1038,6 +1170,16 @@ export class NativePageEngineClient {
         'Native Page Engine binaryPath must be absolute',
       );
     }
+  }
+
+  /**
+   * 客户端**实际持有**的诊断出口，供装配闸按引用核对。
+   *
+   * 存在的理由是一种很像成功的失败：选项加好了、单测全绿、生产装配那一处忘了传 —— 通路根本不存在，
+   * 而工作读起来像是做完了。断言「选项可被接受」抓不到它，只有断言「生产客户端手上是不是那一个」才抓得到。
+   */
+  diagnosticSink(): NativeEngineDiagnosticSink | undefined {
+    return this.options.onDiagnosticLine;
   }
 
   async openSession(input: NativePageSessionInput): Promise<NativePageEngineSession> {
