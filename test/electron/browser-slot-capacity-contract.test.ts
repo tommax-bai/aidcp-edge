@@ -27,9 +27,13 @@ test('内存自动推算只在 Edge 外壳启动时采样一次，任务准入�
 
 test('第二个设置是启动排队上限，且环境创建数量不参与容量判断', () => {
   assert.match(rendererHtml, /启动排队上限/);
+  assert.match(rendererHtml, /id="slot-limit"[^>]*max="64"/);
+  assert.match(rendererHtml, /id="max-queued-start-limit"[^>]*max="256"/);
   assert.doesNotMatch(rendererHtml, /最多挂载账号数/);
   assert.match(rendererSource, /maxQueuedStartLimit/);
+  assert.match(rendererSource, /readStartQueueLimitInput\(settingsUi\.maxQueuedStartLimit\)/);
   assert.doesNotMatch(rendererSource, /maxAccounts|账号上限/);
+  assert.match(mainSource, /maxQueuedStartLimit = fleet\.normalizeStartQueueLimit\(settings\.maxQueuedStartLimit\)/);
 
   const start = mainSource.indexOf("ipcMain.handle('ads:createEnv'");
   const end = mainSource.indexOf("ipcMain.handle('ads:updateEnvProxy'", start);
@@ -37,4 +41,3 @@ test('第二个设置是启动排队上限，且环境创建数量不参与容�
   const createBlock = mainSource.slice(start, end);
   assert.doesNotMatch(createBlock, /maxQueuedStarts|maxAccounts|validateCreationCapacity|挂载名额/);
 });
-

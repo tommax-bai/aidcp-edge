@@ -448,7 +448,7 @@ function resolveSlotSettings({
   const fromEnv = Math.floor(Number(slotEnv) || 0);
   const capacity = fromSetting > 0 ? fromSetting : fromEnv > 0 ? fromEnv : autoCapacity;
   const autoMaxQueuedStarts = maxQueuedStartsForSlots(capacity);
-  const maxSetting = normalizeSlotLimit(maxQueuedStartsSetting);
+  const maxSetting = normalizeStartQueueLimit(maxQueuedStartsSetting);
   const maxQueuedStarts = maxSetting > 0 ? maxSetting : autoMaxQueuedStarts;
   return {
     capacity,
@@ -461,11 +461,20 @@ function resolveSlotSettings({
   };
 }
 
-/** 界面输入归一：空 / 非数 / ≤0 → 0（= 自动）；上界 64，防手滑多打一个零把机器拖垮。 */
-function normalizeSlotLimit(value) {
+function normalizePositiveLimit(value, maximum) {
   const n = Math.floor(Number(value));
   if (!Number.isFinite(n) || n <= 0) return 0;
-  return Math.min(64, n);
+  return Math.min(maximum, n);
+}
+
+/** 浏览器并发输入归一：空 / 非数 / ≤0 → 0（= 自动）；上界 64。 */
+function normalizeSlotLimit(value) {
+  return normalizePositiveLimit(value, 64);
+}
+
+/** 启动排队输入归一：空 / 非数 / ≤0 → 0（= 自动）；上界 256。 */
+function normalizeStartQueueLimit(value) {
+  return normalizePositiveLimit(value, 256);
 }
 
 /**
@@ -725,6 +734,7 @@ module.exports = {
   childProcessIsRunning,
   resolveSlotSettings,
   normalizeSlotLimit,
+  normalizeStartQueueLimit,
   QUEUED_STARTS_PER_SLOT,
   LAUNCH_PRIORITY,
   orderSlotWaiters,

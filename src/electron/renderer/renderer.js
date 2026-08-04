@@ -7325,18 +7325,26 @@ function applySlotsView(view) {
   }
 }
 
-// 空 / 非数 / ≤0 → 0（= 自动）；上界 64（与主进程 fleet.normalizeSlotLimit 同口径，权威仍在主进程）。
-function readSlotInput(el) {
+// 空 / 非数 / ≤0 → 0（= 自动）；这里只约束输入体验，最终权威仍是主进程。
+function readLimitInput(el, maximum) {
   const n = Math.floor(Number((el && el.value) || 0));
   if (!Number.isFinite(n) || n <= 0) return 0;
-  return Math.min(64, n);
+  return Math.min(maximum, n);
+}
+
+function readSlotInput(el) {
+  return readLimitInput(el, 64);
+}
+
+function readStartQueueLimitInput(el) {
+  return readLimitInput(el, 256);
 }
 
 // 并发上限即改即存：这是壳层的闸，不动在跑核心，所以不走 dirty / 「按新设置重启」那条路。
 async function persistSlotLimits() {
   const saved = await window.aidcpEdge.saveSettings({
     browserSlotLimit: readSlotInput(settingsUi.slotLimit),
-    maxQueuedStartLimit: readSlotInput(settingsUi.maxQueuedStartLimit),
+    maxQueuedStartLimit: readStartQueueLimitInput(settingsUi.maxQueuedStartLimit),
   });
   if (!saved) return;
   if (settingsUi.slotLimit) settingsUi.slotLimit.value = Number(saved.browserSlotLimit) > 0 ? String(saved.browserSlotLimit) : '';

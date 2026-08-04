@@ -1352,11 +1352,11 @@ function normalizeColdStandbySettingsIntoSettings() {
   settings.browserColdStandbyWarmupMs = normalized.warmupMs;
 }
 
-// 浏览器并发两个上限的归一（0 = 自动）。改动即作废槽位缓存——设置改了就该立刻生效，
+// 浏览器并发与启动排队上限的归一（0 = 自动）。改动即作废槽位缓存——设置改了就该立刻生效，
 // 不该等下次开应用（缓存的存在是为了不让「边启动边算」随内存下降自我缩水，不是为了钉死用户的选择）。
 function normalizeSlotSettingsIntoSettings() {
   settings.browserSlotLimit = fleet.normalizeSlotLimit(settings.browserSlotLimit);
-  settings.maxQueuedStartLimit = fleet.normalizeSlotLimit(settings.maxQueuedStartLimit);
+  settings.maxQueuedStartLimit = fleet.normalizeStartQueueLimit(settings.maxQueuedStartLimit);
   // 旧字段语义是「环境创建硬上限」，与当前「启动排队上限」不同，不能静默迁移成新限制。
   delete settings.maxAccountLimit;
   slotViewCache = null;

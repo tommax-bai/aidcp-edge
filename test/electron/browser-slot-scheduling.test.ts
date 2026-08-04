@@ -397,11 +397,18 @@ test('启动排队上限可单独设定，且不派生任何账号/环境创建�
 test('0 / 空 / 负数 = 未设 = 自动，绝不解读成「上限 0」', () => {
   for (const v of [0, '', null, undefined, -3, 'abc']) {
     assert.equal(fleet.normalizeSlotLimit(v), 0, `${JSON.stringify(v)} 应归一为 0（自动）`);
+    assert.equal(fleet.normalizeStartQueueLimit(v), 0, `${JSON.stringify(v)} 的排队上限应归一为 0（自动）`);
   }
   const zeroed = fleet.resolveSlotSettings({ freeBytes: 7000 * MB, perEnvBytes: 700 * MB, slotSetting: 0, maxQueuedStartsSetting: 0 });
   assert.equal(zeroed.capacity, 10, '0 是「自动」不是「不许开浏览器」');
   assert.equal(zeroed.maxQueuedStarts, 20);
-  assert.equal(fleet.normalizeSlotLimit(999), 64, '上界 64：防手滑多打一个零把机器拖垮');
+  assert.equal(fleet.normalizeSlotLimit(999), 64, '浏览器并发上界保持 64');
+  assert.equal(fleet.normalizeStartQueueLimit(999), 256, '启动排队上界为 256');
+  assert.equal(
+    fleet.resolveSlotSettings({ freeBytes: 7000 * MB, perEnvBytes: 700 * MB, maxQueuedStartsSetting: 999 }).maxQueuedStarts,
+    256,
+    '主进程设置解析应把启动排队上限截断到 256',
+  );
 });
 
 // ---------------------------------------------------------------------------
