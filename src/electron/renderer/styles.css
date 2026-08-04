@@ -4630,6 +4630,10 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 .content-work-agent > span:last-child { min-width: 0; }
 .content-work-agent small { display: block; overflow: hidden; color: #5879ac; font-size: 9px; font-weight: 760; letter-spacing: .05em; text-overflow: ellipsis; white-space: nowrap; }
 .content-work-agent strong { display: block; margin-top: 2px; overflow: hidden; color: #293b55; font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+/* 身份行：产品助手名与账号名分开呈现，账号名后跟一枚来源标记（平台昵称 / 环境名…），不冒充平台身份。 */
+.content-work-agent small .content-work-account-agent { font-weight: 760; }
+.content-work-agent small .content-work-account-target { color: #34507d; }
+.content-work-agent small .content-work-account-source { color: #8b9ab0; font-style: normal; font-weight: 600; letter-spacing: 0; }
 .content-work-status {
   display: inline-flex; align-self: center; align-items: center; gap: 5px; padding: 5px 8px; border-radius: 999px;
   color: #65758b; background: #eef2f7; font-size: 8.5px; font-weight: 760; white-space: nowrap;

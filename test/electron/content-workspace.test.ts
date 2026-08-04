@@ -808,7 +808,96 @@ test('真实 0 条精选在环境首页显示为已知零值', async () => {
   controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
   await flush();
   assert.equal($(window, '#content-home-inspiration-count').textContent, '0');
+  // 已确认为空才允许宣布空态；「还在寻找」要执行层证据，这里 runtime 未启动所以不出现。
+  assert.match($(window, '#content-home-heading').textContent ?? '', /暂无待处理内容/);
+  assert.doesNotMatch($(window, '#content-home-heading').textContent ?? '', /读不到|还在寻找/);
+});
+
+test('精选计数未知而草稿确认为 0 时，首页标题不得宣布暂无待处理内容', async () => {
+  // 现场三态：精选读失败（—）、我的内容真空（0）。旧写法 `(x || 0) === 0` 把未知折进零，
+  // 于是格子说读不到、紧挨着的标题说没有——同屏两个结论互相矛盾。
+  const { window, controller } = boot({
+    curatedSummary: async () => ({ ok: false, status: 503, error: 'curated_content_unavailable' }),
+    curatedList: async () => ({ ok: false, status: 503, error: 'curated_content_unavailable' }),
+    publishDraftList: async () => ({ ok: true, data: { items: [], total: 0 } }),
+  });
+  controller.setRuntime({ automationState: 'ready', browserState: 'ready', guideActive: false });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
+  await flush(8);
+
+  assert.equal($(window, '#content-home-inspiration-count').textContent, '—');
+  assert.equal($(window, '#content-home-draft-count').textContent, '0');
+  const heading = $(window, '#content-home-heading').textContent ?? '';
+  assert.doesNotMatch(heading, /暂无待处理内容/, '任一计数未知时不得宣布已确认的空态');
+  assert.doesNotMatch(heading, /0 条精选灵感/, '未知的精选计数不得被写成 0');
+  assert.match(heading, /精选灵感暂时读不到/);
+  assert.match($(window, '#content-home-description').textContent ?? '', /可编辑内容 0 篇/, '已确认的那一半仍要如实给出');
+});
+
+test('精选来源失败而草稿来源成功时，最值得看的灵感是可重试失败而非讲准入条件的空态', async () => {
+  const { window, controller } = boot({
+    curatedSummary: async () => ({ ok: false, status: 503, error: 'curated_content_unavailable' }),
+    curatedList: async () => ({ ok: false, status: 503, error: 'curated_content_unavailable' }),
+    publishDraftList: async () => ({ ok: true, data: { items: [], total: 0 } }),
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
+  await flush(8);
+
+  const featured = $(window, '#content-featured');
+  assert.equal(featured.querySelector('.content-featured-empty.is-error') !== null, true, '单边失败必须落失败态');
+  assert.equal(featured.querySelector('.content-featured-empty .cw-button')?.textContent, '重新加载');
+  assert.doesNotMatch(featured.textContent ?? '', /只有赞藏表现和内容证据完整/, '读取失败绝不能讲成内容没达到准入标准');
+  assert.match(featured.textContent ?? '', /精选灵感没有读到/);
+});
+
+test('声称正在浏览必须有执行层证据：ready 与 paused 都不得讲成在跑，也不得配活动动效', async () => {
+  const api = {
+    curatedSummary: async () => ({ ok: true, data: { total: 0, referenceDraftCount: 0 } }),
+    curatedList: async () => ({ ok: true, data: { items: [], total: 0 } }),
+    publishDraftList: async () => ({ ok: true, data: { items: [], total: 0 } }),
+  };
+  const { window, controller } = boot(api);
+  const referenceEmpty = () => $(window, '#content-reference-list .content-section-empty');
+  const liveDot = () => window.document.querySelector('#content-reference-list .content-section-empty-live') as HTMLElement;
+
+  // 引擎已连接但浏览循环没跑起来——诊断面板这一档标「待任务」，内容页不能讲「正在浏览」。
+  controller.setRuntime({ automationState: 'ready', browserState: 'ready', guideActive: false });
+  controller.setEnvironment({ envId: 'env-a', label: '晚风手作', platform: 'xiaohongshu' });
+  await flush(8);
+  assert.doesNotMatch(referenceEmpty().textContent ?? '', /正在继续浏览|正在继续寻找/);
+  assert.equal(liveDot().classList.contains('is-live'), false, '无证据时不得带暗示活动的动效');
+  assert.doesNotMatch($(window, '#content-home-heading').textContent ?? '', /还在寻找/);
+
+  controller.setRuntime({ automationState: 'paused', browserState: 'ready', guideActive: false });
+  await flush(2);
+  assert.match(referenceEmpty().textContent ?? '', /已暂停/);
+  assert.equal(liveDot().classList.contains('is-live'), false, '暂停不得被计为运行中');
+
+  controller.setRuntime({ automationState: 'running', browserState: 'ready', guideActive: false });
+  await flush(2);
+  assert.match(referenceEmpty().textContent ?? '', /正在继续浏览推荐内容/);
+  assert.equal(liveDot().classList.contains('is-live'), true, '有执行层证据时才恢复动效');
   assert.match($(window, '#content-home-heading').textContent ?? '', /还在寻找新灵感/);
+});
+
+test('账号身份行标明显示名来源，且不让环境备注名读起来像平台身份或人设名', async () => {
+  const api = {
+    curatedSummary: async () => ({ ok: true, data: { total: 0, referenceDraftCount: 0 } }),
+    curatedList: async () => ({ ok: true, data: { items: [], total: 0 } }),
+    publishDraftList: async () => ({ ok: true, data: { items: [], total: 0 } }),
+  };
+  const { window, controller } = boot(api);
+  controller.setEnvironment({ envId: 'env-a', label: '工程师大白', labelSource: 'environment', platform: 'xiaohongshu' });
+  await flush(8);
+  const account = () => $(window, '#content-work-account');
+  assert.match(account().textContent ?? '', /工程师大白（环境名）/);
+  assert.doesNotMatch(account().textContent ?? '', /@工程师大白/, '客户端环境备注名不得冒充平台昵称');
+  assert.doesNotMatch(account().textContent ?? '', /小萝北 · 工程师大白/, '产品助手名与账号名不得用同一分隔符并列成人设属性');
+  assert.match(account().textContent ?? '', /小萝北（AI 助手）/);
+
+  controller.setEnvironment({ envId: 'env-b', label: '晚风手作', labelSource: 'platform', platform: 'xiaohongshu' });
+  await flush(8);
+  assert.match(account().textContent ?? '', /@晚风手作（平台昵称）/);
 });
 
 test('状态心跳不得把首页从开着的灵感库底下掀出来（两个工作区共享首页显隐）', async () => {

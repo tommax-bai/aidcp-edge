@@ -385,6 +385,8 @@ function syncContentWorkspace(status = currentStatus) {
   const environment = envId ? {
     envId,
     label: display.name || '当前账号',
+    // 名字本身不自带来源，身份行要靠它区分平台昵称与客户端环境备注名（标题栏同一口径）。
+    labelSource: display.source,
     platform: selectedEnvPlatform(),
   } : null;
   contentWorkspace?.setEnvironment(environment);

@@ -821,10 +821,69 @@
         : `${label}中...`;
     }
 
+    // 「正在浏览 / 正在继续寻找」这类声称执行层在动作的文案，只能由执行层证据支持。
+    // 九档运行态里只有 running 带这个证据：它要求本次生命周期内有真实上报的浏览阶段、
+    // 且浏览器可执行（主进程 lifecycleAxes 的 currentLoopExecutable），与诊断面板的「运行中」同源。
+    // 其余八档只说明「进程活着 / 用户意图未停」——ready 在诊断面板上标的是「待任务」，
+    // paused 与 error 更不是在跑，一律 MUST NOT 讲成正在浏览，也 MUST NOT 配活动动效。
+    const BROWSE_IDLE_TEXT = {
+      stopped: '启动环境后继续寻找',
+      starting: '环境启动中，还没有开始浏览',
+      ready: '环境已就绪，还没有开始浏览',
+      waiting_resource: '正在排队等待资源，还没有开始浏览',
+      pausing: '正在暂停，当前没有在浏览',
+      paused: '已暂停，当前没有在浏览',
+      stopping: '正在关闭，当前没有在浏览',
+      error: '运行异常，当前没有在浏览',
+    };
+
+    function browseActivity() {
+      const state = String(runtime?.automationState || 'stopped');
+      return state === 'running'
+        ? { proven: true, idleText: '' }
+        : { proven: false, idleText: BROWSE_IDLE_TEXT[state] || '还没有开始浏览' };
+    }
+
+    // 身份行必须让人分得清「这是哪个产品在工作」与「这是谁的账号」，并标明账号名的来源：
+    // 客户端可见的名字可能是平台昵称、人工别名或客户端环境备注名，三者可信度不同。
+    // 标题栏已确立口径（只有平台昵称带 @），这一行与它对齐；人设在系统里不承载名称字段，
+    // 所以身份行 MUST NOT 让环境备注名读起来像人设名。
+    const ACCOUNT_NAME_SOURCE_LABELS = {
+      platform: '平台昵称',
+      manual: '人工别名',
+      environment: '环境名',
+      fallback: '环境编号',
+    };
+
+    function renderWorkAccount() {
+      if (!fields.workAccount) return;
+      fields.workAccount.replaceChildren();
+      fields.workAccount.appendChild(createElement(document, 'b', 'content-work-account-agent', '小萝北（AI 助手）'));
+      if (!environment) {
+        fields.workAccount.appendChild(document.createTextNode(' ｜ 未选中账号'));
+        return;
+      }
+      const source = String(environment.labelSource || 'environment');
+      const name = String(environment.label || '当前账号');
+      fields.workAccount.appendChild(document.createTextNode(' ｜ 账号 '));
+      fields.workAccount.appendChild(createElement(
+        document,
+        'span',
+        'content-work-account-target',
+        source === 'platform' ? `@${name.replace(/^@/, '')}` : name,
+      ));
+      fields.workAccount.appendChild(createElement(
+        document,
+        'em',
+        'content-work-account-source',
+        `（${ACCOUNT_NAME_SOURCE_LABELS[source] || '环境名'}）`,
+      ));
+    }
+
     function renderHomeWork(state) {
       if (!fields.workCard) return;
       const model = homeWorkModel(state);
-      fields.workAccount.textContent = `小萝北 · ${environment?.label || '当前环境'}`;
+      renderWorkAccount();
       fields.workCard.classList.toggle('is-idle', !model);
       fields.workCard.classList.toggle('is-active', Boolean(model));
       fields.workCard.classList.toggle('is-waiting', Boolean(model?.stages?.some((stage) => stage.status === 'waiting_human')));
@@ -881,22 +940,30 @@
         ));
         return;
       }
-      if (sourceState.kind === 'error' && draftState.kind === 'error') {
+      // 失败态按本分区自己依赖的来源判：任一来源读取失败即呈现可重试失败，
+      // MUST NOT 要求两个来源同时失败——单边失败落进下面那段讲准入条件的空态，
+      // 等于把一次服务不可用讲成一次内容质量筛选结果，用户据此得到的结论与事实相反。
+      if (sourceState.kind === 'error' || draftState.kind === 'error') {
+        const unread = [
+          sourceState.kind === 'error' ? '精选灵感' : null,
+          draftState.kind === 'error' ? '关联草稿' : null,
+        ].filter(Boolean).join('与');
         fields.featured.appendChild(featuredStateElement(
           'error',
           '暂时无法读取内容成果',
-          '灵感和稿件都没有读到，当前不会展示推测结果。',
+          `${unread}没有读到，当前不会展示推测结果，也不会把读取失败讲成没有内容。`,
           { retry: true },
         ));
         return;
       }
       const source = sourceState.items[0] || null;
       if (!source) {
+        const activity = browseActivity();
         fields.featured.appendChild(featuredStateElement(
           'idle',
           '暂时还没有一条灵感值得放在这里',
           '只有赞藏表现和内容证据完整、可以提炼表达结构的灵感，才会进入这个位置。',
-          { liveText: runtime?.automationActive ? '小萝北正在继续寻找' : '启动环境后继续寻找', live: Boolean(runtime?.automationActive) },
+          { liveText: activity.proven ? '小萝北正在继续寻找' : activity.idleText, live: activity.proven },
         ));
         return;
       }
@@ -999,10 +1066,11 @@
         return;
       }
       if (state.homeCurated.items.length === 0) {
+        const activity = browseActivity();
         fields.referenceList.appendChild(homeStateElement('✦', '还没有筛选出值得参考的内容', '赞藏数据不完整、与当前人设无关或价值证据不足的内容不会出现在这里。', {
           kind: 'idle',
-          live: Boolean(runtime?.automationActive),
-          liveText: runtime?.automationActive ? '正在继续浏览推荐内容' : '启动环境后继续寻找',
+          live: activity.proven,
+          liveText: activity.proven ? '正在继续浏览推荐内容' : activity.idleText,
         }));
         return;
       }
@@ -1154,26 +1222,42 @@
       fields.homeInspirationCount.textContent = inspiration === null ? '—' : String(inspiration);
       fields.homeDraftCount.textContent = drafts === null ? '—' : String(drafts);
       fields.homeActiveCount.textContent = active === null ? '—' : String(active);
+      const activity = browseActivity();
       if (state.homeCurated.kind === 'loading' || state.homeDrafts.kind === 'loading') {
         fields.homeHeading.textContent = '正在整理这个账号的内容成果';
         fields.homeDescription.textContent = '每个区域会独立更新，不会用未知数据拼出结论。';
-      } else if ((inspiration || 0) === 0 && (drafts || 0) === 0) {
-        fields.homeHeading.textContent = '还在寻找新灵感，暂无待处理内容';
-        fields.homeDescription.textContent = runtime?.automationActive
+      } else if (inspiration === null || drafts === null) {
+        // 「未知」与「已确认为空」是两个状态，MUST NOT 被压成同一个：同屏计数格子已经把未知
+        // 渲染成「—」，标题是用户先读到的那一句，必须给出同一个结论。旧写法用 `x || 0` 参与
+        // 相等比较，把 null 折进 0，于是格子说读不到、紧挨着的标题说没有。
+        const unknown = [];
+        const known = [];
+        if (inspiration === null) unknown.push('精选灵感'); else known.push(`精选灵感 ${inspiration} 条`);
+        if (drafts === null) unknown.push('我的内容'); else known.push(`可编辑内容 ${drafts} 篇`);
+        fields.homeHeading.textContent = `${unknown.join('与')}暂时读不到，还不能判断有没有待处理内容`;
+        fields.homeDescription.textContent = known.length > 0
+          ? `已确认的是${known.join('、')}；读不到的部分不会按“没有”处理，可以稍后重新加载。`
+          : '两个分区都没有读到，当前不会把未知画成空池；可以稍后重新加载。';
+      } else if (inspiration === 0 && drafts === 0) {
+        // 「还在寻找」同样是声称执行层在动作，只有拿到执行层证据时才允许出现。
+        fields.homeHeading.textContent = activity.proven ? '还在寻找新灵感，暂无待处理内容' : '暂无待处理内容';
+        fields.homeDescription.textContent = activity.proven
           ? '当前环境仍在浏览推荐内容；发现有价值的灵感后会出现在下面。'
-          : '启动当前环境后会开始浏览推荐内容并寻找值得参考的灵感。';
-      } else if ((drafts || 0) === 0) {
+          : runtime?.automationActive
+            ? `${activity.idleText}；开始浏览后，发现的灵感会出现在下面。`
+            : '启动当前环境后会开始浏览推荐内容并寻找值得参考的灵感。';
+      } else if (drafts === 0) {
         fields.homeHeading.replaceChildren(
           document.createTextNode('已收集 '),
-          createElement(document, 'em', '', `${inspiration || 0} 条精选灵感`),
+          createElement(document, 'em', '', `${inspiration} 条精选灵感`),
           document.createTextNode('，等待发起创作'),
         );
         fields.homeDescription.textContent = '先看赞藏证据和可复用结构，再从其中一条开始创作。';
       } else {
         fields.homeHeading.replaceChildren(
           document.createTextNode('已收集 '),
-          createElement(document, 'em', '', `${inspiration || 0} 条精选灵感`),
-          document.createTextNode(`，形成 ${drafts || 0} 篇可编辑内容`),
+          createElement(document, 'em', '', `${inspiration} 条精选灵感`),
+          document.createTextNode(`，形成 ${drafts} 篇可编辑内容`),
         );
         fields.homeDescription.textContent = active
           ? `当前还有 ${active} 个创作任务在进行，新的过程会持续更新。`
@@ -2162,6 +2246,9 @@
       const normalized = next && next.envId ? {
         envId: String(next.envId),
         label: String(next.label || '当前账号'),
+        // 显示名的来源随名字一起传进来：没有它，身份行只能拿到一个不知道是平台昵称还是
+        // 客户端环境备注名的字符串，而这两者可信度不同。缺省按客户端环境名处理（更保守的那一档）。
+        labelSource: String(next.labelSource || 'environment'),
         platform: String(next.platform || '').trim().toLowerCase(),
       } : null;
       const changed = normalized?.envId !== environment?.envId || normalized?.platform !== environment?.platform;
