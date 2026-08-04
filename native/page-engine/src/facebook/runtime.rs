@@ -3,8 +3,8 @@ use super::shared::{
     FACEBOOK_GROUP_ROOT_LANDING_TIMEOUT, cancelled_before_dispatch, canonical_facebook_post_id,
     dispatch_facebook_click, ensure_facebook_action_gate, evaluate_facebook_first_post_router,
     evaluate_facebook_router, evaluate_facebook_router_until_requested_detail,
-    facebook_action_result, facebook_command_cancelled, is_facebook_content_ref,
-    probe_facebook_comment_action, probe_facebook_comment_editor,
+    facebook_action_result, facebook_command_cancelled, facebook_group_root_landed,
+    is_facebook_content_ref, probe_facebook_comment_action, probe_facebook_comment_editor,
     probe_facebook_first_post_group_root, validate_facebook_origin, validated_facebook_group_url,
     wait_for_facebook_group_root_landing, wait_for_facebook_ready,
 };
@@ -612,7 +612,21 @@ fn log_first_post_group_root_decision(
     probe_error_code: Option<&str>,
     fallback_count: usize,
 ) {
-    let observed_path = probe.map(|value| bounded_log_value(&value.path));
+    // 诊断只留结论，不留原始页面串（change restore-facebook-first-post-recovery）。
+    // `bounded_log_value` 只截长度，**截断不是脱敏**：这行以前随进程丢弃所以无后果，
+    // 引擎诊断通路一打通就会持续落进运营机日志，届时地址 / 选择器 / 页面文本一律 MUST NOT 出现。
+    // 那两个原始路径（请求的 + 读回的）唯一的用途是人工比对同一件事——
+    // 「当前地址是不是请求的那个群根」——那就直接报这个结论。不匹配时「我在哪」由 `surface`
+    // 回答，它本来就是有限词表。判据复用落地等待的同一支纯函数：同一个判断只有一份实现，
+    // 两处永远不会各自漂。
+    let at_requested_group_root = probe.map(|value| {
+        facebook_group_root_landed(
+            Some(value.origin.as_str()),
+            Some(value.path.as_str()),
+            Some(value.ready_state.as_str()),
+            group_url,
+        )
+    });
     let surface = probe.map(|value| bounded_log_value(&value.surface));
     let ready_state = probe.map(|value| bounded_log_value(&value.ready_state));
     let blocking_kind = probe.map(|value| bounded_log_value(&value.blocking_kind));
@@ -620,8 +634,7 @@ fn log_first_post_group_root_decision(
         "strategy": strategy,
         "reason": reason.as_str(),
         "targetId": bounded_log_value(session.cdp.target_id()),
-        "expectedGroupPath": bounded_log_value(group_url.path()),
-        "observedPath": observed_path,
+        "atRequestedGroupRoot": at_requested_group_root,
         "surface": surface,
         "readyState": ready_state,
         "blockingKind": blocking_kind,
