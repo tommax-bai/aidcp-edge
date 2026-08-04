@@ -166,35 +166,44 @@
       scrollY:scrollMetrics.scrollY,
     };
   };
+  // 「请求的那个群地址」解析（change restore-facebook-first-post-recovery）。
+  // 查询串与哈希是**入参装饰**，不是身份：剥掉再比对。带跟踪参数的群链接曾在这里被判无效，
+  // 而运营看到的原因是「帖子身份无法确认」——一个调用方一行就能修的格式问题被说成了页面身份问题，
+  // 于是没人去看真正该看的地方。只有「根本不是群地址形态」才判无效。
   const expectedFirstPostGroupRoot=(container)=>{
     try{
       const url=new URL(String(container||''));
       const parts=url.pathname.split('/').filter(Boolean);
-      if(parts.length!==2||parts[0]!=='groups'||!parts[1]||url.search||url.hash)return null;
+      if(parts.length!==2||parts[0]!=='groups'||!parts[1])return null;
       const targetGroupId=groupIdFromValue(url.pathname);
       return targetGroupId?{origin:url.origin,path:groupRootPath(url.pathname),targetGroupId}:null;
     }catch{return null;}
   };
-  const firstPostGroupRootMatches=(container,requireScrollOrigin=false)=>{
+  // 群根同一性判定的**失败原因**（null = 通过）。两种失败分开具名：
+  // invalid_requested_group_url 要去查调用方，target_context_mismatch 要去查页面。
+  // 本函数 MUST NOT 放宽任何**页面侧**判据——来源、地址与群根全等、页面类型、群号、
+  // 滚动在顶部这几项一字不动：它们是「跳转真落地了吗」的证据，不是格式检查。
+  const firstPostGroupRootFailure=(container,requireScrollOrigin=false)=>{
     const expected=expectedFirstPostGroupRoot(container);
-    if(!expected)return false;
+    if(!expected)return 'invalid_requested_group_url';
     const probe=firstPostGroupRootProbe();
-    return probe.origin===expected.origin
+    const matches=probe.origin===expected.origin
       &&groupRootPath(probe.path)===expected.path
       &&probe.search===''&&probe.hash===''
       &&probe.surface==='group'
       &&probe.targetGroupId===expected.targetGroupId
       &&probe.scopeResolved&&!probe.scopeAmbiguous
       &&(!requireScrollOrigin||(Number.isFinite(probe.scrollY)&&probe.scrollY>=0&&probe.scrollY<=1));
+    return matches?null:'target_context_mismatch';
   };
-  const firstPostTargetContextMismatchCards=()=>({
+  const firstPostGroupRootFailureCards=(reason)=>({
     kind:'page_cards',
     value:{
       cards:[],
-      documentGeneration:'first-commentable-group-post|target-context-mismatch',
+      documentGeneration:`first-commentable-group-post|${reason.replace(/_/g,'-')}`,
       listKind:'feed',
       listState:'present_unreportable',
-      selectionReason:'target_context_mismatch',
+      selectionReason:reason,
     },
   });
   const joinObservation=()=>joinContext().observation;
