@@ -255,6 +255,13 @@ async fn facebook_reels_entry_foregrounds_once_only_after_ineffective_navigation
     let foreground = method_index(&requests, "Page.bringToFront", 0);
     let second_navigation = method_index(&requests, "Page.navigate", 1);
     assert!(first_navigation < foreground && foreground < second_navigation);
+    // 重试必须回到同一个 Reels 入口：两处目标漂开，等于「换个地方再试一次」。
+    for index in [first_navigation, second_navigation] {
+        assert_eq!(
+            requests[index]["params"]["url"],
+            "https://www.facebook.com/reel/?s=tab"
+        );
+    }
     assert!(
         requests[foreground + 1..second_navigation]
             .iter()

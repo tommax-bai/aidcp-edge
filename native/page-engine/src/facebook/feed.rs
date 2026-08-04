@@ -26,6 +26,9 @@ fn facebook_inline_read_context_changed(output: &CommandOutput) -> bool {
 }
 
 const FACEBOOK_FEED_RECOVERY_TIMEOUT: Duration = Duration::from_secs(12);
+/// Reels 入口路由：首次导航与失效后的重试导航共用同一个目标。**MUST NOT 各写一份字面量**——
+/// 两处一旦漂开，重试就变成「换个地方再试一次」，而回执仍按同一个入口解读。
+const FACEBOOK_REELS_ENTRY_URL: &str = "https://www.facebook.com/reel/?s=tab";
 /// Facebook may pass through `/reels/` and anonymous `/reel/` documents before the
 /// canonical Reel route becomes ready. Keep this longer window local to Reels entry;
 /// unrelated Facebook navigations retain their existing eight-second boundary.
@@ -217,10 +220,7 @@ async fn execute_facebook_reels_entry(
         return Ok(result);
     }
 
-    session
-        .cdp
-        .navigate("https://www.facebook.com/reels/")
-        .await?;
+    session.cdp.navigate(FACEBOOK_REELS_ENTRY_URL).await?;
     wait_for_facebook_ready(session, FACEBOOK_REELS_ENTRY_READY_TIMEOUT).await?;
     let first = probe_facebook_reel(session).await?;
     if first.is_reels_surface() {
@@ -283,10 +283,7 @@ async fn execute_facebook_reels_entry(
         return Ok(result);
     }
 
-    session
-        .cdp
-        .navigate("https://www.facebook.com/reels/")
-        .await?;
+    session.cdp.navigate(FACEBOOK_REELS_ENTRY_URL).await?;
     wait_for_facebook_ready(session, FACEBOOK_REELS_ENTRY_READY_TIMEOUT).await?;
     let retried = probe_facebook_reel(session).await?;
     if retried.is_reels_surface() {
