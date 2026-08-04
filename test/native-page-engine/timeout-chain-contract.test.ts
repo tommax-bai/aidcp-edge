@@ -75,7 +75,71 @@ const FAMILIES = [
   },
 ];
 
-const sessionTimeout = constMs(runtime, 'FACEBOOK_NATIVE_SESSION_TIMEOUT_MS');
+const protocol = read('native/page-engine/src/protocol.rs');
+
+/**
+ * 剥掉 Rust 注释。**必须剥**：本文件解析的两处（平台枚举、准入 match）上方都有文档注释，
+ * 而那些注释里逐字出现平台名与常量名——不剥就会把说明文字解析成定义。
+ */
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .map((line) => line.replace(/\/\/.*$/, ''))
+    .join('\n');
+}
+
+/** 引擎认得的平台**全集**（`pub enum Platform` 的变体）。守卫的覆盖面以它为准，不另抄一份。 */
+function platformVariants(source: string): string[] {
+  const match = /pub enum Platform\s*\{([^}]*)\}/.exec(stripComments(source));
+  assert.ok(match, '未找到 Platform 枚举 —— 参照物没了，本闸失去意义');
+  return match![1]!.split(',').map((part) => part.trim()).filter(Boolean);
+}
+
+/** `session.open` 准入的 match 臂：平台变体 → 它实际受哪条准入常量约束。 */
+function admissionArms(source: string): Map<string, string> {
+  const body = /const fn session_open_timeout_admission[^{]*\{([\s\S]*?)\n\}/
+    .exec(stripComments(source));
+  assert.ok(body, '未找到 session.open 准入函数 —— 它被改名或改写时本闸必须当场失败，而不是静默放行');
+  const arms = new Map<string, string>();
+  for (const arm of body![1]!.matchAll(/Platform::(\w+)\s*=>\s*([A-Z][A-Z0-9_]*)/g)) {
+    arms.set(arm[1]!, arm[2]!);
+  }
+  return arms;
+}
+
+const facebookSessionTimeout = constMs(runtime, 'FACEBOOK_NATIVE_SESSION_TIMEOUT_MS');
+
+/**
+ * **每条平台道**的会话超时链。上一次事故的形态是：宿主把默认道的会话超时抬了，
+ * 引擎默认道的准入没跟上 ⇒ 小红书与微信视频号的 `session.open` 全被门口拒掉六天，
+ * 而当时的守卫五条断言**全在 Facebook 那条道上**，一路是绿的。
+ *
+ * `platforms` 用的是 Rust `Platform` 变体名 —— 与引擎准入 match 臂同一套标识，
+ * 好让「守卫覆盖了哪些平台」可以被机械核对，而不是又一份手抄名单。
+ */
+const SESSION_LANES = [
+  {
+    name: 'Facebook 道',
+    platforms: ['Facebook'],
+    sessionTimeout: facebookSessionTimeout,
+    edgeAdmission: constMs(client, 'MAX_FACEBOOK_SESSION_TIMEOUT_MS'),
+    engineAdmissionConst: 'MAX_FACEBOOK_TIMEOUT_MS',
+    clampableCeilings: (): number[] => [
+      ...FAMILIES.map((family) => family.ceiling),
+      constMs(engine, 'FACEBOOK_COMMENT_TIMEOUT_MS'),
+      constMs(engine, 'FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS'),
+    ],
+  },
+  {
+    name: '默认道（小红书 / 微信视频号）',
+    platforms: ['Xiaohongshu', 'WechatChannels'],
+    sessionTimeout: constMs(runtime, 'DEFAULT_NATIVE_SESSION_TIMEOUT_MS'),
+    edgeAdmission: constMs(client, 'MAX_NATIVE_TIMEOUT_MS'),
+    engineAdmissionConst: 'MAX_TIMEOUT_MS',
+    clampableCeilings: (): number[] => [constMs(engine, 'DEFAULT_COMMAND_TIMEOUT_MS')],
+  },
+];
 
 test('Reels entry 的两个 30s 就绪窗与两个 15s 身份窗装得进现有滚动预算', () => {
   const readyMs = durationMs(facebookFeed, 'FACEBOOK_REELS_ENTRY_READY_TIMEOUT');
@@ -113,22 +177,69 @@ test('每个 Facebook 命令族的请求值都能穿过准入校验与引擎天�
   }
 });
 
-test('会话超时必须同时穿过边缘准入与引擎协议准入，否则整个 Facebook 会话开不起来', () => {
+test('每条平台道的会话超时都必须同时穿过边缘准入与引擎协议准入', () => {
   // 这两道是「四处同步」之外的第 ⑤⑥ 处，2026-07-29 清点才发现：
   //   - 边缘 openSession 会拿会话超时去过 validateProbeInput（曾复用加群上限）；
   //   - 引擎 protocol.rs 在入口再卡一次。
   // 任一处小于会话超时，失败形态都不是「某条命令变慢」，而是 session.open 直接被拒、
-  // **整个 Facebook 平台一条命令都发不出去**。
-  const edgeAdmission = constMs(client, 'MAX_FACEBOOK_SESSION_TIMEOUT_MS');
-  const engineAdmission = constMs(read('native/page-engine/src/protocol.rs'), 'MAX_FACEBOOK_TIMEOUT_MS');
-  assert.ok(
-    sessionTimeout <= edgeAdmission,
-    `会话超时 ${sessionTimeout}ms > 边缘准入 ${edgeAdmission}ms ⇒ openSession 抛 invalid_request，FB 全线不可用`,
-  );
-  assert.ok(
-    sessionTimeout <= engineAdmission,
-    `会话超时 ${sessionTimeout}ms > 引擎协议准入 ${engineAdmission}ms ⇒ session.open 被引擎拒，FB 全线不可用`,
-  );
+  // **那个平台一条命令都发不出去**。
+  //
+  // ⚠️ 本条 2026-07-29 加进来时只验了 Facebook 那条道，而回归恰好落在默认道上：
+  // 默认道会话超时 30_000 → 45_000，引擎默认道准入留在 30_000，小红书与微信视频号
+  // 全线不可用六天，本文件一路是绿的。**逐道验，不是逐平台验。**
+  for (const lane of SESSION_LANES) {
+    const engineAdmission = constMs(protocol, lane.engineAdmissionConst);
+    assert.ok(
+      lane.sessionTimeout <= lane.edgeAdmission,
+      `${lane.name}：会话超时 ${lane.sessionTimeout}ms > 边缘准入 ${lane.edgeAdmission}ms`
+      + ' ⇒ openSession 抛 invalid_request，该道全线不可用',
+    );
+    assert.ok(
+      lane.sessionTimeout <= engineAdmission,
+      `${lane.name}：会话超时 ${lane.sessionTimeout}ms > 引擎协议准入 ${engineAdmission}ms`
+      + `（${lane.engineAdmissionConst}）⇒ session.open 被引擎门口拒，该道全线不可用`,
+    );
+  }
+});
+
+test('引擎准入特判的平台集合必须与守卫覆盖的平台道逐一对应', () => {
+  // 这条才是上一次事故的真修复。只把某个常量抬上去，是把同一枚地雷挪到下一个平台：
+  // 守卫的道表若是手抄的，它在「新增平台没被覆盖」时恰好是绿的（memory hand-copied-name-lists）。
+  // 所以覆盖面不由本文件声明，而是从引擎源码里读出来对账。
+  const variants = platformVariants(protocol);
+  const arms = admissionArms(protocol);
+  const covered = new Map<string, { laneName: string; constName: string }>();
+  for (const lane of SESSION_LANES) {
+    for (const platform of lane.platforms) {
+      covered.set(platform, { laneName: lane.name, constName: lane.engineAdmissionConst });
+    }
+  }
+
+  for (const variant of variants) {
+    assert.ok(
+      arms.has(variant),
+      `平台 ${variant} 没有在 session.open 准入里选过道 —— 带兜底 else 的写法会让它静默落进默认道`,
+    );
+    assert.ok(
+      covered.has(variant),
+      `平台 ${variant} 没有对应的守卫道 —— 它的会话超时链无人对账，正是上一次停摆六天的形态`,
+    );
+  }
+  for (const [variant, constName] of arms) {
+    const lane = covered.get(variant);
+    assert.ok(lane, `平台 ${variant} 在引擎准入里选了 ${constName}，守卫却没有覆盖它的道`);
+    assert.equal(
+      constName,
+      lane!.constName,
+      `平台 ${variant}：引擎按 ${constName} 准入，守卫却按 ${lane!.constName} 对账 ⇒ 验的不是同一个数`,
+    );
+  }
+  for (const variant of covered.keys()) {
+    assert.ok(
+      variants.includes(variant),
+      `守卫道表里的 ${variant} 已不在引擎的平台枚举里 —— 覆盖率看着满，其实在空转`,
+    );
+  }
 });
 
 test('评论提交前预留必须装得下它自己那一段，且给回执留余量', () => {
@@ -147,19 +258,17 @@ test('评论提交前预留必须装得下它自己那一段，且给回执留�
   );
 });
 
-test('会话超时不得把任何 Facebook 命令天花板静默夹回', () => {
+test('每条平台道的会话超时都不得把它能夹回的命令天花板静默夹回', () => {
   // 引擎算预算时取 `session_timeout_ms.min(ceiling)`：会话超时小于天花板 ⇒ 天花板失效，且无任何报错。
   // 发布填正文那条在引擎里显式绕过 min()，不受此约束，故不参与比较。
-  const ceilings = [
-    ...FAMILIES.map((family) => family.ceiling),
-    constMs(engine, 'FACEBOOK_COMMENT_TIMEOUT_MS'),
-    constMs(engine, 'FACEBOOK_PUBLISH_SELECT_MODE_TIMEOUT_MS'),
-  ];
-  const highest = Math.max(...ceilings);
-  assert.ok(
-    sessionTimeout >= highest,
-    `会话超时 ${sessionTimeout}ms < 最高命令天花板 ${highest}ms ⇒ 天花板被静默夹回，改了等于没改`,
-  );
+  for (const lane of SESSION_LANES) {
+    const highest = Math.max(...lane.clampableCeilings());
+    assert.ok(
+      lane.sessionTimeout >= highest,
+      `${lane.name}：会话超时 ${lane.sessionTimeout}ms < 最高命令天花板 ${highest}ms`
+      + ' ⇒ 天花板被静默夹回，改了等于没改',
+    );
+  }
 });
 
 test('评论的长度感知预算在四层里自洽，且长评论真的装得下', () => {
@@ -177,7 +286,7 @@ test('评论的长度感知预算在四层里自洽，且长评论真的装得�
   const largestRequest = max - slack;
   assert.ok(largestRequest <= admission, `评论最大请求 ${largestRequest}ms > 准入上限 ${admission}ms`);
   assert.ok(largestRequest <= ceiling, `评论最大请求 ${largestRequest}ms > 引擎天花板 ${ceiling}ms`);
-  assert.ok(largestRequest <= sessionTimeout, `评论最大请求 ${largestRequest}ms > 会话超时 ${sessionTimeout}ms`);
+  assert.ok(largestRequest <= facebookSessionTimeout, `评论最大请求 ${largestRequest}ms > 会话超时 ${facebookSessionTimeout}ms`);
 
   // per-char 系数必须明显高于逐字输入的实测均速，否则固定开销一挤就撞 deadline。
   // 实测约 165ms/字符（native input.rs：对数正态中位 110ms + 标点 ×1.4 + 8% 概率 300–600ms 停顿）。

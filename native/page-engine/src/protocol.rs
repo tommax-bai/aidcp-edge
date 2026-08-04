@@ -8,7 +8,15 @@ pub const PLATFORM_ADAPTER_VERSION: &str = "multi-platform-v1";
 pub const CAPABILITY_DIGEST: &str = env!("AIDCP_PAGE_ENGINE_CAPABILITY_DIGEST");
 pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 const MIN_TIMEOUT_MS: u64 = 50;
-const MAX_TIMEOUT_MS: u64 = 30_000;
+/// 引擎侧对**非 Facebook** 平台（小红书 / 微信视频号）`session.open` timeout 的准入上限。
+///
+/// 必须 ≥ 边缘 `src/native-page-engine/runtime.ts` 下发的 `DEFAULT_NATIVE_SESSION_TIMEOUT_MS`。
+///
+/// ⚠️ **这一条实际炸过一次**：2026-07-29 的「Facebook 时间预算 ×1.5」把宿主侧非 Facebook 的
+/// 会话超时 30_000 → 45_000，却只抬了下面那条 Facebook 的准入，本条留在 30_000。
+/// 于是小红书与微信视频号的每一次 `session.open` 都在门口被判 `invalid_request`，
+/// **两个平台一条命令都发不出、连续六天**，而进程存活 / 传输已连接等其它信号全是绿的。
+const MAX_TIMEOUT_MS: u64 = 45_000;
 /// 引擎侧对 Facebook `session.open` / 命令 timeout 的准入上限。
 ///
 /// ⚠️ 这是「四处同步」之外**第五处**、也是最容易被整组遗忘的一处：它在引擎入口就把超参拒掉。
@@ -16,6 +24,25 @@ const MAX_TIMEOUT_MS: u64 = 30_000;
 /// 必须 ≥ 边缘 `src/native-page-engine/runtime.ts` 下发的 FACEBOOK_NATIVE_SESSION_TIMEOUT_MS。
 const MAX_FACEBOOK_TIMEOUT_MS: u64 = 180_000;
 const MAX_IDENTIFIER_BYTES: usize = 128;
+
+/// `session.open` 的准入上限**按平台道取值**。
+///
+/// 写成穷举 `match` 而不是 `if platform == Facebook { … } else { … }` 是刻意的：
+/// 带兜底 `else` 的写法让**新增平台默认落进默认道**——不报错、不提醒，只是那个平台的
+/// 会话超时突然要受一条没人为它选过的上限约束。上一次事故正是这个形态的镜像
+///（宿主抬了默认道的值，引擎默认道没跟上）。
+///
+/// 穷举 `match` 把「新增平台必须为它选一条道」变成**编译期义务**：
+/// 往 `Platform` 加一个变体而不在这里选道，`cargo build` 当场失败。
+/// 边缘侧的跨语言对账守卫（`test/native-page-engine/timeout-chain-contract.test.ts`）
+/// 再按本函数的 match 臂逐条核对数值链，两道合起来才覆盖「漏改一层」的全部形态。
+const fn session_open_timeout_admission(platform: Platform) -> u64 {
+    match platform {
+        Platform::Xiaohongshu => MAX_TIMEOUT_MS,
+        Platform::WechatChannels => MAX_TIMEOUT_MS,
+        Platform::Facebook => MAX_FACEBOOK_TIMEOUT_MS,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -200,11 +227,7 @@ impl InputRecord {
                 if record.params.host.is_empty() || record.params.host.len() > 255 {
                     return Err(invalid_request("invalid DevTools host"));
                 }
-                let max_timeout_ms = if record.params.platform == Platform::Facebook {
-                    MAX_FACEBOOK_TIMEOUT_MS
-                } else {
-                    MAX_TIMEOUT_MS
-                };
+                let max_timeout_ms = session_open_timeout_admission(record.params.platform);
                 if !(MIN_TIMEOUT_MS..=max_timeout_ms).contains(&record.params.timeout_ms) {
                     return Err(invalid_request("invalid session timeout"));
                 }
