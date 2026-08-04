@@ -62,6 +62,11 @@ const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
     source: 'manual' | 'platform' | 'environment' | 'fallback';
   };
   railDisplayName: (row: Record<string, unknown>) => string;
+  manualRenameOutcomeMessage: (
+    result: Record<string, unknown> | null | undefined,
+    nickname: string,
+    displayName: string,
+  ) => string;
   slowStartLine: (dailyUsage: Record<string, unknown> | null | undefined, connState: string, source?: string) => SlowStartV;
   facebookRuleModeWithoutPersona: (input: unknown) => boolean;
   RULE_MODE_WITHOUT_PERSONA_BADGE: string;
@@ -1302,4 +1307,66 @@ test('facebookRuleModeWithoutPersona：文案既不催补人设，也不宣称�
   assert.match(text, /没有人设/, '必须如实说出「没有人设」，不得含糊成已设置');
   assert.doesNotMatch(text, /已设置|已绑定/);
   assert.doesNotMatch(text, /待补|请先设置人设|才会开始自动运营/);
+});
+
+// change decouple-environment-and-account-rename：改名分三路写，回执必须逐路点名。
+// 承重点在「云端没成时不许只报已保存」——左栏没有云端别名时会回落显示环境名，本地改成功后名字照样会变，
+// 光看名字判断不出云端成没成，所以文案是这里唯一能区分两者的证据。
+test('manualRenameOutcomeMessage：三路全成才宣称后续不会被覆盖', () => {
+  const msg = uiLogic.manualRenameOutcomeMessage(
+    { ok: true, adsProfile: { ok: true }, cloud: { ok: true } }, '越南新号A', '越南新号A',
+  );
+  assert.equal(msg, '已保存人工昵称「越南新号A」，后续系统更新不会覆盖。');
+});
+
+test('manualRenameOutcomeMessage：云端未成必须点名，且不得宣称已保存或不被覆盖', () => {
+  const msg = uiLogic.manualRenameOutcomeMessage({
+    ok: true,
+    adsProfile: { ok: true },
+    cloud: { ok: false, reason: 'binding_unknown', error: '该环境尚未完成首次登录，云端还没有可挂昵称的账号' },
+  }, '越南新号A', '越南新号A');
+  assert.match(msg, /已改本机名「越南新号A」/);
+  assert.match(msg, /云端昵称未改：该环境尚未完成首次登录/);
+  assert.doesNotMatch(msg, /已保存人工昵称/, '云端没成时 MUST NOT 报成整体已保存');
+  assert.doesNotMatch(msg, /后续系统更新不会覆盖/, '那是对三路都落地的断言，缺一路就不成立');
+});
+
+test('manualRenameOutcomeMessage：分身名未成单独点名，且不牵连其余两路的说法', () => {
+  const msg = uiLogic.manualRenameOutcomeMessage({
+    ok: true, adsProfile: { ok: false, error: '指纹浏览器不可达' }, cloud: { ok: true },
+  }, '越南新号A', '越南新号A');
+  assert.match(msg, /已改本机名「越南新号A」/);
+  assert.match(msg, /指纹浏览器分身名未改：指纹浏览器不可达/);
+  assert.doesNotMatch(msg, /云端昵称未改/, '云端成了就不许说它没成');
+});
+
+test('manualRenameOutcomeMessage：两路都没成时逐条列出，不合并成一个笼统原因', () => {
+  const msg = uiLogic.manualRenameOutcomeMessage({
+    ok: true,
+    adsProfile: { ok: false, error: '指纹浏览器不可达' },
+    cloud: { ok: false, error: '该环境尚未完成首次登录，云端还没有可挂昵称的账号' },
+  }, '越南新号A', '越南新号A');
+  assert.match(msg, /指纹浏览器分身名未改：指纹浏览器不可达/);
+  assert.match(msg, /云端昵称未改：该环境尚未完成首次登录/);
+});
+
+test('manualRenameOutcomeMessage：清除人工昵称也逐路点名', () => {
+  const cleared = uiLogic.manualRenameOutcomeMessage(
+    { ok: true, adsProfile: { ok: true, skipped: 'cleared' }, cloud: { ok: true } }, '', 'Lê Chương Dạ',
+  );
+  assert.equal(cleared, '已清除人工昵称，恢复系统昵称「Lê Chương Dạ」。');
+  const partial = uiLogic.manualRenameOutcomeMessage(
+    { ok: true, adsProfile: { ok: true, skipped: 'cleared' }, cloud: { ok: false, error: '云端昵称服务暂时不可用' } },
+    '', 'Lê Chương Dạ',
+  );
+  assert.match(partial, /已清除人工昵称/);
+  assert.match(partial, /云端昵称未改：云端昵称服务暂时不可用/);
+});
+
+test('manualRenameOutcomeMessage：云端写成但本地未同步归一名，如实说明而不冒充失败', () => {
+  const msg = uiLogic.manualRenameOutcomeMessage({
+    ok: true, adsProfile: { ok: true }, cloud: { ok: true, localConfirmError: '磁盘只读' },
+  }, '越南新号A', '越南新号A');
+  assert.match(msg, /云端已更新，但本地未能同步为云端归一名：磁盘只读/);
+  assert.doesNotMatch(msg, /云端昵称未改/, '云端确实写成了，MUST NOT 报成云端未改');
 });

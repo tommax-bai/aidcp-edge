@@ -1591,6 +1591,45 @@ async function maybeRenameEnvToNickname(handle, nickname) {
   }
 }
 
+// 人工改名时同步指纹浏览器分身名（change decouple-environment-and-account-rename）。与上面「环境名跟随真实昵称」
+// 的分工：那条是系统自动跟随、遇到人工名就让路只推影子值；这条是**人工意图本身**，必须落到分身上，否则运营在
+// 指纹浏览器客户端里看到的还是旧名。诚实降级：失败保持原分身名并如实回报，不重试风暴、不阻塞其余两路。
+// 清空人工名不动分身名——那是把命名权交回系统跟随，不是要求把分身改成空名。
+async function renameAdsProfileForManualName(handle, profileId, nickname) {
+  if (!nickname) return { ok: true, skipped: 'cleared' };
+  if (!handle || handle.kind !== 'adspower' || !profileId) return { ok: true, skipped: 'no_profile' };
+  // 不做「名已一致就跳过」的去重：本地花名册在 ① 已经改成新名，此处再比 handle.name 只会永远命中自己。
+  // 人工改名是低频手动动作，直接发一次即可。
+  try {
+    const ads = resolveAdsOpts({});
+    const writeApi = createAdsWriteApi({
+      apiBase: ads.apiBase,
+      apiKey: ads.apiKey,
+      requestImpl: adsApi.enqueueRequest,
+    });
+    const r = await writeApi.renameProfile({ userId: profileId, name: nickname }, ads);
+    if (r && r.ok) return { ok: true };
+    console.warn(`[aidcp-edge] 人工改名同步分身名失败（保持原分身名）：${profileId} → ${(r && r.error) || '未知错误'}`);
+    return { ok: false, error: (r && r.error) || '未知错误' };
+  } catch (e) {
+    const error = (e && e.message) || String(e);
+    console.warn(`[aidcp-edge] 人工改名同步分身名异常（保持原分身名）：${profileId} → ${error}`);
+    return { ok: false, error };
+  }
+}
+
+// 云端别名拒收原因 → 运营看得懂的话。未收录的原因原样带出，绝不吞进兜底桶（跨层翻译必须保住可恢复性）。
+const CLOUD_ALIAS_REJECTION_ZH = {
+  binding_unknown: '该环境尚未完成首次登录，云端还没有可挂昵称的账号',
+  binding_conflict: '该环境的账号绑定存在冲突，云端暂不接受改名',
+  account_not_found: '云端找不到该环境绑定的账号',
+  environment_not_owned: '当前账号无权修改该环境',
+  binding_unavailable: '云端账号绑定服务暂时不可用',
+  operator_alias_unavailable: '云端昵称服务暂时不可用',
+  operator_alias_write_failed: '云端昵称写入失败',
+  validation_failed: '云端拒绝了该昵称内容',
+};
+
 // 「打开 AdsPower 新建环境」best-effort：AdsPower 不公开直达其内部「新建浏览器」tab 的深链，
 // 故只能尝试拉起 / 聚焦客户端；起不来（未装 / 应用名不符）诚实退回打开官方页面。面板另有引导文案。
 async function openAdsClient() {
@@ -7470,8 +7509,11 @@ ipcMain.handle('fleet:select', (_event, envId) => {
   }
   return fleetSnapshot();
 });
-// 运营别名一致写：先落本地并让 renderer 保持 pending，再以客户令牌写 Cloud；Cloud 或最终本地确认任一步失败，
-// 都恢复原花名册并返回真实原因。空白表示清除运营别名，回落系统昵称影子。
+// 改名两路解耦（change decouple-environment-and-account-rename）：一次提交分别写**本地环境名**（本机花名册 +
+// 指纹浏览器分身名）与**云端账号别名**，两路独立成败。云端别名挂在账号上，环境尚未绑定账号（首次登录没成功）时
+// 该路必然失败——它 MUST NOT 回滚已经写好的本地名字。本地花名册是显示名的唯一来源，只有它没写成才算什么都没发生。
+// 左栏在没有云端别名时会回落显示环境名，所以本地改成功后名字照样会变；回执因此 MUST 分别点名两路结果，
+// MUST NOT 只报一句「已保存」——那就退化成静默假成功。空白表示清除运营别名，回落系统昵称影子。
 ipcMain.handle('fleet:setManualNickname', async (_event, raw) => {
   const profileId = String((raw && raw.profileId) || '').trim();
   const nickname = String((raw && raw.nickname) || '').trim();
@@ -7499,6 +7541,7 @@ ipcMain.handle('fleet:setManualNickname', async (_event, raw) => {
   if (!nextEnvironment) return { ok: false, error: '环境记录无效，昵称未保存。' };
   const nextEnvironments = previousEnvironments.map((environment, envIndex) =>
     envIndex === index ? nextEnvironment : environment);
+  // ① 本地花名册：显示名的唯一来源。只有这一路失败才算整体什么都没发生，此时必须恢复原名与原来源。
   const saved = saveSettings({ environments: nextEnvironments });
   if (!saved.ok) {
     broadcastFleet();
@@ -7506,52 +7549,48 @@ ipcMain.handle('fleet:setManualNickname', async (_event, raw) => {
   }
 
   syncEnvHandles();
+
+  // ② 指纹浏览器分身名：人工意图本身，必须落到分身上。诚实降级、不阻塞下一路。
+  const adsProfile = await renameAdsProfileForManualName(handle, profileId, nickname);
+
+  // ③ 云端账号别名：独立成败。失败 MUST NOT 回滚 ①，本地名字连同 unsynced 标记原样保留。
   const response = await clientAuthFetch(`/environments/${encodeURIComponent(profileId)}/operator-alias`, {
     method: 'PUT', token: clientSession.token, body: { alias: nickname || null }, timeoutMs: 12000,
   });
   if (response.status === 401) onSessionInvalid();
+  let environment = nextEnvironment;
+  let cloud = { ok: true };
   if (!response.ok || !response.data || !response.data.data) {
-    const restored = saveSettings({ environments: previousEnvironments });
-    syncEnvHandles();
-    const reason = response.data && (response.data.error || response.data.reason);
-    return {
+    const reason = String((response.data && (response.data.error || response.data.reason)) || '').trim();
+    cloud = {
       ok: false,
-      error: `${reason || response.error || '云端昵称更新失败'}${restored.ok ? '' : `；本地恢复也失败：${restored.error || '未知错误'}`}`,
-      environment: previousEnvironment,
+      reason: reason || undefined,
+      error: CLOUD_ALIAS_REJECTION_ZH[reason] || reason || response.error || '云端昵称更新失败',
     };
+  } else {
+    const confirmed = response.data.data;
+    const confirmedName = confirmed.displayNameSource !== 'account_id' && String(confirmed.displayName || '').trim()
+      ? String(confirmed.displayName).trim()
+      : String(nextEnvironment.systemName || '').trim();
+    const confirmedEnvironment = nickname
+      ? { ...nextEnvironment, name: confirmedName || nickname, nameSource: 'manual', nameSyncState: 'synced' }
+      : { ...nextEnvironment, name: confirmedName || nextEnvironment.name || '' };
+    if (!nickname) {
+      delete confirmedEnvironment.nameSource;
+      delete confirmedEnvironment.nameSyncState;
+    }
+    const confirmedEnvironments = previousEnvironments.map((current, envIndex) =>
+      envIndex === index ? confirmedEnvironment : current);
+    const confirmedSave = saveSettings({ environments: confirmedEnvironments });
+    // 云端已经写成，这里只是拿它归一后的名字覆盖本地。覆盖失败保持 ① 的名字，绝不为此回滚云端。
+    if (confirmedSave.ok) environment = confirmedEnvironment;
+    else cloud = { ok: true, localConfirmError: confirmedSave.error || '未知错误' };
   }
 
-  const confirmed = response.data.data;
-  const confirmedName = confirmed.displayNameSource !== 'account_id' && String(confirmed.displayName || '').trim()
-    ? String(confirmed.displayName).trim()
-    : String(nextEnvironment.systemName || '').trim();
-  const confirmedEnvironment = nickname
-    ? { ...nextEnvironment, name: confirmedName || nickname, nameSource: 'manual', nameSyncState: 'synced' }
-    : { ...nextEnvironment, name: confirmedName || nextEnvironment.name || '' };
-  if (!nickname) {
-    delete confirmedEnvironment.nameSource;
-    delete confirmedEnvironment.nameSyncState;
-  }
-  const confirmedEnvironments = previousEnvironments.map((environment, envIndex) =>
-    envIndex === index ? confirmedEnvironment : environment);
-  const confirmedSave = saveSettings({ environments: confirmedEnvironments });
-  if (!confirmedSave.ok) {
-    const rollbackAlias = previousEnvironment.nameSource === 'manual' ? previousEnvironment.name : null;
-    const cloudRollback = await clientAuthFetch(`/environments/${encodeURIComponent(profileId)}/operator-alias`, {
-      method: 'PUT', token: clientSession && clientSession.token, body: { alias: rollbackAlias }, timeoutMs: 12000,
-    });
-    const localRollback = saveSettings({ environments: previousEnvironments });
-    syncEnvHandles();
-    return {
-      ok: false,
-      error: `本地昵称确认写入失败：${confirmedSave.error || '未知错误'}；云端回滚${cloudRollback.ok ? '成功' : '失败'}；本地恢复${localRollback.ok ? '成功' : '失败'}。`,
-      environment: previousEnvironment,
-    };
-  }
   syncEnvHandles();
   const renamedHandle = [...envs.values()].find((candidate) => candidate.profileId === profileId);
   if (renamedHandle) syncBrowserPersonaNotice(renamedHandle, true);
-  return { ok: true, environment: confirmedEnvironment };
+  return { ok: true, environment, adsProfile, cloud };
 });
 ipcMain.handle('fleet:startAll', (_event, opts) => startAllEnvs(opts || {}));
 ipcMain.handle('fleet:stopAll', () => stopAllEnvs());

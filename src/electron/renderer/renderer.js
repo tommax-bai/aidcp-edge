@@ -6688,7 +6688,9 @@ function refreshEnvironmentIdentityAnchors(envId) {
   }
 }
 
-/** 左栏昵称就地编辑：先乐观显示，再等待主进程原子持久化；失败恢复原昵称与来源。 */
+// 左栏昵称就地编辑：先乐观显示，再等主进程回执（change decouple-environment-and-account-rename）。
+// 回执的 ok 只代表**本地花名册**那一路——它是显示名的唯一来源，没写成才要恢复原昵称与来源。
+// 分身名与云端别名各自成败，由回执逐路带回、只进文案，MUST NOT 因它们失败就把本地名字弹回去。
 function beginRailNameEdit(row, nameEl) {
   if (manualNicknamePendingEnvIds.has(row.envId)) {
     setRailMsg('该环境昵称正在保存，请等待确认。');
@@ -6789,7 +6791,7 @@ function beginRailNameEdit(row, nameEl) {
       manualNicknamePendingEnvIds.delete(row.envId);
       refreshEnvironmentIdentityAnchors(row.envId);
       setRailMsg(`昵称保存失败，已恢复「${previousMember.name || railDisplayName(row)}」：${saved && saved.error ? saved.error : '未知错误'}`);
-      return;
+      return; // 本地那一路没成 = 什么都没发生；分身名与云端别名的失败不会走到这里
     }
     const confirmed = saved.environment || {};
     const confirmedManual = confirmed.nameSource === 'manual' || (Boolean(nickname) && !saved.environment);
@@ -6816,9 +6818,7 @@ function beginRailNameEdit(row, nameEl) {
     if (settingsUi.adsProfile.value.trim() === profileId) selectedProfileName = confirmed.name || optimisticName;
     manualNicknamePendingEnvIds.delete(row.envId);
     refreshEnvironmentIdentityAnchors(row.envId);
-    setRailMsg(nickname
-      ? `已保存人工昵称「${confirmed.name || nickname}」，后续系统更新不会覆盖。`
-      : `已清除人工昵称，恢复系统昵称「${confirmed.name || optimisticName || '未获取昵称'}」。`);
+    setRailMsg(uiLogic.manualRenameOutcomeMessage(saved, nickname, confirmed.name || optimisticName));
   };
 
   input.addEventListener('click', (e) => e.stopPropagation());

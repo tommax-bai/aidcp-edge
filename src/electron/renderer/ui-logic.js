@@ -962,6 +962,34 @@
     binding_conflict: '该账号同时出现在多个环境，当前配置不会被当作已生效；请先处理环境绑定冲突',
   };
 
+  /**
+   * 人工改名回执文案（change decouple-environment-and-account-rename）。
+   *
+   * 改名分三路写：本地花名册、指纹浏览器分身名、云端账号别名。本地那一路是显示名的唯一来源，它成了名字就变了——
+   * 而左栏在没有云端别名时本来就回落显示环境名，所以**光看名字变没变判断不了云端有没有成**。这里因此必须逐路点名，
+   * 任何一路没成都 MUST NOT 只报「已保存」。
+   */
+  function manualRenameOutcomeMessage(result, nickname, displayName) {
+    const name = String(displayName || '').trim();
+    const adsProfile = result && result.adsProfile;
+    const cloud = result && result.cloud;
+    const notes = [];
+    if (adsProfile && adsProfile.ok === false) {
+      notes.push(`指纹浏览器分身名未改：${adsProfile.error || '未知错误'}`);
+    }
+    if (cloud && cloud.ok === false) {
+      notes.push(`云端昵称未改：${cloud.error || '未知错误'}`);
+    } else if (cloud && cloud.localConfirmError) {
+      notes.push(`云端已更新，但本地未能同步为云端归一名：${cloud.localConfirmError}`);
+    }
+    if (!String(nickname || '').trim()) {
+      return `${[`已清除人工昵称，恢复系统昵称「${name || '未获取昵称'}」`, ...notes].join('；')}。`;
+    }
+    // 全成才敢说「后续系统更新不会覆盖」——那是对三路都落地的断言。有一路没成就只报本机这一路的既成事实。
+    if (notes.length === 0) return `已保存人工昵称「${name}」，后续系统更新不会覆盖。`;
+    return `${[`已改本机名「${name}」`, ...notes].join('；')}。`;
+  }
+
   /** 「7 月 17 日」——毕业文案里只用到月/日。 */
   function monthDayCN(ms) {
     const d = new Date(ms);
@@ -1090,5 +1118,5 @@
     };
   }
 
-  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, batchStartReady, resolveEnvironmentDisplayName, railDisplayName, slowStartLine, facebookRuleModeWithoutPersona, RULE_MODE_WITHOUT_PERSONA_BADGE, RULE_MODE_WITHOUT_PERSONA_NOTE, formatReceivedBytes, proxyRuntimeView, FLEET_STALE_MS };
+  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, batchStartReady, resolveEnvironmentDisplayName, railDisplayName, manualRenameOutcomeMessage, slowStartLine, facebookRuleModeWithoutPersona, RULE_MODE_WITHOUT_PERSONA_BADGE, RULE_MODE_WITHOUT_PERSONA_NOTE, formatReceivedBytes, proxyRuntimeView, FLEET_STALE_MS };
 });

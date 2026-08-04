@@ -31,18 +31,50 @@ test('人工昵称只通过具名 IPC 写本地和收窄 Cloud endpoint，不暴
   assert.doesNotMatch(block, /raw.*accountId|saveSettings\(raw\)/, 'renderer 不得选择账号或提交任意设置');
 });
 
-test('主进程先本地 pending、再 Cloud 确认，任一步失败恢复原花名册', () => {
+// change decouple-environment-and-account-rename：本地那一路是显示名唯一来源，只有它失败才恢复原花名册；
+// 分身名与云端别名各自成败，MUST NOT 因它们失败而把本地已写好的名字回滚掉。
+test('主进程先本地 pending，本地写盘失败才恢复原花名册', () => {
   const block = handlerBlock(main, 'fleet:setManualNickname');
   const saveAt = block.indexOf('saveSettings({ environments: nextEnvironments })');
   const cloudAt = block.indexOf('clientAuthFetch(`/environments/');
-  const restoreAt = block.indexOf('saveSettings({ environments: previousEnvironments })', cloudAt);
   assert.ok(saveAt >= 0 && saveAt < cloudAt, '本地 pending 必须在第一次 Cloud await 前可见');
-  assert.ok(cloudAt < restoreAt, 'Cloud 失败必须把本地花名册恢复到原快照');
   assert.match(block, /return \{ ok: false, error: saved\.error/);
-  assert.match(block, /cloudRollback/);
-  assert.match(block, /localRollback/);
   assert.match(block, /syncBrowserPersonaNotice\(renamedHandle, true\)/, '成功后浏览器内人设横幅也要立即刷新昵称');
-  assert.match(block, /return \{ ok: true, environment: confirmedEnvironment \}/);
+  assert.match(block, /return \{ ok: true, environment, adsProfile, cloud \}/, '回执必须逐路带回三路结果');
+});
+
+test('云端别名失败绝不回滚本地名字，也不回滚云端已写成的值', () => {
+  const block = handlerBlock(main, 'fleet:setManualNickname');
+  const cloudAt = block.indexOf('clientAuthFetch(`/environments/');
+  assert.ok(cloudAt >= 0);
+  assert.equal(
+    block.indexOf('saveSettings({ environments: previousEnvironments })', cloudAt), -1,
+    '云端那一路失败后 MUST NOT 把本地花名册恢复到原快照',
+  );
+  assert.doesNotMatch(block, /cloudRollback/, '两路独立后不存在「本地确认失败就回滚云端」这条路径');
+  assert.doesNotMatch(block, /localRollback/);
+  assert.match(block, /cloud = \{\s*\n?\s*ok: false/, '云端失败只记在它自己那一路');
+  assert.match(block, /CLOUD_ALIAS_REJECTION_ZH\[reason\] \|\| reason/, '未收录原因必须原样带出，不得吞进兜底桶');
+});
+
+test('人工改名同步分身名：诚实降级、不重试、无分身则跳过且不计失败', () => {
+  const start = main.indexOf('async function renameAdsProfileForManualName');
+  assert.ok(start >= 0, '人工改名的分身改名函数必须存在');
+  const block = main.slice(start, main.indexOf('const CLOUD_ALIAS_REJECTION_ZH', start));
+  assert.match(block, /if \(!nickname\) return \{ ok: true, skipped: 'cleared' \}/, '清空人工名不动分身名');
+  assert.match(block, /kind !== 'adspower'.*return \{ ok: true, skipped: 'no_profile' \}/s, '无分身的环境跳过且不计失败');
+  assert.match(block, /writeApi\.renameProfile\(\{ userId: profileId, name: nickname \}/);
+  assert.match(block, /return \{ ok: false, error/, '失败必须如实回报，不得静默吞掉');
+  assert.doesNotMatch(block, /setTimeout|retry|重试/, '失败不重试风暴');
+});
+
+test('云端拒收原因映射覆盖未绑定账号，且未收录原因不落兜底桶', () => {
+  const start = main.indexOf('const CLOUD_ALIAS_REJECTION_ZH');
+  const block = main.slice(start, main.indexOf('};', start));
+  assert.match(block, /binding_unknown: '该环境尚未完成首次登录/, '这是本变更的主场景，必须有运营可读文案');
+  for (const reason of ['binding_conflict', 'account_not_found', 'environment_not_owned']) {
+    assert.ok(block.includes(`${reason}:`), `${reason} 必须有可读文案`);
+  }
 });
 
 test('renderer 在昵称持久化前乐观显示，失败时恢复旧名称与来源', () => {
@@ -60,6 +92,10 @@ test('renderer 在昵称持久化前乐观显示，失败时恢复旧名称与�
   assert.match(block, /nickname \? `正在保存人工昵称/);
   assert.match(block, /正在清除人工昵称并恢复系统昵称/);
   assert.doesNotMatch(block, /persistRoster\(/, '昵称不得再走失败后保留内存值的通用 settings 保存链');
+  assert.match(
+    block, /uiLogic\.manualRenameOutcomeMessage\(saved, nickname, confirmed\.name \|\| optimisticName\)/,
+    '成功回执必须走逐路点名的共享文案，MUST NOT 在 renderer 里另写一句笼统的「已保存」',
+  );
 });
 
 test('旧人工昵称在客户会话恢复后有界补同步，失败保留本地并标明 unsynced', () => {
