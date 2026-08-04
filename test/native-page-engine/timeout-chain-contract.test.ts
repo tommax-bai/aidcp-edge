@@ -34,10 +34,18 @@ function constMs(source: string, name: string): number {
   return Number(match![1]!.replace(/_/g, ''));
 }
 
+function durationMs(source: string, name: string): number {
+  const match = new RegExp(`\\b${name}\\b[^=\\n]*=\\s*Duration::from_secs\\((\\d+)\\)`).exec(source);
+  assert.ok(match, `未在源码中找到 Duration 常量 ${name}`);
+  return Number(match![1]) * 1_000;
+}
+
 const browseSession = read('src/native-page-engine/browse-session.ts');
 const client = read('src/native-page-engine/client.ts');
 const runtime = read('src/native-page-engine/runtime.ts');
 const engine = read('native/page-engine/src/engine.rs');
+const facebookFeed = read('native/page-engine/src/facebook/feed.rs');
+const facebookReels = read('native/page-engine/src/facebook/reels.rs');
 
 /** 每个命令族：① 请求值 → ② 准入上限 → ④ 引擎天花板。 */
 const FAMILIES = [
@@ -68,6 +76,29 @@ const FAMILIES = [
 ];
 
 const sessionTimeout = constMs(runtime, 'FACEBOOK_NATIVE_SESSION_TIMEOUT_MS');
+
+test('Reels entry 的两个 30s 就绪窗与两个 15s 身份窗装得进现有滚动预算', () => {
+  const readyMs = durationMs(facebookFeed, 'FACEBOOK_REELS_ENTRY_READY_TIMEOUT');
+  const identityMs = durationMs(facebookReels, 'FACEBOOK_REEL_IDENTITY_HYDRATION_TIMEOUT');
+  const entryReadyUses = facebookFeed.match(
+    /wait_for_facebook_ready\(session, FACEBOOK_REELS_ENTRY_READY_TIMEOUT\)/g,
+  )?.length ?? 0;
+  const namedWaitsMs = readyMs * 2 + identityMs * 2;
+  const nonWaitMarginMs = 30_000;
+  const scroll = FAMILIES.find((family) => family.name === 'Feed 滚动');
+
+  assert.equal(readyMs, 30_000, 'Reels entry 每次文档就绪窗必须是 30s');
+  assert.equal(entryReadyUses, 2, '初次与唯一重试导航必须共用同一个 30s 就绪窗');
+  assert.ok(scroll, '未找到 Facebook Feed/Reels 滚动预算');
+  assert.ok(
+    namedWaitsMs + nonWaitMarginMs <= scroll!.request,
+    `Reels entry 具名等待 ${namedWaitsMs}ms + 非等待余量 ${nonWaitMarginMs}ms`
+      + ` > 滚动请求预算 ${scroll!.request}ms`,
+  );
+  assert.ok(scroll!.request <= scroll!.admission, 'Reels entry 请求必须穿过 Edge 准入上限');
+  assert.ok(scroll!.request <= scroll!.ceiling, 'Reels entry 请求必须穿过 Native 命令天花板');
+  assert.ok(scroll!.request <= sessionTimeout, 'Facebook 会话上限不得夹短 Reels entry 请求');
+});
 
 test('每个 Facebook 命令族的请求值都能穿过准入校验与引擎天花板', () => {
   for (const family of FAMILIES) {

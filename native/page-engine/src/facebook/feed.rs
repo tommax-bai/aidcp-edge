@@ -26,6 +26,10 @@ fn facebook_inline_read_context_changed(output: &CommandOutput) -> bool {
 }
 
 const FACEBOOK_FEED_RECOVERY_TIMEOUT: Duration = Duration::from_secs(12);
+/// Facebook may pass through `/reels/` and anonymous `/reel/` documents before the
+/// canonical Reel route becomes ready. Keep this longer window local to Reels entry;
+/// unrelated Facebook navigations retain their existing eight-second boundary.
+const FACEBOOK_REELS_ENTRY_READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// 恢复等待必须给「把诚实回执交出去」留出的余量。
 ///
 /// 这一层是本 change 的核心命题在小尺度上的复现：**外层原子上限先到点，会把一个具名回执
@@ -217,7 +221,7 @@ async fn execute_facebook_reels_entry(
         .cdp
         .navigate("https://www.facebook.com/reels/")
         .await?;
-    wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    wait_for_facebook_ready(session, FACEBOOK_REELS_ENTRY_READY_TIMEOUT).await?;
     let first = probe_facebook_reel(session).await?;
     if first.is_reels_surface() {
         if let Some(result) = facebook_reels_entry_route_gate(cancellation, deadline_unix_ms, true)?
@@ -283,7 +287,7 @@ async fn execute_facebook_reels_entry(
         .cdp
         .navigate("https://www.facebook.com/reels/")
         .await?;
-    wait_for_facebook_ready(session, Duration::from_secs(8)).await?;
+    wait_for_facebook_ready(session, FACEBOOK_REELS_ENTRY_READY_TIMEOUT).await?;
     let retried = probe_facebook_reel(session).await?;
     if retried.is_reels_surface() {
         if let Some(result) = facebook_reels_entry_route_gate(cancellation, deadline_unix_ms, true)?
@@ -1590,6 +1594,11 @@ fn facebook_near_bottom(probe: &facebook::FacebookFeedProbe) -> bool {
 mod tests {
     use super::*;
     use crate::model::{FacebookListKind, FacebookListState};
+
+    #[test]
+    fn reels_entry_document_readiness_window_is_thirty_seconds() {
+        assert_eq!(FACEBOOK_REELS_ENTRY_READY_TIMEOUT, Duration::from_secs(30));
+    }
 
     #[test]
     fn reels_entry_reason_accepts_only_configured_primary_and_feed_fallback() {
