@@ -5231,7 +5231,8 @@ async function spawnEdgeChild(handle, {
     handle.closePending = false;
     const exitedAbnormally = retryableSetupFailure || Boolean(terminalLoginFailure)
       || (!intentional && (signal != null || (code != null && code !== 0)));
-    handle.browserStateUnconfirmed = exitedAbnormally || closeEvidenceMissing;
+    handle.browserStateUnconfirmed = (exitedAbnormally && !(terminalLoginFailure && browserCloseConfirmed))
+      || closeEvidenceMissing;
     const message = retryableSetupFailure ? setupDisposition.message : exitMessage(code, signal);
     if (handle.removed) return; // 已摘除的环境不再投影状态
 

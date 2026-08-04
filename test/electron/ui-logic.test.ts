@@ -218,6 +218,10 @@ test('自动登录终止后归需要处理并保留认证原因，不回落离�
   assert.equal(fleet.railGroup, 'attention');
   assert.equal(fleet.label, '异常');
   assert.notEqual(fleet.level, 'offline');
+
+  const presence = uiLogic.presenceView(failed, Date.now());
+  assert.equal(presence.text, '登录认证异常：auth_target_not_found');
+  assert.notEqual(presence.text, '待命中');
 });
 
 // ── 首次连接 ≠ 断线重连（change honest-first-connect-label）──

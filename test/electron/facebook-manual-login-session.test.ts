@@ -49,6 +49,26 @@ test('credential fill failure keeps the core attached and waits for identity in 
     'terminal authentication failures must be structured before process exit');
 });
 
+test('terminal Facebook authentication failure closes the owned browser before exit', () => {
+  const terminalExit = core.slice(
+    core.indexOf('const terminateAfterFacebookAuthFailure'),
+    core.indexOf('// 收口真退出端点'),
+  );
+  assert.match(terminalExit, /platformDriver\.platform !== 'facebook' \|\| provider\.kind !== 'adspower'/,
+    'the close path must remain scoped to Facebook AdsPower startup');
+  assert.match(terminalExit, /reportFacebookAuthFailure\(reason\)/);
+  assert.match(terminalExit, /chrome\.killAndConfirmDead\(\)/);
+  assert.match(terminalExit,
+    /if \(browserClosed\) \{[\s\S]*?type: 'lifecycle\.browser_closed'[\s\S]*?terminateNow\(code\)/,
+    'confirmed close evidence must precede process exit');
+  assert.match(core,
+    /Facebook 首登辅助安全停手[\s\S]*?await terminateAfterFacebookAuthFailure\(authResult\.reason, 1\)/,
+    'unsupported checkpoints must use the terminal close path');
+  assert.match(core,
+    /authResult\.kind === 'manual_required'[\s\S]*?保留浏览器与 CDP/,
+    'manual-required remains a retained session');
+});
+
 test('Electron accepts only enumerated Facebook manual reasons and keeps their browser blocked', () => {
   const authMessages = shell.slice(
     shell.indexOf('const FACEBOOK_MANUAL_AUTH_MESSAGES'),
@@ -101,6 +121,9 @@ test('Electron accepts only enumerated Facebook manual reasons and keeps their b
   assert.match(shell,
     /const terminalLoginFailure = handle\.status\.loginFlow[\s\S]*?const exitedAbnormally = retryableSetupFailure \|\| Boolean\(terminalLoginFailure\)/,
     'current-generation authentication failure must outrank an older intentional stop reason');
+  assert.match(shell,
+    /browserStateUnconfirmed = \(exitedAbnormally && !\(terminalLoginFailure && browserCloseConfirmed\)\)/,
+    'a terminal login failure with confirmed browser-close evidence must project the browser as closed');
   assert.match(shell,
     /const decision = terminalLoginFailure[\s\S]*?\{ action: 'stop', streak: 0 \}/,
     'terminal authentication failure must not enter an automatic restart loop');

@@ -547,6 +547,9 @@
     const staticFresh = Number.isFinite(at) ? `状态更新 · ${relTime(at, nowMs)}` : '';
 
     // 非运行态：诚实静态文案，presence 历史文本不再当「正在做」展示。
+    if (loginFlowState(s) === 'failed') {
+      return { text: loginFlowFailureDetail(s), animate: false, fresh: staticFresh };
+    }
     if (s.session === 'paused') return { text: '已暂停，浏览器保持打开', animate: false, fresh: staticFresh };
     // 只有主进程明确标出「仅关闭本机自动化」时，才采用这次原子写入的范围文案；普通关闭继续讲
     // 「已关闭浏览器」，也绝不能让任意历史 presence 文本在关闭态复活。
