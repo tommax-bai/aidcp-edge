@@ -31,7 +31,11 @@ import {
   canonicalPostId,
 } from '../facebook/post-identity-core.js';
 import { nativeActionNameForCommand, nativeCommandForEnvelope } from './command-mapper.js';
-import type { NativePageCommandExecution, NativePagePlatform } from './client.js';
+import type {
+  NativePageCommandExecution,
+  NativePageEngineErrorCode,
+  NativePagePlatform,
+} from './client.js';
 import { NativePageRuntime } from './runtime.js';
 
 export interface NativeBrowseSessionOptions {
@@ -260,6 +264,379 @@ export const FACEBOOK_UNSUPPORTED_COMMANDS = new Set<Envelope['type']>([
   'notification.back_home',
 ]);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 会话启动失败的**具名上报口**（change restore-xiaohongshu-native-session-honesty §2）
+//
+// 起因：四个启动点（首次 / 身份重立后 / 恢复自动化 / 冷待机唤醒）此前各自
+// `start().catch(console.error)`。失败之后云端不知道有过一次点火（浏览闭环由边缘首扫点火，
+// 火没点着，任何看门狗与升级都不会触发）、外壳的运行态停在「正常」、周期巡视也跟着不武装。
+// 这正是红线「停手在下游被读成什么都没发生」的形态：**边缘停了手，上游读到的是「一切正常，
+// 只是还没有内容」**——2026-07-29 起小红书一条命令都没执行过，而每一层都在说它在正常工作。
+//
+// 三件事在这里**分开判、分开写**（完整判据见控制仓 `docs/stop-or-continue.md` §3）：
+//   · 要不要动手 —— 不归本口管（会话已经动过手，这里处理的是那一手的失败）；
+//   · 如实回报什么 —— 认出来的原因照它自己的名字报；**没认出来的以 `unrecognized` 露出，
+//     MUST NOT 折进任何已有失败名**（跨层兜底桶会把一次可恢复失败传成终局判决）；
+//   · 这一趟继不继续 —— **只看结构性**：同一步在重新加载后的页面上原样重来，
+//     有没有可能得到不同结果。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 四个启动点的具名身份。回执与诊断行都带它——「哪一条路径点火失败」是排障的第一个问题。 */
+export type BrowseStartSite =
+  | 'first_start'
+  | 'identity_reestablished'
+  | 'automation_resumed'
+  | 'standby_wake'
+  | 'self_heal';
+
+export type BrowseStartFailureClass = 'structural' | 'recoverable';
+
+/**
+ * 引擎错误码 → 结构性分档。**唯一**一张表，且是 `Record<全部错误码, 分档>`：
+ *
+ * 这个形状不是随手选的，它同时买到三件事，而这三件正是 `docs/stop-or-continue.md` §7
+ * 唯一那条可机械化断言要求的（互斥 + 穷尽）：
+ *   ① **互斥** —— 一个码只能映到一个分档，语法上就写不出第二条；
+ *   ② **穷尽** —— 少一个码 typecheck 当场失败，多一个不存在的码同样失败；
+ *   ③ **抗漂移** —— 引擎将来新增一个错误码，编译器会逼作者当场回答「它重来会不会不一样」，
+ *      而不是让它悄悄落进某个默认桶（memory `hand-copied-name-lists`：手抄名单漏项时恰好是绿的）。
+ *
+ * 判据（逐条都要能回答「重新加载页面后原样重来，可能不同吗？」）：
+ *   · `invalid_request` / `unsupported_protocol` / `unsupported_command` / `endpoint_not_loopback`
+ *     ——**门口拒收**。请求本身或宿主与引擎的契约不合格，页面状态**根本不参与**这个判定，
+ *     所以重来必然同一结果 ⇒ 结构性。（小红书这次停摆就是 `invalid_request`。）
+ *   · 其余全部 ⇒ **非结构性**。端点不可达 / CDP 没连上 / 引擎还没起来 / 超时 / 被取消 /
+ *     会话状态错位，都可能只是「此刻不行」。
+ *
+ * **默认方向必须是非结构性**：把没想清楚的码放进结构性侧，代价是把一个只要重来就能好的
+ * 环境永久判死；反过来最多多花几次有界重试。`invalid_protocol` 因此留在非结构性侧——
+ * 它长得像契约违背，但一帧被截断的响应也会命中它。
+ */
+export const BROWSE_START_FAILURE_CLASS: Readonly<Record<NativePageEngineErrorCode, BrowseStartFailureClass>> = {
+  // —— 门口拒收：准入不通过 / 能力不支持 ——
+  invalid_request: 'structural',
+  unsupported_protocol: 'structural',
+  unsupported_command: 'structural',
+  endpoint_not_loopback: 'structural',
+  // —— 其余一律非结构性：重来有可能不同 ——
+  confirmed: 'recoverable',
+  session_already_open: 'recoverable',
+  session_not_open: 'recoverable',
+  session_mismatch: 'recoverable',
+  task_mismatch: 'recoverable',
+  duplicate_command: 'recoverable',
+  command_in_progress: 'recoverable',
+  deadline_expired: 'recoverable',
+  cancelled: 'recoverable',
+  commit_window_unavailable: 'recoverable',
+  endpoint_unreachable: 'recoverable',
+  no_matching_target: 'recoverable',
+  cdp_connect_failed: 'recoverable',
+  cdp_timeout: 'recoverable',
+  cdp_error: 'recoverable',
+  probe_failed: 'recoverable',
+  engine_internal: 'recoverable',
+  engine_timeout: 'recoverable',
+  engine_exited: 'recoverable',
+  invalid_protocol: 'recoverable',
+};
+
+/** 未识别原因的**自己的名字**。它不是一个桶，是一句「我没认出来」。 */
+export const BROWSE_START_UNRECOGNIZED_CODE = 'unrecognized';
+
+export interface BrowseStartFailureVerdict {
+  /** 结构性 ⇒ 允许终局；非结构性 ⇒ MUST NOT 落终态，MUST 留带上限的自愈通道。 */
+  structural: boolean;
+  /** 认没认出来。三态不得压成一态：未识别既不是结构性、也不是某个已知可恢复原因。 */
+  recognized: boolean;
+  /** 原因码：认出来的用引擎原码；没认出来的恒为 `unrecognized`（原码保留在 detail 里）。 */
+  code: string;
+  /** 现场原文（截断）。只供人排障，不作被解析的证据面。 */
+  detail: string;
+}
+
+const BROWSE_START_DETAIL_MAX = 400;
+
+/** 分档：纯函数、无副作用，用例可直接喂违规输入（含伪造码、非 Error、null）。 */
+export function classifyBrowseStartFailure(error: unknown): BrowseStartFailureVerdict {
+  const raw = error instanceof Error ? error.message : String(error ?? '');
+  const detail = raw.slice(0, BROWSE_START_DETAIL_MAX);
+  const codeField = (error as { code?: unknown } | null | undefined)?.code;
+  const code = typeof codeField === 'string' && codeField ? codeField : '';
+  const classification: BrowseStartFailureClass | undefined =
+    Object.prototype.hasOwnProperty.call(BROWSE_START_FAILURE_CLASS, code)
+      ? BROWSE_START_FAILURE_CLASS[code as NativePageEngineErrorCode]
+      : undefined;
+  if (classification !== undefined) {
+    return { structural: classification === 'structural', recognized: true, code, detail };
+  }
+  // 没认出来 ⇒ 按可恢复处理（绝不擅自判死），但**名字必须是它自己的**，
+  // 且把原码原封不动带进现场，否则下一个排障的人连「引擎当时说的是什么」都拿不到。
+  return {
+    structural: false,
+    recognized: false,
+    code: BROWSE_START_UNRECOGNIZED_CODE,
+    detail: code ? `${code}: ${detail}` : detail,
+  };
+}
+
+/** 一次上报的完整内容：云端拿 `{code, message}`，外壳拿 `postureReason`，日志拿全部。 */
+export interface BrowseStartFailureReport {
+  site: BrowseStartSite;
+  verdict: BrowseStartFailureVerdict;
+  /** 结构性恒 false；非结构性时表示「这次失败之后还排了一次有界重试」。 */
+  selfHealArmed: boolean;
+  selfHealUsed: number;
+  selfHealMax: number;
+  /** 上报云端的原因码。结构性与非结构性用**不同前缀**，跨层不会被读成同一件事。 */
+  code: string;
+  /** 上报云端的人读说明。结构性时 MUST 写清「为什么重来也不会变」。 */
+  message: string;
+  /** 外壳运行态的原因串（落进那张持久失败卡片）。 */
+  postureReason: string;
+}
+
+const BROWSE_START_SITE_LABEL: Readonly<Record<BrowseStartSite, string>> = {
+  first_start: '首次启动',
+  identity_reestablished: '身份重立后',
+  automation_resumed: '恢复自动化',
+  standby_wake: '冷待机唤醒',
+  self_heal: '有界自愈重试',
+};
+
+export function browseStartFailureReport(
+  site: BrowseStartSite,
+  verdict: BrowseStartFailureVerdict,
+  selfHeal: { armed: boolean; used: number; max: number },
+): BrowseStartFailureReport {
+  const where = `${BROWSE_START_SITE_LABEL[site]}（site=${site}）`;
+  const unrecognizedNote = verdict.recognized
+    ? ''
+    : '未识别原因（按可恢复处理，MUST NOT 折进任何已有失败名）；';
+  if (verdict.structural) {
+    return {
+      site,
+      verdict,
+      selfHealArmed: false,
+      selfHealUsed: 0,
+      selfHealMax: 0,
+      code: `browse_start_refused:${verdict.code}`,
+      message: `浏览会话在${where}被引擎门口拒收（${verdict.code}）：结构性失败——`
+        + '准入 / 能力判定不看页面状态，同一步在重新加载后的页面上原样重来必然得到同一结果，'
+        + `因此不再自动重试，需要改配置或改版本才可能不同。现场：${verdict.detail}`,
+      postureReason: `browse_start_refused:${verdict.code}`,
+    };
+  }
+  if (selfHeal.armed) {
+    return {
+      site,
+      verdict,
+      selfHealArmed: true,
+      selfHealUsed: selfHeal.used,
+      selfHealMax: selfHeal.max,
+      code: `browse_start_failed:${verdict.code}`,
+      message: `浏览会话在${where}未能启动（${verdict.code}）：${unrecognizedNote}`
+        + `非结构性失败、**未落终态**，已排入有界自愈第 ${selfHeal.used}/${selfHeal.max} 次重试。`
+        + `现场：${verdict.detail}`,
+      postureReason: `browse_start_retrying:${verdict.code}:${selfHeal.used}/${selfHeal.max}`,
+    };
+  }
+  return {
+    site,
+    verdict,
+    selfHealArmed: false,
+    selfHealUsed: selfHeal.used,
+    selfHealMax: selfHeal.max,
+    code: `browse_start_failed:${verdict.code}`,
+    message: `浏览会话在${where}未能启动（${verdict.code}）：${unrecognizedNote}`
+      + `有界自愈 ${selfHeal.max} 次已用尽，仍未启动——这是「重试 ${selfHeal.max} 次未成」，`
+      + `不是「做不到」，重来仍有可能不同。现场：${verdict.detail}`,
+    postureReason: `browse_start_unavailable:${verdict.code}:retries_exhausted`,
+  };
+}
+
+/** 有界自愈的默认上限与节拍。上限是刚性要求：没有上限的自愈就是另一种静默。 */
+export const DEFAULT_BROWSE_START_SELF_HEAL_RETRIES = 3;
+export const DEFAULT_BROWSE_START_SELF_HEAL_DELAY_MS = 15_000;
+/** 云端不可达时最多攒多少条待补发。攒无上限会把一次长断连变成内存泄漏。 */
+const BROWSE_START_PENDING_MAX = 20;
+
+export interface BrowseStartFailureReporterDeps {
+  /**
+   * 上报云端。返回 `false` = 当下没送出去。
+   * **连不上云端不解除这项义务，只是延后**：本口会攒着，等 `flushPendingReports()` 补发。
+   */
+  reportToCloud: (report: BrowseStartFailureReport) => boolean;
+  /** 让外壳的运行态离开「正常」（走既有的运行姿态通道，不是日志措辞白名单）。 */
+  declareStalled: (reason: string) => void;
+  /** 收回上面那条声明。只在**确实是本口挂上去**的时候才会被调用。 */
+  clearStalled: () => void;
+  logger: (line: string) => void;
+  /** 有界自愈：重新点一次火。只有非结构性失败才会走到这里。 */
+  restart: () => Promise<void>;
+  /** 自愈准入：暂停中 / 冷待机 / 正在退出时 MUST NOT 擅自把浏览拉起来。 */
+  canSelfHeal: () => boolean;
+  maxSelfHealRetries?: number;
+  selfHealDelayMs?: number;
+  /** 定时器可注入，供用例驱动真实现（不让用例自己复制一份等价逻辑）。 */
+  setTimer?: (fn: () => void, ms: number) => { cancel: () => void };
+}
+
+const defaultTimer = (fn: () => void, ms: number): { cancel: () => void } => {
+  const handle = setTimeout(fn, ms);
+  (handle as { unref?: () => void }).unref?.();
+  return { cancel: () => clearTimeout(handle) };
+};
+
+/**
+ * 四个启动点共用的**唯一**失败出口。
+ *
+ * 它做且只做四件事，缺一件这次停摆就会以同样的方式被藏起来：
+ *   ① 上报云端（失败必须离开本进程）；
+ *   ② 让外壳运行态离开「正常」；
+ *   ③ 按结构性分档，并把分档写进回执；
+ *   ④ 非结构性失败留一条**带上限**的自愈通道，结构性失败一次都不重试。
+ *
+ * 恢复预算 **MUST 只由失败消费**：这里的计数只在 `report()` 里加一，
+ * 准备工作、正常启动、被暂停挡回都不消费（`docs/stop-or-continue.md` §4 Q2 推论）。
+ */
+export class BrowseStartFailureReporter {
+  private readonly maxSelfHealRetries: number;
+  private readonly selfHealDelayMs: number;
+  private readonly setTimer: (fn: () => void, ms: number) => { cancel: () => void };
+  private readonly pending: BrowseStartFailureReport[] = [];
+  private retriesUsed = 0;
+  private stallDeclared = false;
+  private timer?: { cancel: () => void };
+
+  constructor(private readonly deps: BrowseStartFailureReporterDeps) {
+    this.maxSelfHealRetries = Math.max(0, deps.maxSelfHealRetries ?? DEFAULT_BROWSE_START_SELF_HEAL_RETRIES);
+    this.selfHealDelayMs = Math.max(0, deps.selfHealDelayMs ?? DEFAULT_BROWSE_START_SELF_HEAL_DELAY_MS);
+    this.setTimer = deps.setTimer ?? defaultTimer;
+  }
+
+  /** 待补发的条数（外部只读，用于用例与排障）。 */
+  get pendingReportCount(): number {
+    return this.pending.length;
+  }
+
+  /** 自愈通道是否还武装着（用于用例断言「非结构性失败没落终态」）。 */
+  get selfHealArmed(): boolean {
+    return this.timer !== undefined;
+  }
+
+  get selfHealRetriesUsed(): number {
+    return this.retriesUsed;
+  }
+
+  report(error: unknown, site: BrowseStartSite): BrowseStartFailureReport {
+    const verdict = classifyBrowseStartFailure(error);
+    this.cancelSelfHeal();
+    if (verdict.structural) {
+      // 结构性：允许终局。**一次都不重试**——重试只会原样再撞一次同一堵墙，
+      // 而每一次重试都会在页面上多一次动作，是纯代价。
+      const report = browseStartFailureReport(site, verdict, { armed: false, used: 0, max: 0 });
+      this.emit(report);
+      return report;
+    }
+    // 非结构性：MUST NOT 落终态。预算只由失败消费。
+    const armed = this.retriesUsed < this.maxSelfHealRetries;
+    if (armed) this.retriesUsed += 1;
+    const report = browseStartFailureReport(site, verdict, {
+      armed,
+      used: this.retriesUsed,
+      max: this.maxSelfHealRetries,
+    });
+    this.emit(report);
+    if (armed) this.scheduleSelfHeal();
+    return report;
+  }
+
+  /**
+   * 一次启动**没有**抛出。收回停摆声明并把恢复预算还回去。
+   *
+   * 注：`start()` 在「已在跑 / 被任务接管 / 已关闭」时会直接返回，这三种情况同样会走到这里。
+   * 这是有意的——那三种状态下「自动化已停摆」本来就不成立（有任务在跑 / 正在退出），
+   * 而清除本身还有第二道闸（只清本口自己挂上去的那条声明）。
+   */
+  noteStarted(): void {
+    this.cancelSelfHeal();
+    this.retriesUsed = 0;
+    if (!this.stallDeclared) return;
+    this.stallDeclared = false;
+    this.deps.clearStalled();
+    this.deps.logger('[native-page] session.event event=browse_start_recovered');
+  }
+
+  /** 云端重连后补发攒下的上报。义务只是延后，不是解除。 */
+  flushPendingReports(): void {
+    const queued = this.pending.splice(0);
+    for (const report of queued) this.deliver(report);
+  }
+
+  /** 退出 / 关停时收掉自愈定时器，避免一条已作废的通道在进程收尾时又把浏览拉起来。 */
+  dispose(): void {
+    this.cancelSelfHeal();
+  }
+
+  private emit(report: BrowseStartFailureReport): void {
+    this.deps.logger(
+      `[native-page] session.event event=browse_start_failed site=${report.site}`
+        + ` code=${report.verdict.code} structural=${report.verdict.structural}`
+        + ` recognized=${report.verdict.recognized}`
+        + ` self_heal=${report.selfHealArmed ? `${report.selfHealUsed}/${report.selfHealMax}` : 'none'}`,
+    );
+    this.deps.logger(`[aidcp-edge] ${report.message}`);
+    this.deliver(report);
+    // 外壳侧：无论哪一档都必须离开「正常」。停摆的是同一件事（浏览没跑起来），
+    // 差别写在 reason 里（拒收 / 重试中 / 重试已用尽），运营据此知道要不要等。
+    this.stallDeclared = true;
+    this.deps.declareStalled(report.postureReason);
+  }
+
+  private deliver(report: BrowseStartFailureReport): void {
+    let delivered = false;
+    try {
+      delivered = this.deps.reportToCloud(report);
+    } catch {
+      delivered = false;
+    }
+    if (delivered) return;
+    if (this.pending.length >= BROWSE_START_PENDING_MAX) this.pending.shift();
+    this.pending.push(report);
+    this.deps.logger(
+      `[native-page] session.event event=browse_start_report_deferred site=${report.site}`
+        + ` pending=${this.pending.length}`,
+    );
+  }
+
+  private scheduleSelfHeal(): void {
+    this.timer = this.setTimer(() => {
+      this.timer = undefined;
+      if (!this.deps.canSelfHeal()) {
+        // 被暂停 / 冷待机挡回**不消费**这次机会以外的任何东西，也绝不硬闯：
+        // 那会把用户的一次「暂停」变成一次自动恢复浏览。
+        this.deps.logger('[native-page] session.event event=browse_start_self_heal_skipped reason=not_permitted');
+        return;
+      }
+      this.deps.logger(
+        `[native-page] session.event event=browse_start_self_heal attempt=${this.retriesUsed}/${this.maxSelfHealRetries}`,
+      );
+      void this.deps.restart().then(
+        () => this.noteStarted(),
+        (error: unknown) => {
+          this.report(error, 'self_heal');
+        },
+      );
+    }, this.selfHealDelayMs);
+  }
+
+  private cancelSelfHeal(): void {
+    this.timer?.cancel();
+    this.timer = undefined;
+  }
+}
+
 export class NativeBrowseSession implements EdgeBrowseSession {
   private readonly ownerId: string;
   private readonly logger: (message: string) => void;
@@ -336,9 +713,14 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       await this.executeAndReport({ kind: 'browse_scroll', params: { reason: 'initial_scan' } });
       this.logger(`[native-page] ${this.options.platform ?? 'xiaohongshu'} Native-only browse session ready`);
       this.diagnostic('session_ready');
-      this.scheduleProbe();
     } finally {
       this.running = false;
+      // 巡视武装 **MUST NOT 依赖首扫成功**（change restore-xiaohongshu-native-session-honesty 2.5）。
+      // 它原先排在 `session_ready` 之后：首扫一抛，整条周期观测就再也不武装，而**四个启动点没有
+      // 一个会再次触发它**——首扫失败恰恰是最需要它的时刻（阻断观测是那时唯一还睁着的眼睛）。
+      // 放在 finally 而不是 try 之前，是为了不改变既有的并发面：探针照旧只在首扫落定后才起拍，
+      // 只是不再要求那一拍必须是成功的。停手 / 已关闭仍拦得住（判据在 scheduleProbe 里）。
+      this.scheduleProbe();
     }
   }
 

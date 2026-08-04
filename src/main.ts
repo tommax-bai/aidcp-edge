@@ -80,11 +80,13 @@ import type {
 import type { EdgeBrowseSession } from './browse/edge-browse-session.js';
 import type { IdentityDecision, SelfIdentityResult } from './cdp/self-identity.js';
 import {
+  BrowseStartFailureReporter,
   NativeBrowseSession,
   NativePageRuntime,
   NativePublishExecutor,
   nativeActionNameForCommand,
   readNativeFacebookIdentity,
+  type BrowseStartSite,
 } from './native-page-engine/index.js';
 import {
   reconcileFacebookStartupAuth,
@@ -751,6 +753,13 @@ async function main(): Promise<void> {
   // （suspendObservation / resumeObservation / observationStatus），而生命周期托管与身份校验都要用它们。
   // 在装配处一并赋上，避免为此去动平台无关的 `EdgeBrowseSession` 契约。
   let nativeBrowse: NativeBrowseSession | undefined;
+  /**
+   * 会话启动失败的**唯一**出口（change restore-xiaohongshu-native-session-honesty §2）。
+   * 判据、分档、上报、自愈上限全在 `native-page-engine/browse-session.ts` 的可注入实现里，
+   * 宿主只做接线——留在这个无导出的 `main()` 闭包里的判据，用例一行都驱动不了（这条教训
+   * 在 `client/runtime-posture.ts` 文件头有完整记录）。装配在浏览会话之后，故此处只声明。
+   */
+  let browseStartFailures: BrowseStartFailureReporter | undefined;
   // 运行期身份持续校验体（§5）。装配在自动浏览会话之后；无浏览器 / 启动即暂停时「装配但不启动」。
   let identityGuard: IdentityRevalidator | undefined;
   // 启动校验体（含失效回调 → 身份重立链）。回调闭包要捕获浏览会话，故在装配处赋值。
@@ -794,6 +803,29 @@ async function main(): Promise<void> {
       sendIpc: sendLifecycleIpc,
       logger: (line) => console.warn(line),
     });
+  };
+  /**
+   * 浏览会话的**唯一**启动入口（四个启动点全部经它）。
+   *
+   * 此前四处各写一份 `start().catch(console.error)`：失败之后云端不知道有过一次点火、
+   * 外壳运行态停在「正常」、周期巡视也不武装。现在成功与失败各有一条具名的边：
+   * 成功 → 收回停摆声明；失败 → 交给具名上报口分档、上报、翻姿态、按需留有界自愈。
+   */
+  const startBrowseSession = (site: BrowseStartSite): void => {
+    const session = browse;
+    if (!session) return;
+    session.start().then(
+      () => browseStartFailures?.noteStarted(),
+      (error: unknown) => {
+        if (browseStartFailures) {
+          browseStartFailures.report(error, site);
+          return;
+        }
+        // 上报口未装配时**绝不静默**：这条路径只有在浏览会话本身没装配时才可能走到
+        // （那时 `browse` 也是 undefined、上面已经返回），留一行是为了万一装配顺序被改动。
+        console.error(`[aidcp-edge] 浏览会话启动失败（site=${site}，失败上报口未装配）:`, error);
+      },
+    );
   };
   const clearColdStandbyCloudRetry = (): void => {
     if (coldStandbyCloudRetryTimer) clearTimeout(coldStandbyCloudRetryTimer);
@@ -1402,6 +1434,39 @@ async function main(): Promise<void> {
     });
     browse = nativeSession;
     nativeBrowse = nativeSession;
+    // —— 会话启动失败的具名上报口（change restore-xiaohongshu-native-session-honesty §2）——
+    // 四条边全部具名注入，宿主这里没有任何判据：
+    //   上报云端 / 让外壳离开「正常」 / 收回声明 / 有界自愈重新点火 + 它的准入。
+    browseStartFailures = new BrowseStartFailureReporter({
+      reportToCloud: (report) => {
+        // 失败必须**离开本进程**。协议既有的通用错误信封承载它（`{code, message}` 正好是
+        // 这条事实的形状），不新造消息类型——新增类型要四处同步、且会撞上并行的协议单写者。
+        // 连不上就返回 false：义务不解除，只延后（下面订阅 cloud.reconnected 补发）。
+        if (!client.isConnected()) return false;
+        try {
+          client.send('error', { code: report.code, message: report.message });
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      // 走**既有的运行姿态通道**（不是日志措辞白名单）：`automation_stalled` 的语义正是
+      // 「身份完好、但浏览停着」，外壳据此把 edge 轴翻 warning、session 轴落 idle，
+      // 并写一张日志行清不掉的持久失败卡片。IPC 送不到时还有 `自动化已停摆` 那条既有白名单兜底。
+      declareStalled: (reason) => publishRuntimePosture({ kind: 'automation_stalled', reason }),
+      clearStalled: () => {
+        // 只收回**本口挂上去**的那条。身份终局 / 重立中的闩绝不能被一次浏览恢复顺手擦掉。
+        if (currentPosture.kind !== 'automation_stalled') return;
+        publishRuntimePosture({ kind: 'healthy' });
+      },
+      logger: (line) => console.log(line),
+      restart: () => nativeSession.start(),
+      // 自愈准入：暂停中 / 冷待机 / 正在退出时绝不擅自把浏览拉起来——那会把用户的一次
+      // 「暂停」变成一次自动恢复浏览（`lifecycle` 在下方装配，此处只在回调里读它的实时态）。
+      canSelfHeal: () => !coldStandbyActive && lifecycle.state === 'active',
+    });
+    // 云端重连即补发攒下的启动失败上报（断连期间的上报义务只是延后，不是解除）。
+    client.on('cloud.reconnected', () => browseStartFailures?.flushPendingReports());
     // 身份闸（S9）：页面动作（评论 / 点赞 / 关注 / 加群…）都以页面上登着的那个账号的名义发生，
     // 身份未落定时一律拒绝并如实回执（`action.completed` 成功位为假 + 具名原因）。救援 / 读 / 收尾类
     // 命令在判据里具名放行。判据 + 回执 + 「不往下走」整段在 guardCommandsUnderIdentity 里。
@@ -1432,7 +1497,7 @@ async function main(): Promise<void> {
       });
     }
     if (!coldStandbyActive && !startAutomationPaused) {
-      browse.start().catch((err) => console.error('[aidcp-edge] Native 浏览会话异常:', err));
+      startBrowseSession('first_start');
     }
     console.log(`[aidcp-edge] ${platformDriver.platform} 页面执行已切换为 Native-only（无 shadow、无 JavaScript fallback）`);
 
@@ -1518,9 +1583,7 @@ async function main(): Promise<void> {
       connectCloud: () => client.connect(),
       rebaseline: (nextAccountId) => identityGuard?.rebaseline(nextAccountId),
       resumeObservation: () => nativeSession.resumeObservation(),
-      startBrowse: () => {
-        nativeSession.start().catch((err) => console.error('[aidcp-edge] 身份重立后浏览会话异常:', err));
-      },
+      startBrowse: () => startBrowseSession('identity_reestablished'),
     });
     startIdentityGuard = (): void => {
       if (!accountId) return; // 无身份态不启动校验体：没有基线可比，跑起来只会每拍打日志。
@@ -1552,6 +1615,9 @@ async function main(): Promise<void> {
       // stop() 同时递增代际，把**已经在途**的一次校验与一条重立链一起作废（只清定时器拦不住它们：
       // 一条没拦住的在途链条会在暂停期间关掉云端连接、几秒后又把浏览拉起来）。
       identityGuard?.stop();
+      // 启动失败的有界自愈通道同理：一条已排上的重试会在暂停期间把浏览重新拉起来。
+      // （`canSelfHeal` 也拦得住，但那是第二道网——通道该在这里就作废。）
+      browseStartFailures?.dispose();
       reportBrowseDrainTimeout((await browse?.stopAndWait(BROWSE_DRAIN_MS)) ?? true, 'user_pause');
     },
     // 「浏览器缺席请走唤醒」+ 身份准入 + 三件恢复动作**整段**都在 identity-guard 的可注入实现里
@@ -1565,11 +1631,7 @@ async function main(): Promise<void> {
       reportPosture: publishRuntimePosture,
       haltReason: () => (currentPosture.kind === 'identity_halted' ? currentPosture.reason : 'identity_halted'),
       resumeObservation: () => nativeBrowse?.resumeObservation(),
-      startBrowse: () => {
-        browse?.start().catch((error) => {
-          console.error('[aidcp-edge] 恢复自动化失败:', error);
-        });
-      },
+      startBrowse: () => startBrowseSession('automation_resumed'),
       startIdentityGuard: () => startIdentityGuard?.(),
     }),
     deactivate: async (reason) => {
@@ -1577,6 +1639,7 @@ async function main(): Promise<void> {
       clearColdStandbyCloudRetry();
       console.log(`\n[aidcp-edge] 自动运营停用流程启动（reason=${reason}）...`);
       identityGuard?.stop();
+      browseStartFailures?.dispose();
       // 暂停/关闭/回收都先诚实终止在途发布，绝不让半截命令跨恢复重放。
       failInFlightPublishesHonestly(reason);
       // 终态关闭：用 closeAndWait()（非 close()/stop()）——置 closing 使停用窗口内迟到的云端命令绝不唤醒
@@ -1789,9 +1852,7 @@ async function main(): Promise<void> {
           cloudLinkAttached: () => client.isConnected(),
           restoreCloudLink: () => client.connect(),
           reportPosture: publishRuntimePosture,
-          startBrowse: () => {
-            browse?.start().catch((err) => console.error('[aidcp-edge] 唤醒后浏览会话异常:', err));
-          },
+          startBrowse: () => startBrowseSession('standby_wake'),
           startIdentityGuard: () => startIdentityGuard?.(),
         });
         console.log(`[aidcp-edge] ✓ 唤醒完成：浏览器已重建、身份已确认、自动化${resumeAutomation ? '已恢复' : '保持暂停'}`);
