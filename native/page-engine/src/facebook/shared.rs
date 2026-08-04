@@ -809,6 +809,11 @@ pub(crate) async fn evaluate_facebook_router_until_requested_detail(
     }
 }
 
+/// 文档就绪等待。**判据只有文档状态，不含任何地址判据** —— 这是刻意的：
+/// 它有十几个调用点（feed / session / runtime），各自跳向互不相同的目的地，
+/// 给它加「必须落到某个地址」会一次性改写全部调用方的语义。
+/// 需要「确认落到某个地址」的路径请用各自的专用等待
+/// （群根见 `wait_for_facebook_group_root_landing`）。
 pub(crate) async fn wait_for_facebook_ready(
     session: &mut EngineSession,
     timeout: Duration,
@@ -830,6 +835,108 @@ pub(crate) async fn wait_for_facebook_ready(
                 ErrorCode::ProbeFailed,
                 "native Facebook navigation did not reach a ready document",
             ));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// 群根落地确认窗（change restore-facebook-first-post-recovery）。
+///
+/// 只覆盖「地址换过来」这一件事，比内容水合快得多，10s 已经很宽。
+/// 抬高它前先算首帖命令的外层原子上限还剩多少余量
+/// （`src/native-page-engine/browse-session.ts` 的 `FACEBOOK_FIRST_POST_OPEN_TIMEOUT_MS` = 135s）：
+/// 只放宽内层而不抬外层，等于把边端一个具名失败改判成外层合成失败。
+pub(crate) const FACEBOOK_GROUP_ROOT_LANDING_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 「跳转真的落地了吗」的纯判据。
+///
+/// 只有两条，且都是**落地必需**的，MUST NOT 借机塞姿态项
+/// （带不带查询串、水合完没完、区域划不划得清都各有归属，塞进来就是把一次可恢复的抖动变成终局）：
+/// ① 文档就绪；② 当前地址就是请求的那个群根。
+///
+/// 读数刻意取自页面基础探测（就绪等待用的同一个），**不用群根复用探测**：
+/// 后者是「这一页能不能直接复用」那个决策的读数，两件事共用一个读数会让「决策做了几次」
+/// 与「等了几轮」在观测上分不开。
+pub(crate) fn facebook_group_root_landed(
+    origin: Option<&str>,
+    path: Option<&str>,
+    ready_state: Option<&str>,
+    group_url: &Url,
+) -> bool {
+    if !matches!(ready_state, Some("interactive" | "complete")) {
+        return false;
+    }
+    if origin != Some(group_url.origin().ascii_serialization().as_str()) {
+        return false;
+    }
+    let Some(path) = path else {
+        return false;
+    };
+    let observed = facebook_path_parts(path);
+    let expected = facebook_path_parts(group_url.path());
+    observed.len() == 2
+        && expected.len() == 2
+        && observed[0].eq_ignore_ascii_case(expected[0])
+        && observed[1].eq_ignore_ascii_case(expected[1])
+}
+
+fn facebook_path_parts(path: &str) -> Vec<&str> {
+    path.split('/').filter(|part| !part.is_empty()).collect()
+}
+
+async fn probe_facebook_group_root_landing(
+    session: &mut EngineSession,
+    group_url: &Url,
+) -> Result<bool, EngineError> {
+    let expression = facebook::page_probe_expression()?;
+    let raw = session.cdp.evaluate(&expression, true).await?;
+    let result = facebook::result_from_cdp(&raw)?;
+    Ok(facebook_group_root_landed(
+        result
+            .output
+            .pointer("/value/origin")
+            .and_then(serde_json::Value::as_str),
+        result
+            .output
+            .pointer("/value/path")
+            .and_then(serde_json::Value::as_str),
+        result
+            .output
+            .pointer("/value/readyState")
+            .and_then(serde_json::Value::as_str),
+        group_url,
+    ))
+}
+
+/// 群根导航的落地等待。
+///
+/// 导航是「发出即返回」的（`cdp.rs` 的 `navigate` 只把命令送出去，不等新文档接管），
+/// 新文档接管之前**上一页仍然是 ready 的** —— 只看文档就绪的等待会瞬间通过，
+/// 于是后面每一道检查都跑在上一页上，一次「上一段任务把浏览器留在同群某条帖详情页」的衔接
+/// 就会让评论落到陌生人的帖子下。
+///
+/// 返回 `Ok(false)` = 有界窗口内没确认落地。**这不是终局**，由调用方按姿态类处置。
+pub(crate) async fn wait_for_facebook_group_root_landing(
+    session: &mut EngineSession,
+    group_url: &Url,
+    timeout: Duration,
+    cancellation: Option<&AtomicBool>,
+) -> Result<bool, EngineError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if facebook_command_cancelled(cancellation) {
+            return Err(cancelled_before_dispatch());
+        }
+        // 换页途中旧执行上下文会被销毁、探测会报错。那是「还没落地」而非失败：
+        // 照 `?` 抛出去等于把一次正常的换页判成终局。
+        if probe_facebook_group_root_landing(session, group_url)
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(false);
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -1194,5 +1301,63 @@ mod tests {
         );
         assert!(unknown.contains(r#""cleared":"unknown""#));
         assert!(unknown.contains(r#""attempts":3"#));
+    }
+
+    /// task 5.1 —— 陈旧就绪文档不算落地。
+    ///
+    /// 导航发出即返回，新文档接管前上一页仍然 `complete`。若落地判据只看文档状态，
+    /// 「还站在上一段任务留下的同群某条帖详情页上」这一幕会**瞬间**通过，
+    /// 后面每一道检查都跑在上一页上。
+    #[test]
+    fn a_ready_document_on_the_previous_page_is_never_landing_evidence() {
+        let group = validated_facebook_group_url("https://www.facebook.com/groups/945390701793119")
+            .expect("group");
+        let origin = Some("https://www.facebook.com");
+
+        // 上一页：同一个群的某条帖详情页，文档已经 complete。
+        assert!(!facebook_group_root_landed(
+            origin,
+            Some("/groups/945390701793119/posts/7"),
+            Some("complete"),
+            &group,
+        ));
+
+        // 别的群的群根同样不算落地（地址判据必须比到群号）。
+        assert!(!facebook_group_root_landed(
+            origin,
+            Some("/groups/42"),
+            Some("complete"),
+            &group,
+        ));
+
+        // 地址对了但文档还没就绪 —— 也不算落地。
+        assert!(!facebook_group_root_landed(
+            origin,
+            Some("/groups/945390701793119"),
+            Some("loading"),
+            &group,
+        ));
+
+        // 读不出地址时不得当作落地（读不到 MUST NOT 判成「就是那一页」）。
+        assert!(!facebook_group_root_landed(
+            origin,
+            None,
+            Some("complete"),
+            &group
+        ));
+
+        // 正常落地：地址已换到请求的群根且文档就绪。尾斜杠与大小写不参与判定。
+        assert!(facebook_group_root_landed(
+            origin,
+            Some("/groups/945390701793119"),
+            Some("interactive"),
+            &group,
+        ));
+        assert!(facebook_group_root_landed(
+            origin,
+            Some("/groups/945390701793119/"),
+            Some("complete"),
+            &group,
+        ));
     }
 }

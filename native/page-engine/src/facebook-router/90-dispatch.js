@@ -62,22 +62,20 @@
     }
     if(p.reason!=='initial_scan'){
       const firstPostProbe=p.reason==='first_commentable_group_post_probe';
-      if(firstPostProbe&&!firstPostGroupRootMatches(p.container)){
-        return done(firstPostTargetContextMismatchCards());
-      }
+      const firstPostGuard=()=>firstPostProbe?firstPostGroupRootFailure(p.container):null;
+      const beforeScroll=firstPostGuard();
+      if(beforeScroll)return done(firstPostGroupRootFailureCards(beforeScroll));
       // 滚动与位移/到底回报都必须落在**真正在滚的那个元素**上（20-feed.js `feedScrollNode`）。
       // 群页有一类版式文档本身不滚，照滚窗口 ⇒ 位移恒 0、到底恒真，Native 的「没动且到底」判据
       // 从第一轮起就成立，四轮下滚预算实际只跑一轮——首帖没找到就直接放弃。窗口真的会滚时行为不变。
       const before=feedScrollBy(Math.max(420,Math.round((window.innerHeight||800)*0.8)));
       await sleep(450);
       if(firstPostProbe)await sleep(2000);
-      if(firstPostProbe&&!firstPostGroupRootMatches(p.container)){
-        return done(firstPostTargetContextMismatchCards());
-      }
+      const afterSettle=firstPostGuard();
+      if(afterSettle)return done(firstPostGroupRootFailureCards(afterSettle));
       const output=firstPostProbe?await firstPostCards():await feedCards();
-      if(firstPostProbe&&!firstPostGroupRootMatches(p.container)){
-        return done(firstPostTargetContextMismatchCards());
-      }
+      const afterCards=firstPostGuard();
+      if(afterCards)return done(firstPostGroupRootFailureCards(afterCards));
       output.value.movement=feedScrollMovement(before);
       return done(output);
     }
@@ -85,9 +83,11 @@
   }
   if(kind==='feed_refresh'){
     if(p.reason!=='first_commentable_group_post_probe')return done(await feedCards());
-    if(!firstPostGroupRootMatches(p.container,true))return done(firstPostTargetContextMismatchCards());
+    const beforeCards=firstPostGroupRootFailure(p.container,true);
+    if(beforeCards)return done(firstPostGroupRootFailureCards(beforeCards));
     const output=await firstPostCards();
-    return done(firstPostGroupRootMatches(p.container,true)?output:firstPostTargetContextMismatchCards());
+    const afterCards=firstPostGroupRootFailure(p.container,true);
+    return done(afterCards?firstPostGroupRootFailureCards(afterCards):output);
   }
   if(kind==='search_execute'){
     if(!p.container)return fail('search','permission_gated');

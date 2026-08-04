@@ -317,6 +317,74 @@ test('Facebook first-post candidate probes reject non-exact group-root contexts'
   }
 });
 
+/**
+ * change restore-facebook-first-post-recovery —— 入参装饰不是身份问题。
+ *
+ * 查询串 / 哈希曾让「我们自己发过去的那个群地址」直接判无效，而回上去的原因是
+ * `target_context_mismatch`：一个调用方一行就能修的格式问题被说成了页面身份问题，
+ * 于是运营去查页面、查不出任何东西。
+ *
+ * 这里守两件事：带跟踪参数的群链接照常走通；真的不是群地址时**另有其名**。
+ * 页面侧那几项判据（来源 / 地址与群根全等 / 页面类型 / 群号 / 滚动在顶部）不在本用例的放宽范围内。
+ */
+test('Facebook first-post accepts a decorated group link and names a non-group request separately', async () => {
+  const groupPage = `
+    <main>
+      <h1>Agent Builders</h1>
+      <div role="feed">
+        <article role="article">
+          <h2><a href="/people/Alice/123456/">Alice</a></h2>
+          <div data-ad-rendering-role="story_message">The first commentable post</div>
+          <a href="/groups/945390701793119/posts/333/">2h</a>
+          <button aria-label="Comment">Comment</button>
+        </article>
+      </div>
+    </main>
+  `;
+
+  for (const decorated of [
+    'https://www.facebook.com/groups/945390701793119?fbclid=IwAR_tracking',
+    'https://www.facebook.com/groups/945390701793119/#recent',
+  ]) {
+    install(groupPage, 'https://www.facebook.com/groups/945390701793119');
+    const result = await run({
+      kind: 'feed_refresh',
+      params: { reason: 'first_commentable_group_post_probe', container: decorated },
+    });
+    const cards = result.output.value.cards as Array<Record<string, unknown>>;
+    assert.equal(result.output.value.selectionReason, undefined, decorated);
+    assert.equal(cards.length, 1, decorated);
+    assert.equal(
+      cards[0]?.noteId,
+      'https://www.facebook.com/groups/945390701793119/posts/333',
+      decorated,
+    );
+  }
+
+  // 真的不是群地址：仍然判无效，但**不得**复用帖子身份的原因值。
+  install(groupPage, 'https://www.facebook.com/groups/945390701793119');
+  const invalid = await run({
+    kind: 'feed_refresh',
+    params: {
+      reason: 'first_commentable_group_post_probe',
+      container: 'https://www.facebook.com/marketplace',
+    },
+  });
+  assert.deepEqual(invalid.output.value.cards, []);
+  assert.equal(invalid.output.value.selectionReason, 'invalid_requested_group_url');
+
+  // 引擎侧必须**按名认得**这个原因：两份工件手抄，行为测试原理上看不见对面漏改，
+  // 漏了它会掉进「未识别原因」而不是以入参问题露出。
+  const runtimeSource = await readFile(
+    resolve(repoRoot, 'native/page-engine/src/facebook/runtime.rs'),
+    'utf8',
+  );
+  assert.ok(
+    runtimeSource.includes('"invalid_requested_group_url"'),
+    'runtime.rs 的失败分类必须具名列出 invalid_requested_group_url',
+  );
+});
+
 test('Facebook first-post scroll settles for two seconds before probing hydrated cards', async () => {
   const dom = install(`
     <main>

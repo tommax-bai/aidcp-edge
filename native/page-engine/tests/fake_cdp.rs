@@ -2276,6 +2276,11 @@ async fn facebook_first_post_reuse_context_mismatch_falls_back_only_once() {
         "the candidate probe is retried once after canonical navigation"
     );
     assert_eq!(
+        router_call_count(&requests, "browse_scroll"),
+        4,
+        "a posture-class probe failure spends the scroll budget before the corrective navigation"
+    );
+    assert_eq!(
         page_navigation_count_to(&requests, "https://www.facebook.com/groups/945390701793119"),
         1,
         "a reused-page context mismatch gets one canonical-root fallback"
@@ -5134,6 +5139,18 @@ async fn spawn_facebook_first_post_root_fallback_cdp(
                         }),
                     )
                 }
+                // 姿态类失败改为消费下滚预算后续探（change restore-facebook-first-post-recovery），
+                // 于是这条竞态在纠正导航之前会先把四轮下滚走完。竞态本身在导航之前一直存在，
+                // 所以每一轮都照旧回同一条姿态失败。
+                Some("browse_scroll") => router_cdp(
+                    "page_cards",
+                    json!({
+                        "cards": [],
+                        "selectionReason": "target_context_mismatch",
+                        "listKind": "feed",
+                        "listState": "present_unreportable"
+                    }),
+                ),
                 Some("comment_editor_probe") => router_cdp(
                     "text_target",
                     json!({
@@ -5193,7 +5210,8 @@ async fn spawn_facebook_first_post_reuse_context_mismatch_cdp()
                 ),
                 Some("page_probe") => facebook_ready_cdp("/groups/945390701793119"),
                 Some("consent_probe") => facebook_consent_absent_cdp(),
-                Some("feed_refresh") => router_cdp(
+                // 姿态类失败先消费下滚预算再走纠正导航，所以这一幕里每一轮下滚也照旧回同一条失败。
+                Some("feed_refresh") | Some("browse_scroll") => router_cdp(
                     "page_cards",
                     json!({
                         "cards": [],
@@ -5260,7 +5278,10 @@ async fn spawn_facebook_first_post_late_context_mismatch_cdp()
                 ),
                 Some("browse_scroll") => {
                     scrolls += 1;
-                    let selection_reason = (scrolls == 3).then_some("target_context_mismatch");
+                    // 第三轮起才出姿态失败：既证明「预算中途的姿态失败不会弃掉剩余轮次」
+                    // （否则只会看到 3 次下滚），也让预算耗尽时手里确实还捏着一条姿态失败，
+                    // 从而走到那条纠正导航——本用例真正要守的是「纠正不重置已消费的轮次」。
+                    let selection_reason = (scrolls >= 3).then_some("target_context_mismatch");
                     router_cdp(
                         "page_cards",
                         json!({
