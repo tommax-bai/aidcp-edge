@@ -68,7 +68,7 @@ test('login selector submits a narrow target enum with target-aware copy and OL 
 });
 
 test('main validates the exact login payload and persists target before sending credentials', () => {
-  const parser = blockBetween(main, 'function parseClientLoginPayload(', 'const CONTROL_BOOTSTRAP_REASON_ZH');
+  const parser = blockBetween(main, 'function parseClientLoginPayload(', 'const INTERACTION_CHANNELS');
   assert.match(parser, /new Set\(\['deploymentTarget', 'name', 'key'\]\)/);
   assert.match(parser, /Object\.keys\(value\)\.some/);
   const handler = handlerBlock(main, 'client-auth:login');

@@ -412,6 +412,9 @@ let clientSession = null; // { token, name, expiresAt(ms) } | null
 let allowedProfileIds = null; // Set<profileId> | null（null = 未 gated，不过滤）
 let allowedEnvironmentPlatforms = new Map(); // envKey -> Cloud 权威 platform；绝不采信 renderer 自报
 let allowedEnvironmentControlStates = new Map(); // envKey -> Cloud 权威 binding/persona 投影；不含 accountId
+// 本次会话是否**成功**读到过权威可见集。读取失败时上一次已知集仍留着供显示，但「没读成功」
+// MUST NOT 被当成撤权去收敛自动化——那是把一次网络抖动读成一次授权否定。
+let allowedEnvironmentsAuthoritative = false;
 let sessionTimer = null;
 let proceededOnce = false;
 const CLIENT_SESSION_REFRESH_WINDOW_MS = 5 * 60_000;
@@ -634,13 +637,6 @@ function parseClientLoginPayload(value) {
   };
 }
 
-const CONTROL_BOOTSTRAP_REASON_ZH = {
-  environment_not_owned: '当前客户无权访问该环境',
-  binding_unknown: '该环境尚未成功上报过登录账号',
-  binding_conflict: '该环境的账号绑定存在跨客户冲突',
-  binding_unavailable: '云端账号绑定暂时不可用',
-};
-
 // ── 视频号 InteractionWorkspace customer-auth bridge ────────────────────────
 // renderer 只能调用下方具名 IPC；路径、方法、query、body 与幂等 header 全部由主进程组装。
 // 这里不暴露通用 URL/fetch，也不把客户 token 或 Cloud 原始请求能力交给 renderer。
@@ -790,6 +786,7 @@ async function refreshAllowedEnvironments() {
     allowedProfileIds = null;
     allowedEnvironmentPlatforms = new Map();
     allowedEnvironmentControlStates = new Map();
+    allowedEnvironmentsAuthoritative = false;
     return true;
   }
   const r = await clientAuthFetch('/my-environments', { token: clientSession.token });
@@ -809,10 +806,14 @@ async function refreshAllowedEnvironments() {
         }];
       })
       .filter(([envKey]) => Boolean(envKey)));
+    allowedEnvironmentsAuthoritative = true;
   } else if (allowedProfileIds == null) {
     allowedProfileIds = new Set(); // 首次拉取失败 → fail-closed 空集（不误显他人环境）；已建立则保留上次已知
     allowedEnvironmentPlatforms = new Map();
     allowedEnvironmentControlStates = new Map();
+    allowedEnvironmentsAuthoritative = false; // 空集是「没读成功」的显示兜底，不是「这些环境被撤权」
+  } else {
+    allowedEnvironmentsAuthoritative = false; // 保留上次已知集用于显示，但本次不得据它收敛自动化
   }
   return true;
 }
@@ -1126,6 +1127,7 @@ function onSessionInvalid({ forgetCredentials = false } = {}) {
   allowedProfileIds = new Set();
   allowedEnvironmentPlatforms = new Map();
   allowedEnvironmentControlStates = new Map();
+  allowedEnvironmentsAuthoritative = false;
   try { syncEnvHandles(); } catch { /* ignore */ } // wanted 为空 → 移除并 SIGTERM 全部环境
   if (mainWindow) { try { mainWindow.close(); } catch { /* ignore */ } mainWindow = null; }
   createLoginWindow();
@@ -1151,6 +1153,7 @@ function persistDeploymentTargetForLogin(target) {
     allowedProfileIds = new Set();
     allowedEnvironmentPlatforms = new Map();
     allowedEnvironmentControlStates = new Map();
+    allowedEnvironmentsAuthoritative = false;
     try { syncEnvHandles(); } catch { /* login startup may not have initialized handles yet */ }
   }
   return { ok: true, changed, deploymentTarget: target };
@@ -2381,41 +2384,74 @@ function syncEnvHandles() {
   }
 }
 
+const AUTOMATION_CONVERGENCE_REASON_ZH = {
+  ownership_revoked: '当前客户无权访问该环境',
+  binding_conflict: '该环境的账号绑定存在跨客户冲突',
+};
+const AUTOMATION_CONVERGENCE_PRESENCE_ZH = {
+  ownership_revoked: '归属已撤销，自动化已停止',
+  binding_conflict: '账号绑定冲突，自动化已停止',
+};
+const AUTOMATION_CONVERGENCE_EXIT_ZH = {
+  ownership_revoked: '当前客户已无权访问该环境，自动化引擎已停止；数据管理仍可继续使用。',
+  binding_conflict: '该环境的账号绑定存在跨客户冲突，自动化引擎已停止；数据管理仍可继续使用。',
+};
+
+/** 该次停止是不是授权收敛（撤权 / 跨客户绑定冲突）——核心退出时据此如实叙述，不混进异常退出。 */
+function isAuthorizationConvergenceReason(reason) {
+  return Object.prototype.hasOwnProperty.call(AUTOMATION_CONVERGENCE_REASON_ZH, String(reason || ''));
+}
+
 /**
  * 客户会话只提供数据管理能力，不会在登录后自动启动自动化引擎。
- * 这里仅执行归属/绑定收紧：已经失去可信绑定的环境必须停止现有引擎；可信环境保持原状，
+ * 这里只做**授权收敛**：已撤权或存在跨客户绑定冲突的环境必须停止；其余一律保持原状，
  * 等用户明确点击“开始自动化”后才进入引擎和浏览器启动队列。
+ *
+ * 判据只认授权事实（见 fleet.automationAuthorizationDecision）：「云端还不知道这个环境是谁」
+ * （未绑定 / 绑定读不到）MUST NOT 停它——绑定只回答「是谁」、不回答「归谁」，而未绑定环境
+ * 本来就要靠下一次握手自愈；拿它当停止理由等于把自愈唯一的入口关掉。
+ *
+ * 权威可见集这次没读成功时整轮跳过：保留上次已知集用于显示，但一次网络抖动 MUST NOT 被读成撤权。
  */
 function enforceOwnedAutomationEngines() {
   if (!clientAuthEnabled() || !hasValidSession() || !(allowedProfileIds instanceof Set)) return;
+  if (!allowedEnvironmentsAuthoritative) return;
   for (const handle of envs.values()) {
     if (!handle || handle.removed || handle.kind !== 'adspower' || handle.offboardCleanup) continue;
     const envKey = String(handle.profileId || '').trim();
     const controlState = allowedEnvironmentControlStates.get(envKey);
-    const trustworthy = allowedProfileIds.has(envKey) && controlState && controlState.bindingState === 'bound';
-    if (!trustworthy) {
-      coreBootstrapSupervisor.remove(handle.envId);
-      handle.automationIntent = 'stopped';
-      handle.engineStopReason = 'binding_untrusted';
-      handle.resumeAfterStop = false;
-      // 归属仍在但绑定不可信：立刻停止自动化引擎；绝不猜账号，也不靠打开浏览器“修复”。
-      if (handle.child) {
-        handle.stopRequested = true;
-        clearRespawnTimer(handle);
-        try { handle.child.kill('SIGTERM'); } catch { /* best-effort */ }
-      }
-      const reason = controlState && controlState.bindingState
-        ? CONTROL_BOOTSTRAP_REASON_ZH[controlState.bindingState] || '云端账号绑定暂不可用'
-        : '云端账号绑定暂不可用';
-      updateStatus(handle, {
-        edge: 'stopped',
-        cloud: 'disconnected',
-        session: 'idle',
-        lastMessage: `自动化未启动：${reason}。数据管理仍可继续使用。`,
-        ...edgeFailurePatch(reason),
-        ...presencePatch('账号绑定未确认，自动化已限制'),
-      });
+    const decision = fleet.automationAuthorizationDecision({
+      ownedByCustomer: allowedProfileIds.has(envKey),
+      bindingState: controlState && controlState.bindingState,
+    });
+    if (!decision.converge) continue;
+    coreBootstrapSupervisor.remove(handle.envId);
+    // 与用户显式关闭同一条收敛：推进操作代（取消错峰队列与串行启动队列里尚未执行的项、
+    // 归还启动排队名额）+ 清等槽位资历。少做任何一步，都会留下「已判停止、随后仍打开浏览器」
+    // 这种没人认领的启动，同时把界面写成「自动化未启动 + 浏览器开启中」。
+    advanceLifecycleGeneration(handle, decision.reason);
+    clearSlotWaiting(handle);
+    clearColdStandbyTimer(handle);
+    handle.automationIntent = 'stopped';
+    handle.engineStopReason = decision.reason;
+    handle.resumeAfterStop = false;
+    handle.automationPaused = false;
+    handle.restartPending = false;
+    handle.stopRequested = true;
+    clearRespawnTimer(handle);
+    // 授权已被否定：立刻停止自动化引擎；绝不猜账号，也不靠打开浏览器“修复”。
+    if (handle.child) {
+      try { handle.child.kill('SIGTERM'); } catch { /* best-effort */ }
     }
+    const reason = AUTOMATION_CONVERGENCE_REASON_ZH[decision.reason] || '当前客户无权访问该环境';
+    updateStatus(handle, {
+      edge: 'stopped',
+      cloud: 'disconnected',
+      session: 'idle',
+      lastMessage: `自动化未启动：${reason}。数据管理仍可继续使用。`,
+      ...edgeFailurePatch(reason),
+      ...presencePatch(AUTOMATION_CONVERGENCE_PRESENCE_ZH[decision.reason] || reason),
+    });
   }
 }
 
@@ -5461,7 +5497,7 @@ async function spawnEdgeChild(handle, {
         ? 'idle'
         : stopReason === 'user_pause'
         ? 'paused'
-        : stopReason === 'user_close' || stopReason === 'binding_untrusted'
+        : stopReason === 'user_close' || isAuthorizationConvergenceReason(stopReason)
           ? 'closed'
         : wasClosing
         ? 'closed'
@@ -5485,8 +5521,8 @@ async function spawnEdgeChild(handle, {
         ? '自动化已暂停，引擎和浏览器已关闭；数据管理仍可继续使用。'
         : stopReason === 'user_close'
         ? '自动化已关闭，引擎和浏览器已关闭；数据管理仍可继续使用。'
-        : stopReason === 'binding_untrusted'
-        ? '账号绑定未确认，自动化引擎已停止；数据管理仍可继续使用。'
+        : isAuthorizationConvergenceReason(stopReason)
+        ? AUTOMATION_CONVERGENCE_EXIT_ZH[stopReason]
         : wasClosing
         ? '浏览器已关闭。'
         : gaveUp
@@ -5503,8 +5539,8 @@ async function spawnEdgeChild(handle, {
           ? '自动化已暂停'
           : stopReason === 'user_close'
             ? '自动化已关闭'
-            : stopReason === 'binding_untrusted'
-              ? '账号绑定未确认，自动化已停止'
+            : isAuthorizationConvergenceReason(stopReason)
+              ? AUTOMATION_CONVERGENCE_PRESENCE_ZH[stopReason]
         : wasClosing
           ? '已关闭浏览器'
           : wasRestarting

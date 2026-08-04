@@ -67,7 +67,7 @@ test('人设 IPC 本地白名单、幂等键和体积上限保持 fail-closed', 
   assert.match(main, /require\('\.\/persona-request-validation\.cjs'\)/);
   assert.match(personaBlock, /new Set\(\['soulYaml'\]\)/);
   assert.match(personaBlock, /Buffer\.byteLength\(args\.soulYaml, 'utf8'\) > 32 \* 1024/);
-  const fetchBlock = main.slice(main.indexOf('async function clientAuthFetch'), main.indexOf('const CONTROL_BOOTSTRAP_REASON_ZH'));
+  const fetchBlock = main.slice(main.indexOf('async function clientAuthFetch'), main.indexOf('const INTERACTION_CHANNELS'));
   assert.match(fetchBlock, /timeoutMs = 12000/);
   assert.match(fetchBlock, /timeoutMs <= 200000/);
 });

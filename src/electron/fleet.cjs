@@ -418,6 +418,27 @@ function shouldPreserveEnabledAutomationOnBrowserOpen(handle) {
   return Boolean(handle.startFlowQueued || handle.launchQueued || handle.slotWaitingSince);
 }
 
+/**
+ * 会话维护复核该不该收敛某环境的自动化——**只看授权事实**，不看「云端知不知道它是谁」。
+ *
+ * 收敛只有两个理由：该环境已不在当前客户的权威可见集里（撤权 / 改归属 / 删除），或云端明确
+ * 报告跨客户绑定冲突（安全事件）。除此以外一律不收敛：
+ *  - `binding_unknown`：从未成功握手过 / 绑定悬空。绑定按规格「只回答是谁、绝不回答归谁」，
+ *    且明写未绑定环境靠**下一次握手**自愈——拿它当停止理由，正好把自愈唯一的入口关掉。
+ *  - `binding_unavailable`：绑定解析所需存储读不到。不确定 MUST NOT 被消费成否定答案。
+ *  - 认不出来的新绑定态：同样不收敛。把没认出来的原因折进已有的停止判决，就是静默假失败。
+ *
+ * 纯函数、无副作用：这道闸的失效形态是「恒真」，只有喂违规输入的用例才拦得住。
+ */
+function automationAuthorizationDecision({ ownedByCustomer, bindingState } = {}) {
+  if (!ownedByCustomer) return { converge: true, reason: 'ownership_revoked' };
+  const state = typeof bindingState === 'string' ? bindingState.trim() : '';
+  if (state === 'binding_conflict') return { converge: true, reason: 'binding_conflict' };
+  // 归属由可见集单独把守；绑定解析若也回「不归你」，按授权否定处理。
+  if (state === 'environment_not_owned') return { converge: true, reason: 'ownership_revoked' };
+  return { converge: false, reason: null };
+}
+
 /** 启动排队的纯准入判定。同一环境已在队列中时幂等，不重复占容量。 */
 function startQueueAdmission({ queuedCount, limit, alreadyQueued = false } = {}) {
   const queued = Math.max(0, Math.floor(Number(queuedCount) || 0));
@@ -767,6 +788,7 @@ module.exports = {
   resolveSlotCapacity,
   maxQueuedStartsForSlots,
   shouldPreserveEnabledAutomationOnBrowserOpen,
+  automationAuthorizationDecision,
   startQueueAdmission,
   launchCancellationReason,
   childProcessIsRunning,
