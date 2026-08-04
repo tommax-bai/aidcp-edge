@@ -2667,6 +2667,48 @@ function isCurrentLifecycleGeneration(handle, generation) {
 }
 
 /**
+ * 「这一趟启动还算不算数」——外壳侧唯一取值口（change cancel-in-flight-environment-launch）。
+ *
+ * 判据本体是 `fleet.launchCancellationReason`（纯函数、可直接喂违规输入验）。这里只负责取值。
+ * 三处读同一条规则：拉起前的入口复核、拉起那一刻的提交点复核、子进程所有权登记的准入闸。
+ *
+ * `allowWhilePaused` 是唯一按启动意图分档的输入：无浏览器的控制面 bootstrap 核心在暂停态下仍可起
+ * （它本就不开浏览器），常规浏览器核心不行。其余判据对所有启动路径一视同仁——受限离场清理走的是
+ * `startRestrictedOffboardCleanupCore` 里显式复位 `stopRequested` 的既有做法，不在这里开豁免口。
+ */
+function launchCancellation(handle, generation, { allowWhilePaused = false } = {}) {
+  if (!handle) return 'invalid_environment';
+  return fleet.launchCancellationReason({
+    generationCurrent: isCurrentLifecycleGeneration(handle, generation),
+    hasChild: Boolean(handle.child),
+    removed: Boolean(handle.removed),
+    stopRequested: Boolean(handle.stopRequested),
+    quitting: Boolean(isQuitting),
+    sessionPaused: Boolean(handle.status && handle.status.session === 'paused'),
+    allowWhilePaused,
+  });
+}
+
+const UNADOPTED_CHILD_TERMINATION_GRACE_MS = 2_000;
+/**
+ * 准入被拒时终止那个刚出生、且**未被登记为任何环境所有**的子进程。
+ *
+ * 它没有所有权，因此既不进浏览器并发计数、也不会有退出回调替它收尾——终止必须在这里自己走完
+ * SIGTERM → 有界升级 SIGKILL，绝不能只发一次 SIGTERM 就当作已了结（核心可能还没装上信号处理器，
+ * 也可能正卡在启动早期）。拒收如实进原始日志，但 MUST NOT 投影为失败态：用户主动关闭不是故障。
+ */
+function terminateUnadoptedChild(handle, child, reason) {
+  appendEdgeLog(handle.envId, `launch admission denied (${reason}); terminating the unadopted core child`, true);
+  try { child.kill('SIGTERM'); } catch { /* best-effort */ }
+  const escalation = setTimeout(() => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    appendEdgeLog(handle.envId, 'unadopted core child did not exit after SIGTERM; requesting SIGKILL', true);
+    try { child.kill('SIGKILL'); } catch { /* best-effort */ }
+  }, UNADOPTED_CHILD_TERMINATION_GRACE_MS);
+  escalation.unref?.();
+}
+
+/**
  * 显式开始/暂停/关闭推进每环境操作代。尚未执行的旧队列项直接取消；已经执行的异步项在自己的
  * generation 闸处收尾，绝不能跨代清标记、重挂唤醒或再次打开浏览器。
  */
@@ -2830,6 +2872,13 @@ function awaitLaunchReady(handle) {
       console.warn(
         `[launch-queue] ${handle.envId} 未在 ${LAUNCH_READY_TIMEOUT_MS}ms 内就绪；放行队列下一个（不杀它，它可以继续自己起）`,
       );
+      // 超时如实呈现（change cancel-in-flight-environment-launch）：只打控制台的话，运营看到的只是
+      // 「一直在启动中」，不知道系统其实已经不等它了。MUST NOT 写成失败 / 终态 / 放弃——它既没失败
+      // 也没停手，写成失败就是方向相反的另一条静默假失败。故这里只改一句话，不碰任何状态轴。
+      updateStatus(handle, {
+        lastMessage: `启动已超过 ${Math.round(LAUNCH_READY_TIMEOUT_MS / 1000)}s 就绪预算；启动队列已放行下一个环境，本环境仍在继续启动。`,
+        ...presencePatch('启动较慢，仍在继续'),
+      });
       finish(false);
     }, LAUNCH_READY_TIMEOUT_MS);
     if (typeof timer.unref === 'function') timer.unref();
@@ -4436,9 +4485,10 @@ async function spawnEdgeChild(handle, {
   transientBrowserLease = false,
   generation = handle && handle.lifecycleGeneration,
 } = {}) {
-  if (!handle || !isCurrentLifecycleGeneration(handle, generation) || handle.child
-    || handle.removed || handle.stopRequested || isQuitting) return false;
-  if (handle.status.session === 'paused' && !controlBootstrap) return false;
+  // 入口复核只是**省掉一趟白跑的准备工作**，绝不是这一趟的取消保证：它与真正拉起进程之间隔着
+  // 分身状态读取与代理准备（真机上十几到几十秒）。保证在下面的启动提交点，见那里的注释。
+  const allowWhilePaused = Boolean(controlBootstrap);
+  if (launchCancellation(handle, generation, { allowWhilePaused })) return false;
   if (!controlBootstrap) {
     handle.controlPlaneOnly = false;
     handle.controlPlaneBootstrapped = false;
@@ -4587,6 +4637,26 @@ async function spawnEdgeChild(handle, {
     spawnEnv.AIDCP_AUTOMATION_PAUSED_AT_START = '1';
   }
 
+  // ── 启动提交点（change cancel-in-flight-environment-launch）──────────────────────────────
+  //
+  // 从这一行到 `initializeOwnedCoreChild` 取得所有权之间 **MUST NOT 出现任何 await**（`lifecycle-contract`
+  // 有一条源码断言钉住这个区间）。JS 单线程下这段保持同步，用户的取消意图就只有两种落点：
+  //   · 落在复核之前 → 根本不拉起进程；
+  //   · 落在所有权登记之后 → 关闭路径看得见这个子进程、会去关它。
+  // 中间地带被消掉，而不是变窄。一旦有人往这段里插一个等待，第三种落点就回来了：关闭已经走完
+  // 「当前没有子进程 → 无事可停」并宣布浏览器已确认关闭，几秒后这一趟仍把核心拉起来——那个核心
+  // 没有任何一方认领它，占着浏览器执行名额、界面永久停在「关闭中」（2026-08-04 真机事故形态）。
+  //
+  // 位置也是判据的一部分：它必须早于下面那批 `handle.*` 复位。被取消的这一趟绝不能顺手把
+  // `browserStateUnconfirmed` 之类的既有事实抹掉——那等于替一趟没发生的启动宣布浏览器已确认关闭。
+  const cancelledAtCommit = launchCancellation(handle, generation, { allowWhilePaused });
+  if (cancelledAtCommit) {
+    appendEdgeLog(handle.envId, `launch cancelled at commit point (${cancelledAtCommit}); no core child was spawned`);
+    releaseStartQueue(handle);
+    settleLaunchReady(handle, false);
+    return false;
+  }
+
   handle.browserParkingReady = false;
   handle.executorFailure = null;
   // 运行态闩只反映**本次 core run**。这一句是顺手清爽，**不是**保证：保证在读侧（livePosture →
@@ -4635,6 +4705,11 @@ async function spawnEdgeChild(handle, {
   const startup = initializeOwnedCoreChild({
     handle,
     child,
+    // 所有权登记的准入闸：与上面提交点读同一条规则。正常情况下它永远放行（两次判定之间是同步的），
+    // 它存在是为了兜住「将来某条启动路径忘了提交点复核」——那时它会当场把这个子进程终止掉，
+    // 而不是让它成为没人认领的核心。
+    admit: () => launchCancellation(handle, generation, { allowWhilePaused }),
+    onAdmissionDenied: (reason) => terminateUnadoptedChild(handle, child, reason),
     createLaunchReady: () => awaitLaunchReady(handle),
     observers: {
       stdout: onChildStdout,
@@ -5905,9 +5980,20 @@ function stopAndRestart(handle, message, patch = {}) {
 }
 
 function handleEdgeOutput(handle, text, isError = false, generation = handle && handle.lifecycleGeneration) {
-  if (!isCurrentLifecycleGeneration(handle, generation)) return;
+  if (!handle) return;
   // 一个 chunk 可能带多行：逐行处理，让活动流 / 计数按真实行数走（旧法整块只算一次）。
   const lines = String(text).split('\n').map((l) => l.trim()).filter(Boolean);
+  // 丢弃判据分两层（change cancel-in-flight-environment-launch）：
+  //   · **原始日志按所有权收**——这些行来自本环境仍持有的子进程，一律留痕；
+  //   · **界面运行态投影按操作代次门控**——防止被取代的代次把界面写回去（该保护原样保留）。
+  // 上一版用同一个判据管两件事：为保护界面，把唯一能发现故障的证据一起扔了。2026-08-04 真机事故里，
+  // 一个在关闭之后才出生的核心连上云端跑了 13 分钟，原始日志零行——正是这一句 return 吃掉的。
+  // 这里只放开日志留痕：人设 / 发布审批 / 浏览器窗口回执、引擎命令诊断与状态投影都在
+  // handleEdgeLogLine 里，仍受代次门约束，本 change 不动它们的关联语义。
+  if (!isCurrentLifecycleGeneration(handle, generation)) {
+    for (const line of lines) appendEdgeLog(handle.envId, `[superseded-generation] ${line}`, isError);
+    return;
+  }
   for (const line of lines) handleEdgeLogLine(handle, line, isError);
 }
 

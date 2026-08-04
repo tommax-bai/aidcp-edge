@@ -487,6 +487,33 @@ function normalizeStartQueueLimit(value) {
 }
 
 /**
+ * 启动取消判据（change cancel-in-flight-environment-launch）：**一条规则，三处读**——
+ * 拉起前的入口复核、拉起那一刻的提交点复核、子进程所有权登记的准入闸。
+ *
+ * 输入是**已取值的事实**而不是 handle：判据因此可以被直接喂违规输入验证（把它改成恒放行会当场红），
+ * 也保证三处读的是同一条规则，不会各自漂移出一份「差不多」的判断。
+ *
+ * 返回 '' = 可以继续；非空字符串 = 取消原因（进原始日志，供事后归因）。
+ */
+function launchCancellationReason({
+  generationCurrent,
+  hasChild,
+  removed,
+  stopRequested,
+  quitting,
+  sessionPaused,
+  allowWhilePaused,
+} = {}) {
+  if (!generationCurrent) return 'generation_superseded';
+  if (hasChild) return 'child_already_owned';
+  if (removed) return 'environment_removed';
+  if (stopRequested) return 'stop_requested';
+  if (quitting) return 'client_quitting';
+  if (sessionPaused && !allowWhilePaused) return 'session_paused';
+  return '';
+}
+
+/**
  * 串行启动队列（change browser-slot-scheduling）：**所有会打开浏览器的动作**都排这一条队——
  * 自动续场恢复、冷待机唤醒、崩溃重起、手动任务、排期任务。
  *
@@ -741,6 +768,7 @@ module.exports = {
   maxQueuedStartsForSlots,
   shouldPreserveEnabledAutomationOnBrowserOpen,
   startQueueAdmission,
+  launchCancellationReason,
   childProcessIsRunning,
   resolveSlotSettings,
   normalizeSlotLimit,

@@ -321,3 +321,48 @@ test('classifyAdsInUse：普通崩溃 / 缺内核 / 无关失败 / 空 → 一�
   assert.equal(fleet.classifyAdsInUse('').inUse, false);
   assert.equal(fleet.classifyAdsInUse(undefined).inUse, false);
 });
+
+// ── 启动取消判据（change cancel-in-flight-environment-launch）──
+// 这条规则被三处读：入口复核 / 启动提交点 / 子进程所有权准入闸。它是纯函数，正是为了能被直接
+// 喂违规输入——把它改成恒放行（return '' 常量）会让下面每一条断言当场红。
+
+const ADMITTABLE = {
+  generationCurrent: true,
+  hasChild: false,
+  removed: false,
+  stopRequested: false,
+  quitting: false,
+  sessionPaused: false,
+  allowWhilePaused: false,
+};
+
+test('launchCancellationReason：全部条件干净才放行', () => {
+  assert.equal(fleet.launchCancellationReason(ADMITTABLE), '');
+});
+
+test('launchCancellationReason：每一条违规输入都给出可归因的取消原因', () => {
+  const cases: Array<[Record<string, unknown>, string]> = [
+    [{ generationCurrent: false }, 'generation_superseded'],
+    [{ hasChild: true }, 'child_already_owned'],
+    [{ removed: true }, 'environment_removed'],
+    [{ stopRequested: true }, 'stop_requested'],
+    [{ quitting: true }, 'client_quitting'],
+    [{ sessionPaused: true }, 'session_paused'],
+  ];
+  for (const [violation, reason] of cases) {
+    assert.equal(fleet.launchCancellationReason({ ...ADMITTABLE, ...violation }), reason);
+  }
+});
+
+test('launchCancellationReason：无浏览器的控制面 bootstrap 可在暂停态起，但停止意图仍然拦得住它', () => {
+  assert.equal(fleet.launchCancellationReason({ ...ADMITTABLE, sessionPaused: true, allowWhilePaused: true }), '');
+  assert.equal(
+    fleet.launchCancellationReason({ ...ADMITTABLE, sessionPaused: true, allowWhilePaused: true, stopRequested: true }),
+    'stop_requested',
+  );
+});
+
+test('launchCancellationReason：缺参数按最保守判（绝不因为调用方少传字段就放行）', () => {
+  assert.equal(fleet.launchCancellationReason(), 'generation_superseded');
+  assert.equal(fleet.launchCancellationReason({}), 'generation_superseded');
+});

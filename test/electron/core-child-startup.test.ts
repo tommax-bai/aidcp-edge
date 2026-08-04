@@ -59,6 +59,8 @@ test('owned child installs terminal and optional stream observers before success
   const result = initializeOwnedCoreChild({
     handle,
     child,
+    admit: () => '',
+    onAdmissionDenied() { assert.fail('an admitted launch must not report denial'); },
     createLaunchReady: () => launchReady,
     observers: noopObservers(),
     prepare() {
@@ -83,6 +85,56 @@ test('owned child installs terminal and optional stream observers before success
   assert.deepEqual(child.killSignals, []);
 });
 
+test('a launch denied at the ownership gate is terminated and never becomes an owned child', () => {
+  const live = new FakeChild({ pid: 991 });
+  const handle = { child: live as FakeChild | null, envId: 'ads-k1enonmg' };
+  const child = new FakeChild();
+  const denials: string[] = [];
+  let released = 0;
+
+  const result = initializeOwnedCoreChild({
+    handle,
+    child,
+    admit: () => 'stop_requested',
+    onAdmissionDenied(reason: string) {
+      denials.push(reason);
+      child.kill('SIGTERM');
+    },
+    createLaunchReady() { assert.fail('a denied launch must not create launch readiness'); },
+    observers: noopObservers(),
+    prepare() { assert.fail('a denied launch must not project a starting state'); },
+    onSetupFailure() { assert.fail('a user-initiated close is not a setup failure'); },
+    settleLaunchFailure() {},
+    releaseStartReservation() { released += 1; },
+    requestTermination() {},
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.admissionDenied, 'stop_requested');
+  assert.deepEqual(denials, ['stop_requested']);
+  assert.deepEqual(child.killSignals, ['SIGTERM'], 'the unadopted child must be terminated');
+  assert.equal(released, 1, 'the start-queue reservation must be returned');
+  assert.equal(handle.child, live, 'ownership must stay with the child that is actually running');
+  child.emit('error', new Error('kill raced the exit'));
+});
+
+test('the ownership gate is required: a launch path that omits it fails loudly instead of being admitted', () => {
+  const handle = { child: null as FakeChild | null };
+  const child = new FakeChild();
+  assert.throws(() => initializeOwnedCoreChild({
+    handle,
+    child,
+    createLaunchReady: () => Promise.resolve(true),
+    observers: noopObservers(),
+    prepare: () => true,
+    onSetupFailure() {},
+    settleLaunchFailure() {},
+    releaseStartReservation() {},
+    requestTermination() {},
+  }), /admission gate/);
+  assert.equal(handle.child, null, 'a launch without an admission gate must not take ownership');
+});
+
 test('failed spawn with missing stdout/stderr reaches spawn-error cleanup instead of throwing first', () => {
   const handle = { child: null as FakeChild | null };
   const child = new FakeChild({ pid: null, streams: false });
@@ -92,6 +144,8 @@ test('failed spawn with missing stdout/stderr reaches spawn-error cleanup instea
   initializeOwnedCoreChild({
     handle,
     child,
+    admit: () => '',
+    onAdmissionDenied() { assert.fail('an admitted launch must not report denial'); },
     createLaunchReady: () => Promise.resolve(false),
     observers: noopObservers({
       spawnError() {
@@ -133,6 +187,8 @@ test('post-spawn setup throw releases siblings but retains ownership across kill
   const result = initializeOwnedCoreChild({
     handle,
     child,
+    admit: () => '',
+    onAdmissionDenied() { assert.fail('an admitted launch must not report denial'); },
     createLaunchReady: () => launchReady,
     observers: noopObservers({
       spawnError() {

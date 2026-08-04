@@ -48,7 +48,10 @@ test('managed AdsPower child uses the parent FIFO without receiving the API key'
 test('spawned core is observed before fallible post-spawn setup', () => {
   const spawn = functionSource('spawnEdgeChild', 'stopLoginPoller');
   const childOwnership = childStartup.indexOf('handle.child = child;');
-  const launchReady = childStartup.indexOf('const launchReady = createLaunchReady();');
+  // 准入被拒的分支也会给那个未被认领的子进程装一个最小 'error' 安全网，位置在所有权之前。
+  // 观测者顺序这条不变量说的是**被放行的那条路**，故只在所有权之后的区间里判。
+  const admittedPath = childStartup.slice(childOwnership);
+  const launchReady = admittedPath.indexOf('const launchReady = createLaunchReady();');
   const observerRegistrations = [
     "child.on('error'",
     "child.on('exit', observers.exit);",
@@ -56,11 +59,13 @@ test('spawned core is observed before fallible post-spawn setup', () => {
     "child.on('message', observers.message);",
     "child.stdout?.on?.('data', observers.stdout);",
     "child.stderr?.on?.('data', observers.stderr);",
-  ].map((needle) => childStartup.indexOf(needle));
-  const prepareCall = childStartup.indexOf('return { ok: prepare() !== false, launchReady };');
+  ].map((needle) => admittedPath.indexOf(needle));
+  const prepareCall = admittedPath.indexOf('return { ok: prepare() !== false, launchReady };');
 
   assert.ok(childOwnership >= 0, 'spawn must establish current-child ownership');
-  assert.ok(launchReady > childOwnership, 'launch readiness must exist after ownership');
+  assert.ok(childStartup.indexOf('const denial = admit();') < childOwnership,
+    'the admission gate must be evaluated before ownership is taken');
+  assert.ok(launchReady > 0, 'launch readiness must exist after ownership');
   for (const registration of observerRegistrations) {
     assert.ok(registration > launchReady, 'every child observer must be registered after readiness exists');
     assert.ok(registration < prepareCall, 'every child observer must precede fallible setup');
@@ -72,6 +77,39 @@ test('spawned core is observed before fallible post-spawn setup', () => {
   assert.match(spawn, /finalizeNonRetryableSetupTerminal\(\{[\s\S]*?childStillOwned: handle\.child === child[\s\S]*?stopStartForProxyFailure[\s\S]*?broadcastFleet/,
     'known proxy terminal must be reprojected after ownership clears and must not auto-respawn');
   assert.match(spawn, /return startup\.launchReady;/);
+});
+
+test('the launch commit point stays synchronous from cancel re-check through ownership', () => {
+  const spawn = functionSource('spawnEdgeChild', 'stopLoginPoller');
+  const commit = spawn.indexOf('const cancelledAtCommit = launchCancellation(');
+  const spawnCall = spawn.indexOf('const child = spawn(process.execPath');
+  const ownership = spawn.indexOf('const startup = initializeOwnedCoreChild({');
+  assert.ok(commit >= 0, 'the launch must re-check cancellation at its commit point');
+  assert.ok(spawnCall > commit && ownership > spawnCall,
+    'cancel re-check must precede the spawn, which must precede ownership registration');
+
+  // 这一段一旦出现 await，用户的关闭就又能落进「已宣布关闭、随后仍拉起一个无人认领的核心」的缝里。
+  assert.doesNotMatch(spawn.slice(commit, ownership), /\bawait\b/,
+    'no await may separate the cancel re-check from core child ownership');
+
+  // 被取消的一趟绝不能顺手抹掉既有事实（那等于替一趟没发生的启动宣布浏览器已确认关闭）。
+  assert.ok(commit < spawn.indexOf('handle.browserStateUnconfirmed = false;'),
+    'the commit point must precede the per-run state reset');
+
+  // 提交点与所有权准入闸必须读同一条规则，且规则本体是 fleet 里的纯函数。
+  assert.match(spawn, /admit: \(\) => launchCancellation\(handle, generation, \{ allowWhilePaused \}\)/);
+  assert.match(spawn, /onAdmissionDenied: \(reason\) => terminateUnadoptedChild\(handle, child, reason\)/);
+  assert.match(functionSource('launchCancellation', 'terminateUnadoptedChild'), /fleet\.launchCancellationReason\(\{/);
+});
+
+test('output from a still-owned child is never discarded by the generation gate', () => {
+  const output = functionSource('handleEdgeOutput', 'handleEdgeLogLine');
+  const gate = output.indexOf('if (!isCurrentLifecycleGeneration(handle, generation))');
+  assert.ok(gate >= 0, 'the generation gate must still guard the runtime-state projection');
+  assert.match(output.slice(gate), /appendEdgeLog\(handle\.envId, `\[superseded-generation\] \$\{line\}`, isError\)/,
+    'a superseded generation must still leave every line in the raw log');
+  assert.doesNotMatch(output.slice(0, gate), /handleEdgeLogLine\(/,
+    'the gate must precede any runtime-state projection');
 });
 
 test('Facebook TOTP IPC is current-child/profile bound and projects no raw AdsPower material', () => {
