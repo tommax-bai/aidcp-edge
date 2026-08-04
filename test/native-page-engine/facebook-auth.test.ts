@@ -706,6 +706,43 @@ test('missing AdsPower credential fill becomes a manual-login result without Nat
   runtime.assertDone();
 });
 
+test('confirmed suspension Appeal entry stops at one action and hands the successor to the operator', async () => {
+  const automaticProgress: Array<{ signal: string; action: string }> = [];
+  const runtime = new ScriptedRuntime([
+    {
+      kind: 'facebook_auth_probe',
+      execution: probe('suspension_appeal_start', { signalId: 'appeal-1' }),
+    },
+    {
+      kind: 'facebook_auth_start_suspension_appeal',
+      execution: action('facebook_auth_start_suspension_appeal', 'appeal-1'),
+    },
+  ]);
+
+  const result = await reconcileFacebookStartupAuth({
+    runtime,
+    totpBroker: totpBroker(),
+    freshStartPolicyApplied: true,
+    timeoutMs: 30_000,
+    onAutomaticProgress: (progress) => automaticProgress.push(progress),
+  });
+
+  assert.deepEqual(result, {
+    kind: 'manual_required',
+    reason: 'facebook_suspension_appeal_step_required',
+    actionAttempts: 1,
+  });
+  assert.deepEqual(runtime.calls.map((call) => call.kind), [
+    'facebook_auth_probe',
+    'facebook_auth_start_suspension_appeal',
+  ]);
+  assert.deepEqual(automaticProgress, [{
+    signal: 'suspension_appeal_start',
+    action: 'facebook_auth_start_suspension_appeal',
+  }]);
+  runtime.assertDone();
+});
+
 test('retained manual-login session re-enters the same coordinator when the page advances to 2FA', async () => {
   const automaticProgress: Array<{ signal: string; action: string }> = [];
   const broker = totpBroker([

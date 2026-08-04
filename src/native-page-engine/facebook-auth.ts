@@ -51,6 +51,7 @@ const ACTION_FOR_SIGNAL: Record<ActionableFacebookAuthSignal, FacebookAuthAction
   push_blocker_close: 'facebook_auth_close_push_blocker',
   remember_password_confirm: 'facebook_auth_confirm_remember_password',
   ad_data_review_get_started: 'facebook_auth_start_ad_data_review',
+  suspension_appeal_start: 'facebook_auth_start_suspension_appeal',
 };
 
 const AUTH_SIGNALS = new Set<FacebookAuthSignal>(NATIVE_FACEBOOK_AUTH_SIGNALS);
@@ -812,6 +813,12 @@ export async function reconcileFacebookStartupAuth(
 
     const actionResult = await dispatchAction(probe, ACTION_FOR_SIGNAL[probe.signal]);
     if (actionResult) return actionResult;
+    if (probe.signal === 'suspension_appeal_start') {
+      return result({
+        kind: 'manual_required',
+        reason: 'facebook_suspension_appeal_step_required',
+      });
+    }
     // Every confirmed action is followed by a fresh probe at the top of the next pass.
   }
 

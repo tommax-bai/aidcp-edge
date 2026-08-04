@@ -148,6 +148,7 @@ export type NativePageCommandKind =
   | 'facebook_auth_submit_totp' | 'facebook_auth_clear_totp'
   | 'facebook_auth_dismiss_warning' | 'facebook_auth_close_push_blocker'
   | 'facebook_auth_confirm_remember_password' | 'facebook_auth_start_ad_data_review'
+  | 'facebook_auth_start_suspension_appeal'
   | 'publish_navigate_entry' | 'publish_select_mode' | 'publish_upload_image'
   | 'publish_set_cover' | 'publish_fill_field' | 'publish_add_with_candidate' | 'publish_set_option'
   | 'publish_set_schedule' | 'publish_submit' | 'publish_capture_post_id'
@@ -163,6 +164,7 @@ export const NATIVE_FACEBOOK_AUTH_SIGNALS = [
   'push_blocker_close',
   'remember_password_confirm',
   'ad_data_review_get_started',
+  'suspension_appeal_start',
   'manual_login_required',
   'blocked_human_verification',
   'blocked_unknown',
@@ -192,6 +194,7 @@ const NATIVE_FACEBOOK_AUTH_ACTION_KIND_FLAGS = {
   facebook_auth_close_push_blocker: true,
   facebook_auth_confirm_remember_password: true,
   facebook_auth_start_ad_data_review: true,
+  facebook_auth_start_suspension_appeal: true,
 } as const satisfies Record<NativeFacebookAuthActionKind, true>;
 
 export const NATIVE_FACEBOOK_AUTH_ACTION_KINDS = Object.freeze(

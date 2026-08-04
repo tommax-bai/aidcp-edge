@@ -261,6 +261,19 @@ pub const FACEBOOK_PARITY_LEDGER: &[FacebookParityEntry] = &[
         None
     ),
     entry!(
+        "facebook_auth_start_suspension_appeal",
+        Auth,
+        "Facebook suspension appeal entry",
+        "exact suspension checkpoint, content, and unique Appeal control",
+        "fresh signal id, visibility, uniqueness, enabled state, and top hit",
+        "one trusted pointer stage",
+        1,
+        "distinct loaded Facebook checkpoint successor",
+        "confirmed, ambiguous after input, or not-started",
+        30_000,
+        None
+    ),
+    entry!(
         "page_probe",
         Session,
         "native page probe",
@@ -618,6 +631,7 @@ pub fn parity(command: &NativeCommand) -> Option<&'static FacebookParityEntry> {
         FacebookAuthClosePushBlocker(_) => "facebook_auth_close_push_blocker",
         FacebookAuthConfirmRememberPassword(_) => "facebook_auth_confirm_remember_password",
         FacebookAuthStartAdDataReview(_) => "facebook_auth_start_ad_data_review",
+        FacebookAuthStartSuspensionAppeal(_) => "facebook_auth_start_suspension_appeal",
         PageProbe(_) => "page_probe",
         SessionStop(_) => "session_stop",
         IdentityBootstrap(_) => "identity_bootstrap",

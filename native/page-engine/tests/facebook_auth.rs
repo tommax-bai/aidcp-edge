@@ -56,6 +56,52 @@ async fn manual_login_probe_preserves_the_structured_reason_without_input() {
 }
 
 #[tokio::test]
+async fn suspension_appeal_fresh_revalidation_clicks_once_confirms_successor_and_refuses_replay() {
+    let signal = signal_id('f');
+    let observations = VecDeque::from([actionable_observation("suspension_appeal_start", &signal)]);
+    let (port, server) = spawn_auth_cdp(observations, VecDeque::new()).await;
+    let mut engine = Engine::default();
+    engine
+        .open(&session_open(port))
+        .await
+        .expect("open Facebook suspension appeal session");
+
+    let confirmed = execute(
+        &mut engine,
+        1,
+        NativeCommand::FacebookAuthStartSuspensionAppeal(FacebookAuthSignalParams {
+            signal_id: signal.clone(),
+        }),
+    )
+    .await;
+    assert_confirmed(&confirmed, "facebook_auth_start_suspension_appeal");
+
+    let replay = execute(
+        &mut engine,
+        2,
+        NativeCommand::FacebookAuthStartSuspensionAppeal(FacebookAuthSignalParams {
+            signal_id: signal,
+        }),
+    )
+    .await;
+    assert_refused(&replay, "auth_signal_already_consumed");
+
+    engine.shutdown().await;
+    let requests = server.await.expect("Facebook suspension appeal fake CDP");
+    assert_eq!(count_auth_probes(&requests), 1);
+    assert_eq!(count_mouse_pressed(&requests), 1);
+    assert!(requests.iter().any(|request| {
+        request["params"]["expression"]
+            .as_str()
+            .is_some_and(|expression| {
+                expression.contains(r#""kind":"auth_postcondition""#)
+                    && expression.contains(r#""expectedSignal":"suspension_appeal_start""#)
+            })
+    }));
+    assert_action_probes_allow_auth_actions(&requests);
+}
+
+#[tokio::test]
 async fn refused_auth_signals_dispatch_zero_input_and_a_consumed_signal_is_not_replayed() {
     let stale_requested = signal_id('a');
     let stale_observed = signal_id('b');

@@ -128,9 +128,21 @@ const FACEBOOK_AD_DATA_REVIEW_MANUAL_REASONS = new Set([
   'facebook_ad_data_review_requires_fresh_start',
   'facebook_ad_data_choice_required',
 ]);
+const FACEBOOK_SUSPENSION_APPEAL_MANUAL_REASONS = new Set([
+  'facebook_suspension_appeal_requires_fresh_start',
+  'facebook_suspension_appeal_step_required',
+]);
 
 function requiresFacebookAdDataReview(reason: string | undefined): boolean {
   return reason !== undefined && FACEBOOK_AD_DATA_REVIEW_MANUAL_REASONS.has(reason);
+}
+
+function requiresFacebookSuspensionAppeal(reason: string | undefined): boolean {
+  return reason !== undefined && FACEBOOK_SUSPENSION_APPEAL_MANUAL_REASONS.has(reason);
+}
+
+function requiresFacebookStartupReview(reason: string | undefined): boolean {
+  return requiresFacebookAdDataReview(reason) || requiresFacebookSuspensionAppeal(reason);
 }
 
 function verifiedAccountNickname(idRes: SelfIdentityResult, decision: IdentityDecision): string | undefined {
@@ -476,9 +488,11 @@ async function main(): Promise<void> {
               reason: authResult.reason,
               platform: platformDriver.platform,
             });
-            console.log(requiresFacebookAdDataReview(authResult.reason)
-              ? `[aidcp-edge] Facebook 广告数据选择待人工确认（${authResult.reason}）；保留浏览器与 CDP，等待页面完成。`
-              : `[aidcp-edge] Facebook 需要人工登录（${authResult.reason}）；保留浏览器与 CDP，等待登录完成。`);
+            console.log(requiresFacebookSuspensionAppeal(authResult.reason)
+              ? `[aidcp-edge] Facebook 账号申诉步骤待人工处理（${authResult.reason}）；保留浏览器与 CDP，等待页面完成。`
+              : requiresFacebookAdDataReview(authResult.reason)
+                ? `[aidcp-edge] Facebook 广告数据选择待人工确认（${authResult.reason}）；保留浏览器与 CDP，等待页面完成。`
+                : `[aidcp-edge] Facebook 需要人工登录（${authResult.reason}）；保留浏览器与 CDP，等待登录完成。`);
           } else if (authResult.kind === 'timeout') {
             reportFacebookAuthFailure('facebook_auth_timeout');
             console.error(
@@ -502,8 +516,10 @@ async function main(): Promise<void> {
     };
     // A Facebook privacy choice can coexist with a valid account identity. Do not let that identity
     // bypass the retained review flow before its exact destination is cleared.
-    const idRes: SelfIdentityResult = requiresFacebookAdDataReview(manualLoginRequiredReason)
-      ? { ok: false, reason: 'Facebook 广告数据选择待人工确认' }
+    const idRes: SelfIdentityResult = requiresFacebookStartupReview(manualLoginRequiredReason)
+      ? { ok: false, reason: requiresFacebookSuspensionAppeal(manualLoginRequiredReason)
+          ? 'Facebook 账号申诉步骤待人工处理'
+          : 'Facebook 广告数据选择待人工确认' }
       : await readPlatformIdentity(firstReadOpts);
     const decision = platformDriver.decideIdentity(idRes, overrideAccountId);
 
@@ -517,9 +533,11 @@ async function main(): Promise<void> {
       logger: (m) => console.log(m),
       waitForLogin: async () => {
         console.log(manualLoginRequiredReason
-          ? requiresFacebookAdDataReview(manualLoginRequiredReason)
-            ? '[aidcp-edge] 请在保留的 Facebook 浏览器里完成广告数据选择；页面稳定后将原地继续。'
-            : '[aidcp-edge] 请在保留的浏览器里完成登录；检测到稳定身份后将原地继续。'
+          ? requiresFacebookSuspensionAppeal(manualLoginRequiredReason)
+            ? '[aidcp-edge] 请在保留的 Facebook 浏览器里完成后续申诉步骤；离开 checkpoint 后将原地继续。'
+            : requiresFacebookAdDataReview(manualLoginRequiredReason)
+              ? '[aidcp-edge] 请在保留的 Facebook 浏览器里完成广告数据选择；页面稳定后将原地继续。'
+              : '[aidcp-edge] 请在保留的浏览器里完成登录；检测到稳定身份后将原地继续。'
           : `[aidcp-edge] 请在浏览器里完成登录并等待稳定身份（剩余最长 ${Math.round(remainingLoginWaitMs / 1000)}s）…`);
         console.log('[browser-parking] awaiting-login'); // 外壳可识别的等待态状态行（task 1.4 / 4.1）
         while (true) {
@@ -537,6 +555,10 @@ async function main(): Promise<void> {
                     return { kind: 'interrupted' as const, reason: authResult.reason };
                   }
                   if (authResult.kind === 'failed') {
+                    if (requiresFacebookSuspensionAppeal(manualLoginRequiredReason)
+                        && authResult.reason === 'unsupported_facebook_checkpoint') {
+                      return { kind: 'defer' as const };
+                    }
                     return { kind: 'failed' as const, reason: authResult.reason };
                   }
                   if (authResult.kind === 'manual_required') {
@@ -549,7 +571,7 @@ async function main(): Promise<void> {
                         platform: platformDriver.platform,
                       });
                     }
-                    return requiresFacebookAdDataReview(authResult.reason)
+                    return requiresFacebookStartupReview(authResult.reason)
                       ? { kind: 'defer' as const }
                       : { kind: 'continue' as const };
                   }

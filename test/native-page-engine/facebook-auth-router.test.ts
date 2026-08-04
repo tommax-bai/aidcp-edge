@@ -730,6 +730,133 @@ test('ad-data review requires a fresh action policy and fails closed on unsafe t
   assert.equal(disabled.reason, 'auth_target_disabled');
 });
 
+test('live suspension checkpoint binds only the visible enabled topmost Appeal clone', async () => {
+  const checkpointUrl = 'https://www.facebook.com/checkpoint/1501092823525282/'
+    + '?next=https%3A%2F%2Fwww.facebook.com%2F#';
+  const suspensionCopy = `
+    <h1>We suspended your account</h1>
+    <p>117 days left to appeal or we'll permanently disable your account</p>
+    <p>Your account may be associated with another account that has gone against our rules.</p>
+    <p>This doesn't follow our Community Standards on account integrity.</p>
+    <p>If you think we made a mistake, start an appeal to get back into your account.</p>
+  `;
+  install(`
+    <main>
+      ${suspensionCopy}
+      <div id="hidden" role="button" aria-label="Appeal" aria-disabled="true" style="display:none">Appeal</div>
+      <div id="appeal" role="button" aria-label="Appeal">Appeal</div>
+    </main>
+  `, checkpointUrl);
+  setRect(document.getElementById('hidden')!, { left: 197, top: 793, right: 469, bottom: 829 });
+  setRect(document.getElementById('appeal')!, { left: 477, top: 793, right: 749, bottom: 829 });
+
+  const actionable = await probe({ authenticated: true, allowAuthActions: true });
+  assert.equal(actionable.signal, 'suspension_appeal_start');
+  assert.match(String(actionable.signalId), /^aidcp:facebook-auth:v1:[0-9a-f]{64}$/);
+  assert.equal((actionable.candidate as Record<string, unknown>).cx, 613);
+  assert.equal((actionable.candidate as Record<string, unknown>).cy, 811);
+
+  const unproven = await probe({ authenticated: true, allowAuthActions: false });
+  assert.equal(unproven.signal, 'manual_login_required');
+  assert.equal(unproven.reason, 'facebook_suspension_appeal_requires_fresh_start');
+
+  document.getElementById('appeal')!.setAttribute('aria-disabled', 'true');
+  const disabled = await probe({ authenticated: true, allowAuthActions: true });
+  assert.equal(disabled.signal, 'blocked_unknown');
+  assert.equal(disabled.reason, 'auth_target_disabled');
+
+  document.getElementById('appeal')!.removeAttribute('aria-disabled');
+  document.getElementById('hidden')!.removeAttribute('style');
+  const ambiguous = await probe({ authenticated: true, allowAuthActions: true });
+  assert.equal(ambiguous.signal, 'blocked_unknown');
+  assert.equal(ambiguous.reason, 'auth_target_ambiguous');
+
+  install(`
+    <main>
+      ${suspensionCopy.replace('We suspended your account', 'Review your account status')}
+      <div role="button" aria-label="Appeal">Appeal</div>
+    </main>
+  `, checkpointUrl, 1_800_000_015_000, 0, 15_000);
+  const wrongCopy = await probe({ authenticated: true, allowAuthActions: true });
+  assert.equal(wrongCopy.signal, 'blocked_unknown');
+  assert.equal(wrongCopy.reason, 'unsupported_facebook_checkpoint');
+
+  install('<main aria-busy="true">Loading appeal</main>', checkpointUrl, 1_800_000_015_000, 0, 14_999);
+  const loading = await probe({ authenticated: true, allowAuthActions: true });
+  assert.equal(loading.signal, 'none');
+  assert.equal(loading.reason, 'suspension_appeal_hydrating');
+
+  install(`
+    <main>${suspensionCopy}<div role="button" aria-label="Appeal">Appeal</div></main>
+  `, 'https://www.facebook.com/checkpoint/1501092823525282/?next=https%3A%2F%2Fexample.com%2F',
+  1_800_000_015_000, 0, 15_000);
+  const wrongNext = await probe({ authenticated: true, allowAuthActions: true });
+  assert.equal(wrongNext.signal, 'blocked_unknown');
+  assert.equal(wrongNext.reason, 'unsupported_facebook_checkpoint');
+});
+
+test('suspension Appeal postcondition waits through loading and confirms only a loaded checkpoint successor', async () => {
+  const checkpointUrl = 'https://www.facebook.com/checkpoint/1501092823525282/'
+    + '?next=https%3A%2F%2Fwww.facebook.com%2F';
+  install(`
+    <main>
+      <h1>We suspended your account</h1>
+      <p>117 days left to appeal or we'll permanently disable your account</p>
+      <p>Your account may be associated with another account that has gone against our rules.</p>
+      <p>This doesn't follow our Community Standards on account integrity.</p>
+      <p>If you think we made a mistake, start an appeal to get back into your account.</p>
+      <div id="appeal" role="button" aria-label="Appeal">Appeal</div>
+    </main>
+  `, checkpointUrl);
+  const appeal = document.getElementById('appeal')!;
+  setRect(appeal, { left: 477, top: 793, right: 749, bottom: 829 });
+  const observation = await probe({ authenticated: true, allowAuthActions: true });
+  const params = {
+    documentGeneration: observation.documentGeneration,
+    expectedSignal: 'suspension_appeal_start',
+    candidateKey: (observation.candidate as Record<string, unknown>).candidateKey,
+  };
+
+  appeal.setAttribute('aria-disabled', 'true');
+  const disabled = await run({ kind: 'auth_postcondition', params });
+  assert.deepEqual(disabled.output.value, {
+    satisfied: false,
+    documentChanged: false,
+    signalGone: false,
+    successorObserved: false,
+    loadingObserved: false,
+    buttonStateChanged: true,
+  });
+
+  document.body.innerHTML = '<main aria-busy="true">Loading appeal</main>';
+  const loading = await run({ kind: 'auth_postcondition', params });
+  assert.deepEqual(loading.output.value, {
+    satisfied: false,
+    documentChanged: false,
+    signalGone: false,
+    successorObserved: false,
+    loadingObserved: true,
+    buttonStateChanged: true,
+  });
+
+  document.body.innerHTML = `<main><h1>Continue your appeal</h1><p>${'Review the next account recovery step. '.repeat(8)}</p></main>`;
+  const successor = await run({ kind: 'auth_postcondition', params });
+  assert.deepEqual(successor.output.value, {
+    satisfied: true,
+    documentChanged: false,
+    signalGone: true,
+    successorObserved: true,
+    loadingObserved: false,
+    buttonStateChanged: true,
+  });
+
+  install(`<main><h1>Unexpected destination</h1><p>${'Not a checkpoint successor. '.repeat(10)}</p></main>`,
+    'https://www.facebook.com/login/');
+  const unrelated = await run({ kind: 'auth_postcondition', params });
+  assert.equal(unrelated.output.value.satisfied, false);
+  assert.equal(unrelated.output.value.successorObserved, false);
+});
+
 test('new checkpoint waits up to fifteen seconds for the automation warning to hydrate', async () => {
   install(
     '<div aria-busy="true">Loading</div>',

@@ -24,7 +24,7 @@ const MAX_CONSUMED_AUTH_SIGNALS: usize = 64;
 const TOTP_VALIDITY_FLOOR_MS: u64 = 10_000;
 const POSTCONDITION_POLL_MS: u64 = 200;
 const POSTCONDITION_MAX_POLLS: usize = 35;
-const AD_DATA_REVIEW_POSTCONDITION_MAX_POLLS: usize = 150;
+const SUCCESSOR_POSTCONDITION_MAX_POLLS: usize = 150;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -169,6 +169,18 @@ pub(crate) async fn execute(
             )
             .await
         }
+        NativeCommand::FacebookAuthStartSuspensionAppeal(params) => {
+            execute_click(
+                session,
+                command,
+                params,
+                FacebookAuthSignal::SuspensionAppealStart,
+                action_probe_params(),
+                cancellation,
+                deadline_unix_ms,
+            )
+            .await
+        }
         _ => Err(EngineError::new(
             ErrorCode::EngineInternal,
             "native Facebook auth capability received another owner's command",
@@ -244,13 +256,7 @@ async fn execute_click(
             None,
         )),
         Ok(verification) => {
-            let reason = if expected_signal == FacebookAuthSignal::AdDataReviewGetStarted
-                && verification.transition_observed
-            {
-                "auth_successor_unconfirmed"
-            } else {
-                "auth_postcondition_unconfirmed"
-            };
+            let reason = postcondition_failure_reason(expected_signal, verification);
             Ok(action_result(
                 command,
                 &params.signal_id,
@@ -266,6 +272,21 @@ async fn execute_click(
             false,
             Some("auth_postcondition_unreadable"),
         )),
+    }
+}
+
+fn postcondition_failure_reason(
+    expected_signal: FacebookAuthSignal,
+    verification: FacebookAuthPostconditionVerification,
+) -> &'static str {
+    let successor_action = matches!(
+        expected_signal,
+        FacebookAuthSignal::AdDataReviewGetStarted | FacebookAuthSignal::SuspensionAppealStart
+    );
+    if successor_action && verification.transition_observed {
+        "auth_successor_unconfirmed"
+    } else {
+        "auth_postcondition_unconfirmed"
     }
 }
 
@@ -777,6 +798,7 @@ fn is_actionable(signal: FacebookAuthSignal) -> bool {
             | FacebookAuthSignal::PushBlockerClose
             | FacebookAuthSignal::RememberPasswordConfirm
             | FacebookAuthSignal::AdDataReviewGetStarted
+            | FacebookAuthSignal::SuspensionAppealStart
     )
 }
 
@@ -845,10 +867,13 @@ async fn verify_postcondition(
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
 ) -> Result<FacebookAuthPostconditionVerification, EngineError> {
-    let ad_data_review = expected_signal == FacebookAuthSignal::AdDataReviewGetStarted;
+    let long_successor_transition = matches!(
+        expected_signal,
+        FacebookAuthSignal::AdDataReviewGetStarted | FacebookAuthSignal::SuspensionAppealStart
+    );
     let expected_signal = signal_name(expected_signal);
-    let max_polls = if ad_data_review {
-        AD_DATA_REVIEW_POSTCONDITION_MAX_POLLS
+    let max_polls = if long_successor_transition {
+        SUCCESSOR_POSTCONDITION_MAX_POLLS
     } else {
         POSTCONDITION_MAX_POLLS
     };
@@ -908,6 +933,7 @@ fn signal_name(signal: FacebookAuthSignal) -> &'static str {
         FacebookAuthSignal::PushBlockerClose => "push_blocker_close",
         FacebookAuthSignal::RememberPasswordConfirm => "remember_password_confirm",
         FacebookAuthSignal::AdDataReviewGetStarted => "ad_data_review_get_started",
+        FacebookAuthSignal::SuspensionAppealStart => "suspension_appeal_start",
         FacebookAuthSignal::ManualLoginRequired => "manual_login_required",
         FacebookAuthSignal::BlockedHumanVerification => "blocked_human_verification",
         FacebookAuthSignal::BlockedUnknown => "blocked_unknown",
@@ -1052,10 +1078,47 @@ mod tests {
     }
 
     #[test]
-    fn ad_data_review_successor_window_is_thirty_seconds() {
+    fn bounded_successor_window_is_thirty_seconds() {
         assert_eq!(
-            POSTCONDITION_POLL_MS * AD_DATA_REVIEW_POSTCONDITION_MAX_POLLS as u64,
+            POSTCONDITION_POLL_MS * SUCCESSOR_POSTCONDITION_MAX_POLLS as u64,
             30_000
+        );
+    }
+
+    #[test]
+    fn suspension_appeal_cancellation_deadline_and_ambiguous_successor_stay_distinct() {
+        let command = NativeCommand::FacebookAuthStartSuspensionAppeal(FacebookAuthSignalParams {
+            signal_id: format!("{AUTH_SIGNAL_PREFIX}{}", "b".repeat(64)),
+        });
+        for (failure, phase, reason) in [
+            (
+                PointerInputFailure::CancelledBeforePress,
+                EffectPhase::NotStarted,
+                "auth_action_cancelled_before_commit",
+            ),
+            (
+                PointerInputFailure::DeadlineBeforePress,
+                EffectPhase::NotStarted,
+                "auth_action_deadline_before_commit",
+            ),
+        ] {
+            let (actual_phase, output) = pointer_failure_result(&command, "signal", failure);
+            assert_eq!(actual_phase, phase);
+            let CommandOutput::FacebookAuthAction(receipt) = output else {
+                panic!("expected Facebook auth action receipt")
+            };
+            assert!(!receipt.ok);
+            assert_eq!(receipt.reason.as_deref(), Some(reason));
+        }
+        assert_eq!(
+            postcondition_failure_reason(
+                FacebookAuthSignal::SuspensionAppealStart,
+                FacebookAuthPostconditionVerification {
+                    confirmed: false,
+                    transition_observed: true,
+                },
+            ),
+            "auth_successor_unconfirmed"
         );
     }
 }

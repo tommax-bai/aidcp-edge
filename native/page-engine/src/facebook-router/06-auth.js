@@ -2,6 +2,7 @@
   const facebookAuthCredentialFillGraceMs=25000;
   const facebookAuthCheckpointHydrationGraceMs=15000;
   const facebookAdDataReviewHydrationGraceMs=15000;
+  const facebookSuspensionAppealHydrationGraceMs=15000;
   const authWithinHydrationGrace=(graceMs)=>{
     const documentAge=Number(window.performance&&window.performance.now&&window.performance.now());
     return Number.isFinite(documentAge)&&documentAge<graceMs;
@@ -367,9 +368,57 @@
     }
     return authObservation('manual_login_required',null,'facebook_ad_data_choice_required');
   };
+  const authSuspensionAppealContext=()=>{
+    if(location.hostname!=='www.facebook.com'||!/^\/checkpoint\/\d+\/?$/.test(location.pathname))return false;
+    const next=new URLSearchParams(location.search).get('next');
+    if(!next)return false;
+    try{
+      const destination=new URL(next,location.origin);
+      return destination.origin===location.origin
+        &&destination.pathname==='/'
+        &&destination.search===''
+        &&destination.hash==='';
+    }catch{return false;}
+  };
+  const authSuspensionAppealState=()=>{
+    if(!authSuspensionAppealContext())return {kind:'absent'};
+    const body=text(document.body,16000);
+    const loading=String(document.readyState||'')!=='complete'
+      ||body.length<160
+      ||all('[aria-busy="true"],[role="progressbar"],[data-visualcompletion="loading-state"]',document).some(visible);
+    const introduction=/we suspended your account/i.test(body)
+      &&/days left to appeal or we(?:'|’)ll permanently disable your account/i.test(body)
+      &&/your account may be associated with another account that has gone against our rules/i.test(body)
+      &&/this doesn(?:'|’)t follow our community standards on account integrity/i.test(body)
+      &&/if you think we made a mistake, start an appeal to get back into your account/i.test(body);
+    if(introduction){
+      const appeal=authUnique(authButtons(document).filter((button)=>/^appeal$/i.test(label(button))));
+      if(!appeal.candidate)return {kind:'intro_blocked',reason:appeal.reason||'suspension_appeal_target_unavailable'};
+      if(authTargetDisabled(appeal.candidate))return {kind:'intro_blocked',reason:'auth_target_disabled'};
+      return {kind:'intro',candidate:appeal.candidate};
+    }
+    return {kind:loading?'loading':'successor'};
+  };
+  const authSuspensionAppealObservation=async()=>{
+    const state=authSuspensionAppealState();
+    if(state.kind==='absent'||state.kind==='successor')return null;
+    if(state.kind==='intro'){
+      if(Boolean(p.authenticated)&&!Boolean(p.allowAuthActions)){
+        return authObservation('manual_login_required',null,'facebook_suspension_appeal_requires_fresh_start');
+      }
+      return authObservation('suspension_appeal_start',state.candidate);
+    }
+    if(state.kind==='intro_blocked')return authObservation('blocked_unknown',null,state.reason);
+    if(authWithinHydrationGrace(facebookSuspensionAppealHydrationGraceMs)){
+      return authObservation('none',null,'suspension_appeal_hydrating');
+    }
+    return null;
+  };
   const authProbeBase=async(sampleServerTime=true)=>{
     const adDataReview=await authAdDataReviewObservation();
     if(adDataReview)return adDataReview;
+    const suspensionAppeal=await authSuspensionAppealObservation();
+    if(suspensionAppeal)return suspensionAppeal;
     const blocking=blockingProbe();
     if(blocking.kind==='captcha'){
       return authObservation('blocked_human_verification',null,'human_verification_required');
@@ -486,6 +535,29 @@
       const loadingObserved=state.kind==='loading'
         ||String(document.readyState||'')!=='complete'
         ||all('[aria-busy="true"]',document).some(visible);
+      return {
+        kind:'facebook_auth_postcondition',
+        value:{
+          satisfied:successorObserved,
+          documentChanged,
+          signalGone:successorObserved,
+          successorObserved,
+          loadingObserved,
+          buttonStateChanged,
+        },
+      };
+    }
+    if(expectedSignal==='suspension_appeal_start'){
+      const state=authSuspensionAppealState();
+      const successorObserved=state.kind==='successor';
+      const original=state.kind==='intro'?state.candidate:null;
+      const candidateKey=original?await authDigest(authElementEvidence(original)):null;
+      const buttonStateChanged=!original
+        ||authTargetDisabled(original)
+        ||candidateKey!==expectedCandidateKey;
+      const loadingObserved=state.kind==='loading'
+        ||String(document.readyState||'')!=='complete'
+        ||all('[aria-busy="true"],[role="progressbar"],[data-visualcompletion="loading-state"]',document).some(visible);
       return {
         kind:'facebook_auth_postcondition',
         value:{

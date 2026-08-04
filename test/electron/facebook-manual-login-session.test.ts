@@ -11,8 +11,8 @@ test('credential fill failure keeps the core attached and waits for identity in 
   assert.match(core, /authenticatedQuietWindowMs: FACEBOOK_AUTHENTICATED_QUIET_WINDOW_MS/,
     'production assembly must keep probing after the first authenticated observation');
   assert.match(core,
-    /requiresFacebookAdDataReview\(manualLoginRequiredReason\)[\s\S]*?Facebook 广告数据选择待人工确认/,
-    'a stable account identity must not bypass an unresolved post-login privacy choice');
+    /requiresFacebookStartupReview\(manualLoginRequiredReason\)[\s\S]*?Facebook 账号申诉步骤待人工处理[\s\S]*?Facebook 广告数据选择待人工确认/,
+    'a stable account identity must not bypass an unresolved startup review');
   assert.match(core, /unbounded: Boolean\(manualLoginRequiredReason\)/);
   assert.match(core, /beforeIdentityRead: manualLoginRequiredReason[\s\S]*?reconcileFacebookAuthIfNeeded\(firstLoginPolicyApplied, loginWaitMs\)/,
     'the retained session must serially re-enter the existing coordinator with the original policy proof');
@@ -36,8 +36,11 @@ test('credential fill failure keeps the core attached and waits for identity in 
   assert.equal((retainedWait.match(/reconcileFacebookAuthIfNeeded/g) ?? []).length, 1,
     'manual waiting must install one serialized auth consumer, not parallel watchers');
   assert.match(retainedWait,
-    /authResult\.kind === 'manual_required'[\s\S]*?manualLoginRequiredReason !== authResult\.reason[\s\S]*?manualLoginRequiredReason = authResult\.reason[\s\S]*?type: 'lifecycle\.auth_required'[\s\S]*?reason: authResult\.reason[\s\S]*?requiresFacebookAdDataReview\(authResult\.reason\)[\s\S]*?kind: 'defer'/,
+    /authResult\.kind === 'manual_required'[\s\S]*?manualLoginRequiredReason !== authResult\.reason[\s\S]*?manualLoginRequiredReason = authResult\.reason[\s\S]*?type: 'lifecycle\.auth_required'[\s\S]*?reason: authResult\.reason[\s\S]*?requiresFacebookStartupReview\(authResult\.reason\)[\s\S]*?kind: 'defer'/,
     'a retained wait must publish a changed review reason and defer identity until the review clears');
+  assert.match(retainedWait,
+    /requiresFacebookSuspensionAppeal\(manualLoginRequiredReason\)[\s\S]*?unsupported_facebook_checkpoint[\s\S]*?kind: 'defer'/,
+    'only a prior confirmed suspension handoff may retain a later unsupported checkpoint as manual');
   assert.doesNotMatch(retainedWait, /setInterval|setTimeout|Promise\.all/,
     'manual waiting must reuse the identity cadence instead of creating another scheduler');
   assert.match(core, /onAutomaticProgress:[\s\S]*?type: 'lifecycle\.auth_progress'[\s\S]*?kind: 'automatic_login'/,
@@ -60,6 +63,8 @@ test('Electron accepts only enumerated Facebook manual reasons and keeps their b
       'auth_probe_unavailable',
       'facebook_ad_data_review_requires_fresh_start',
       'facebook_ad_data_choice_required',
+      'facebook_suspension_appeal_requires_fresh_start',
+      'facebook_suspension_appeal_step_required',
     ],
     'the shell must not accept an open-ended auth reason as manual-safe',
   );
@@ -81,7 +86,7 @@ test('Electron accepts only enumerated Facebook manual reasons and keeps their b
   assert.match(authHandler, /lastMessage: authMessage[\s\S]*?presencePatch\(authMessage\)/,
     'the accepted structured reason must drive the visible manual-attention copy');
   assert.match(shell, /status\.overlayBlocked \|\| facebookManualAuthMessage\(status\.authReason\)/,
-    'all three retained manual reasons must project the browser as blocked');
+    'all retained manual reasons must project the browser as blocked');
   assert.match(shell, /next\.auth = 'logged in';\s*next\.authReason = null;/,
     'the existing stable account event clears the manual reason after in-place login');
   assert.match(shell, /message\.type === 'lifecycle\.close_failed'[\s\S]*?user_close'[\s\S]*?user_pause'/,

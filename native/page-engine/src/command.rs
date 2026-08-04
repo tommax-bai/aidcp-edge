@@ -52,6 +52,10 @@ pub const MANIFEST_EXCLUDED_COMMAND_KINDS: &[(&str, &str)] = &[
         "facebook_auth_start_ad_data_review",
         "startup-only Facebook ad-data review introduction stage: never dispatched from Cloud",
     ),
+    (
+        "facebook_auth_start_suspension_appeal",
+        "startup-only Facebook suspension appeal entry stage: never dispatched from Cloud",
+    ),
 ];
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -530,6 +534,7 @@ native_commands! {
     FacebookAuthClosePushBlocker(FacebookAuthSignalParams) => "facebook_auth_close_push_blocker",
     FacebookAuthConfirmRememberPassword(FacebookAuthSignalParams) => "facebook_auth_confirm_remember_password",
     FacebookAuthStartAdDataReview(FacebookAuthSignalParams) => "facebook_auth_start_ad_data_review",
+    FacebookAuthStartSuspensionAppeal(FacebookAuthSignalParams) => "facebook_auth_start_suspension_appeal",
     PlanExecute(PlanExecuteParams) => "plan_execute",
     SessionStop(ReasonParams) => "session_stop",
     BrowseNext(ReasonParams) => "browse_next",
@@ -593,6 +598,7 @@ impl NativeCommand {
                     | FacebookAuthClosePushBlocker(_)
                     | FacebookAuthConfirmRememberPassword(_)
                     | FacebookAuthStartAdDataReview(_)
+                    | FacebookAuthStartSuspensionAppeal(_)
             ),
             Platform::Facebook => crate::facebook::capability::owner(self).is_some(),
             Platform::WechatChannels => matches!(self, WechatCaptureSession(_)),
@@ -638,7 +644,8 @@ impl NativeCommand {
             | Self::FacebookAuthDismissWarning(params)
             | Self::FacebookAuthClosePushBlocker(params)
             | Self::FacebookAuthConfirmRememberPassword(params)
-            | Self::FacebookAuthStartAdDataReview(params) => {
+            | Self::FacebookAuthStartAdDataReview(params)
+            | Self::FacebookAuthStartSuspensionAppeal(params) => {
                 validate_facebook_auth_signal_id(&params.signal_id)
             }
             Self::FacebookAuthEnterTotp(params) => {
@@ -1283,6 +1290,7 @@ mod tests {
                 "facebook_auth_close_push_blocker",
                 "facebook_auth_confirm_remember_password",
                 "facebook_auth_start_ad_data_review",
+                "facebook_auth_start_suspension_appeal",
             ]),
             "the exclusion table changed; record the reason and update this assertion"
         );
@@ -1416,7 +1424,8 @@ mod tests {
             | "facebook_auth_dismiss_warning"
             | "facebook_auth_close_push_blocker"
             | "facebook_auth_confirm_remember_password"
-            | "facebook_auth_start_ad_data_review" => serde_json::json!({
+            | "facebook_auth_start_ad_data_review"
+            | "facebook_auth_start_suspension_appeal" => serde_json::json!({
                 "signalId": format!("aidcp:facebook-auth:v1:{}", "a".repeat(64))
             }),
             "facebook_auth_enter_totp" => serde_json::json!({

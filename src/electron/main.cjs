@@ -184,6 +184,8 @@ const FACEBOOK_MANUAL_AUTH_MESSAGES = Object.freeze({
   auth_probe_unavailable: '需要处理：暂时无法读取 Facebook 登录页面，请在浏览器检查后继续',
   facebook_ad_data_review_requires_fresh_start: '需要处理：请在 Facebook 中开始广告数据使用确认',
   facebook_ad_data_choice_required: '需要处理：请在 Facebook 中选择广告数据使用方式',
+  facebook_suspension_appeal_requires_fresh_start: '需要处理：请在 Facebook 中手动开始账号申诉',
+  facebook_suspension_appeal_step_required: '需要处理：请在 Facebook 中完成后续账号申诉步骤',
 });
 
 function facebookManualAuthMessage(reason) {
