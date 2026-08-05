@@ -41,6 +41,8 @@ const routedActiveCommands = [
   'note.browse_images',
   'note.scroll_comments',
   'profile.open',
+  'identity.read_current',
+  'identity.read_self_profile',
   'notification.open',
   'notification.browse_comments',
   'notification.browse_likes',
@@ -58,6 +60,44 @@ test('operation registry covers every Cloud active command routed by EdgeClient'
   for (const type of routedActiveCommands) {
     assert.ok(operationDescriptorFor(type), `${type} must have an explicit operation classification`);
   }
+});
+
+/**
+ * 反向结构断言：登记表说「这条可下发」，EdgeClient 入口就必须真能路由到它。
+ *
+ * 上面那张 `routedActiveCommands` 是**手抄的**——它只证明「我抄进来的这些登记表里有」，
+ * 而漏抄一条时它恰好什么都不说。2026-08-05 实测：`identity.read_current` 同时缺席于
+ * 云端登记表、EdgeClient 白名单、以及这张手抄清单，三处一起漏、全部闸门绿。
+ *
+ * 所以这条改成**读真源码**：以登记表为事实源，逐条去 edge-client.ts 里找它的分派点。
+ * 漏放行的后果是命令落到「其他主动消息暂忽略」被静默丢弃——云端 sent=1、边缘无动作无回执，
+ * 与「边缘没装到」「页面读不出来」三者同形（根 CLAUDE.md §2 第 4 处同步点）。
+ *
+ * 判据是「出现在某个 env.type === '<x>' 比较里」，不限定必须落在哪一段：
+ * publish / edge.task / captcha.assist / plan.response 各有自己的独立分支，
+ * 强行要求它们进同一张白名单会把这条断言变成一张需要维护的例外清单，
+ * 而例外清单正是下一个 bug 的藏身处。
+ */
+test('every dispatchable page command is actually routed by EdgeClient (no silent drop)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('../../src/client/edge-client.ts', import.meta.url), 'utf8');
+
+  const pageCommands = (Object.entries(CLOUD_OPERATION_REGISTRY) as [MessageType, { category: string }][])
+    .filter(([, descriptor]) => descriptor.category === 'page_automation')
+    .map(([type]) => type);
+
+  // 防空转：登记表解析不出东西时，上面的循环会「零条全过」，与真的全覆盖同形。
+  assert.ok(
+    pageCommands.length >= 25,
+    `page_automation 只解析出 ${pageCommands.length} 条，登记表结构大概率已变——本断言 MUST 响亮失败，绝不退化成空集恒真`,
+  );
+
+  const unrouted = pageCommands.filter((type) => !source.includes(`env.type === '${type}'`));
+  assert.deepEqual(
+    unrouted,
+    [],
+    `这些命令已登记为可下发，但 EdgeClient 入口没有任何分派点会接住它们 —— 云端会 sent=1 而边缘静默丢弃：${unrouted.join(', ')}`,
+  );
 });
 
 test('operation registry keeps browser acquisition outside automation control and platform API operations', () => {

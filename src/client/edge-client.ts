@@ -808,6 +808,15 @@ export class EdgeClient {
       env.type === 'note.browse_images' ||
       env.type === 'note.scroll_comments' ||
       env.type === 'profile.open' ||
+      // 运行期身份读取（edge 侧 identity-command-gate 的救援放行清单成员）：独立主动命令，
+      // MUST 放行到 browseHandler，否则在入口被静默丢弃 → command-mapper 的
+      // identity_read_current 映射与 browse-session 的 identity_observation 回报分支**永不可达**，
+      // 云端只看得到 20s 静默超时（与「边缘没装到」「页面读不出来」三者同形，不可区分）。
+      // 这两条是身份落到「不知道浏览器里登着谁」终局时**唯一**能问出当前登录身份、解开该终局的
+      // 事实来源；漏放行等于把那条自救通道在边缘这一侧也堵死（同 §2 第4处同步点）。
+      // 2026-08-05 实测：云端补齐登记表后 sent=1，边缘仍静默 20s，根因即本白名单缺这两条。
+      env.type === 'identity.read_current' ||
+      env.type === 'identity.read_self_profile' ||
       // 通知巡视（软中断离开流程）自身的命令：MUST 放行到 browseHandler，
       // 否则会在入口被静默丢弃 → 巡视无回执 → 恢复链永不收敛 → 会话挂死。
       // 与 command-bridge 的 open_notifications/browse_notification_* 映射对应。
