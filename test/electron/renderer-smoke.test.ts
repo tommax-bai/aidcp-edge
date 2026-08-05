@@ -1842,11 +1842,13 @@ test('慢启动行：静态节点在 #daily-summary 内、#quota-windows 之后'
     '慢启动行应排在 #quota-windows 之后');
 });
 
-test('慢启动行：曲线帮助与说明存在但默认隐藏', () => {
+test('慢启动行：曲线帮助与说明存在但默认隐藏，且页面结构里不写死天数', () => {
   const dom = new JSDOM(html);
   const help = dom.window.document.querySelector('.slow-start-help') as HTMLElement;
   const copy = dom.window.document.querySelector('.slow-start-copy') as HTMLElement;
-  assert.equal(copy.textContent?.trim(), '设置跟随当前环境。开启后头 7 天按曲线逐日放开量，7天后按当前账号档位运行。');
+  // change sync-slow-start-curve-to-client：说明文案由云端权威总天数现填。页面结构里写死一句「头 7 天」，
+  // 就是又一处「后台改了也不会变」的假数字。
+  assert.equal(copy.textContent?.trim(), '');
   assert.ok(help.classList.contains('hidden'));
   assert.ok(copy.classList.contains('hidden'));
 });
@@ -1904,13 +1906,13 @@ test('精选详情宽屏两列分别原生滚动并在窄屏恢复单列文档�
   assert.match(styles, /@media \(max-width:\s*680px\)[\s\S]*?\.curated-detail-media,\s*\.curated-detail-copy\s*\{[^}]*padding-bottom:\s*0;[^}]*overflow:\s*visible;/s);
 });
 
-test('慢启动帮助：问号可聚焦，hover/focus 展示 7×6 Facebook 曲线限额表', () => {
+test('慢启动帮助：问号可聚焦，曲线表结构存在但页面结构里一个数字都不写死', () => {
   const dom = new JSDOM(html);
   const trigger = dom.window.document.querySelector('#slow-start-help-trigger');
   const panel = dom.window.document.querySelector('#slow-start-help-panel');
   assert.equal(trigger?.tagName, 'BUTTON');
   assert.equal(trigger?.getAttribute('type'), 'button');
-  assert.match(trigger?.getAttribute('aria-label') || '', /Facebook 慢启动 7 天限额/);
+  assert.match(trigger?.getAttribute('aria-label') || '', /Facebook 慢启动曲线限额/);
   assert.match(panel?.querySelector('strong')?.textContent || '', /Facebook 慢启动曲线限额/);
   assert.match(styles, /\.slow-start-row\s*\{[^}]*margin-top:\s*0; padding-top:\s*0;/s);
   assert.match(styles, /\.slow-start-row\s+\.switch-track\s*\{[^}]*width:\s*30px; height:\s*16\.5px;/s);
@@ -1920,18 +1922,13 @@ test('慢启动帮助：问号可聚焦，hover/focus 展示 7×6 Facebook 曲�
   assert.match(styles, /\.slow-start-help:hover\s+\.slow-start-help-panel/);
   assert.match(styles, /\.slow-start-help:focus-within\s+\.slow-start-help-panel/);
 
-  const rows = Array.from(panel?.querySelectorAll('tbody tr') || []).map((row) =>
-    Array.from(row.children).map((cell) => cell.textContent?.trim()),
-  );
-  assert.deepEqual(rows, [
-    ['第 1 天', '20', '2', '0', '1', '0', '0'],
-    ['第 2 天', '25', '3', '0', '1', '0', '0'],
-    ['第 3 天', '35', '6', '1', '2', '0', '1'],
-    ['第 4 天', '40', '8', '2', '2', '0', '1'],
-    ['第 5 天', '50', '12', '3', '3', '1', '2'],
-    ['第 6 天', '60', '15', '4', '4', '1', '2'],
-    ['第 7 天', '70', '18', '5', '5', '1', '3'],
-  ]);
+  // change sync-slow-start-curve-to-client：表头与表体都由云端下发的当前生效曲线现渲染。
+  // 这里守的是「页面结构里没有任何一格数字」——留一格，它就会在云端读不到时被当成真值显示出去。
+  assert.equal(panel?.querySelectorAll('tbody tr').length, 0);
+  assert.equal(panel?.querySelector('thead tr')?.children.length, 0);
+  assert.ok(panel?.querySelector('#slow-start-curve-table-scroll')?.classList.contains('hidden'),
+    '没读到曲线前整块表隐藏');
+  assert.doesNotMatch(panel?.textContent || '', /\d/, '曲线面板的静态文案里不得出现任何数字');
 });
 
 test('慢启动 HTTP 未返回状态 → 显示读取失败且绝不默认成「关」', async () => {
@@ -2362,6 +2359,44 @@ test('慢启动行：停止的环境经 env-scoped 读渲染真态、开关可�
   assert.match($(w, '#slow-start-badge').textContent || '', /慢启动 · 第 3\/7 天/);
   assert.equal(hidden($(w, '.slow-start-help')), false);
   assert.equal(hidden($(w, '.slow-start-copy')), false);
+});
+
+test('慢启动曲线：按云端下发渲染（后台配 10 天就 10 行），云端没给则说读不到', async () => {
+  const days = Array.from({ length: 10 }, (_, index) => ({
+    day: index + 1, view: 11 + index, like: index, comment: 0, follow: 1, publish: 0, search: 2, joinGroup: 1,
+  }));
+  const withCurve = await boot(stoppedFbEnv(async () => ({
+    ok: true,
+    data: { data: {
+      envKey: 'fb_env',
+      slowStart: { state: 'active', day: 3, totalDays: 10, binding: true, eligible: true },
+      curve: { totalDays: 10, days },
+    } },
+  })));
+  for (let i = 0; i < 4; i++) await tick();
+  const rows = Array.from(withCurve.document.querySelectorAll('#slow-start-curve-body tr')).map((row) =>
+    Array.from(row.children).map((cell) => cell.textContent?.trim()));
+  assert.equal(rows.length, 10, '行数跟随后台配的总天数，不是写死的 7');
+  assert.deepEqual(rows[9], ['第 10 天', '20', '9', '0', '1', '0', '2', '1']);
+  assert.deepEqual(
+    Array.from(withCurve.document.querySelectorAll('#slow-start-curve-head th')).map((c) => c.textContent),
+    ['天数', '浏览', '点赞', '评论', '关注', '发布', '搜索', '加组'],
+  );
+  assert.match($(withCurve, '.slow-start-copy').textContent || '', /头 10 天/);
+
+  // 云端没带曲线（策略未就绪 / 老云端）：就地说读不到，MUST NOT 搬出任何数字。
+  const noCurve = await boot(stoppedFbEnv(async () => ({
+    ok: true,
+    data: { data: {
+      envKey: 'fb_env',
+      slowStart: { state: 'active', day: 3, totalDays: 7, binding: true, eligible: true },
+    } },
+  })));
+  for (let i = 0; i < 4; i++) await tick();
+  assert.equal(noCurve.document.querySelectorAll('#slow-start-curve-body tr').length, 0);
+  assert.ok(hidden($(noCurve, '#slow-start-curve-table-scroll')));
+  assert.match($(noCurve, '#slow-start-curve-note').textContent || '', /读不到/);
+  assert.doesNotMatch($(noCurve, '.slow-start-copy').textContent || '', /\d+ 天/);
 });
 
 test('慢启动行：binding_unknown + active → 环境配置保持勾选可操作，不冒充账号已生效', async () => {

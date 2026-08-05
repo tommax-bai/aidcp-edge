@@ -13,6 +13,10 @@ const fields = {
   slowStartReason: document.querySelector('#slow-start-reason'),
   slowStartHelp: document.querySelector('#slow-start-row .slow-start-help'),
   slowStartCopy: document.querySelector('#slow-start-row .slow-start-copy'),
+  slowStartCurveScroll: document.querySelector('#slow-start-curve-table-scroll'),
+  slowStartCurveHead: document.querySelector('#slow-start-curve-head'),
+  slowStartCurveBody: document.querySelector('#slow-start-curve-body'),
+  slowStartCurveNote: document.querySelector('#slow-start-curve-note'),
   facebookPersonaModeRow: document.querySelector('#facebook-persona-mode-row'),
   facebookPersonaModeToggleWrap: document.querySelector('#facebook-persona-mode-toggle-wrap'),
   facebookPersonaModeToggle: document.querySelector('#facebook-persona-mode-toggle'),
@@ -880,7 +884,13 @@ async function ensureSlowStartHttpFetch(envKey) {
     if (res && res.ok) {
       const payload = res.data && res.data.data;
       next = payload && payload.slowStart && typeof payload.slowStart === 'object'
-        ? { kind: 'ok', slowStart: payload.slowStart, dayQuotas: payload.dayQuotas && typeof payload.dayQuotas === 'object' ? payload.dayQuotas : null }
+        ? {
+            kind: 'ok',
+            slowStart: payload.slowStart,
+            dayQuotas: payload.dayQuotas && typeof payload.dayQuotas === 'object' ? payload.dayQuotas : null,
+            // 曲线跟着这次读整体采用：云端没给就是 null，客户端据此说「读不到」而不是搬旧数字出来。
+            curve: payload.curve && typeof payload.curve === 'object' ? payload.curve : null,
+          }
         : { kind: 'error', message: '云端已返回，但未带回慢启动状态' };
     } else {
       const rawError = res && res.data && res.data.error;
@@ -1344,9 +1354,68 @@ function setSlowStartGuidanceVisible(visible) {
   if (fields.slowStartCopy) fields.slowStartCopy.classList.toggle('hidden', !visible);
 }
 
+/**
+ * 慢启动曲线表（change sync-slow-start-curve-to-client）：**只渲染云端下发的当前生效曲线**。
+ *
+ * 与本行其余节点「静态、只切文本」不同，表头与表体必须动态建：行数由运营在后台配的总天数决定
+ * （1–30 天），列由回包里真出现的动作项决定。页面结构里刻意一个数字都不留——留一份就是又一张
+ * 「后台改了也不会变」的假表。
+ *
+ * 读不到曲线（非 Facebook 环境、后台配置未就绪、读失败、刚切到还没读的环境）→ 整块表隐藏并就地说明。
+ * **绝不回落上一次读到的、内置的或另一环境的曲线**：运营照这张表判断新号今天还能做多少，
+ * 把「不知道」渲染成一张看起来确定的表比不显示更危险。
+ */
+function clearSlowStartCurve() {
+  if (fields.slowStartCurveHead) fields.slowStartCurveHead.textContent = '';
+  if (fields.slowStartCurveBody) fields.slowStartCurveBody.textContent = '';
+  if (fields.slowStartCurveScroll) fields.slowStartCurveScroll.classList.add('hidden');
+  if (fields.slowStartCurveNote) fields.slowStartCurveNote.textContent = '';
+}
+
+function renderSlowStartCurve(envKey) {
+  if (!fields.slowStartCurveBody || !window.uiLogic) return;
+  const http = slowStartHttpByEnv.get(envKey);
+  const curve = http && http.kind === 'ok' ? http.curve : null;
+  const view = window.uiLogic.slowStartCurveView(curve);
+  // 常驻说明的天数同样来自云端，读不到就不提天数（绝不写死 7 天）。
+  if (fields.slowStartCopy) fields.slowStartCopy.textContent = window.uiLogic.slowStartCopyText(curve);
+  clearSlowStartCurve();
+  if (!view.available) {
+    if (fields.slowStartCurveNote) fields.slowStartCurveNote.textContent = view.message;
+    return;
+  }
+  const headRow = fields.slowStartCurveHead;
+  const dayHead = document.createElement('th');
+  dayHead.scope = 'col';
+  dayHead.textContent = '天数';
+  headRow.appendChild(dayHead);
+  for (const column of view.columns) {
+    const cell = document.createElement('th');
+    cell.scope = 'col';
+    cell.textContent = column.label;
+    headRow.appendChild(cell);
+  }
+  for (const row of view.rows) {
+    const tr = document.createElement('tr');
+    const head = document.createElement('th');
+    head.scope = 'row';
+    head.textContent = row.label;
+    tr.appendChild(head);
+    for (const value of row.values) {
+      const cell = document.createElement('td');
+      cell.textContent = value;
+      tr.appendChild(cell);
+    }
+    fields.slowStartCurveBody.appendChild(tr);
+  }
+  if (fields.slowStartCurveScroll) fields.slowStartCurveScroll.classList.remove('hidden');
+  if (fields.slowStartCurveNote) fields.slowStartCurveNote.textContent = view.note;
+}
+
 function hideSlowStartRow() {
   if (!fields.slowStartRow) return;
   setSlowStartGuidanceVisible(false);
+  clearSlowStartCurve();
   fields.slowStartRow.classList.add('hidden');
   fields.slowStartRow.classList.remove('is-stale', 'is-pending');
   fields.slowStartRow.removeAttribute('aria-busy');
@@ -1358,6 +1427,8 @@ function hideSlowStartRow() {
 // ensureSlowStartHttpFetch 重绘为真态 / binding_unknown / 读失败。
 function renderSlowStartPlaceholder(text) {
   setSlowStartGuidanceVisible(false);
+  // 曲线随之清空：隐藏容器不等于清内容，留着上一环境的数字就是在等一次「切回来还没读完」时把它显示出去。
+  clearSlowStartCurve();
   fields.slowStartRow.classList.remove('hidden', 'is-stale', 'is-pending');
   fields.slowStartRow.removeAttribute('aria-busy');
   if (fields.slowStartToggle) {
@@ -1379,6 +1450,8 @@ function renderSlowStartPlaceholder(text) {
 // 故禁用是 ESSENTIAL（不知道现在是开是关，不能给一个会撒谎的勾选框）——这与被摘掉的「内核在线闸」形状不同。
 function renderSlowStartHttpError(message) {
   setSlowStartGuidanceVisible(false);
+  // 曲线随之清空：隐藏容器不等于清内容，留着上一环境的数字就是在等一次「切回来还没读完」时把它显示出去。
+  clearSlowStartCurve();
   fields.slowStartRow.classList.remove('hidden', 'is-stale', 'is-pending');
   fields.slowStartRow.removeAttribute('aria-busy');
   if (fields.slowStartToggle) {
@@ -1892,6 +1965,8 @@ function applySlowStartView(view, context) {
   // 曲线说明只跟随最后一次 Cloud 确认真态。pending.checked 是本地目标，不是生效事实：开启在途仍隐藏，
   // 关闭在途仍保留，直到完整写后回读把 view.checked 改掉。
   setSlowStartGuidanceVisible(Boolean(view.checked));
+  // 曲线按**当前环境**的最后一次读整体重绘：一处收口，三个调用点都不必各自记得刷。
+  renderSlowStartCurve(context.envKey);
   fields.slowStartRow.classList.remove('hidden');
   fields.slowStartRow.classList.toggle('is-stale', Boolean(view.stale) && !pending);
   fields.slowStartRow.classList.toggle('is-pending', Boolean(pending));
@@ -5510,9 +5585,11 @@ async function submitSlowStart(enabled) {
 
     slowStartFeedbackByEnv.delete(envKey);
     const dayQuotas = receipt.dayQuotas && typeof receipt.dayQuotas === 'object' ? receipt.dayQuotas : null;
+    // 曲线随回执整体采用（同读路径）：回执不带就置 null，绝不留着上一次读到的那份继续显示。
+    const receiptCurve = receipt.curve && typeof receipt.curve === 'object' ? receipt.curve : null;
     // 回执对**发起环境**在写入瞬间权威（change slow-start-offline-toggle，D3 优先级③）：写进 HTTP/receipt 缓存，
     // 使**没有活快照**的环境（离线写入）也当场呈现为**已生效**，绝不显示「已保存 / 待本机应用」二态。
-    slowStartHttpByEnv.set(envKey, { kind: 'ok', slowStart: receipt.slowStart, dayQuotas });
+    slowStartHttpByEnv.set(envKey, { kind: 'ok', slowStart: receipt.slowStart, dayQuotas, curve: receiptCurve });
     // 有活快照的同一 env 对象 → 把回执并进快照（快照来源优先，且带用量计数轴 + 当日上限当场更新）。
     // **不逐字段跨源拼**：慢启动真态整块换成回执的，用量计数仍来自快照——两条独立的轴，不是同一 datum 的合并。
     if (fleetView.envs.get(selectedKey) === env && env.status && env.status.dailyUsage) {

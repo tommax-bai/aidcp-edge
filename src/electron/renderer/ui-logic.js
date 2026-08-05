@@ -1041,6 +1041,72 @@
     return out;
   }
 
+  // ── 慢启动曲线表（change sync-slow-start-curve-to-client）──
+  //
+  // 这张表此前是**写死在页面结构里**的 7 行 6 列，数字恰好等于云端出厂默认值。运营在管理后台改过曲线
+  // （总天数可配 1–30 天、每格上限可调）之后，客户端仍原样显示那 42 个数字——而运营正是照这张表判断
+  // 新号今天还能做多少。现在它只呈现云端下发的当前生效曲线。
+  //
+  // 三条红线：
+  // - **一格都不本地推算、不内置默认**：云端没给就说读不到，MUST NOT 回落上一次 / 内置 / 另一环境的曲线。
+  //   把「不知道」渲染成一张看起来确定的表，比不显示更危险。
+  // - **列由回包决定**：只渲染回包里真出现的动作项，MUST NOT 为缺席的项补一列 0 —— 那是一份系统
+  //   永远不会执行的计划（与今日进展卡「云端摘掉的指标客户端不许自己补」同一条口径）。
+  // - **行数与总天数必须自洽**：对不上就整体判为读不到。半张表比没有表更糟：徽章说第 9 天、
+  //   表里只有 7 行，运营无从知道第 9 天到底允许多少。
+  const SLOW_START_CURVE_LABELS = {
+    view: '浏览', like: '点赞', comment: '评论', follow: '关注',
+    publish: '发布', search: '搜索', joinGroup: '加组',
+  };
+  // 稳定列序；回包里出现而这里没列的键仍照发（拿键名当表头），绝不静默丢一列。
+  const SLOW_START_CURVE_ORDER = ['view', 'like', 'comment', 'follow', 'publish', 'search', 'joinGroup'];
+
+  function slowStartCurveView(curve) {
+    const unavailable = {
+      available: false, columns: [], rows: [], note: '', message: '暂时读不到当前曲线限额',
+    };
+    if (!curve || typeof curve !== 'object') return unavailable;
+    const totalDays = curve.totalDays;
+    const days = Array.isArray(curve.days) ? curve.days : [];
+    if (!Number.isInteger(totalDays) || totalDays <= 0) return unavailable;
+    if (days.length !== totalDays) return unavailable;
+    const first = days[0];
+    if (!first || typeof first !== 'object') return unavailable;
+    const keys = Object.keys(first).filter((key) => key !== 'day');
+    const columns = SLOW_START_CURVE_ORDER.filter((key) => keys.includes(key))
+      .concat(keys.filter((key) => !SLOW_START_CURVE_ORDER.includes(key)));
+    if (!columns.length) return unavailable;
+    const rows = [];
+    for (let index = 0; index < days.length; index += 1) {
+      const row = days[index];
+      if (!row || typeof row !== 'object') return unavailable;
+      const day = Number.isInteger(row.day) && row.day > 0 ? row.day : index + 1;
+      const values = [];
+      for (const key of columns) {
+        const value = row[key];
+        if (!Number.isFinite(value)) return unavailable;
+        values.push(String(value));
+      }
+      rows.push({ day, label: `第 ${day} 天`, values });
+    }
+    return {
+      available: true,
+      totalDays,
+      columns: columns.map((key) => ({ key, label: SLOW_START_CURVE_LABELS[key] || key })),
+      rows,
+      note: '表中为慢启动曲线限额；实际运行仍不会超过账号档位。',
+      message: '',
+    };
+  }
+
+  /** 脚注常驻说明：天数取云端权威总天数，读不到就不提天数（绝不写死 7 天）。 */
+  function slowStartCopyText(curve) {
+    const view = slowStartCurveView(curve);
+    return view.available
+      ? `设置跟随当前环境。开启后头 ${view.totalDays} 天按曲线逐日放开量，之后按当前账号档位运行。`
+      : '设置跟随当前环境。开启后按云端曲线逐日放开量，完成后按当前账号档位运行。';
+  }
+
   // ── 规则模式免人设的呈现口径（change facebook-rule-mode-without-persona）──
   //
   // Facebook 规则模式的四个动作（浏览、点赞、加群、模板评论）一个字都不读人设，所以云端为这类账号取消了
@@ -1118,5 +1184,5 @@
     };
   }
 
-  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, batchStartReady, resolveEnvironmentDisplayName, railDisplayName, manualRenameOutcomeMessage, slowStartLine, facebookRuleModeWithoutPersona, RULE_MODE_WITHOUT_PERSONA_BADGE, RULE_MODE_WITHOUT_PERSONA_NOTE, formatReceivedBytes, proxyRuntimeView, FLEET_STALE_MS };
+  return { relTime, synthesizeHealth, bandTone, detailRows, presenceView, runtimeGuidanceView, publishView, publishDock, PRESENCE_FRESH_MS, PUBLISH_WAIT_HOT_MS, fleetLevel, fleetRailModel, batchStartReady, resolveEnvironmentDisplayName, railDisplayName, manualRenameOutcomeMessage, slowStartLine, slowStartCurveView, slowStartCopyText, facebookRuleModeWithoutPersona, RULE_MODE_WITHOUT_PERSONA_BADGE, RULE_MODE_WITHOUT_PERSONA_NOTE, formatReceivedBytes, proxyRuntimeView, FLEET_STALE_MS };
 });

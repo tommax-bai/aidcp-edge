@@ -68,11 +68,22 @@ const uiLogic = require('../../src/electron/renderer/ui-logic.js') as {
     displayName: string,
   ) => string;
   slowStartLine: (dailyUsage: Record<string, unknown> | null | undefined, connState: string, source?: string) => SlowStartV;
+  slowStartCurveView: (curve: unknown) => SlowStartCurveV;
+  slowStartCopyText: (curve: unknown) => string;
   facebookRuleModeWithoutPersona: (input: unknown) => boolean;
   RULE_MODE_WITHOUT_PERSONA_BADGE: string;
   RULE_MODE_WITHOUT_PERSONA_NOTE: string;
   PRESENCE_FRESH_MS: number;
 };
+
+interface SlowStartCurveV {
+  available: boolean;
+  totalDays?: number;
+  columns: Array<{ key: string; label: string }>;
+  rows: Array<{ day: number; label: string; values: string[] }>;
+  note: string;
+  message: string;
+}
 
 interface SlowStartV {
   visible: boolean;
@@ -1128,6 +1139,57 @@ test('railDisplayName：既无真实昵称也无环境名 → 「环境 …末4�
 // 每条用例都对着一个具体的谎（未知当成关 / 没压说成在压 / 毕业静默消失 / 断连当成已关闭）。
 
 const usage = (slowStart: Record<string, unknown> | undefined) => ({ asOf: '2026-07-17T00:00:00.000Z', totals: {}, ...(slowStart ? { slowStart } : {}) });
+
+// ── 慢启动曲线表（change sync-slow-start-curve-to-client）──
+
+const curveDay = (day: number) => ({
+  day, view: 10 + day, like: day, comment: day % 3, follow: 1, publish: day % 2, search: 2, joinGroup: 1,
+});
+
+test('slowStartCurveView：行数与数字全跟云端回包，不受写死的 7 天 / 出厂默认约束', () => {
+  const days = Array.from({ length: 10 }, (_, index) => curveDay(index + 1));
+  const view = uiLogic.slowStartCurveView({ totalDays: 10, days });
+  assert.equal(view.available, true);
+  assert.equal(view.totalDays, 10);
+  assert.equal(view.rows.length, 10, '后台配了 10 天就渲染 10 行');
+  assert.deepEqual(view.rows[9], {
+    day: 10, label: '第 10 天', values: ['20', '10', '1', '1', '0', '2', '1'],
+  });
+  assert.deepEqual(view.columns.map((column) => column.label),
+    ['浏览', '点赞', '评论', '关注', '发布', '搜索', '加组']);
+});
+
+test('slowStartCurveView：缺席 / 半张表都判为读不到，绝不自造数字', () => {
+  const seven = Array.from({ length: 7 }, (_, index) => curveDay(index + 1));
+  for (const [name, input] of [
+    ['字段缺席', null],
+    ['行数与总天数对不上', { totalDays: 10, days: seven }],
+    ['空曲线', { totalDays: 0, days: [] }],
+    ['某格不是数字', { totalDays: 1, days: [{ ...curveDay(1), view: null }] }],
+  ] as Array<[string, unknown]>) {
+    const view = uiLogic.slowStartCurveView(input);
+    assert.equal(view.available, false, name);
+    assert.equal(view.rows.length, 0, `${name}：一个数字都不许渲染`);
+    assert.ok(view.message, `${name}：必须就地说明读不到`);
+  }
+});
+
+test('slowStartCurveView：只渲染回包里真出现的动作项，不补零也不丢列', () => {
+  const view = uiLogic.slowStartCurveView({
+    totalDays: 1,
+    days: [{ day: 1, view: 20, like: 2, dmReply: 3 }],
+  });
+  assert.deepEqual(view.columns.map((column) => column.key), ['view', 'like', 'dmReply']);
+  assert.deepEqual(view.rows[0]!.values, ['20', '2', '3']);
+  // FB 做不了的项云端本就不下发；客户端更不许自己补一列永远为 0 的计划。
+  assert.equal(view.columns.some((column) => column.key === 'collect'), false);
+});
+
+test('slowStartCopyText：天数取云端权威值，读不到就不提天数（绝不写死 7 天）', () => {
+  const days = Array.from({ length: 10 }, (_, index) => curveDay(index + 1));
+  assert.match(uiLogic.slowStartCopyText({ totalDays: 10, days }), /头 10 天/);
+  assert.doesNotMatch(uiLogic.slowStartCopyText(null), /\d+ 天/);
+});
 
 test('slowStartLine：字段缺省 = 未知（云端还没说）→ 整行不渲染，绝不默认成「关」', () => {
   // 照 personaBound 三态判例：显示一个没勾的框，等于替云端回答了「这个号没在养」。
