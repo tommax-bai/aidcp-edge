@@ -919,6 +919,11 @@
       <details class="dev hidden" id="dev-section">
         <summary>开发者详情</summary>
         <div class="hp-row"><span class="hp-label">自动化引擎连接</span><strong id="engine-link-diagnostic" class="badge">未连接</strong></div>
+        <!-- 浏览器让位（change admit-browser-standby-on-live-facts）：一个「本可以让位却被本地拒绝」
+             的环境会无限期占住一个浏览器槽位，而它在别处看起来与健康环境一模一样。连续拒绝的次数与
+             持续时长必须在这里露出来——单次拒绝正常，连续拒绝才是故障。 -->
+        <div class="hp-row"><span class="hp-label">浏览器让位</span><strong id="browser-standby-diagnostic" class="badge">未知</strong></div>
+        <div class="hp-row"><span class="hp-label">让位诊断</span><span id="browser-standby-detail">—</span></div>
         <section class="command-diagnostics" aria-labelledby="command-diagnostics-title">
           <div class="command-diagnostics-head">
             <strong id="command-diagnostics-title">引擎命令</strong>

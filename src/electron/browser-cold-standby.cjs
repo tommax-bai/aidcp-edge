@@ -82,6 +82,17 @@ function classifyBrowserStandbyHintUpdate(input, state = {}) {
 /**
  * 判「此刻该不该进入冷待机」。
  *
+ * **准入 MUST 只读当场可验证的事实**（change admit-browser-standby-on-live-facts）。曾经这里读两个
+ * 由核心 stdout 中文日志推断出来的轴（`status.edge` / `status.session`）。会话轴的写入方是已退役的
+ * 那套页面自动化路径——现役平台跑 Native 引擎、发的是结构化会话事件，外壳对其零处理分支，于是该轴
+ * 自核心启动被写下那一次之后**再无任何人维护**：只会被各种失败路径单向改坏、永不复原。它一旦停在
+ * 错值上，此后每一条提示都被拒，浏览器槽位被永久锁死，而拒绝这条路径当时还不留痕（真机实测：连续
+ * 32 分钟、零证据）。
+ *
+ * 因此新增条款：**任何一个准入输入都必须在每个在产平台上有可证的写入方**，并由回归断言钉死
+ * （见 test/electron/browser-cold-standby.test.ts 的写入方存在断言）。想把「浏览循环在不在跑」重新
+ * 加回来的人请先回答：这个平台上谁写它、哪条测试证明它还在被写。
+ *
  * @param lastWokenAt 上次唤醒完成的时刻（ms）；未唤醒过 / 未知 → 传 undefined（视作不受最短持有时长约束）。
  *        min_hold 被拦下时**调用方 MUST NOT 丢弃这条提示**，而应在持有时长满足后按最新提示重新判定
  *        （见 main.cjs 的 coldStandbyHoldTimer）——否则一次拦截就把该环境永久留在开启态。
@@ -112,9 +123,11 @@ function shouldEnterColdStandby({ status = {}, flags = {}, hint, settings, now =
   for (const flag of ['restartPending', 'pausePending', 'closePending', 'coreParked', 'removed', 'stopRequested']) {
     if (flags[flag]) return skip(flag, normalizedHint);
   }
-  if (status.edge !== 'running') return skip('edge_not_running', normalizedHint);
+  // 运营意图是本地事实（点了暂停 / 关闭就是暂停 / 关闭），取代原先那条「会话轴 ∈ running/resting」。
+  if (flags.automationPaused || flags.automationIntent === 'paused' || flags.automationIntent === 'stopped') {
+    return skip('automation_not_enabled', normalizedHint);
+  }
   if (status.cloud !== 'connected') return skip('cloud_not_connected', normalizedHint);
-  if (status.session !== 'running' && status.session !== 'resting') return skip('session_not_idle_safe', normalizedHint);
   if (status.overlayBlocked) return skip('overlay_blocked', normalizedHint);
   if (status.auth && status.auth !== 'logged in') return skip('auth_not_ready', normalizedHint);
   if (status.publish && status.publish.state === 'approved') return skip('publish_inflight', normalizedHint);
@@ -132,6 +145,35 @@ function shouldEnterColdStandby({ status = {}, flags = {}, hint, settings, now =
 
 function skip(reason, hint) {
   return { ok: false, reason, hint: hint || null };
+}
+
+/**
+ * 连续拒绝的日志节流：首次一条、原因变化一条（计数复位到 1），此后每 N 次一条。
+ *
+ * 不能每次都写——提示每 60s 一跳，一个卡住的环境会把日志淹掉，反而看不见别的；也不能只写首次——
+ * 那样「卡了 32 分钟」和「拒了一次」在日志里仍然长得一样，而这正是本 change 要消灭的那种等价。
+ */
+const STANDBY_REFUSAL_LOG_EVERY = 5;
+
+/**
+ * 连续拒绝记账（change admit-browser-standby-on-live-facts）。
+ *
+ * 纯函数：调用方持有上一次的记账值，这里只算下一个。**单次拒绝是正常运行的一部分**（刚醒来、
+ * 任务在跑），**连续拒绝才意味着这个环境正在无限期占着一个浏览器槽位**——二者若在呈现与日志上
+ * 长得一样，运营就永远认不出后者。
+ */
+function noteStandbyRefusal(previous, reason, now = Date.now()) {
+  const named = typeof reason === 'string' && reason ? reason : 'unknown';
+  if (previous && previous.reason === named && Number.isFinite(previous.count) && Number.isFinite(previous.since)) {
+    return { reason: named, count: previous.count + 1, since: previous.since };
+  }
+  return { reason: named, count: 1, since: now };
+}
+
+/** 这一次拒绝要不要落日志（见 STANDBY_REFUSAL_LOG_EVERY 的理由）。 */
+function shouldLogStandbyRefusal(streak) {
+  if (!streak || !Number.isFinite(streak.count) || streak.count < 1) return false;
+  return streak.count === 1 || streak.count % STANDBY_REFUSAL_LOG_EVERY === 0;
 }
 
 function parseBooleanOverride(raw) {
@@ -170,6 +212,9 @@ module.exports = {
   DEFAULT_BROWSER_COLD_STANDBY_WARMUP_MS,
   DEFAULT_BROWSER_COLD_STANDBY_MIN_HOLD_MS,
   MIN_VALID_BROWSER_STANDBY_WAIT_MS,
+  STANDBY_REFUSAL_LOG_EVERY,
+  noteStandbyRefusal,
+  shouldLogStandbyRefusal,
   normalizeColdStandbySettings,
   omitLegacyColdStandbyMinWaitSetting,
   normalizeBrowserStandbyHint,

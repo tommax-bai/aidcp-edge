@@ -1685,20 +1685,22 @@ async function main(): Promise<void> {
     enterStandby: async () => {
       console.log('\n[aidcp-edge] 冷待机流程启动：停止自动化、释放浏览器层、关闭浏览器、保留云端连接...');
       clearColdStandbyCloudRetry();
+      // 下面三条拒绝都发生在**任何拆除动作之前**，浏览器分毫未动 ⇒ browserIntact: true。
+      // 这个字段不是措辞问题：外壳按它决定「什么都没发生、下次再判」还是「浏览器真态未知」。
       if (browserWasAlreadyActive) {
         console.log('[aidcp-edge] 本核心接管的是启动前已存在的 Active 浏览器，保持浏览器原状并拒绝冷待机');
-        return false;
+        return { ok: false, reason: 'adopted_active_browser', browserIntact: true };
       }
       // 释放 ⊥ 在跑租约（change browser-slot-scheduling）：任务持着执行权时绝不把浏览器从它底下抽走。
       // 待机请求推迟到租约结束后由外壳再判（这里如实拒绝，不静默降级成「等一会儿再偷偷关」）。
       if (taskCoordinator.hasActiveLease()) {
         console.log('[aidcp-edge] 有任务租约在跑，拒绝进入冷待机（绝不把浏览器从正在执行的任务底下抽走）');
-        return false;
+        return { ok: false, reason: 'task_lease_active', browserIntact: true };
       }
-      if (!chrome) return true;
+      if (!chrome) return { ok: true };
       if (chrome.reused) {
         console.log('[aidcp-edge] 复用模式：不回收本进程不拥有的外部 Chrome，拒绝进入冷待机');
-        return false;
+        return { ok: false, reason: 'external_browser_reused', browserIntact: true };
       }
       coldStandbyActive = true;
       clearColdStandbyWakeLatch();
@@ -1717,21 +1719,23 @@ async function main(): Promise<void> {
       // 当成意外掉线、触发有界重连，最后把连接对象搞成一个 recovering/unavailable 的僵尸（今天的 bug）。
       // 释放后任何页面命令都会响亮失败，绝不静默假成功。
       session.detach();
+      // 越过 detach 之后，浏览器层已经拆了 ⇒ 后面每一条失败都 browserIntact: false。
+      // 这两条与上面三条的**可恢复性完全不同**，绝不能共用一个失败名。
       try {
         const freed = await chrome.killAndConfirmDead();
         if (!freed) {
           console.warn('[aidcp-edge] ⚠ 冷待机浏览器关闭状态未能确认，拒绝进入冷待机');
           coldStandbyActive = false;
           clearColdStandbyCloudRetry();
-          return false;
+          return { ok: false, reason: 'browser_close_unconfirmed', browserIntact: false };
         }
         proxyRuntime?.suspendGeneration('browser_standby');
-        return true;
+        return { ok: true };
       } catch (error) {
         console.warn(`[aidcp-edge] ⚠ 冷待机关闭浏览器异常：${(error as Error)?.message || String(error)}`);
         coldStandbyActive = false;
         clearColdStandbyCloudRetry();
-        return false;
+        return { ok: false, reason: 'browser_close_error', browserIntact: false };
       }
     },
     /**
@@ -1890,6 +1894,17 @@ async function main(): Promise<void> {
     onCloseFailed: () => {
       if (typeof process.send === 'function' && process.connected) {
         process.send({ type: 'lifecycle.close_failed' });
+      }
+    },
+    // 待机被拒走独立回执，绝不复用 close_failed（change admit-browser-standby-on-live-facts）：
+    // 那条的语义是「运营要求关闭但没关成」，外壳据此收敛自动化意图；待机被拒时运营什么都没要求。
+    onStandbyRefused: (refusal) => {
+      if (typeof process.send === 'function' && process.connected) {
+        process.send({
+          type: 'lifecycle.standby_refused',
+          reason: refusal.reason,
+          browserIntact: refusal.browserIntact,
+        });
       }
     },
     reportBrowserClosed: () => sendLifecycleIpcAcknowledged({ type: 'lifecycle.browser_closed' }),

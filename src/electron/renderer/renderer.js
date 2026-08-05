@@ -51,6 +51,8 @@ const fields = {
   auth: document.querySelector('#auth-status'),
   cloud: document.querySelector('#cloud-status'),
   engineLinkDiagnostic: document.querySelector('#engine-link-diagnostic'),
+  browserStandbyDiagnostic: document.querySelector('#browser-standby-diagnostic'),
+  browserStandbyDetail: document.querySelector('#browser-standby-detail'),
   session: document.querySelector('#session-state'),
   browser: document.querySelector('#browser-state'),
   risk: document.querySelector('#risk-status'),
@@ -1482,6 +1484,40 @@ function renderSlowStartHttpError(message) {
 function setBadge(element, field, value) {
   element.textContent = STATUS_LABELS[field]?.[value] ?? value;
   element.className = `badge ${value}`;
+}
+
+const BROWSER_STANDBY_MODE_LABELS = {
+  hint: '可让位', scheduled: '准备让位', sleeping: '已让位', awake: '已唤醒',
+  skipped: '被拒绝', disabled: '已关闭',
+};
+
+/**
+ * 开发者详情里的「浏览器让位」两行（change admit-browser-standby-on-live-facts）。
+ *
+ * 存在理由：连续拒绝让位的环境会无限期占住一个浏览器槽位，而它在别的任何一格里都跟健康环境
+ * 长得一样。**次数与持续时长必须直接写出来**——单次拒绝是正常运行的一部分，连续拒绝才是故障，
+ * 两者若在界面上无法区分，运营就永远认不出后者（真机上曾连续 32 分钟无人察觉）。
+ */
+function renderBrowserStandbyDiagnostic(standby) {
+  if (!fields.browserStandbyDiagnostic || !fields.browserStandbyDetail) return;
+  const mode = standby && typeof standby.mode === 'string' ? standby.mode : '';
+  fields.browserStandbyDiagnostic.textContent = BROWSER_STANDBY_MODE_LABELS[mode] || (mode || '未知');
+  fields.browserStandbyDiagnostic.className = `badge ${mode || 'unknown'}`;
+  if (!standby) {
+    fields.browserStandbyDetail.textContent = '—';
+    return;
+  }
+  const parts = [];
+  if (standby.reason) parts.push(`原因 ${standby.reason}`);
+  if (Number.isFinite(standby.refusedCount) && standby.refusedCount > 0) {
+    parts.push(`连续拒绝 ${standby.refusedCount} 次`);
+    if (Number.isFinite(standby.refusedSinceMs)) {
+      parts.push(`已持续 ${Math.round(standby.refusedSinceMs / 1000)}s`);
+    }
+  }
+  if (standby.browserIntact === true) parts.push('浏览器完好');
+  if (standby.browserIntact === false) parts.push('浏览器真态未确认');
+  fields.browserStandbyDetail.textContent = parts.length ? parts.join(' · ') : '—';
 }
 
 /**
@@ -5981,6 +6017,7 @@ function render(status) {
   setBadge(fields.auth, 'clientSession', status.clientSessionState || 'ready');
   setBadge(fields.cloud, 'engineLink', status.engineLinkState || (status.cloud === 'connected' ? 'connected' : 'disconnected'));
   setBadge(fields.engineLinkDiagnostic, 'engineLink', status.engineLinkState || (status.cloud === 'connected' ? 'connected' : 'disconnected'));
+  renderBrowserStandbyDiagnostic(status.browserStandby);
   setBadge(fields.session, 'automation', status.automationState || (status.session === 'running' ? 'running' : status.session === 'paused' ? 'paused' : 'stopped'));
   setBadge(fields.browser, 'browser', status.browserState || 'closed');
   setBadge(fields.risk, 'risk', status.risk);

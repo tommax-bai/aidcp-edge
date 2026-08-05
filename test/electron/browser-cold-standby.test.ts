@@ -26,6 +26,13 @@ const standby = require('../../src/electron/browser-cold-standby.cjs') as {
     now: number;
     lastWokenAt?: number;
   }) => { ok: boolean; reason: string; remainingMs?: number; warmupMs?: number; wakeDelayMs?: number; holdRemainingMs?: number };
+  STANDBY_REFUSAL_LOG_EVERY: number;
+  noteStandbyRefusal: (
+    previous: { reason: string; count: number; since: number } | null,
+    reason: string,
+    now?: number,
+  ) => { reason: string; count: number; since: number };
+  shouldLogStandbyRefusal: (streak: { reason: string; count: number; since: number } | null) => boolean;
 };
 
 const now = 1_700_000_000_000;
@@ -65,8 +72,19 @@ function flags(overrides: Record<string, unknown> = {}) {
     coreParked: false,
     removed: false,
     stopRequested: false,
+    automationPaused: false,
+    automationIntent: 'enabled',
     ...overrides,
   };
+}
+
+/** 取一段顶层函数体（到下一个顶层 `function ` 为止），用于结构性断言。 */
+function functionBody(source: string, name: string): string {
+  const start = source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `未找到函数 ${name}`);
+  const rest = source.slice(start + 1);
+  const end = rest.indexOf('\nfunction ');
+  return end === -1 ? rest : rest.slice(0, end);
 }
 
 test('browser-cold-standby: settings default enabled and can be disabled by env', () => {
@@ -331,4 +349,103 @@ test('browser-cold-standby: 最短持有时长可关（设 0）', () => {
     lastWokenAt: now - 1_000,
   });
   assert.equal(decision.ok, true);
+});
+
+// ── change admit-browser-standby-on-live-facts ──────────────────────────────────
+// 真机（2026-08-05，dev 车队）：一个 Facebook 账号在小时浏览配额跑满后连续 32 分钟拒绝让位，
+// 锁死两个浏览器槽位之一，界面与日志零痕迹。根因是准入读了一个**已无写入方**的日志推断轴。
+
+test('browser-cold-standby: 陈旧的日志推断轴不再阻挡让位（本次故障的定向回归）', () => {
+  // 现役平台跑 Native 引擎，写会话轴的那几句中文只有已退役的页面自动化路径会打印；该轴自核心
+  // 启动被写下那一次之后再无人维护，只会被各种失败路径单向改坏。它绝不能再决定要不要让位。
+  const decision = standby.shouldEnterColdStandby({
+    status: status({ edge: 'idle', session: 'idle' }),
+    flags: flags(),
+    hint: hint(),
+    settings: { enabled: true, warmupMs: 90_000 },
+    now,
+  });
+  assert.equal(decision.ok, true, '两个推断轴都陈旧时仍必须让位');
+  assert.equal(decision.wakeDelayMs, 30 * 60_000 - 90_000);
+});
+
+test('browser-cold-standby: 准入 MUST NOT 再读日志推断轴', () => {
+  const source = readFileSync(new URL('../../src/electron/browser-cold-standby.cjs', import.meta.url), 'utf8');
+  const body = functionBody(source, 'shouldEnterColdStandby');
+  assert.equal(body.includes('status.session'), false, '准入不得再依赖会话轴');
+  assert.equal(body.includes('status.edge'), false, '准入不得再依赖引擎轴');
+});
+
+test('browser-cold-standby: 运营意图（本地事实）取代会话轴拦住暂停/关闭的环境', () => {
+  for (const [override, label] of [
+    [{ automationPaused: true }, 'automationPaused'],
+    [{ automationIntent: 'paused' }, 'intent=paused'],
+    [{ automationIntent: 'stopped' }, 'intent=stopped'],
+  ] as Array<[Record<string, unknown>, string]>) {
+    const decision = standby.shouldEnterColdStandby({
+      status: status(),
+      flags: flags(override),
+      hint: hint(),
+      settings: { enabled: true, warmupMs: 90_000 },
+      now,
+    });
+    assert.equal(decision.reason, 'automation_not_enabled', label);
+  }
+});
+
+test('browser-cold-standby: 云端连接轴的每一个匹配串都仍有发射方', () => {
+  // 本次事故的机械化教训：准入依赖的每一个标签都必须有活着的写入方。会话轴当年就是这么死的
+  // ——匹配串还在，发射它的那条路径已经退役，于是标签静默冻结、闸门永久拒绝。
+  // 这里钉住仍在准入里的那一个（云端连接轴）：匹配串必须能在核心侧源码里找到发射点。
+  const connectedAt = electronMainSource.indexOf("next.cloud = 'connected'");
+  assert.notEqual(connectedAt, -1, '未找到写入云端连接轴的那一处');
+  const guardAt = electronMainSource.lastIndexOf('if (message.includes(', connectedAt);
+  assert.notEqual(guardAt, -1, '未找到云端连接轴的匹配条件');
+  const cloudBranch = electronMainSource.slice(guardAt, electronMainSource.indexOf('\n', guardAt));
+  const literals = [...cloudBranch.matchAll(/message\.includes\('([^']+)'\)/g)].map((m) => m[1]);
+  assert.ok(literals.length >= 2, '未能从 main.cjs 取到云端连接轴的匹配串');
+  const coreSources = [
+    'src/main.ts',
+    'src/client/edge-client.ts',
+  ].map((p) => readFileSync(new URL(`../../${p}`, import.meta.url), 'utf8')).join('\n');
+  for (const literal of literals) {
+    assert.ok(coreSources.includes(literal), `匹配串「${literal}」在核心侧已无发射方，准入不得再依赖它`);
+  }
+});
+
+test('browser-cold-standby: 连续拒绝记账——单次与连续必须可分辨', () => {
+  const first = standby.noteStandbyRefusal(null, 'task_lease_active', now);
+  assert.deepEqual(first, { reason: 'task_lease_active', count: 1, since: now });
+  const second = standby.noteStandbyRefusal(first, 'task_lease_active', now + 60_000);
+  assert.deepEqual(second, { reason: 'task_lease_active', count: 2, since: now }, '同因累加且保留首次时刻');
+  const changed = standby.noteStandbyRefusal(second, 'publish_inflight', now + 120_000);
+  assert.deepEqual(changed, { reason: 'publish_inflight', count: 1, since: now + 120_000 }, '换原因即复位');
+});
+
+test('browser-cold-standby: 拒绝日志节流——首次一条，此后每 N 次一条', () => {
+  const every = standby.STANDBY_REFUSAL_LOG_EVERY;
+  assert.equal(standby.shouldLogStandbyRefusal({ reason: 'r', count: 1, since: now }), true);
+  assert.equal(standby.shouldLogStandbyRefusal({ reason: 'r', count: 2, since: now }), false);
+  assert.equal(standby.shouldLogStandbyRefusal({ reason: 'r', count: every, since: now }), true);
+  assert.equal(standby.shouldLogStandbyRefusal(null), false);
+});
+
+test('browser-cold-standby: 待机被拒 MUST NOT 收敛运营意图（浏览器完好那一支什么都不许动）', () => {
+  // 核心侧「有任务租约在跑，别把浏览器从任务底下抽走」是完全无害的拒绝，而它此前与「运营要求关闭
+  // 但没关成」共用同一条无名回执，于是一个健康环境被写成暂停态：永久占槽、且被踢出等槽位队列。
+  const body = functionBody(electronMainSource, 'onColdStandbyRefused');
+  assert.equal(body.includes('automationIntent ='), false, '待机被拒不得改运营意图');
+  assert.equal(body.includes('automationPaused ='), false, '待机被拒不得把环境标成暂停');
+  assert.equal(body.includes("session: 'paused'"), false, '待机被拒不得落暂停态');
+  assert.ok(body.includes('browserIntact'), '两支必须按浏览器是否被动过分开');
+});
+
+test('browser-cold-standby: 每一条本地拒绝都要留痕（不许静默 return）', () => {
+  const body = functionBody(electronMainSource, 'applyBrowserStandbyHint');
+  const refusalBlock = body.slice(body.indexOf('if (!decision.ok)'));
+  assert.ok(refusalBlock.includes('noteColdStandbyRefusal('), '拒绝路径必须经过记账');
+  const noteAt = refusalBlock.indexOf('noteColdStandbyRefusal(');
+  const eligibleGuardAt = refusalBlock.indexOf('hint.eligible === false');
+  assert.ok(eligibleGuardAt !== -1 && eligibleGuardAt < noteAt, '「云端说还有活干」不是拒绝，必须先复位再记账');
+  assert.ok(refusalBlock.slice(noteAt).includes('refusalPatch(streak)'), '记账必须写进待机状态供界面呈现');
 });

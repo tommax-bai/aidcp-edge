@@ -164,7 +164,7 @@ test('standby closes browser but does not exit or deactivate cloud connection', 
   const controller = new CoreLifecycleController({
     deactivate: async () => { throw new Error('standby must not call terminal deactivate'); },
     closeOwnedBrowser: async () => { throw new Error('standby uses enterStandby, not final close'); },
-    enterStandby: async () => { standbyCalls++; return true; },
+    enterStandby: async () => { standbyCalls++; return { ok: true }; },
     exit: (code) => { exits.push(code); },
     onStandby: () => { standbyAcks++; },
   });
@@ -182,7 +182,7 @@ test('initial standby wakes without re-entering standby or closing a nonexistent
   const controller = new CoreLifecycleController({
     deactivate: async () => { calls.push('deactivate'); },
     closeOwnedBrowser: async () => { calls.push('close'); return true; },
-    enterStandby: async () => { calls.push('enter'); return true; },
+    enterStandby: async () => { calls.push('enter'); return { ok: true }; },
     wakeFromStandby: async () => { calls.push('wake'); return true; },
     exit: () => { calls.push('exit'); },
   }, 'standby');
@@ -200,7 +200,7 @@ test('resume after standby exits without trying to close the already closed brow
   const controller = new CoreLifecycleController({
     deactivate: async () => { deactivations++; },
     closeOwnedBrowser: async () => { browserCloses++; return true; },
-    enterStandby: async () => true,
+    enterStandby: async () => ({ ok: true } as const),
     exit: (code) => { exits.push(code); },
   });
 
@@ -220,7 +220,7 @@ test('automation pause remains independent from browser standby and resumes befo
     pauseAutomation: async () => { paused++; },
     resumeAutomation: async () => { resumed++; },
     closeOwnedBrowser: async () => true,
-    enterStandby: async () => true,
+    enterStandby: async () => ({ ok: true } as const),
     wakeFromStandby: async (resumeAutomation) => {
       calls.push(`wake:${resumeAutomation}`);
       return true;

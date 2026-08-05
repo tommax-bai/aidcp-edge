@@ -109,6 +109,8 @@ const {
   shouldEnterColdStandby,
   normalizeBrowserStandbyHint,
   classifyBrowserStandbyHintUpdate,
+  noteStandbyRefusal,
+  shouldLogStandbyRefusal,
 } = require('./browser-cold-standby.cjs');
 const fleet = require('./fleet.cjs');
 const { createCoreBootstrapSupervisor } = require('./core-bootstrap.cjs');
@@ -2252,6 +2254,9 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     // 再也不会让出槽位（外层 !decision.ok 分支对「不在待机中」的普通 skip 是直接 return、什么都不做的）。
     coldStandbyLastWokenAt: 0,
     coldStandbyHoldTimer: null,
+    // 连续拒绝记账（change admit-browser-standby-on-live-facts）：{ reason, count, since }。
+    // 单次拒绝正常，连续拒绝＝这个环境正在无限期占着一个浏览器槽位；两者必须可分辨。
+    coldStandbyRefusal: null,
     // 正在原地重建浏览器（change browser-slot-scheduling）。唤醒是异步有界的：待机态只在核心回报
     // lifecycle.woken 后才解除，绝不在下发唤醒的那一刻就乐观标成已醒。
     coldStandbyWaking: false,
@@ -3952,6 +3957,43 @@ function coldStandbyFlags(handle) {
     coreParked: handle.coreParked,
     removed: handle.removed,
     stopRequested: handle.stopRequested,
+    // 运营意图（本地事实）——取代了原先靠日志文本推断的会话轴，见 browser-cold-standby.cjs 的头注释。
+    automationPaused: Boolean(handle.automationPaused),
+    automationIntent: handle.automationIntent,
+  };
+}
+
+/**
+ * 记一次「本可以让位、但被本地拒绝」，并按节流写日志（change admit-browser-standby-on-live-facts）。
+ *
+ * 返回本次记账值，供调用方一并写进待机状态。**每一条拒绝路径都必须经过这里**——在此之前，除
+ * min_hold 外的拒绝全是直接 return，于是一个环境锁死半小时在磁盘与界面上都零证据。
+ */
+function noteColdStandbyRefusal(handle, reason) {
+  const streak = noteStandbyRefusal(handle.coldStandbyRefusal, reason, Date.now());
+  handle.coldStandbyRefusal = streak;
+  if (shouldLogStandbyRefusal(streak)) {
+    const heldMs = Math.max(0, Date.now() - streak.since);
+    appendEdgeLog(
+      handle.envId,
+      `[cold-standby] 拒绝让出浏览器槽位 reason=${streak.reason} streak=${streak.count} for=${Math.round(heldMs / 1000)}s`,
+    );
+  }
+  return streak;
+}
+
+/** 让位成功 / 提示已不再 eligible ⇒ 这段连续拒绝结束。 */
+function clearColdStandbyRefusal(handle) {
+  if (handle) handle.coldStandbyRefusal = null;
+}
+
+/** 把连续拒绝记账摊进待机状态，供开发者详情呈现。 */
+function refusalPatch(streak) {
+  if (!streak) return {};
+  return {
+    refusedReason: streak.reason,
+    refusedCount: streak.count,
+    refusedSinceMs: Math.max(0, Date.now() - streak.since),
   };
 }
 
@@ -3999,6 +4041,18 @@ function applyBrowserStandbyHint(handle, rawHint) {
       : (handle.coldStandbyLastWokenAt || undefined),
   });
   if (!decision.ok) {
+    // 云端说「这会儿还有活干」不是拒绝，是这段连续拒绝的**结束**：计数归零，不留痕。
+    if (hint.eligible === false) {
+      clearColdStandbyRefusal(handle);
+      if (handle.coldStandbyActive || handle.coldStandbyPending) {
+        wakeColdStandby(handle, decision.reason);
+        return;
+      }
+      updateStatus(handle, { browserStandby: coldStandbyStatus('hint', hint, { reason: decision.reason }) });
+      return;
+    }
+    // 到这里 = **本可以让位、却被本地拒绝**。每一条这样的路径都必须留痕，一条都不许静默返回。
+    const streak = noteColdStandbyRefusal(handle, decision.reason);
     // 最短持有时长未满：**绝不能把这条提示丢掉**。外层那个 if 只处理「待机中」与「disabled」两种情形，
     // 普通 skip 是直接 return、什么都不做的——若在此丢弃，该环境就永远留在开启态、再也不会让出槽位
     // （云端 60s 周期链虽会再推，但那只是碰运气：提示内容不变时判定结果同样是 min_hold，直到某一跳恰好
@@ -4011,22 +4065,28 @@ function applyBrowserStandbyHint(handle, rawHint) {
       }, delay);
       if (typeof handle.coldStandbyHoldTimer.unref === 'function') handle.coldStandbyHoldTimer.unref();
       updateStatus(handle, {
-        browserStandby: coldStandbyStatus('skipped', hint, { reason: 'min_hold', holdRemainingMs: delay }),
+        browserStandby: coldStandbyStatus('skipped', hint, {
+          reason: 'min_hold',
+          holdRemainingMs: delay,
+          ...refusalPatch(streak),
+        }),
       });
       return;
     }
-    if (handle.coldStandbyActive || handle.coldStandbyPending || decision.reason === 'disabled') {
-      if (handle.coldStandbyActive || handle.coldStandbyPending) {
-        wakeColdStandby(handle, decision.reason);
-        return;
-      }
-      clearColdStandbyTimer(handle);
-      updateStatus(handle, {
-        browserStandby: coldStandbyStatus(decision.reason === 'disabled' ? 'disabled' : 'skipped', hint, { reason: decision.reason }),
-      });
+    if (handle.coldStandbyActive || handle.coldStandbyPending) {
+      wakeColdStandby(handle, decision.reason);
+      return;
     }
+    if (decision.reason === 'disabled') clearColdStandbyTimer(handle);
+    updateStatus(handle, {
+      browserStandby: coldStandbyStatus(decision.reason === 'disabled' ? 'disabled' : 'skipped', hint, {
+        reason: decision.reason,
+        ...refusalPatch(streak),
+      }),
+    });
     return;
   }
+  clearColdStandbyRefusal(handle);
   if (handle.coldStandbyActive) {
     scheduleColdStandbyWake(handle, decision);
     updateStatus(handle, {
@@ -4076,18 +4136,67 @@ function enterColdStandby(handle, decision) {
   });
 }
 
+/**
+ * 核心拒绝进入冷待机（change admit-browser-standby-on-live-facts）。
+ *
+ * 这条**不是** `lifecycle.close_failed`：那条的语义是「运营要求关闭浏览器但没关成」，外壳据此把
+ * 自动化意图收敛成停止。待机被拒时运营什么都没要求，按那条处理等于凭空造出一个终态——一个只是
+ * 「此刻不方便待机」的健康环境会变成永久占槽、且被排除出等槽位队列的砖。最常见的触发就是
+ * `task_lease_active`（正在发帖 / 评论），而本 change 让待机尝试变得频繁得多。
+ *
+ * 两支的分界是**物理事实**，由核心给出：拒绝发生在任何拆除动作之前（浏览器完好）⇒ 这一趟什么都
+ * 没发生；已经 detach / kill 过 ⇒ 浏览器真态未知，如实呈现，但仍然不动运营意图。
+ */
+function onColdStandbyRefused(handle, reason, browserIntact) {
+  if (!handle) return;
+  clearColdStandbyTimer(handle);
+  clearColdStandbyHoldTimer(handle);
+  const streak = noteColdStandbyRefusal(handle, reason);
+  const hint = handle.status.browserStandby && handle.status.browserStandby.hint;
+  if (browserIntact) {
+    // 什么都没发生：四轴、运营意图、在场感一律不动，只留一条可重试的痕迹，等下一条提示重判。
+    updateStatus(handle, {
+      browserStandby: coldStandbyStatus('skipped', hint, {
+        reason,
+        retryable: true,
+        browserIntact: true,
+        ...refusalPatch(streak),
+      }),
+      lastMessage: `本次让出浏览器被拒（${reason}）：浏览器保持开启，下一次待机提示会重新判定。`,
+    });
+    return;
+  }
+  // 浏览器层已被拆而关闭未确认：如实标真态未知并给运营一张持久卡片；但**绝不**改运营意图
+  // （没人要求停自动化），也不动引擎轴（核心与云端连接都还好好的）。
+  handle.browserStateUnconfirmed = true;
+  updateStatus(handle, {
+    browserStandby: coldStandbyStatus('skipped', hint, {
+      reason,
+      retryable: true,
+      browserIntact: false,
+      ...refusalPatch(streak),
+    }),
+    lastMessage: `冷待机未能完成（${reason}）：浏览器关闭状态未确认，自动化引擎仍连接。`,
+    ...edgeFailurePatch('冷待机浏览器关闭状态未确认'),
+    ...presencePatch('冷待机未完成，浏览器状态待确认'),
+  });
+}
+
 function onColdStandbyAck(handle) {
   if (!handle || !handle.coldStandbyPending) return;
   const bornBrowserAbsent = Boolean(handle.controlPlaneOnly);
   handle.coldStandbyPending = false;
   handle.coldStandbyActive = true;
   handle.closePending = false;
+  // 让位成功 = 这段连续拒绝结束。
+  clearColdStandbyRefusal(handle);
   if (handle.controlPlaneOnly) handle.controlPlaneBootstrapped = true;
   // 浏览器关掉了 = 一个槽位空出来了：立刻叫等槽位队列的队头，别让它白等到下一次重扫。
   setTimeout(() => drainSlotWaiters(), 0);
   const hint = handle.status.browserStandby && handle.status.browserStandby.hint;
   const decision = shouldEnterColdStandby({
-    status: { ...handle.status, edge: 'running', cloud: 'connected', session: handle.automationPaused ? 'paused' : 'resting' },
+    // 核心刚确认待机成功 ⇒ 云端连接就在，这条是事实而非乐观假设；关闭/暂停在途标记随之落地。
+    status: { ...handle.status, cloud: 'connected' },
     flags: { ...coldStandbyFlags(handle), closePending: false, pausePending: false },
     hint,
     settings: normalizeColdStandbySettings(settings, process.env),
@@ -5060,6 +5169,14 @@ async function spawnEdgeChild(handle, {
     }
     if (message.type === 'lifecycle.standby') {
       onColdStandbyAck(handle);
+      return;
+    }
+    if (message.type === 'lifecycle.standby_refused') {
+      onColdStandbyRefused(
+        handle,
+        typeof message.reason === 'string' && message.reason ? message.reason : 'standby_refused',
+        message.browserIntact === true,
+      );
       return;
     }
     {

@@ -1108,7 +1108,7 @@ test('T15ter 端到端：真 lifecycle 驱动「暂停 → 冷待机 → 唤醒 
     resumeAutomation: async () => { browsing = true; startIdentityGuard(); },
     deactivate: async () => undefined,
     closeOwnedBrowser: async () => true,
-    enterStandby: async () => { guard.stop(); browsing = false; return true; },
+    enterStandby: async () => { guard.stop(); browsing = false; return { ok: true }; },
     wakeFromStandby: async (resumeAutomation) => {
       // 宿主唤醒步 4 的等价物：新一代浏览器里重新读身份并确认成功（读不出会直接判唤醒失败）。
       const decision: IdentityDecision = { kind: 'use', accountId: pageIdentity, source: 'in-place' };

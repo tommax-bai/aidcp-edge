@@ -1,13 +1,28 @@
 export type CoreLifecycleCommand = 'pause' | 'pause_and_exit' | 'resume' | 'close' | 'standby' | 'wake';
 export type CoreLifecycleState = 'active' | 'pausing' | 'paused' | 'standby' | 'waking' | 'finalizing' | 'finished';
 
+/**
+ * 一次进入冷待机的尝试结果（change admit-browser-standby-on-live-facts）。
+ *
+ * 拒绝**必须具名，并且必须说清浏览器有没有被动过**——这两件事在此之前被压成了一个裸 `false`，
+ * 而 `false` 又被外壳当成「用户想关浏览器但没关成」处理：自动化意图改停止、环境落暂停态。
+ * 于是一次完全无害的拒绝（最常见的是「有任务租约在跑，绝不把浏览器从任务底下抽走」）会把一个
+ * 健康环境变成永久占槽、且被踢出等槽位队列的砖。
+ *
+ * `browserIntact` 的判据是**物理的**，不是心理的：拒绝发生在任何拆除动作之前 ⇒ true；
+ * 已经 detach / kill 过 ⇒ false（此时浏览器真态未知，绝不可回报成完好）。
+ */
+export type StandbyAttempt =
+  | { ok: true }
+  | { ok: false; reason: string; browserIntact: boolean };
+
 export interface CoreLifecycleDependencies {
   deactivate(reason: string): Promise<void>;
   /** Stop/resume automation at a page-safe boundary without closing Cloud, CDP, browser, or the core process. */
   pauseAutomation?: () => Promise<void>;
   resumeAutomation?: () => Promise<void>;
   closeOwnedBrowser(): Promise<boolean>;
-  enterStandby?: () => Promise<boolean>;
+  enterStandby?: () => Promise<StandbyAttempt>;
   /**
    * 冷待机唤醒：**原地重开浏览器 + 重建浏览器层**，核心进程与云端连接全程不动（change browser-slot-scheduling）。
    *
@@ -25,6 +40,13 @@ export interface CoreLifecycleDependencies {
   /** Report confirmed owned-browser death to the supervisor before an intentional process exit. */
   reportBrowserClosed?(): Promise<boolean> | boolean;
   onCloseFailed?(): void;
+  /**
+   * 进入冷待机被拒（change admit-browser-standby-on-live-facts）。
+   *
+   * 它**不是** `onCloseFailed` 的同义词，故不复用那条回执：那条的语义是「运营要求关闭浏览器但没关成」，
+   * 外壳据此收敛自动化意图。待机被拒时运营什么都没要求，收敛意图是凭空造出来的终态。
+   */
+  onStandbyRefused?(refusal: { reason: string; browserIntact: boolean }): void;
   logger?(message: string): void;
 }
 
@@ -156,11 +178,24 @@ export class CoreLifecycleController {
       this.deps.onStandby?.();
       return;
     }
+    const stateBeforeAttempt = this.currentState;
     this.currentState = 'pausing';
-    const confirmed = await this.deps.enterStandby?.();
-    if (!confirmed) {
-      this.currentState = 'paused';
-      this.deps.onCloseFailed?.();
+    const attempt = await this.deps.enterStandby?.();
+    if (!attempt || !attempt.ok) {
+      // 缺实现视同「不支持待机」，且浏览器未被动过——不是失败，更不是关闭失败。
+      const refusal = attempt && attempt.ok === false
+        ? { reason: attempt.reason, browserIntact: attempt.browserIntact }
+        : { reason: 'standby_unsupported', browserIntact: true };
+      // 浏览器完好 ⇒ 原样回到尝试之前的状态，这一趟什么都没发生。
+      // 浏览器层已被拆 ⇒ 只能落 paused（自动化确实跑不了了），但**由外壳**决定怎么呈现与恢复，
+      // 这里绝不代替运营宣布「关闭失败」。
+      this.currentState = refusal.browserIntact ? stateBeforeAttempt : 'paused';
+      if (this.deps.onStandbyRefused) {
+        this.deps.onStandbyRefused(refusal);
+      } else {
+        // 没有接收方 = 这次拒绝无人知道。响亮记一行，绝不静默返回。
+        this.log(`[aidcp-edge] lifecycle standby refused (${refusal.reason}); no supervisor handler is wired`);
+      }
       return;
     }
     this.currentState = 'standby';
