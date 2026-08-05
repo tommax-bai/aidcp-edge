@@ -137,7 +137,9 @@ test('“工作中”只来自真实运行态，排期页按钮复用当前环�
   );
   controller.setEnvironment({ envId: 'env-a', label: '小萝北', platform: 'xiaohongshu' });
   await flush();
-  controller.setRuntime({ automationState: 'running', browserState: 'open' });
+  // 浏览器已开的真实投影值是 'ready'（主进程取值域 closed/queued/starting/ready/closing/blocked/error，
+  // 从来没有 'open' 这一档）。这里曾按 'open' 断言，与实现里同一个错判互相印证，把 bug 一起绿了过去。
+  controller.setRuntime({ automationState: 'running', browserState: 'ready' });
   $(window, '#environment-schedule-entry').click();
 
   assert.equal($(window, '#environment-schedule-entry-badge').textContent, '工作中');
@@ -147,6 +149,36 @@ test('“工作中”只来自真实运行态，排期页按钮复用当前环�
   $(window, '#environment-schedule-lifecycle').click();
   $(window, '#environment-schedule-browser').click();
   assert.deepEqual(actions, ['close', 'browser-close']);
+});
+
+test('运行态按钮跟随真实档位：已启动未跑起来给关闭，过渡档位如实说出并禁用', async () => {
+  const actions: string[] = [];
+  const { window, controller } = boot(
+    { getEnvironmentSchedule: async () => response() },
+    (action) => actions.push(action),
+  );
+  controller.setEnvironment({ envId: 'env-a', label: '小萝北', platform: 'xiaohongshu' });
+  await flush();
+  $(window, '#environment-schedule-entry').click();
+
+  // 环境已启动但浏览循环还没跑起来：按钮 MUST 给「关闭」，否则用户再点一次就是对一个
+  // 已经起来的环境重复下达启动；而「正在工作」这类断言仍只由 running 支持，两者不得互相顶替。
+  controller.setRuntime({ automationState: 'ready', browserState: 'ready' });
+  assert.equal($(window, '#environment-schedule-lifecycle').textContent, '关闭当前环境');
+  assert.notEqual($(window, '#environment-schedule-now-kicker').textContent, '当前正在工作');
+  $(window, '#environment-schedule-lifecycle').click();
+  assert.deepEqual(actions, ['close']);
+
+  controller.setRuntime({ automationState: 'starting', browserState: 'starting' });
+  assert.equal($(window, '#environment-schedule-lifecycle').textContent, '启动中');
+  assert.equal(($(window, '#environment-schedule-lifecycle') as unknown as HTMLButtonElement).disabled, true);
+  assert.equal($(window, '#environment-schedule-browser').textContent, '浏览器开启中');
+  assert.equal(($(window, '#environment-schedule-browser') as unknown as HTMLButtonElement).disabled, true);
+
+  controller.setRuntime({ automationState: 'stopped', browserState: 'closed' });
+  assert.equal($(window, '#environment-schedule-lifecycle').textContent, '启动当前环境');
+  assert.equal($(window, '#environment-schedule-browser').textContent, '打开浏览器');
+  assert.equal(($(window, '#environment-schedule-browser') as unknown as HTMLButtonElement).disabled, false);
 });
 
 test('切换环境会丢弃旧账号迟到回包，非小红书环境隐藏入口并退出排期页', async () => {

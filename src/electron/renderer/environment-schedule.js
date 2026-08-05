@@ -179,12 +179,23 @@
       return environment ? cache.get(environment.envId) || null : null;
     }
 
+    // 「此刻真的在跑」与「环境已经启动」是两件事，MUST 分开判：
+    // 前者是能否声称正在工作的证据（九档里只有 running 算），后者决定按钮该给启动还是关闭。
+    // 用前者当按钮判据，会让 starting / ready / waiting_resource / paused 这几档都显示成
+    // 「启动当前环境」，用户再点一次就是对一个已经起来的环境重复下达启动。
     function running() {
       return runtime.automationState === 'running';
     }
 
-    function browserOpen() {
-      return runtime.browserState === 'open';
+    function automationActive() {
+      return String(runtime.automationState || 'stopped') !== 'stopped';
+    }
+
+    // 浏览器状态的真实取值域来自主进程投影：closed / queued / starting / ready / closing / blocked / error。
+    // 这里曾判 'open'——那一档从来不存在，于是判定恒为假：按钮永远停在「打开浏览器」，
+    // 浏览器已经开着也收不起来，点下去只会再下达一次打开。
+    function browserReady() {
+      return String(runtime.browserState || 'closed') === 'ready';
     }
 
     function visible() {
@@ -247,11 +258,23 @@
       entry.setAttribute('aria-label', `查看本周安排，${fields.entrySummary.textContent}`);
     }
 
+    // 过渡档位（启动中 / 关闭中 / 排队中）如实说出来并禁用按钮：把它们显示成静止的
+    // 「启动」或「关闭」，等于邀请用户对一件正在发生的事重复下达同一个命令。
+    // 档位划分与价值首页的运行详情保持同一口径，同一状态两处不得给出不同结论。
     function renderRuntimeActions() {
-      fields.lifecycle.textContent = running() ? '关闭当前环境' : '启动当前环境';
-      fields.lifecycle.classList.toggle('danger', running());
-      fields.lifecycle.classList.toggle('primary', !running());
-      fields.browser.textContent = browserOpen() ? '收起浏览器' : '打开浏览器';
+      const automation = String(runtime.automationState || 'stopped');
+      const browser = String(runtime.browserState || 'closed');
+      const active = automationActive();
+      fields.lifecycle.textContent = automation === 'starting' ? '启动中'
+        : automation === 'stopping' ? '关闭中'
+          : active ? '关闭当前环境' : '启动当前环境';
+      fields.lifecycle.disabled = ['starting', 'stopping', 'pausing', 'waiting_resource'].includes(automation);
+      fields.lifecycle.classList.toggle('danger', active);
+      fields.lifecycle.classList.toggle('primary', !active);
+      fields.browser.textContent = browser === 'ready' ? '收起浏览器'
+        : ['queued', 'starting'].includes(browser) ? '浏览器开启中'
+          : ['closing', 'releasing'].includes(browser) ? '浏览器关闭中' : '打开浏览器';
+      fields.browser.disabled = ['queued', 'starting', 'closing', 'releasing'].includes(browser);
     }
 
     function renderNow() {
@@ -556,8 +579,8 @@
       renderDays();
       renderRanges();
     });
-    fields.lifecycle.addEventListener('click', () => onRuntimeAction(running() ? 'close' : 'start'));
-    fields.browser.addEventListener('click', () => onRuntimeAction(browserOpen() ? 'browser-close' : 'browser-open'));
+    fields.lifecycle.addEventListener('click', () => onRuntimeAction(automationActive() ? 'close' : 'start'));
+    fields.browser.addEventListener('click', () => onRuntimeAction(browserReady() ? 'browser-close' : 'browser-open'));
 
     renderEntry();
     return {
