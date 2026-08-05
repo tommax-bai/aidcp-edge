@@ -492,6 +492,26 @@ async function(input){
     likes:tabBadgeCount(notificationTab('like')),
     follows:tabBadgeCount(notificationTab('follow')),
   }});
+  const onNotificationPage=()=>/\/(notification|notice)/.test(location.pathname);
+  // 「进通知首页」的**唯一实现**，`notification_open` 与 `notification_back_home` 共用。
+  // 两条命令的终局是同一件事——落在通知页上、把三栏未读读出来——只有失败回执的动作名不同
+  // （云端一条按 `open_notifications` 关联、一条按 `notification_back_home` 关联，名字对不上
+  // 就等不到回执）。所以动作名当参数传，实现只留一份：抄成两份时，改了一份没改另一份
+  // 在两侧都编译通过、都测得过，只有真跑起来才现形。
+  const enterNotificationHome=async(actionName)=>{
+    if(!onNotificationPage()){
+      const link=first(['a[href*="/notification"]','a[href*="/notice"]'])||findByWords(['通知','消息','notification']);
+      if(!link)return fail(actionName,'notification_entry_not_found');
+      if(!click(link))return fail(actionName,'notification_entry_not_actuated');
+      await waitFor(onNotificationPage,1800,120);
+      if(!onNotificationPage())return ambiguous(actionName,'notification_navigation_unconfirmed');
+    }
+    // 「读不到分类栏」与「三栏都是 0」必须可区分：云端把计数 ≤0 当成该类已清零直接跳过，
+    // 读不到时若回一份全 0 的读数，整条巡视会静默什么都不做。
+    if(!leafTabs().length)await waitFor(()=>leafTabs().length>0,1500,120);
+    if(!leafTabs().length)return ambiguous(actionName,'notification_tabs_not_found');
+    return done(notificationHome());
+  };
   // 清零循环：滚到底 / 直到不再出新行（连续 2 轮行数不增即判到底），硬上限取
   // max(云端下发的滚动预算, 12) 轮作有界兜底。固定滚几屏在未读多于一屏时会留下未清项，
   // 破坏「清零」前提；而云端下发的预算必须真参与上限，否则它就是个没人读的悬空参数。
@@ -734,19 +754,7 @@ async function(input){
   if(kind==='notification_open'){
     // 动作名用云端 / 宿主的规范名（open_notifications），不是命令 kind：名字对不上，
     // 云端既不结案、还会把它当未知失败动作处理。
-    const onNotificationPage=()=>/\/(notification|notice)/.test(location.pathname);
-    if(!onNotificationPage()){
-      const link=first(['a[href*="/notification"]','a[href*="/notice"]'])||findByWords(['通知','消息','notification']);
-      if(!link)return fail('open_notifications','notification_entry_not_found');
-      if(!click(link))return fail('open_notifications','notification_entry_not_actuated');
-      await waitFor(onNotificationPage,1800,120);
-      if(!onNotificationPage())return ambiguous('open_notifications','notification_navigation_unconfirmed');
-    }
-    // 「读不到分类栏」与「三栏都是 0」必须可区分：云端把计数 ≤0 当成该类已清零直接跳过，
-    // 读不到时若回一份全 0 的读数，整条巡视会静默什么都不做。
-    if(!leafTabs().length)await waitFor(()=>leafTabs().length>0,1500,120);
-    if(!leafTabs().length)return ambiguous('open_notifications','notification_tabs_not_found');
-    return done(notificationHome());
+    return await enterNotificationHome('open_notifications');
   }
   if(kind==='notification_browse_comments'||kind==='notification_browse_likes'||kind==='notification_browse_follows'){
     const category=kind.endsWith('likes')?'like':kind.endsWith('follows')?'follow':'comment';
@@ -800,23 +808,12 @@ async function(input){
     return done(observed(action(actionName,true,'viewed'),items.length?{notificationItems:{items}}:undefined));
   }
   if(kind==='notification_back_home'){
-    const onHome=()=>/^\/explore\/?$/.test(location.pathname);
-    const pointsHome=(el)=>{
-      try{
-        const url=new URL(String(el&&el.href||''),location.href);
-        return url.origin===location.origin&&/^\/explore\/?$/.test(url.pathname);
-      }catch{return false;}
-    };
-    const link=all('a[href]').filter(visible).find(pointsHome);
-    const words=findByWords(['首页','发现','home']);
-    // 文案回落只接受非链接控件。通知页天然含 `/explore/<noteId>` 笔记链接，
-    // 把它（或它的子节点 / 包裹容器）当首页入口会直接打开详情页。
-    const linked=words&&(words.closest&&words.closest('a[href]')||first(['a[href]'],words));
-    const home=link||(!linked?words:null);
-    if(!home)return fail('notification_back_home','home_entry_not_found');
-    if(!click(home))return fail('notification_back_home','home_entry_not_actuated');
-    await sleep(700);
-    return onHome()?done(cards()):ambiguous('notification_back_home','home_navigation_unconfirmed');
+    // 这里的「首页」是**通知页的分类栏那一层**，不是信息流首页。云端一类看完后靠这一步
+    // 重报的三栏未读挑下一类；回信息流是巡视收尾之后由 `navigation_back` 单独做的另一步。
+    // 两步合并（原实现导航到 /explore 并回一屏信息流卡片）不会报错，只会让分诊永远等不到
+    // 重读结果：循环在第一类处理完后静默停摆，浏览暂停开关无人解除，而每一层回执都仍是成功的。
+    // 分类浏览只切栏、不离页，所以正常路径下本就还在通知页，共用实现会直接走到读数那一步。
+    return await enterNotificationHome('notification_back_home');
   }
   if(kind==='interaction_like'||kind==='interaction_collect'||kind==='interaction_follow'){
     const name=kind.replace('interaction_','');

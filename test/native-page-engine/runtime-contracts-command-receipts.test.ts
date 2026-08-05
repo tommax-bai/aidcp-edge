@@ -340,7 +340,11 @@ const BROWSE_SUCCESS_OUTPUTS: Readonly<Record<string, readonly SuccessOutput[]>>
     },
   ],
   notification_back_home: [
-    { output: 'page_cards', platform: 'xiaohongshu', source: 'xhs-command-router.js kind===notification_back_home (cards())' },
+    // 与 notification_open 同一个产出，因为二者共用同一份实现（`enterNotificationHome`）：
+    // 这条命令回的是**通知首页三栏未读**，不是信息流卡片。此处曾登记成 page_cards ——
+    // 那是按走岔了的实现（导航到 /explore）回填的，与 command-manifest.json 早已声明的
+    // `receipts: ["notification.home", …]` 直接矛盾，却因为两处从不互相对账而并存了下来。
+    { output: 'notification_home', platform: 'xiaohongshu', source: 'xhs-command-router.js kind===notification_back_home (enterNotificationHome)' },
   ],
   interaction_like: [
     { output: 'action_receipt', platform: 'xiaohongshu', source: 'xhs-command-router.js interaction_like/collect/follow' },
@@ -546,28 +550,22 @@ const FROZEN_RECEIPT_GAPS: ReadonlyArray<Mismatch & { removal: string }> = [
     receipt: 'notification.items',
     removal: '同上',
   },
-  {
-    nativeKind: 'notification_back_home',
-    direction: 'declared_but_unreachable',
-    receipt: 'notification.home',
-    removal: '回首页成功回的是首页卡片，不是通知读数；改成 ["page.cards"]',
-  },
+  // 曾经冻结在这里的另外两条（`declared_but_unreachable: notification.home` 与
+  // `reachable_but_undeclared: page.cards`）由 change `restore-notification-home-return` 消除。
+  // 值得记一笔它们当初的消除动作写的是什么：「回首页成功回的是首页卡片，不是通知读数；
+  // 改成 ["page.cards"]」—— 也就是**打算改声明去迁就实现**。而声明才是对的：云端下发这条
+  // 命令就是为了拿三栏未读挑下一类，清单从一开始就写着 `["notification.home", …]`。
+  // 教训是对账暴露出方向不一致时，「改哪一边」不能默认选实现那边。
   {
     nativeKind: 'notification_back_home',
     direction: 'declared_but_unreachable',
     receipt: 'action.completed',
-    removal: '同上',
-  },
-  {
-    nativeKind: 'notification_back_home',
-    direction: 'reachable_but_undeclared',
-    receipt: 'page.cards',
-    removal: '同上',
+    removal: '成功恒回通知首页读数；删掉声明里的 action.completed（与 notification_open 同因）',
   },
 ];
 
 /** 初始条目数。后续 change 只许下降，涨了就是新缺口被静默冻结。 */
-const FROZEN_GAP_BUDGET = 14;
+const FROZEN_GAP_BUDGET = 12;
 
 test('声明的回执与成功路径上可达的发出点逐条对账（两个方向）', () => {
   const mismatches = reconcile();

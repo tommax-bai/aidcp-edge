@@ -106,15 +106,26 @@ function receipt(result: RouterResult): Record<string, unknown> {
   return result.output.value;
 }
 
-const NOTIFICATION_SHELL = `
+const FEED_URL = 'https://www.xiaohongshu.com/explore';
+
+/**
+ * 通知页外壳：三个叶子分类栏 + 可选未读角标（角标是栏内的纯数字叶子，真机校准口径）。
+ * 角标带上，是为了让「回通知首页」的成功终局能断到**具体读数**——只断「回了个通知读数」
+ * 而不断数字，栏与数字错位这类漂移就漏过去了。
+ */
+function notificationShell(badges: { comments?: string; likes?: string; follows?: string } = {}): string {
+  const cell = (label: string, badge?: string) =>
+    `<div class="reds-tab-item tab-item">${label}${badge === undefined ? '' : `<span class="count">${badge}</span>`}</div>`;
+  return `
   <div class="notification-page">
     <nav class="reds-tabs">
-      <div class="reds-tab-item">评论和@</div>
-      <div class="reds-tab-item">赞和收藏</div>
-      <div class="reds-tab-item">新增关注</div>
+      ${cell('评论和@', badges.comments)}
+      ${cell('赞和收藏', badges.likes)}
+      ${cell('新增关注', badges.follows)}
     </nav>
   </div>
 `;
+}
 
 // 笔记 id 用真实形状（24 位十六进制）。**不要用 `note-a` 这种带连字符的占位**：
 // 路由的 id 提取正则是 `[A-Za-z0-9]+`，连字符会把两个不同 id 都截成同一个前缀，
@@ -133,73 +144,94 @@ const FEED_CARDS = `
   </section>
 `;
 
-test('找不到首页入口时诚实回未开始，且一次都没点', async () => {
-  const dom = install(`<body>${NOTIFICATION_SHELL}</body>`);
+// 这条命令的「首页」指的是**通知页的分类栏那一层**，不是信息流首页：云端一类看完后靠这一步
+// 重报的三栏未读挑下一类，回信息流是巡视收尾之后由 `navigation_back` 单独做的另一步。
+// 本文件原先把它当成「回信息流」来守，守得很严——守错了目的地：实现导航到 /explore 并回一屏
+// 信息流卡片，云端永远等不到重读结果，循环在第一类处理完后静默停摆，而每一层回执都仍是成功的。
+// 所以下面的用例既守三态，也守**目的地**。
+
+test('★ 一类看完后回通知首页：已在通知页就直接重报三栏，一次都不点', async () => {
+  // 分类浏览只切栏、不离页 —— 这是正常路径，此时任何点击都是多余动作。
+  const dom = install(`<body>${notificationShell({ comments: '2', likes: '48' })}</body>`);
   const counter = countClicks(dom);
 
   const result = await runRouter({ kind: 'notification_back_home', params: {} });
 
-  assert.equal(result.effectPhase, 'not_started');
-  const value = receipt(result);
-  assert.equal(value.action, 'notification_back_home');
-  assert.equal(value.ok, false);
-  assert.equal(value.reason, 'home_entry_not_found');
-  // 「没找到」必须意味着**什么都没动**：先点了再说找不到，页面已经被改过了。
-  assert.equal(counter.clicks, 0);
+  assert.equal(counter.clicks, 0, '已经在通知页上，不该再点任何入口');
+  assert.equal(result.effectPhase, 'confirmed');
+  assert.equal(result.output.kind, 'notification_home');
+  assert.deepEqual(result.output.value, { comments: 2, likes: 48, follows: 0 });
 });
 
-test('首页入口存在但不可见时同样是未开始，不当成找到了', async () => {
-  const dom = install(`<body>
-    <div style="display:none"><a href="/explore">首页</a></div>
-    ${NOTIFICATION_SHELL}
-  </body>`);
-  const counter = countClicks(dom);
-
-  const result = await runRouter({ kind: 'notification_back_home', params: {} });
-
-  assert.equal(result.effectPhase, 'not_started');
-  assert.equal(receipt(result).reason, 'home_entry_not_found');
-  assert.equal(counter.clicks, 0);
-});
-
-test('★ 通知页只有笔记详情链接时不得把它当首页入口', async () => {
-  const dom = install(`<body>
-    <a href="/explore/${NOTE_ID_A}" id="note-link">查看相关笔记</a>
-    ${NOTIFICATION_SHELL}
-  </body>`);
-  const counter = navigateOnClick(dom, '#note-link', `/explore/${NOTE_ID_A}`);
-
-  const result = await runRouter({ kind: 'notification_back_home', params: {} });
-
-  assert.equal(counter.clicks, 0, '笔记详情链接不是首页入口，必须零点击');
-  assert.equal(result.effectPhase, 'not_started');
-  assert.equal(receipt(result).reason, 'home_entry_not_found');
-});
-
-test('点中首页入口并真的跳到 explore 才算确认，并带回本次看到的卡片', async () => {
+test('★ 页面上就算有首页入口与信息流卡片，也不得回信息流', async () => {
+  // 本次回归的守卫用例：原实现正是在这里点了 /explore 走人、并把一屏卡片当成终局。
   const dom = install(`<body>
     <a href="/explore" id="home">首页</a>
-    ${NOTIFICATION_SHELL}
+    ${notificationShell({ comments: '2' })}
     ${FEED_CARDS}
   </body>`);
   const counter = navigateOnClick(dom, '#home', '/explore');
 
   const result = await runRouter({ kind: 'notification_back_home', params: {} });
 
-  assert.equal(counter.clicks, 1);
-  assert.equal(result.effectPhase, 'confirmed');
-  assert.equal(result.output.kind, 'page_cards');
-  const cards = result.output.value.cards as Array<{ noteId?: string }>;
-  assert.deepEqual(cards.map((card) => card.noteId), [NOTE_ID_A, NOTE_ID_B]);
+  assert.equal(counter.clicks, 0, '「回通知首页」不是回信息流，首页入口一次都不该被点');
+  assert.equal(result.output.kind, 'notification_home');
+  assert.notEqual(result.output.kind, 'page_cards');
 });
 
-test('★ 点了但页面没跳成时是 ambiguous，绝不回确认', async () => {
-  // 这是本文件的红线用例：点击派发成功 ≠ 回到了首页。
-  // 若这一支被写成成功，会话会在通知页上继续跑 feed 扫描，而回执说它在首页。
+test('不在通知页且找不到通知入口时诚实回未开始，且一次都没点', async () => {
+  const dom = install(`<body>${FEED_CARDS}</body>`, FEED_URL);
+  const counter = countClicks(dom);
+
+  const result = await runRouter({ kind: 'notification_back_home', params: {} });
+
+  assert.equal(result.effectPhase, 'not_started');
+  const value = receipt(result);
+  // 动作名必须是云端等待的规范名：云端把它列在巡视命令集合里，失败回执是恢复通道的入口之一，
+  // 名字对不上就没人来解巡视的暂停开关。
+  assert.equal(value.action, 'notification_back_home');
+  assert.equal(value.ok, false);
+  assert.equal(value.reason, 'notification_entry_not_found');
+  // 「没找到」必须意味着**什么都没动**：先点了再说找不到，页面已经被改过了。
+  assert.equal(counter.clicks, 0);
+});
+
+test('通知入口存在但不可见时同样是未开始，不当成找到了', async () => {
   const dom = install(`<body>
-    <a href="/explore" id="home">首页</a>
-    ${NOTIFICATION_SHELL}
-  </body>`);
+    <div style="display:none"><a href="/notification">消息</a></div>
+    ${FEED_CARDS}
+  </body>`, FEED_URL);
+  const counter = countClicks(dom);
+
+  const result = await runRouter({ kind: 'notification_back_home', params: {} });
+
+  assert.equal(result.effectPhase, 'not_started');
+  assert.equal(receipt(result).reason, 'notification_entry_not_found');
+  assert.equal(counter.clicks, 0);
+});
+
+test('点中通知入口并真的跳回通知页才算确认，并带回三栏读数', async () => {
+  const dom = install(`<body>
+    <a href="/notification" id="entry">消息</a>
+    ${notificationShell({ likes: '48', follows: '1' })}
+  </body>`, FEED_URL);
+  const counter = navigateOnClick(dom, '#entry', '/notification');
+
+  const result = await runRouter({ kind: 'notification_back_home', params: {} });
+
+  assert.equal(counter.clicks, 1);
+  assert.equal(result.effectPhase, 'confirmed');
+  assert.equal(result.output.kind, 'notification_home');
+  assert.deepEqual(result.output.value, { comments: 0, likes: 48, follows: 1 });
+});
+
+test('★ 点了但页面没跳回通知页时是 ambiguous，绝不回确认', async () => {
+  // 红线用例：点击派发成功 ≠ 回到了通知页。
+  // 这一支若被写成成功，云端会拿一份不知从哪读来的读数去挑下一类。
+  const dom = install(`<body>
+    <a href="/notification" id="entry">消息</a>
+    ${FEED_CARDS}
+  </body>`, FEED_URL);
   const counter = countClicks(dom);
 
   const result = await runRouter({ kind: 'notification_back_home', params: {} });
@@ -210,40 +242,41 @@ test('★ 点了但页面没跳成时是 ambiguous，绝不回确认', async () 
   const value = receipt(result);
   assert.equal(value.action, 'notification_back_home');
   assert.equal(value.ok, false);
-  assert.equal(value.reason, 'home_navigation_unconfirmed');
-  // 未确认时不得夹带卡片：那会让上游把通知页上的东西当成 feed 内容。
+  assert.equal(value.reason, 'notification_navigation_unconfirmed');
+  // 未确认时不得夹带读数。
   assert.equal(result.output.kind, 'action_receipt');
 });
 
-test('★ 首页入口点击后落到 explore 详情页时不得 confirmed', async () => {
-  const dom = install(`<body>
-    <a href="/explore" id="home">首页</a>
-    ${NOTIFICATION_SHELL}
-  </body>`);
-  const counter = navigateOnClick(dom, '#home', `/explore/${NOTE_ID_A}`);
+test('★ 落在通知页但分类栏读不到时回未确认，绝不用全 0 冒充「三栏已清零」', async () => {
+  // 云端把某栏计数 ≤ 0 当成该类已清零直接跳过 —— 一份全 0 的读数会让整趟巡视
+  // 把一次读取失败静默兑现成「已经清完了」。
+  install('<body><div class="notification-page">加载中…</div></body>');
 
   const result = await runRouter({ kind: 'notification_back_home', params: {} });
 
-  assert.equal(counter.clicks, 1);
   assert.equal(result.effectPhase, 'ambiguous');
-  assert.notEqual(result.effectPhase, 'confirmed');
-  assert.equal(receipt(result).reason, 'home_navigation_unconfirmed');
+  assert.equal(result.output.kind, 'action_receipt');
+  const value = receipt(result);
+  assert.equal(value.action, 'notification_back_home');
+  assert.equal(value.ok, false);
+  assert.equal(value.reason, 'notification_tabs_not_found');
+  assert.ok(!('comments' in value), '未确认的产出里不得出现任何三栏读数');
 });
 
-test('用文字识别到的首页入口走同一条三态判据', async () => {
-  // 入口不带 /explore 链接、只有文案时仍应可达（findByWords 分支），
+test('用文字识别到的通知入口走同一条三态判据', async () => {
+  // 入口不带 /notification 链接、只有文案时仍应可达（findByWords 分支），
   // 但「跳没跳成」的判据不变 —— 识别方式变宽，成功判据不许跟着变宽。
   const dom = install(`<body>
-    <div id="home" role="button">发现</div>
-    ${NOTIFICATION_SHELL}
-  </body>`);
+    <div id="entry" role="button">消息</div>
+    ${FEED_CARDS}
+  </body>`, FEED_URL);
   const counter = countClicks(dom);
 
   const result = await runRouter({ kind: 'notification_back_home', params: {} });
 
   assert.equal(counter.clicks, 1);
   assert.equal(result.effectPhase, 'ambiguous');
-  assert.equal(receipt(result).reason, 'home_navigation_unconfirmed');
+  assert.equal(receipt(result).reason, 'notification_navigation_unconfirmed');
 });
 
 // ── note_close：关闭详情浮层 ───────────────────────────────────────────────

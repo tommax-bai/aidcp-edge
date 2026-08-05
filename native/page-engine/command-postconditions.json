@@ -146,7 +146,7 @@
     {
       "nativeKind": "notification_back_home",
       "status": "confirmed",
-      "evidence": "入口与后置都严格限定同源 `/explore` 根路径（允许尾斜杠）：`/explore/<noteId>` 详情链接既不能被选成首页入口，点击后落到详情也只能回 ambiguous + home_navigation_unconfirmed；找不到入口 / 点不动分别 fail。两条反例与既有三态由 `xhs-navigation-command-contracts.test.ts` 锁住。**它是出口命令**：假成功不体现在自己身上，体现在它之后的每一条命令上。"
+      "evidence": "这里的「首页」是**通知页的分类栏那一层**，不是信息流首页——云端一类看完后靠这一步重报的三栏未读挑下一类。与 notification_open 共用同一份实现（`xhs-command-router.js` 的 enterNotificationHome），后置＝落在通知页 URL 上 + 分类栏可读，终局是三栏未读读数；不在通知页时经通知入口进入，找不到入口 / 点不动 / 有界等待 1.8s 后 URL 仍不是通知页 分别回 notification_entry_not_found / _not_actuated / notification_navigation_unconfirmed；落到通知页但分类栏 1.5s 内读不到 → ambiguous + notification_tabs_not_found，**绝不回一份全 0 的三栏读数**（云端把计数 ≤0 当作该类已清零）。由 `xhs-navigation-command-contracts.test.ts` 锁住，含一条「页面上有首页入口与信息流卡片时也不得回信息流」的回归守卫。**它是出口命令**：假成功不体现在自己身上，体现在它之后的每一条命令上——2026-08-05 的线上故障正是它导航到了 /explore 并回一屏卡片，云端等不到重读结果，巡视永久挂起而每层回执都仍是成功的。"
     },
     {
       "nativeKind": "interaction_like",
