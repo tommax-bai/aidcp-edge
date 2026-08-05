@@ -17,6 +17,30 @@ import {
 const TOTP_WINDOW_MS = 30_000;
 const TOTP_MIN_REMAINING_MS = 10_000;
 const DEFAULT_POLL_INTERVAL_MS = 500;
+/**
+ * 凭据安定窗口：同一个 `login_submit_ready` signal id 必须连续被观测到跨越这么久，才允许提交。
+ *
+ * AdsPower 的凭据是**逐字符模拟人手敲**进去的，所以「输入框非空」只证明填充**开始了**，
+ * 绝不证明填充**结束了**。旧判据只看非空，实测在密码敲到第 1–2 个字符时就点了提交，
+ * Facebook 回「密码不正确」，而点击又抢走焦点让填充永远停在半截（见 change
+ * settle-facebook-credential-fill）。实测相邻按键间隔约 100–250ms，本值给到 6 倍余量。
+ */
+export const CREDENTIAL_SETTLE_MS = 1_500;
+/**
+ * 凭据填充宽限期，锚点是**两个凭据框首次同时被观测到**，不是文档开始加载。
+ *
+ * 文档零点比表单出现早十几秒（实测表单 ~10.7s 才出现、密码 ~15.2s 才开始敲），
+ * 拿文档年龄计时会在敲完之前先判「凭据不可用」。实测从两个框出现到敲完约 7.5s，本值给到 6 倍余量。
+ */
+export const CREDENTIAL_FILL_GRACE_MS = 45_000;
+/**
+ * 「我准备点的这段时间里凭据又变了」的有界恢复次数。
+ *
+ * 这条路径的回执是 `stale_auth_signal` + `not_started`——引擎在预留信号与派发点击**之前**就拒绝了，
+ * 「没有任何输入被发出」是权威事实而非猜测，因此重来不触碰提交点红线。它是非结构性失败：
+ * 重新探测一次就会拿到带新字符数的 signal id。MUST NOT 落终态（见 docs/stop-or-continue.md）。
+ */
+export const MAX_STALE_LOGIN_SIGNAL_RETRIES = 5;
 const MAX_COMMAND_TIMEOUT_MS = 30_000;
 const PROBE_STABILIZATION_TIMEOUT_MS = 20_000;
 const PROBE_RETRY_DELAYS_MS = [250, 500, 1_000] as const;
@@ -106,6 +130,13 @@ type FacebookAuthCoordinatorResultWithoutAttempts =
     : never;
 
 type FacebookAuthProbe = NativeFacebookAuthProbeReceipt;
+
+/**
+ * 「凭据在我准备点的这段时间里又变了」的可恢复出口。它**不是**一个结果，
+ * 所以刻意不做成 `FacebookAuthCoordinatorResult` 的一员——落进结果类型就迟早会被某条
+ * `return attempt.result` 顺手当成终态返回出去。
+ */
+const STALE_LOGIN_SIGNAL = Symbol('facebook_auth_stale_login_signal');
 
 interface EnteredTotpWindow {
   startMs: number;
@@ -253,6 +284,13 @@ export async function reconcileFacebookStartupAuth(
   let enteredWindow: EnteredTotpWindow | undefined;
   let pendingProbe: FacebookAuthProbe | undefined;
   let authenticatedQuietStartedAt: number | undefined;
+  /** 两个凭据框首次同时被观测到的时刻——填充宽限期的锚点，不是文档零点。 */
+  let credentialFieldsFirstSeenAt: number | undefined;
+  /** 当前正在计安定的 `login_submit_ready` signal id 及其首次观测时刻。 */
+  let settlingLoginSignalId: string | undefined;
+  let settlingLoginSignalSince: number | undefined;
+  /** 已消费的「凭据又变了」恢复次数。恢复预算 MUST 只由失败消费，等待不计入。 */
+  let staleLoginSignalRetries = 0;
 
   const result = (
     value: FacebookAuthCoordinatorResultWithoutAttempts,
@@ -271,6 +309,38 @@ export async function reconcileFacebookStartupAuth(
   };
 
   const remainingBudgetMs = (): number => Math.max(0, deadlineMs - now());
+
+  /**
+   * 记下「两个凭据框都在」这一事实。锚点只由 `credential_fill_pending`（框在、还没填好）
+   * 与 `login_submit_ready`（框在、已填上）两种观测确立；`login_form_hydrating` /
+   * `login_fields_hydrating` 是页面自己还没渲染完，MUST NOT 消耗给填充的预算。
+   */
+  const noteCredentialFieldsPresent = (): void => {
+    credentialFieldsFirstSeenAt ??= now();
+  };
+
+  /** 自「两个框都在」起是否已耗尽填充宽限期。锚点未确立时恒为 false。 */
+  const credentialFillGraceExpired = (): boolean => (
+    credentialFieldsFirstSeenAt !== undefined
+    && now() - credentialFieldsFirstSeenAt >= CREDENTIAL_FILL_GRACE_MS
+  );
+
+  const forgetLoginSettleState = (): void => {
+    settlingLoginSignalId = undefined;
+    settlingLoginSignalSince = undefined;
+  };
+
+  /**
+   * 把动作结果收敛回结果类型。恢复出口只在登录提交上产生，2FA 三条路径拿不到它——
+   * 真拿到就是装配错了，如实报一个**具名**原因，绝不折进已有失败名当兜底桶。
+   */
+  const asResult = (
+    outcome: FacebookAuthCoordinatorResult | typeof STALE_LOGIN_SIGNAL,
+  ): FacebookAuthCoordinatorResult => (
+    outcome === STALE_LOGIN_SIGNAL
+      ? result({ kind: 'failed', reason: 'facebook_auth_stale_signal_misrouted' })
+      : outcome
+  );
 
   const runCommand = async (
     command: NativePageCommand,
@@ -564,7 +634,7 @@ export async function reconcileFacebookStartupAuth(
     probe: FacebookAuthProbe,
     commandKind: FacebookAuthActionCommandKind,
     params: Record<string, unknown> = {},
-  ): Promise<FacebookAuthCoordinatorResult | null> => {
+  ): Promise<FacebookAuthCoordinatorResult | null | typeof STALE_LOGIN_SIGNAL> => {
     if (!probe.signalId) {
       return result({ kind: 'failed', reason: 'facebook_auth_signal_id_missing' });
     }
@@ -603,12 +673,25 @@ export async function reconcileFacebookStartupAuth(
       || output.value.action !== commandKind
       || output.value.signalId !== probe.signalId
     ) {
+      const failureReason = safeReason(
+        boundedReceipt?.reason,
+        safeReason(execution.reasonCode, 'facebook_auth_action_unconfirmed'),
+      );
+      // 唯一的可恢复出口，三个条件缺一不可：① 只对登录提交（只有凭据是被逐字符敲进去的）；
+      // ② 拒绝原因必须正好是「信号过期」；③ effectPhase 必须是 not_started ——引擎在预留信号
+      // 与派发点击**之前**就拒绝了，这是「确定没有任何输入发出」的权威证据，不是「不知道发没发」。
+      // ambiguous / dispatched、以及任何其它拒绝原因（信号已消费 / 预算耗尽 / 已取消）都不走这里，
+      // 维持既有终局语义——重投一条可能已按下的提交，是本仓代价最高的错误。
+      if (
+        commandKind === 'facebook_auth_submit_login'
+        && failureReason === 'stale_auth_signal'
+        && execution.effectPhase === 'not_started'
+      ) {
+        return STALE_LOGIN_SIGNAL;
+      }
       return result({
         kind: 'failed',
-        reason: safeReason(
-          boundedReceipt?.reason,
-          safeReason(execution.reasonCode, 'facebook_auth_action_unconfirmed'),
-        ),
+        reason: failureReason,
         effectPhase: execution.effectPhase,
       });
     }
@@ -671,10 +754,56 @@ export async function reconcileFacebookStartupAuth(
         reason: safeReason(probe.reason, 'blocked_unknown'),
       });
     }
+    if (probe.signal !== 'login_submit_ready') forgetLoginSettleState();
     if (probe.signal === 'none') {
+      // 观测层对「两个框都在、还没填好」恒回 pending，时间判断由这里做：
+      // 锚点是两个框首次同时出现，不是文档零点（文档零点比表单出现早十几秒）。
+      if (probe.reason === 'credential_fill_pending') {
+        noteCredentialFieldsPresent();
+        if (credentialFillGraceExpired()) {
+          log(
+            '[facebook-auth] credential fill did not settle '
+            + `windowMs=${CREDENTIAL_FILL_GRACE_MS} disposition=manual`,
+          );
+          return result({ kind: 'manual_required', reason: 'credential_fill_unavailable' });
+        }
+      }
       const waited = await waitWithinBudget(Math.min(pollIntervalMs, remainingBudgetMs()));
       if (waited) return waited;
       continue;
+    }
+
+    // 未证明 fresh-start 的浏览器代次永远不会被允许改动登录态（下面 dispatchAction 会当场拒绝）。
+    // 那条终局答案与凭据填没填完无关，不该先花 1.5s 等一个注定用不上的安定窗口。
+    if (probe.signal === 'login_submit_ready' && probe.signalId && options.freshStartPolicyApplied) {
+      // 非空只证明填充**开始了**。同一个 signal id 连续观测到跨越安定窗口，才是
+      // 「不再往里敲了」的证据——id 里含凭据字符数，多一个字符 id 就换一个。
+      noteCredentialFieldsPresent();
+      if (settlingLoginSignalId !== probe.signalId) {
+        settlingLoginSignalId = probe.signalId;
+        settlingLoginSignalSince = now();
+      }
+      const settledForMs = now() - (settlingLoginSignalSince ?? now());
+      if (settledForMs < CREDENTIAL_SETTLE_MS) {
+        // 安定迟迟不来（例如布局持续抖动）也不能永远等下去：仍受同一个填充宽限期约束，
+        // 到点后进入人工登录等待这个安全态，而不是提交一个可能只有半截的密码。
+        if (credentialFillGraceExpired()) {
+          log(
+            '[facebook-auth] credential fill did not settle '
+            + `windowMs=${CREDENTIAL_FILL_GRACE_MS} disposition=manual`,
+          );
+          return result({ kind: 'manual_required', reason: 'credential_fill_unavailable' });
+        }
+        // 等满剩余的安定时长再复读，而不是每个节拍空转一次：安定与否只由「下一次观测到的
+        // id 还是不是它」决定，中途多问几遍不会更早知道答案。期间凭据若又变了，下一拍的 id
+        // 就会不同，安定从头计。
+        const waited = await waitWithinBudget(Math.min(
+          CREDENTIAL_SETTLE_MS - settledForMs,
+          remainingBudgetMs(),
+        ));
+        if (waited) return waited;
+        continue;
+      }
     }
 
     if (probe.signal === 'totp_entry_ready') {
@@ -735,7 +864,7 @@ export async function reconcileFacebookStartupAuth(
             totpWindowEndUnixMs: brokerWindow.endMs,
           },
         );
-        if (actionResult) return actionResult;
+        if (actionResult) return asResult(actionResult);
         enteredWindow = brokerWindow;
         continue;
       } finally {
@@ -771,7 +900,7 @@ export async function reconcileFacebookStartupAuth(
           totpWindowEndUnixMs: enteredWindow.endMs,
         },
       );
-      if (actionResult) return actionResult;
+      if (actionResult) return asResult(actionResult);
       continue;
     }
 
@@ -795,7 +924,7 @@ export async function reconcileFacebookStartupAuth(
             totpWindowEndUnixMs: recoveryWindow.endMs,
           },
         );
-        if (recoveryResult) return recoveryResult;
+        if (recoveryResult) return asResult(recoveryResult);
         continue;
       }
       const actionResult = await dispatchAction(
@@ -806,12 +935,28 @@ export async function reconcileFacebookStartupAuth(
           totpWindowEndUnixMs: enteredWindow.endMs,
         },
       );
-      if (actionResult) return actionResult;
+      if (actionResult) return asResult(actionResult);
       enteredWindow = undefined;
       continue;
     }
 
     const actionResult = await dispatchAction(probe, ACTION_FOR_SIGNAL[probe.signal]);
+    if (actionResult === STALE_LOGIN_SIGNAL) {
+      // 凭据在下发的这一瞬又变了，引擎在派发点击之前就拒绝了 —— 没有任何输入发出。
+      // 这不是结构性失败：重新探测一次就会拿到带新字符数的 signal id。有界重来，绝不落终态。
+      staleLoginSignalRetries += 1;
+      forgetLoginSettleState();
+      if (staleLoginSignalRetries > MAX_STALE_LOGIN_SIGNAL_RETRIES) {
+        return result({ kind: 'failed', reason: 'credential_fill_unsettled' });
+      }
+      log(
+        '[facebook-auth] login submit refused on superseded credential fill '
+        + `attempt=${staleLoginSignalRetries} disposition=reprobe`,
+      );
+      const waited = await waitWithinBudget(Math.min(pollIntervalMs, remainingBudgetMs()));
+      if (waited) return waited;
+      continue;
+    }
     if (actionResult) return actionResult;
     if (probe.signal === 'suspension_appeal_start') {
       return result({

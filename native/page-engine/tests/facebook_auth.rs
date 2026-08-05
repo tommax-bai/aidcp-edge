@@ -16,9 +16,12 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 #[tokio::test]
 async fn manual_login_probe_preserves_the_structured_reason_without_input() {
+    // 用一个**当前路由确实会产出**的原因值。credential_fill_unavailable 已不再由观测层宣告
+    // （锚点是「两个凭据框都出现」，观测层只有文档年龄这一个时钟、量不了它；判定已整体移交协调层，
+    // 见 change settle-facebook-credential-fill）。本用例锁的是「原因值原样透传、且不产生任何输入」。
     let observations = VecDeque::from([blocked_observation(
         "manual_login_required",
-        "credential_fill_unavailable",
+        "facebook_ad_data_choice_required",
     )]);
     let (port, server) = spawn_auth_cdp(observations, VecDeque::new()).await;
     let mut engine = Engine::default();
@@ -43,7 +46,7 @@ async fn manual_login_probe_preserves_the_structured_reason_without_input() {
     );
     assert_eq!(
         receipt.reason.as_deref(),
-        Some("credential_fill_unavailable")
+        Some("facebook_ad_data_choice_required")
     );
 
     engine.shutdown().await;

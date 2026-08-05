@@ -1,5 +1,4 @@
   const facebookAuthSignalPrefix='aidcp:facebook-auth:v1:';
-  const facebookAuthCredentialFillGraceMs=25000;
   const facebookAuthCheckpointHydrationGraceMs=15000;
   const facebookAdDataReviewHydrationGraceMs=15000;
   const facebookSuspensionAppealHydrationGraceMs=15000;
@@ -47,7 +46,10 @@
     return evidence.join('|');
   };
   const authTotpElementEvidence=(el)=>authElementEvidence(el,false);
-  const authObservation=async(signal,candidate,reason,extra={})=>{
+  // `extraEvidence` 只进 signalId 摘要、**绝不进返回对象**。返回结构是 Rust 侧
+  // `FacebookAuthObservation` 的 deny_unknown_fields 契约，多一个字段整条反序列化就失败；
+  // 而它承载的东西（凭据填充进度）本身也不该跨边界外传。
+  const authObservation=async(signal,candidate,reason,extra={},extraEvidence)=>{
     const documentGeneration=await authDocumentGeneration();
     if(!candidate){
       return {
@@ -70,6 +72,7 @@
       candidateKey,
     ];
     if(signal==='totp_refresh_required')signalEvidence.push(String(candidate.value||''));
+    if(extraEvidence!==undefined)signalEvidence.push(String(extraEvidence));
     const signalId=`${facebookAuthSignalPrefix}${await authDigest(signalEvidence.join('\n'))}`;
     const target=point(candidate);
     return {
@@ -206,12 +209,13 @@
     const passwords=[...new Set(all('input[name="pass"][type="password"],input[type="password"]',form).filter(visible))];
     if(emails.length>1||passwords.length>1)return authObservation('blocked_unknown',null,'login_fields_ambiguous');
     if(emails.length!==1||passwords.length!==1)return authObservation('none',null,'login_fields_hydrating');
-    if(!String(emails[0].value||'').trim()||!String(passwords[0].value||'')){
-      if(authWithinHydrationGrace(facebookAuthCredentialFillGraceMs)){
-        return authObservation('none',null,'credential_fill_pending');
-      }
-      return authObservation('manual_login_required',null,'credential_fill_unavailable');
-    }
+    const emailValue=String(emails[0].value||'').trim();
+    const passwordValue=String(passwords[0].value||'');
+    // 两个框都在、但还没填好：**恒回** pending。这里不再做任何时间判断——
+    // 指纹浏览器是逐字符敲进去的，"填完没有" 只能由持有节拍与时钟的协调层按锚点量，
+    // 而本层唯一能拿到的时钟是文档年龄，它的零点比表单出现早十几秒（见 change
+    // settle-facebook-credential-fill）。宣告 credential_fill_unavailable 的权限已整体移交协调层。
+    if(!emailValue||!passwordValue)return authObservation('none',null,'credential_fill_pending');
     const submit=authUnique(authButtons(form).filter((button)=>{
       const raw=label(button);
       return button.getAttribute('name')==='login'
@@ -219,7 +223,11 @@
         ||/^(log in|login|登录|登入)$/i.test(raw);
     }));
     if(!submit.candidate)return authObservation('blocked_unknown',null,submit.reason);
-    return authObservation('login_submit_ready',submit.candidate);
+    // 凭据**字符数**进 signalId 摘要（只有长度、绝无内容）：还在往里敲，signalId 就会变，
+    // 于是 ① 协调层能按 "同一个 id 连续出现多久" 判安定；② 点击前那道 fresh-revalidate
+    // 能发现 "我准备点的这段时间里密码又长了" 并拒绝下发，而不是照点一个半截密码。
+    return authObservation('login_submit_ready',submit.candidate,undefined,{},
+      `fill:${emailValue.length}:${passwordValue.length}`);
   };
   const authTotpObservation=async(sampleServerTime=true)=>{
     const candidates=authTotpInputCandidates();
@@ -592,6 +600,10 @@
     let determinate=true;
     let buttonStateChanged=false;
     if(expectedSignal==='login_submit_ready'){
+      // 这里比的是 **candidateKey（提交按钮的证据摘要）**，不是 signalId。两者不同源：
+      // signalId 额外含凭据字符数，candidateKey 不含。所以给 signalId 加填充证据
+      // 不改变本分支的判定——后置校验问的始终是 "那个按钮还在不在"。
+      // 别把两者当同一个东西对齐，否则一次正常的击键就会被读成 "信号消失了 = 动作生效了"。
       const forms=all('form').filter(visible).filter((form)=>{
         const emails=all('input[name="email"],input[type="email"],input#email',form).filter(visible);
         const passwords=all('input[name="pass"][type="password"],input[type="password"]',form).filter(visible);

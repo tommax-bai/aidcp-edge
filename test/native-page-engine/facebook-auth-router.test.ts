@@ -141,30 +141,76 @@ test('auth probe emits one target/document-bound login signal only after AdsPowe
   assert.equal('password' in first, false);
 });
 
-test('login hydration waits before empty credentials fail closed, while ambiguity blocks immediately', async () => {
+test('a still-typing password produces a different login signal id', async () => {
+  // 指纹浏览器是逐字符敲进去的：只要还在往里敲，signal id 就必须换一个——
+  // 否则点击前那道 fresh-revalidate 会认为「还是同一个信号」，照点一个半截密码。
+  // 必须在**同一个文档**里改值：换文档会连 documentGeneration 一起换掉，那样就
+  // 证明不了「是填充进度让 id 变的」。
   install(`
     <form>
-      <input name="email" type="email" value="">
+      <input name="email" type="email" value="filled@example.test">
       <input name="pass" type="password" value="">
       <button name="login">Log in</button>
     </form>
-  `, 'https://www.facebook.com/login/', 1_800_000_015_000, 0, 24_999);
-  const pending = await probe();
-  assert.equal(pending.signal, 'none');
-  assert.equal(pending.reason, 'credential_fill_pending');
-  assert.equal(pending.signalId, undefined);
+  `, 'https://www.facebook.com/login/');
+  setRect(document.querySelector('button')!, { left: 200, top: 200, right: 320, bottom: 245 });
+  const passwordInput = document.querySelector('input[type="password"]') as HTMLInputElement;
 
+  const idFor = async (password: string): Promise<string> => {
+    passwordInput.value = password;
+    const observation = await probe();
+    assert.equal(observation.signal, 'login_submit_ready', `password length ${password.length}`);
+    return String(observation.signalId);
+  };
+
+  const typing = await idFor('fi');
+  const halfway = await idFor('filled-pass');
+  const complete = await idFor('filled-password');
+  assert.notEqual(typing, halfway);
+  assert.notEqual(halfway, complete);
+  // 同一个值复读必须稳定，否则这条判据只是在测随机数。
+  assert.equal(await idFor('filled-password'), complete);
+
+  // 长度进摘要、内容不进：等长的另一个密码给出**同一个** id。
+  // 这条同时锁住「摘要里没有明文」——有明文的话两者必然不同。
+  assert.equal(await idFor('x'.repeat('filled-password'.length)), complete);
+});
+
+test('a login observation never carries credential fill fields across the boundary', async () => {
+  // Rust 侧 FacebookAuthObservation 是 deny_unknown_fields：返回对象多一个字段，
+  // 整条反序列化就失败。填充进度只许进摘要，绝不许进返回结构。
   install(`
     <form>
-      <input name="email" type="email" value="">
-      <input name="pass" type="password" value="">
+      <input name="email" type="email" value="filled@example.test">
+      <input name="pass" type="password" value="filled-password">
       <button name="login">Log in</button>
     </form>
-  `, 'https://www.facebook.com/login/', 1_800_000_015_000, 0, 25_000);
-  const empty = await probe();
-  assert.equal(empty.signal, 'manual_login_required');
-  assert.equal(empty.reason, 'credential_fill_unavailable');
-  assert.equal(empty.signalId, undefined);
+  `, 'https://www.facebook.com/login/');
+  setRect(document.querySelector('button')!, { left: 200, top: 200, right: 320, bottom: 245 });
+  const observation = await probe();
+  assert.deepEqual(
+    Object.keys(observation as Record<string, unknown>).sort(),
+    ['candidate', 'documentGeneration', 'signal', 'signalId'],
+  );
+});
+
+test('empty credentials stay pending at any document age, while ambiguity blocks immediately', async () => {
+  // 反向锁：宣告 credential_fill_unavailable 的权限已整体移交协调层（锚点是「两个框都出现」，
+  // 观测层只有文档年龄这一个时钟、量不了它）。观测层在**任何**文档年龄下都必须只回 pending——
+  // 它若再自行宣告一次，就是同一条判据的第二份实现，两处会各自漂移。
+  for (const documentAgeMs of [0, 24_999, 25_000, 600_000]) {
+    install(`
+      <form>
+        <input name="email" type="email" value="">
+        <input name="pass" type="password" value="">
+        <button name="login">Log in</button>
+      </form>
+    `, 'https://www.facebook.com/login/', 1_800_000_015_000, 0, documentAgeMs);
+    const pending = await probe();
+    assert.equal(pending.signal, 'none', `documentAgeMs=${documentAgeMs}`);
+    assert.equal(pending.reason, 'credential_fill_pending', `documentAgeMs=${documentAgeMs}`);
+    assert.equal(pending.signalId, undefined);
+  }
 
   install(`
     <form><input name="email" value="a"><input name="pass" type="password" value="b"><button name="login">Log in</button></form>
