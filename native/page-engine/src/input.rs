@@ -1195,6 +1195,28 @@ fn last_pointer_landing() -> Option<PointerPoint> {
         .and_then(|landing| *landing)
 }
 
+/// 开会话时清掉上一场留下的落点。
+///
+/// 上面那个静态量的注释写着它的成立前提：「引擎进程同一时刻只服务一个会话，故按进程持有即会话级」。
+/// **那只是个假设，代码里没有任何东西让它成真** —— 换一场会话，上一场的落点原样留着，
+/// 下一次点击就从**别人的**光标位置起步。
+///
+/// 后果不是崩溃，是**拟人化悄悄失效**：起点若正好落在新目标 2 像素内，轨迹会
+/// 「正确地」塌成单帧（那一支本来就是对的——目标已在脚下），于是一次本该逐帧移动的点击
+/// 变成瞬移，而 `PointerDegradation::None` 说它没降级。**两态在这里又被压成了一态。**
+///
+/// 实测入口是测试二进制：几十条用例并发跑在同一进程里，各开各的会话，落点互相污染 ——
+/// 「点击必须逐帧移动」那条断言因此 4 路并发下约 17% 变红（`scripts/flake-probe` 实测
+/// 24 跑 4 红），而它测的东西一点问题都没有。
+/// 生产上这条路径要求「一个引擎进程先后服务两场会话」，比测试里罕见得多，但**同样可达**。
+///
+/// 复位放在开会话，而不是关会话：关会话的路径可能因为进程被杀而根本走不到。
+pub(crate) fn forget_pointer_landing() {
+    if let Ok(mut slot) = LAST_POINTER_LANDING.lock() {
+        *slot = None;
+    }
+}
+
 fn remember_pointer_landing(landing: PointerPoint) {
     if let Ok(mut slot) = LAST_POINTER_LANDING.lock() {
         *slot = Some(landing);
