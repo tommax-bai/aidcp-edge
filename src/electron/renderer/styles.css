@@ -4713,6 +4713,10 @@ body.environment-roster-empty .environment-onboarding { display: flex; }
 .content-work-card.is-idle .content-work-empty > span { max-width: none; margin-top: 0; }
 .content-work-card.is-idle .content-work-empty-stages { grid-column: 1 / -1; justify-content: flex-start; margin-top: 7px; }
 .content-work-card.has-process .content-work-empty { display: none; }
+/* 没有过程时间线时，那个容器是空的，但它仍带 flex:1 —— 会把空态说明整块推到卡片下半部，
+   在说明文字上方留出一片与内容无关的空白。空态与时间线互斥（两条规则成对），所以这里
+   反向把空容器撤出布局，让空态直接接在标题栏下面。 */
+.content-work-card:not(.has-process) .content-work-timeline { display: none; }
 .content-work-card.is-collapsed { height: 74px; min-height: 0; grid-template-columns: 1fr; }
 .content-work-card.is-collapsed .content-work-brief { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 10px 14px; }
 .content-work-card.is-collapsed .content-work-agent { grid-column: 1 / 3; }
