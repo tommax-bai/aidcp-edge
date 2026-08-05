@@ -394,6 +394,7 @@ function syncContentWorkspace(status = currentStatus) {
     platform: selectedEnvPlatform(),
   } : null;
   contentWorkspace?.setEnvironment(environment);
+  syncContentWorkspaceActivities();
   // 环境首页模式已确定后再同步首启高亮，确保它落在 XHS 价值首页的可见代理按钮上。
   syncFirstEnvironmentStartGuide();
   contentWorkspace?.setRuntime?.({
@@ -5060,6 +5061,15 @@ function routeActivity(entry) {
   const key = entry.envId || routeSelKey();
   bufferActivity(key, entry, undefined);
   if (key === routeSelKey()) domPrependActivity(entry);
+  // 内容工作区的工作面板消费同一条流：归属判断留在这唯一的路由点，不让它另开一个订阅。
+  contentWorkspace?.pushActivity?.({ ...entry, envId: key });
+}
+
+/** 切到某环境时，把它已有的活动缓冲整体交给工作面板（否则刚切过去面板空白而运行面板有内容）。 */
+function syncContentWorkspaceActivities() {
+  const key = routeSelKey();
+  if (!key) return;
+  contentWorkspace?.setActivities?.(key, (fleetView.buffers.get(key) || []).map((item) => item.entry));
 }
 
 /** 切换环境后按缓冲整体重建活动流 DOM（旧→新逐条前插 → 最新在上）。 */

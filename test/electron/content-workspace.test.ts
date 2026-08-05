@@ -9,6 +9,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const electronDir = join(here, '../../src/electron');
 const html = readFileSync(join(electronDir, 'renderer/index.html'), 'utf8');
 const workspaceSrc = readFileSync(join(electronDir, 'renderer/content-workspace.js'), 'utf8');
+const uiLogicSrc = readFileSync(join(electronDir, 'renderer/ui-logic.js'), 'utf8');
+const displayNameSrc = readFileSync(join(electronDir, 'renderer/environment-display-name.cjs'), 'utf8');
 const openWindows: DOMWindow[] = [];
 after(() => openWindows.forEach((window) => window.close()));
 
@@ -163,6 +165,9 @@ function boot(api: Record<string, unknown>) {
   const dom = new JSDOM(html, { runScripts: 'dangerously' });
   const { window } = dom;
   openWindows.push(window);
+  // 与 index.html 同序加载：工作面板的相对时间走陪伴界面的视图逻辑，不另写第二份实现。
+  window.eval(displayNameSrc);
+  window.eval(uiLogicSrc);
   window.eval(workspaceSrc);
   const factory = (window as unknown as { ContentWorkspace: { create(options: unknown): any } }).ContentWorkspace;
   const controller = factory.create({
@@ -892,12 +897,102 @@ test('账号身份行标明显示名来源，且不让环境备注名读起来�
   const account = () => $(window, '#content-work-account');
   assert.match(account().textContent ?? '', /工程师大白（环境名）/);
   assert.doesNotMatch(account().textContent ?? '', /@工程师大白/, '客户端环境备注名不得冒充平台昵称');
-  assert.doesNotMatch(account().textContent ?? '', /小萝北 · 工程师大白/, '产品助手名与账号名不得用同一分隔符并列成人设属性');
-  assert.match(account().textContent ?? '', /小萝北（AI 助手）/);
+  // 身份行只承载当前账号。并列一个产品助手名会让读者以为面板上同时有两个身份在场，
+  // 而那个名字本身来自对设计稿的误读——它是另一个账号名，不是助手名。
+  assert.doesNotMatch(account().textContent ?? '', /助手/, '身份行不得并列产品助手身份');
+  assert.doesNotMatch(account().textContent ?? '', /小萝北/, '设计稿里的账号名不得被当作助手名固化进文案');
+  assert.doesNotMatch(account().textContent ?? '', /账号\s*工程师大白/, '账号名前不再加「账号」前缀');
 
   controller.setEnvironment({ envId: 'env-b', label: '晚风手作', labelSource: 'platform', platform: 'xiaohongshu' });
   await flush(8);
   assert.match(account().textContent ?? '', /@晚风手作（平台昵称）/);
+});
+
+const IDLE_API = {
+  curatedSummary: async () => ({ ok: true, data: { total: 0, referenceDraftCount: 0 } }),
+  curatedList: async () => ({ ok: true, data: { items: [], total: 0 } }),
+  publishDraftList: async () => ({ ok: true, data: { items: [], total: 0 } }),
+  publishQueueGet: async () => queueResponse({
+    summary: { inProgress: 0, waitingForYou: 0, cancellable: 0 }, tasks: [], active: [], recent: [],
+  }),
+};
+
+function activity(sentence: string, agoMs = 0) {
+  return { envId: 'env-a', type: 'note_open', sentence, ts: new Date(Date.now() - agoMs).toISOString() };
+}
+
+test('没有创作任务但账号正在浏览时，工作面板展示真实发生过的活动而不是宣布没有任务', async () => {
+  const { window, controller } = boot(IDLE_API);
+  controller.setEnvironment({ envId: 'env-a', label: '工程师大白', platform: 'xiaohongshu' });
+  controller.setRuntime({ automationState: 'running', browserState: 'ready' });
+  await flush(8);
+  controller.setActivities('env-a', [activity('打开了一篇讲城市散步的笔记', 120_000), activity('给这篇笔记点了个赞', 5_000)]);
+  await flush();
+
+  const card = $(window, '#content-work-card');
+  assert.equal(card.classList.contains('has-process'), true);
+  assert.equal(card.classList.contains('is-idle'), false);
+  const rows = window.document.querySelectorAll('.content-work-message.activity');
+  assert.equal(rows.length, 2);
+  // 历史条目一次给全；最新一条走逐字效果，此刻只断言它在场且被标为进行中（见下）。
+  assert.match(rows[0].textContent ?? '', /2 分钟前.*打开了一篇讲城市散步的笔记/s);
+  assert.doesNotMatch($(window, '#content-work-goal').textContent ?? '', /当前没有正在进行的任务/);
+  // 活动记录只说明发生过：不得被翻译成阶段链，也不得带完成勾冒充「这步成功了」。
+  assert.doesNotMatch($(window, '#content-work-timeline').textContent ?? '', /阶段|完成$|✓/);
+  assert.equal($(window, '#content-work-plan').children.length, 0);
+  // 浏览循环确实跑起来了，最新一条才可以呈现为进行中。
+  assert.equal(rows[rows.length - 1].classList.contains('current'), true);
+  assert.equal(rows[0].classList.contains('current'), false);
+});
+
+test('环境已暂停时活动记录只作历史呈现，不带进行中语义也不冒充正在工作', async () => {
+  const { window, controller } = boot(IDLE_API);
+  controller.setEnvironment({ envId: 'env-a', label: '工程师大白', platform: 'xiaohongshu' });
+  controller.setRuntime({ automationState: 'paused', browserState: 'closed' });
+  await flush(8);
+  controller.pushActivity(activity('给这篇笔记点了个赞', 60_000));
+  await flush();
+
+  const rows = window.document.querySelectorAll('.content-work-message.activity');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].classList.contains('current'), false, '未跑起来时不得把历史条目标成进行中');
+  assert.equal($(window, '#content-work-card').classList.contains('is-active'), false);
+  assert.doesNotMatch($(window, '#content-work-goal').textContent ?? '', /正在浏览/);
+});
+
+test('创作进度读不到时，工作面板说读不到并可重试，绝不宣布没有任务', async () => {
+  let queueCalls = 0;
+  const { window, controller } = boot({
+    ...IDLE_API,
+    publishQueueGet: async () => { queueCalls += 1; return { ok: false, status: 503, error: 'upstream_unavailable' }; },
+  });
+  controller.setEnvironment({ envId: 'env-a', label: '工程师大白', platform: 'xiaohongshu' });
+  controller.setRuntime({ automationState: 'running', browserState: 'ready' });
+  await flush(8);
+  // 有活动记录也不能盖过读取失败：读不到的是创作进度，那件事必须先说清楚。
+  controller.pushActivity(activity('打开了一篇讲城市散步的笔记', 10_000));
+  await flush();
+
+  assert.match($(window, '#content-work-title').textContent ?? '', /暂时读不到/);
+  assert.doesNotMatch($(window, '#content-work-goal').textContent ?? '', /当前没有正在进行的任务/);
+  assert.equal($(window, '#content-work-primary').textContent, '重新读取');
+  const before = queueCalls;
+  $(window, '#content-work-primary').dispatchEvent(new window.Event('click'));
+  await flush(8);
+  assert.ok(queueCalls > before, '重试必须真的再读一次，而不是只换个文案');
+});
+
+test('存在创作任务时仍以任务阶段为准，活动记录不覆盖它', async () => {
+  const { window, controller } = boot({ ...IDLE_API, publishQueueGet: async () => queueResponse() });
+  controller.setEnvironment({ envId: 'env-a', label: '工程师大白', platform: 'xiaohongshu' });
+  controller.setRuntime({ automationState: 'running', browserState: 'ready' });
+  await flush(8);
+  controller.pushActivity(activity('给这篇笔记点了个赞', 3_000));
+  await flush();
+
+  assert.equal(window.document.querySelectorAll('.content-work-message.activity').length, 0);
+  assert.ok(window.document.querySelectorAll('.content-work-message').length > 0);
+  assert.ok($(window, '#content-work-plan').children.length > 0, '任务阶段链仍在');
 });
 
 test('状态心跳不得把首页从开着的灵感库底下掀出来（两个工作区共享首页显隐）', async () => {

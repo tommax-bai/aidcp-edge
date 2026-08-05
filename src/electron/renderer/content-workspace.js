@@ -326,6 +326,7 @@
       workGoalCopy: homeRoot.querySelector('#content-work-goal-copy'),
       workPlan: homeRoot.querySelector('#content-work-plan'),
       workTimeline: homeRoot.querySelector('#content-work-timeline'),
+      workEmpty: homeRoot.querySelector('#content-work-empty'),
       workPrimary: homeRoot.querySelector('#content-work-primary'),
       workCollapse: homeRoot.querySelector('#content-work-collapse'),
       featured: homeRoot.querySelector('#content-featured'),
@@ -385,6 +386,51 @@
     let typeTimer = null;
     let typedMessageKey = '';
     const dashboardScrollByEnv = new Map();
+
+    // 活动记录：核心进程按真实事件发出、主进程按 envId 广播、渲染层单点路由后转发进来的条目。
+    // 这里只保留「当前环境」的一份：其余环境的缓冲由运行面板持有，切换过来时由它整体补发
+    // （setActivities）。两处各存一份会在环境切换与裁剪时机上悄悄漂移，故不自行订阅广播。
+    const ACTIVITY_LIMIT = 12;
+    let activityEnvId = null;
+    let activities = [];
+
+    // 条目只证明「这件事发生过」：保留原始时间戳与原句，不在这里合成阶段、完成度或当前动作。
+    function normalizeActivity(entry) {
+      const sentence = String(entry?.sentence || '').trim();
+      if (!sentence) return null;
+      const at = Date.parse(entry?.ts || '');
+      return { sentence, at: Number.isFinite(at) ? at : null, type: String(entry?.type || 'info') };
+    }
+
+    function setActivities(envId, entries) {
+      const key = String(envId || '');
+      if (!key) return;
+      activityEnvId = key;
+      activities = (Array.isArray(entries) ? entries : [])
+        .map(normalizeActivity)
+        .filter(Boolean)
+        .slice(-ACTIVITY_LIMIT);
+      if (environment?.envId === key && homeVisible()) renderHome();
+    }
+
+    function pushActivity(entry) {
+      const key = String(entry?.envId || '');
+      // 非当前环境的条目在运行面板那边已入缓冲，切过去时会被整体补发；这里丢弃不算丢数据。
+      if (!key || key !== environment?.envId) return;
+      const normalized = normalizeActivity(entry);
+      if (!normalized) return;
+      if (activityEnvId !== key) {
+        activityEnvId = key;
+        activities = [];
+      }
+      activities.push(normalized);
+      while (activities.length > ACTIVITY_LIMIT) activities.shift();
+      if (homeVisible()) renderHome();
+    }
+
+    function currentActivities() {
+      return environment?.envId && activityEnvId === environment.envId ? activities : [];
+    }
 
     function envState() {
       if (!environment) return null;
@@ -811,6 +857,43 @@
           stages: [{ key: 'queue', label: '计划', status: 'running', summary: '正在核对任务范围和当前账号的执行条件。' }],
         };
       }
+      // 走到这里只说明「没读到任务」。它有三种互不相同的成因，MUST NOT 压成同一句话：
+      // 来源读失败 → 暂时读不到；来源读成功且确无任务但有活动记录 → 展示活动；两者皆无 → 已确认空闲。
+      // 判据取来源的读取状态，不取 data 是否为 null —— 后者正是把三态压成一态的那个写法。
+      const unreadable = workSourceFailure(state);
+      if (unreadable) return { kind: 'unreadable', ...unreadable };
+      const entries = currentActivities();
+      if (entries.length > 0) return { kind: 'activity', entries };
+      return null;
+    }
+
+    // 面板依赖两个来源：创作队列与待审稿。任一失败即为「暂时读不到」；两者都还在首轮读取
+    // 且没有既有数据时为「正在读取」。已有数据的后台刷新不算读不到（旧值仍是真值）。
+    function workSourceFailure(state) {
+      if (!state) return null;
+      const queueState = publishQueueAvailable() ? state.publishQueue : null;
+      const failed = [
+        queueState?.kind === 'error' ? '创作进度' : null,
+        state.homeDrafts?.kind === 'error' ? '待审稿' : null,
+      ].filter(Boolean);
+      if (failed.length > 0) {
+        return {
+          reason: 'error',
+          status: '暂时读不到',
+          goal: `暂时读不到这个账号的${failed.join('与')}`,
+          detail: queueState?.error || state.homeDrafts?.error || '当前不会把读取失败显示成没有任务，可重试。',
+        };
+      }
+      const loadingQueue = queueState ? queueState.kind === 'loading' && !queueState.data : false;
+      const loadingDrafts = state.homeDrafts?.kind === 'loading' && (state.homeDrafts.items || []).length === 0;
+      if (loadingQueue || loadingDrafts) {
+        return {
+          reason: 'loading',
+          status: '正在读取',
+          goal: '正在读取这个账号的创作进度',
+          detail: '读到之前不会宣布这里没有任务。',
+        };
+      }
       return null;
     }
 
@@ -844,10 +927,11 @@
         : { proven: false, idleText: BROWSE_IDLE_TEXT[state] || '还没有开始浏览' };
     }
 
-    // 身份行必须让人分得清「这是哪个产品在工作」与「这是谁的账号」，并标明账号名的来源：
-    // 客户端可见的名字可能是平台昵称、人工别名或客户端环境备注名，三者可信度不同。
-    // 标题栏已确立口径（只有平台昵称带 @），这一行与它对齐；人设在系统里不承载名称字段，
-    // 所以身份行 MUST NOT 让环境备注名读起来像人设名。
+    // 身份行只讲一件事：这是谁的账号，以及这个名字是从哪来的（平台昵称 / 人工别名 /
+    // 客户端环境备注名，三者可信度不同）。标题栏已确立口径（只有平台昵称带 @），这一行与它对齐；
+    // 人设在系统里不承载名称字段，所以 MUST NOT 让环境备注名读起来像人设名。
+    // 这里曾并列一个产品助手名，那是把设计稿里的一个账号名误读成了助手身份——它与当前账号
+    // 并列出现时，读者会以为面板上同时有两个身份在场。
     const ACCOUNT_NAME_SOURCE_LABELS = {
       platform: '平台昵称',
       manual: '人工别名',
@@ -858,14 +942,12 @@
     function renderWorkAccount() {
       if (!fields.workAccount) return;
       fields.workAccount.replaceChildren();
-      fields.workAccount.appendChild(createElement(document, 'b', 'content-work-account-agent', '小萝北（AI 助手）'));
       if (!environment) {
-        fields.workAccount.appendChild(document.createTextNode(' ｜ 未选中账号'));
+        fields.workAccount.appendChild(document.createTextNode('未选中账号'));
         return;
       }
       const source = String(environment.labelSource || 'environment');
       const name = String(environment.label || '当前账号');
-      fields.workAccount.appendChild(document.createTextNode(' ｜ 账号 '));
       fields.workAccount.appendChild(createElement(
         document,
         'span',
@@ -883,15 +965,35 @@
     function renderHomeWork(state) {
       if (!fields.workCard) return;
       const model = homeWorkModel(state);
+      const taskModel = model?.kind === 'refinement' || model?.kind === 'queue' ? model : null;
+      const activityModel = model?.kind === 'activity' ? model : null;
+      const browsing = browseActivity().proven;
       renderWorkAccount();
-      fields.workCard.classList.toggle('is-idle', !model);
-      fields.workCard.classList.toggle('is-active', Boolean(model));
-      fields.workCard.classList.toggle('is-waiting', Boolean(model?.stages?.some((stage) => stage.status === 'waiting_human')));
-      fields.workCard.classList.toggle('has-process', Boolean(model?.stages?.length));
+      fields.workCard.classList.toggle('is-idle', !taskModel && !activityModel);
+      // 「正在工作」的绿色状态只跟真实证据走：任务投影本身是证据；活动记录只有在浏览循环
+      // 确实跑起来时才算，否则它讲的是已经发生过的事，不是此刻正在发生的事。
+      fields.workCard.classList.toggle('is-active', Boolean(taskModel) || Boolean(activityModel && browsing));
+      fields.workCard.classList.toggle('is-waiting', Boolean(taskModel?.stages?.some((stage) => stage.status === 'waiting_human')));
+      fields.workCard.classList.toggle('has-process', Boolean(taskModel?.stages?.length) || Boolean(activityModel));
+      fields.workCard.classList.toggle('has-activity', Boolean(activityModel));
       fields.workPlan.replaceChildren();
       fields.workTimeline.replaceChildren();
-      if (!model) {
-        fields.workTitle.textContent = 'AI 已准备好为你工作';
+      if (activityModel) {
+        renderHomeWorkActivity(activityModel, browsing);
+        return;
+      }
+      if (!taskModel) {
+        const unreadable = model?.kind === 'unreadable' ? model : null;
+        renderWorkEmptyCopy(unreadable);
+        fields.workTitle.textContent = unreadable ? '暂时读不到当前进度' : 'AI 已准备好为你工作';
+        if (unreadable) {
+          // 读不到 MUST NOT 讲成「没有任务」：这两句在用户那里导向完全相反的结论。
+          fields.workStatus.textContent = unreadable.status;
+          fields.workGoal.textContent = unreadable.goal;
+          fields.workGoalCopy.textContent = unreadable.detail;
+          fields.workPrimary.textContent = unreadable.reason === 'loading' ? '读取中' : '重新读取';
+          return;
+        }
         fields.workStatus.textContent = runtime && runtime.automationActive ? '当前空闲' : '未启动';
         fields.workGoal.textContent = runtime && runtime.automationActive ? '当前没有正在进行的任务' : '启动当前环境后，可以开始寻找灵感';
         fields.workGoalCopy.textContent = runtime && runtime.automationActive
@@ -901,13 +1003,13 @@
         return;
       }
       fields.workTitle.textContent = 'AI 正在为你工作';
-      fields.workStatus.textContent = model.status;
-      fields.workGoal.textContent = model.goal;
-      fields.workGoalCopy.textContent = model.detail;
-      fields.workPrimary.textContent = model.recordId ? '查看内容' : '查看进度';
-      let currentIndex = model.stages.findIndex((stage) => ['running', 'retrying', 'waiting_human'].includes(stage.status));
-      if (currentIndex < 0) currentIndex = model.stages.length - 1;
-      model.stages.forEach((stage, index) => {
+      fields.workStatus.textContent = taskModel.status;
+      fields.workGoal.textContent = taskModel.goal;
+      fields.workGoalCopy.textContent = taskModel.detail;
+      fields.workPrimary.textContent = taskModel.recordId ? '查看内容' : '查看进度';
+      let currentIndex = taskModel.stages.findIndex((stage) => ['running', 'retrying', 'waiting_human'].includes(stage.status));
+      if (currentIndex < 0) currentIndex = taskModel.stages.length - 1;
+      taskModel.stages.forEach((stage, index) => {
         const chip = createElement(document, 'span', index < currentIndex ? 'done' : index === currentIndex ? 'current' : '', stage.label);
         fields.workPlan.appendChild(chip);
         if (index > currentIndex) return;
@@ -921,9 +1023,69 @@
         row.appendChild(copy);
         fields.workTimeline.appendChild(row);
         if (completed) paragraph.textContent = stage.summary;
-        else typeHomeCurrent(paragraph, stage.summary, `${environment?.envId}:${model.kind}:${model.recordId || model.title}:${stage.key}:${stage.summary}`);
+        else typeHomeCurrent(paragraph, stage.summary, `${environment?.envId}:${taskModel.kind}:${taskModel.recordId || taskModel.title}:${stage.key}:${stage.summary}`);
       });
       fields.workTimeline.scrollTop = fields.workTimeline.scrollHeight;
+    }
+
+    // 过程区的空态说明必须与左栏结论同向：读不到时讲「任务开始后会展示什么」，
+    // 等于在同一屏上给出「只是还没开始」这个与事实相反的暗示。
+    const WORK_EMPTY_DEFAULT = {
+      title: '还没有工作过程',
+      copy: '任务开始后，这里会逐步展示计划、判断、生成、检查和确认。',
+    };
+
+    function renderWorkEmptyCopy(unreadable) {
+      if (!fields.workEmpty) return;
+      const title = fields.workEmpty.querySelector('strong');
+      const copy = fields.workEmpty.querySelector('span');
+      const stages = fields.workEmpty.querySelector('.content-work-empty-stages');
+      if (title) title.textContent = unreadable ? '暂时读不到工作过程' : WORK_EMPTY_DEFAULT.title;
+      if (copy) {
+        copy.textContent = unreadable
+          ? '读到之前，这里不会显示成没有发生过任何事。'
+          : WORK_EMPTY_DEFAULT.copy;
+      }
+      // 阶段预告讲的是「任务开始后会看到什么」，与读不到无关，读不到时不展示。
+      stages?.classList.toggle('hidden', Boolean(unreadable));
+    }
+
+    // 活动记录的呈现：只有「什么时候」和「发生了什么」两件事。
+    // MUST NOT 出现阶段名、完成勾或完成度——那些会把一串已发生的事讲成一条有进度的流程。
+    function renderHomeWorkActivity(model, browsing) {
+      const idleText = browseActivity().idleText;
+      fields.workTitle.textContent = browsing ? 'AI 正在为你工作' : 'AI 已准备好为你工作';
+      fields.workStatus.textContent = browsing ? '浏览中' : (runtime && runtime.automationActive ? '当前空闲' : '未启动');
+      fields.workGoal.textContent = browsing ? '正在浏览并挑选值得参考的内容' : (idleText || '当前没有正在进行的任务');
+      fields.workGoalCopy.textContent = browsing
+        ? '下面是这个账号刚刚做过的事；发起创作后，计划与草稿也会出现在这里。'
+        : '下面是这个账号已经做过的事；它们不代表此刻正在进行。';
+      fields.workPrimary.textContent = runtime && runtime.automationActive ? '查看灵感' : '启动环境';
+      const lastIndex = model.entries.length - 1;
+      model.entries.forEach((entry, index) => {
+        // 只有浏览循环确实跑起来时，最后一条才可呈现为进行中；其余一律是历史。
+        const live = browsing && index === lastIndex;
+        const row = createElement(document, 'article', `content-work-message activity${live ? ' current' : ''}`);
+        row.appendChild(createElement(document, 'i', '', '·'));
+        const copy = createElement(document, 'div');
+        const when = activityTimeText(entry.at);
+        if (when) copy.appendChild(createElement(document, 'b', '', when));
+        const paragraph = createElement(document, 'p');
+        copy.appendChild(paragraph);
+        row.appendChild(copy);
+        fields.workTimeline.appendChild(row);
+        if (live) typeHomeCurrent(paragraph, entry.sentence, `${environment?.envId}:activity:${entry.at}:${entry.sentence}`);
+        else paragraph.textContent = entry.sentence;
+      });
+      fields.workTimeline.scrollTop = fields.workTimeline.scrollHeight;
+    }
+
+    // 相对时间按条目自己的时间戳算，重渲染不得把旧条目改写成「刚刚」。
+    // 走字函数由陪伴界面的视图逻辑提供；它缺席时只是不显示时间，绝不编一个。
+    function activityTimeText(at) {
+      const relTime = global.uiLogic?.relTime;
+      if (!Number.isFinite(at) || typeof relTime !== 'function') return '';
+      return relTime(at, Date.now());
     }
 
     function renderFeatured(state) {
@@ -963,7 +1125,7 @@
           'idle',
           '暂时还没有一条灵感值得放在这里',
           '只有赞藏表现和内容证据完整、可以提炼表达结构的灵感，才会进入这个位置。',
-          { liveText: activity.proven ? '小萝北正在继续寻找' : activity.idleText, live: activity.proven },
+          { liveText: activity.proven ? '正在继续寻找' : activity.idleText, live: activity.proven },
         ));
         return;
       }
@@ -2262,6 +2424,12 @@
         }
       }
       if (changed) closeSortMenu();
+      // 换账号即丢弃上一个账号的活动记录：它讲的是别人做过的事，留在面板上就是张冠李戴。
+      // 新账号的历史条目由渲染层单点路由整体补发（setActivities），这里不猜、不保留。
+      if (changed && normalized?.envId !== activityEnvId) {
+        activityEnvId = null;
+        activities = [];
+      }
       environment = normalized;
       if (!changed) {
         // 账号没变也必须重新主张自己的可见性：首页显隐是与互动工作区共享的状态，
@@ -2369,6 +2537,16 @@
     fields.workPrimary?.addEventListener('click', () => {
       const state = envState();
       const model = homeWorkModel(state);
+      if (model?.kind === 'unreadable') {
+        if (model.reason !== 'loading') void loadHome(true);
+        return;
+      }
+      // 活动记录不是任务，没有可进入的进度页；按钮回到与空闲态一致的去处。
+      if (model?.kind === 'activity') {
+        if (runtime?.automationActive) openLibrary();
+        else root.dispatchEvent(new global.CustomEvent('content-workspace:runtime-action', { detail: { action: 'start' } }));
+        return;
+      }
       if (model?.recordId) openHomeDraft(model.recordId);
       else if (model) openPublishQueue();
       else if (runtime?.automationActive) openLibrary();
@@ -2466,6 +2644,8 @@
     return {
       setEnvironment,
       setRuntime,
+      setActivities,
+      pushActivity,
       openHome,
       openLibrary,
       openPublishQueue,
