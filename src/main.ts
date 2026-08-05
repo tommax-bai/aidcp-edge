@@ -68,6 +68,7 @@ import { deriveEdgeId } from './client/edge-id.js';
 import { EdgeTaskCoordinator } from './execution/edge-task-coordinator.js';
 import { CommitWindowGuard, combineCommitWindows } from './execution/commit-window.js';
 import { abortForTakeover, TaskTakeoverError, type TakeoverCtx } from './execution/takeover.js';
+import { InFlightPublishes } from './execution/in-flight-publishes.js';
 import { PublishUiEventTracker, uiSnapshotToLines, writeNoteStageLine } from './flows/ui-event-lines.js';
 import { imageTempPrefixFor, sweepImageTempDirs } from './flows/image-uploader.js';
 import type {
@@ -730,7 +731,8 @@ async function main(): Promise<void> {
 
   // §7 在途发布追踪：回收若撞上在途发布，先把它诚实判失败（让审批/通知侧看到失败而非半成品），
   // 绝不静默丢弃让其跨重起被重复触发 → 真账号重复发帖。值为「按各自结果形状诚实判失败」的闭包。
-  const inFlightPublishes = new Map<string, (reason: string) => void>();
+  //   回执登记与「写者还在页面上」是两件事，由 InFlightPublishes 分开持有（回收路径只清前者）。
+  const inFlightPublishes = new InFlightPublishes();
   // 抢占取消登记（change lease-strict-preemption 5.3）：每条在途发布 dispatch 的**真取消**句柄——
   //   abort() 触发本命令的接管（abortForTakeover），settled 在 dispatch 真收敛时 resolve。
   //   协调器 writers.cancelPublish 遍历触发 abort + 有界等 settled；未收敛即抛（判控制面故障 yield_timeout）。
@@ -978,7 +980,7 @@ async function main(): Promise<void> {
     //   - cancelPublish：抢占/让位时真取消在途发布并有界等收敛；未收敛即抛（协调器判控制面故障 yield_timeout）。
     writers: {
       ...combineCommitWindows([publishGuard, browseGuard]),
-      publishInFlight: () => inFlightPublishes.size > 0,
+      publishInFlight: () => inFlightPublishes.writerOnPage,
       cancelPublish: async (timeoutMs?: number): Promise<number> => {
         const entries = [...inFlightPublishCancels.values()];
         if (entries.length === 0) return 0;
@@ -1061,9 +1063,11 @@ async function main(): Promise<void> {
 
   // §7 回收契约：把全部在途发布诚实判失败（须在关闭云端连接之前发，确保失败回执发得出去）。
   // 云端 WS 已断时 send 会 best-effort 失败，但本地 in-flight 必须立刻清掉，避免重连后重放旧发布。
+  //
+  // **它清掉的只是回执登记，不是页面写者。** dispatch 仍在页面上打字（自我掐表，最长按下发预算），
+  // 只有它自己的 finally 才知道写者何时真的离开——两者的分工写在 InFlightPublishes 的类注释里。
   const failInFlightPublishesHonestly = (reason: string): void => {
-    for (const [, failer] of inFlightPublishes) failer(reason);
-    inFlightPublishes.clear();
+    inFlightPublishes.recycle(reason);
   };
 
   client.on('cloud.disconnected', () => {
@@ -1116,10 +1120,10 @@ async function main(): Promise<void> {
         // 重绑照跑而全套用例零红。现在被拒时下面这个回调一次都不会被调用（用例驱动的就是这个函数）。
         await rebindCloudUnderIdentityGate(identityGuard?.health, async () => {
           const deadline = Date.now() + 30_000;
-          while ((taskCoordinator.hasActiveLease() || inFlightPublishes.size > 0) && Date.now() < deadline) {
+          while ((taskCoordinator.hasActiveLease() || inFlightPublishes.writerOnPage) && Date.now() < deadline) {
             await new Promise((resolve) => setTimeout(resolve, 100));
           }
-          if (taskCoordinator.hasActiveLease() || inFlightPublishes.size > 0) {
+          if (taskCoordinator.hasActiveLease() || inFlightPublishes.writerOnPage) {
             throw new Error('page_work_drain_timeout');
           }
           browse?.discardQueuedCloudCommands('cloud_rebind');
@@ -1200,7 +1204,8 @@ async function main(): Promise<void> {
       console.log(writeNoteStageLine());
       publishUiEvents.observe(env.payload);
       // §7 在途登记：按 publish.command.result 形状诚实判失败（带 recordId/seq/kind，同 env.id 回执）。
-      inFlightPublishes.set(env.id, (reason) => {
+      // 同一次调用把「写者踏上页面」也记上——与下面的 finally: settle() 严格配对，中间无可抛语句。
+      inFlightPublishes.begin(env.id, (reason) => {
         try {
           client.send(
             'publish.command.result',
@@ -1243,7 +1248,7 @@ async function main(): Promise<void> {
           error: `dispatch_error: ${message}`,
         };
       } finally {
-        inFlightPublishes.delete(env.id);
+        inFlightPublishes.settle(env.id);
         inFlightPublishCancels.delete(env.id);
         // 在途发布收敛 → 若协调器空闲则恢复浏览（否则 publishInFlight 闸会让浏览在 dispatch 结束后永久冻结，复核 finding C）。
         taskCoordinator.notifyPublishSettled();
