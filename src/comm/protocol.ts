@@ -34,8 +34,8 @@ export type MessageType =
   | 'hello' // edge → cloud：边缘上线，声明能力/会话
   | 'welcome' // cloud → edge：握手确认
   | 'browser.status' // edge → cloud：同一连接内浏览器 absent/ready 真态变化
-  // —— 陪伴界面数据回填（cloud → edge，主动推送）——
-  | 'ui.snapshot' // cloud → edge：账号资料快照 + 发布审批状态回填（昵称/最近发布/pending·approved·rejected·failed），边缘核心转 [ui-event] 行给桌面壳
+  // —— 自动化运行投影（cloud → edge）；客户数据字段仅供旧客户端兼容 ——
+  | 'ui.snapshot' // 新客户端仅接收浏览器待机等自动化控制投影；今日用量、人物、草稿、审批、发布等客户数据经 customer-auth HTTP 拉取
   // —— 任务规划 ——
   | 'plan.request' // edge → cloud：给定高层目标，请求拆解为步骤
   | 'plan.response' // cloud → edge：返回有序步骤清单
