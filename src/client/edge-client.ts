@@ -69,6 +69,9 @@ import {
 } from './command-diagnostics.js';
 import { operationDescriptorFor } from './operation-registry.js';
 
+/** 平台段枚举（与代码平台标识一致；词汇批 4 起命令名顶层段取值于此）。 */
+const PLATFORM_SEGMENTS: ReadonlySet<string> = new Set(['xiaohongshu', 'facebook', 'wechat_channels']);
+
 /** 最小 WebSocket 抽象（与 cdp/client.ts 同形，便于测试注入） */
 /**
  * 云端**拒绝**了本节点的握手（change risk-state-cross-process-integrity，task 9.1）。
@@ -708,6 +711,21 @@ export class EdgeClient {
       clearTimeout(p.timer);
       p.resolve(env);
       return;
+    }
+
+    // 平台段入口闸（edge-command-grammar「平台能力命令 MUST 以平台为顶层命名空间」的入口半边，
+    // change recategorize-nonpage-commands）：命令名首段 ∈ 平台枚举 ⇒ 必须等于本会话平台。
+    // 本闸对现役词汇零命中（无平台段命令），置于未登记检查之前——发错平台的未来命令拿到的是
+    // 精确拒因而非 unclassified，且闸的活性今天就可被测试驱动。
+    {
+      const head = env.type.split('.')[0];
+      if (PLATFORM_SEGMENTS.has(head) && head !== (this.opts.platform ?? '')) {
+        this.emitCommandDiagnostic(env, 'rejected', 'platform_mismatch');
+        this.opts.logger(
+          `[edge-client] platform_mismatch type=${env.type} sessionPlatform=${this.opts.platform ?? 'unknown'}; rejected`,
+        );
+        return;
+      }
     }
 
     if (!operationDescriptorFor(env.type)) {

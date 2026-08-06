@@ -7,7 +7,6 @@ import {
   clientOperationDescriptorFor,
   operationDescriptorFor,
 } from '../../src/client/operation-registry.js';
-import { IDENTITY_RESCUE_OPERATIONS } from '../../src/client/identity-command-gate.js';
 import type { MessageType } from '../../src/comm/protocol.js';
 
 /**
@@ -50,14 +49,17 @@ test('every dispatchable page command is actually routed by EdgeClient (no silen
   const { readFileSync } = await import('node:fs');
   const source = readFileSync(new URL('../../src/client/edge-client.ts', import.meta.url), 'utf8');
 
+  // 改类根治（recategorize-nonpage-commands）后，经主动白名单路由的不止 page_automation：
+  // 观察与环境处置同样由 EdgeClient 主动命令路由分派，漏路由同样是静默丢弃。
+  const ROUTED_CATEGORIES = new Set(['page_automation', 'page_observation', 'environment_assist']);
   const pageCommands = (Object.entries(CLOUD_OPERATION_REGISTRY) as [MessageType, { category: string }][])
-    .filter(([, descriptor]) => descriptor.category === 'page_automation')
+    .filter(([, descriptor]) => ROUTED_CATEGORIES.has(descriptor.category))
     .map(([type]) => type);
 
   // 防空转：登记表解析不出东西时，上面的循环会「零条全过」，与真的全覆盖同形。
   assert.ok(
     pageCommands.length >= 25,
-    `page_automation 只解析出 ${pageCommands.length} 条，登记表结构大概率已变——本断言 MUST 响亮失败，绝不退化成空集恒真`,
+    `路由类命令只解析出 ${pageCommands.length} 条，登记表结构大概率已变——本断言 MUST 响亮失败，绝不退化成空集恒真`,
   );
 
   const unrouted = pageCommands.filter((type) => !source.includes(`env.type === '${type}'`));
@@ -92,28 +94,41 @@ test('operation registry keeps browser acquisition outside automation control an
 });
 
 /**
- * 身份救援清单的成员资格闸（change close-account-layer-operation-manual）：
+ * 身份闸被拦集合的结构断言（change recategorize-nonpage-commands，取代救援清单成员资格闸）：
  *
- *   救援清单 ⊆ { 登记表里 platformFootprint === 'none' 的命令 }
+ * 救援清单已随判例四根治退役——类别按「在编址什么」重归后，判据收敛为一句话：
+ * **身份未落定时，拒绝一切 identity === 'page_account' 的命令，零例外清单。**
  *
- * 这是这张清单**唯一的危险方向**——少放行一条只是更难救，多放行一条会在未知身份下
- * 真发内容、记错账。误把一条会留痕的命令加进救援清单，本断言当场红并点名它。
- *
- * ⚠️ MUST NOT 把它「补全」成双向断言（「所有 'none' 命令都该在救援清单里」）。反例现成：
- * `edge.task.acquire` 是 'none'，但身份未落定时照拦——认领租约＝马上要以该账号名义动作，
- * 拦它的理由是**准入**，不是留痕。「不留痕」不蕴含「该放行」；清单的另一半判据
- * （拦掉它会让节点更难救）是闸相对特定终局的策略，推导不出来，只能人判。
+ * 本断言按引用从登记表推导被拦集合（零手抄），并锁两条硬性质：
+ *   ① 全部会留痕的命令（platformFootprint === 'account_visible'）MUST 在被拦集合内——
+ *      身份未落定时绝不允许任何可能在平台留痕的动作；
+ *   ② `edge.task.acquire` MUST 在被拦集合内——它不留痕，但认领租约＝即将以该账号名义
+ *      动作的准入（「留痕维 MUST NOT 单独决定放行」的常驻反例，机械化在此）。
+ * 变异校准：把 acquire 或任一留痕命令的 identity 改为非 page_account ⇒ 本断言当场红并点名。
  */
-test('identity rescue allowlist members must all be declared platformFootprint none in the registry', () => {
-  const violations = [...IDENTITY_RESCUE_OPERATIONS].filter((type) => {
-    const descriptor = operationDescriptorFor(type as MessageType);
-    return !descriptor || descriptor.platformFootprint !== 'none';
-  });
+test('identity gate blocked set is derived from the registry and covers every footprinted command plus acquire', () => {
+  const blocked = (Object.entries(CLOUD_OPERATION_REGISTRY) as [MessageType, { identity: string; platformFootprint: string }][])
+    .filter(([, d]) => d.identity === 'page_account')
+    .map(([type]) => type);
+  const blockedSet = new Set<string>(blocked);
+
+  const footprintedOutsideGate = (Object.entries(CLOUD_OPERATION_REGISTRY) as [MessageType, { platformFootprint: string }][])
+    .filter(([type, d]) => d.platformFootprint === 'account_visible' && !blockedSet.has(type))
+    .map(([type]) => type)
+    .sort();
+  // 棘轮：留痕却不受页面身份闸约束的，恰好只许是这一条**已登记的已知缺口**——
+  // interaction.reply.send 走视频号 API、identity 是 bound_account（令牌鉴权，与页面登录态无关），
+  // 页面身份未落定不构成其身份失效。该缺口登记于 close-account-layer-operation-manual tasks 9.1，
+  // 是否给 API 写路径设独立身份闸属产品裁决。新增任何「留痕且不被拦」的命令 ⇒ 本断言当场红。
   assert.deepEqual(
-    violations,
-    [],
-    `救援清单里这些命令未在登记表声明为不留痕（platformFootprint 'none'）——身份未落定时放行它们`
-      + `会在未知身份下于平台留下真实痕迹：${violations.join(', ')}`,
+    footprintedOutsideGate,
+    ['interaction.reply.send'],
+    `留痕且不受身份闸约束的集合变了（只许恰好等于已登记的唯一例外）：${footprintedOutsideGate.join(', ')}`,
+  );
+
+  assert.ok(
+    blockedSet.has('edge.task.acquire'),
+    'edge.task.acquire 必须在被拦集合内：不留痕但属账号动作准入（身份都不知道是谁，谈不上以谁的名义认领）',
   );
 });
 

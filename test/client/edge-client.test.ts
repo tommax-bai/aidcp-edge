@@ -48,12 +48,14 @@ async function connectClient(
   ws: FakeWebSocket,
   options: {
     logger?: (message: string) => void;
+    platform?: string;
     runner?: ConstructorParameters<typeof EdgeClient>[0]['runner'];
   } = {},
 ): Promise<EdgeClient> {
   const client = new EdgeClient({
     url: 'ws://test',
     edgeId: 'edge-1',
+    platform: options.platform,
     runner: options.runner ?? {
       run: async () => ({
         actionId: 'noop',
@@ -560,6 +562,28 @@ test('edge-client: reportNoteContent 收到 note.ack 正常 resolve', async () =
   const resp = await promise;
   assert.equal(resp.type, 'note.ack');
   assert.deepEqual(resp.payload, { received: true });
+});
+
+/**
+ * 平台段入口闸活性证明（change recategorize-nonpage-commands）：现役词汇无平台段命令、闸休眠，
+ * 这两条用例是它活着的唯一证明——批 4 改名后第一条真实平台段命令到来时，闸已经在了。
+ */
+test('edge-client: 平台段与会话平台不符的命令被精确拒收（platform_mismatch，先于未登记检查）', async () => {
+  const ws = new FakeWebSocket();
+  const logs: string[] = [];
+  await connectClient(ws, { logger: (m: string) => logs.push(m), platform: 'xiaohongshu' });
+  ws.emitMessage(makeEnvelope('facebook.fake.command' as never, 'pm-1', 2, {} as never));
+  assert.ok(logs.some((l) => l.includes('platform_mismatch') && l.includes('facebook.fake.command')),
+    '发往 xiaohongshu 会话的 facebook.* 命令必须以 platform_mismatch 拒收，而非落进 operation_unclassified');
+});
+
+test('edge-client: 平台段匹配但未登记的命令仍走 fail-closed 未登记拒收', async () => {
+  const ws = new FakeWebSocket();
+  const logs: string[] = [];
+  await connectClient(ws, { logger: (m: string) => logs.push(m), platform: 'xiaohongshu' });
+  ws.emitMessage(makeEnvelope('xiaohongshu.fake.command' as never, 'pm-2', 2, {} as never));
+  assert.ok(logs.some((l) => l.includes('operation_unclassified') && l.includes('xiaohongshu.fake.command')),
+    '平台对了但没登记，闸放行到未登记检查——两道闸各答各的问题');
 });
 
 test('edge-client: page.scroll 路由到 browseHandler', async () => {

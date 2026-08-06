@@ -10,6 +10,7 @@ export const COMMAND_DIAGNOSTIC_PREFIX = '[command-diagnostic]';
 export type CommandDiagnosticStage = 'received' | 'rejected' | 'dispatched' | 'completed' | 'failed';
 export type CommandDiagnosticReason =
   | 'operation_unclassified'
+  | 'platform_mismatch'
   | 'capability_not_negotiated'
   | 'extension_not_negotiated'
   | 'payload_invalid'
