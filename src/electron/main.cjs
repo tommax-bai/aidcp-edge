@@ -74,7 +74,7 @@ const {
   requestFacebookSelectedPersonaFill,
 } = require('./facebook-persona-auto-fill.cjs');
 const os = require('node:os');
-const { createUiEventStream, mergeStats } = require('./ui-events.cjs');
+const { createUiEventStream, mergeStats, nativeSessionAxisEvent } = require('./ui-events.cjs');
 const {
   parseRuntimePosture,
   postureLatches,
@@ -6316,17 +6316,20 @@ function handleEdgeLogLine(handle, message, isError = false) {
     next.session = 'idle';
     next.presence = { text: '云端重连失败，等待重启', at: new Date().toISOString() };
   }
-  if (
-    message.includes('自动浏览已启动') ||
-    message.includes('启动自动浏览循环') ||
-    message.includes('启动命令驱动浏览循环') ||
-    message.includes('唤醒重启浏览循环')
-  ) {
-    next.session = 'running';
-  }
-  if (message.includes('浏览循环结束')) {
-    next.session = message.includes('后继续') ? 'resting' : 'idle';
-  }
+  // 会话运行态（change harden-edge-blocker-and-session-axis）：改由 Native 引擎的**结构化会话事件**驱动。
+  //
+  // 换掉的是五条按中文措辞推断的规则，它们**在生产上一条都不会触发**：三句的唯一发射点在
+  // `src/browse/browse-session.ts`（已列入 scripts/native-engine-inventory.cjs 退役名单、从生产构建剪除），
+  // 另两句（`自动浏览已启动` / `启动自动浏览循环`）全仓根本没有发射点。后果不是「不更新」而是**停在错值**：
+  // 该轴自核心启动被写下那一次之后只会被各种失败路径单向改坏、永不复原，界面据此长期说谎且零告警。
+  // 这正是上一次「准入读了一根无写入方的轴 → 锁死浏览器槽位 32 分钟、磁盘上零证据」的同一个根因；
+  // 那次把它逐出了准入闸，但没有修它本身。
+  //
+  // ⚠️ **它 MUST NOT 回到冷待机准入闸**——即便现在有了活写入方。理由不是写入方死活，而是
+  // 它描述的是**姿态**（此刻在不在跑）而非**身份**（要动的是哪个对象）；规格 browser-cold-standby
+  // 已就此单立条款与场景，改动前先读那条。
+  const nativeSessionAxis = nativeSessionAxisEvent(message);
+  if (nativeSessionAxis) next.session = nativeSessionAxis;
   if (message.includes('风控拒绝') || message.includes('risk_error') || message.includes('⚠')) next.risk = 'warned';
 
   // 健康运行达阈值 → 连续失败预算清零（respawn-policy 的健康信号在退出时按 uptime 判，这里无需处理）。
@@ -6440,7 +6443,7 @@ function handleEdgeLogLine(handle, message, isError = false) {
       next.loopStageBrowserIndependent = evt.loopStage !== null && evt.browserIndependent === true;
     }
     // 阻断浮层（登录/验证码/未知阻断）待人工处理：核心成对信号驱动（`popup` 置真 / `popup_cleared`
-    // 或会话结束 置假），使该环境在环境栏浮顶为「需人工」而非绿色在线（红线：多环境跨窗盯验证码正是
+    // 置假），使该环境在环境栏浮顶为「需人工」而非绿色在线（红线：多环境跨窗盯验证码正是
     // 本控制台的核心目的）。
     //
     // change facebook-write-action-visibility：**移除了「任何成功互动（statsDelta）顺带置假」这条兜底**。
@@ -6448,8 +6451,18 @@ function handleEdgeLogLine(handle, message, isError = false) {
     // 证明不了验证码已经解决。留着它 = 被拦住的环境被一次无关动作抹回绿色，运营就此看不见该救哪台机器。
     // 两个平台此刻都已有显式成对信号（XHS 走中文兜底表的两条恢复信号；FB 走结构化 popup/popup_cleared），
     // 兜底已无存在理由。清除只认显式解除。
+    //
+    // change harden-edge-blocker-and-session-axis：**同理移除「会话结束顺带置假」（`session_end`）**。
+    // 它与上面那条兜底是同一类不成立的推断——一轮浏览停下来证明不了阻断被处理掉了，**而且浏览停下来
+    // 恰恰常常正是因为那个浮层还挡着**，所以它比 statsDelta 那条更反向。
+    //
+    // ⚠️ 拆的是一颗**当时还没响的雷**，不是正在漏的洞：该 UI 事件全仓唯一的产出点是 ui-events.cjs 里
+    // 那条中文正则，而它的日志发射点在 `src/browse/browse-session.ts`——该文件已列入
+    // scripts/native-engine-inventory.cjs 的退役名单、从生产构建中剪除，故此支当时不可能触发。
+    // **但本 change 的另一半正是在给「会话结束」造一个活信号源**（见上方 nativeSessionAxisEvent）。
+    // 先拆雷、再接线：顺序颠倒过来，就是亲手把一个正被人工处置的阻断态抹掉。
     if (evt.type === 'popup') next.overlayBlocked = true;
-    else if (evt.type === 'popup_cleared' || evt.type === 'session_end') next.overlayBlocked = false;
+    else if (evt.type === 'popup_cleared') next.overlayBlocked = false;
   }
   // posture 覆盖层**最后生效、且赢**（顺序即语义）。上面几十条按文本推断的规则各自只看一行日志，
   // 而 posture 是核心对整体运行态的判断——两者冲突时后者是权威。

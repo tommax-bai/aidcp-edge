@@ -323,9 +323,54 @@ function mergeStats(prev, patch) {
   };
 }
 
+/** Native 引擎结构化诊断行的前缀与两个会话事件名（唯一事实源：引擎侧 `diagnostic()`）。 */
+const NATIVE_SESSION_EVENT_PREFIX = '[native-page] session.event';
+const NATIVE_SESSION_READY_EVENT = 'session_ready';
+const NATIVE_SESSION_STOPPED_EVENT = 'session_stopped';
+
+/**
+ * 从一行核心日志里读出**会话运行态**（change harden-edge-blocker-and-session-axis）。
+ *
+ * 存在的理由：这根轴此前由中文措辞推断，而那几句的唯一发射点是**已从生产构建剪除**的退役浏览循环
+ * （`src/browse/browse-session.ts`，见 scripts/native-engine-inventory.cjs 的退役名单），另有两句
+ * 全仓根本没有发射点。于是该轴自核心启动被写下那一次之后再无人维护——界面上「这个号在不在跑」
+ * 长期停在错值，且**没有任何告警**。现役 Native 引擎一直在发结构化会话行，此前无人接。
+ *
+ * **匹配必须落在引擎侧 token 化字段上**，这不是退回「按自然语言措辞推断」。三点差别缺一不可：
+ * ① token 化（引擎发射前对每个 token 做过字符集收敛，不含页面正文，不随文案改写而漂）；
+ * ② 平台中立（各平台分片共用同一发射点，不是某平台专属措辞）；③ 写入方在产。
+ * 回归断言逐串到引擎源码里找发射点——那是上一次事故（准入读了无写入方的轴、锁死槽位 32 分钟）的
+ * 机械化教训。
+ *
+ * **MUST NOT 用于任何裁决，只供界面呈现**：它描述的是**姿态**（此刻在不在跑），不是**身份**
+ * （要被操作的是哪个对象）。冷待机准入 MUST NOT 读它——**即便它现在有了活写入方**；
+ * 规格 browser-cold-standby 已就此单立条款，理由是姿态非身份，不是写入方死活。
+ *
+ * `session_stopped` **一律映射为 idle、不合成 resting**：引擎侧那几个停止原因
+ * （本地停手 / 云端结束 / 关闭 / 排空）**都不表达「歇一会儿还会继续」**。凭空造一个 resting
+ * 就是把观测不到的状态说成观测到了。resting 仍由其它真正知情的路径写入（待机、暂停等）。
+ *
+ * @returns 'running' | 'idle'；该行不是会话事件行、或是别的会话事件 → null（调用方不得动这根轴）。
+ */
+function nativeSessionAxisEvent(line) {
+  const text = String(line || '');
+  if (!text.includes(NATIVE_SESSION_EVENT_PREFIX)) return null;
+  // 只认 `event=<token>` 这一个字段；token 字符集与引擎侧 diagnosticToken() 一致。
+  const matched = /\bevent=([a-zA-Z0-9_.:-]{1,96})(?:\s|$)/.exec(text);
+  if (!matched) return null;
+  if (matched[1] === NATIVE_SESSION_READY_EVENT) return 'running';
+  if (matched[1] === NATIVE_SESSION_STOPPED_EVENT) return 'idle';
+  // 其余会话事件（阻断检出、命令失败等）MUST NOT 顺带改这根轴：它只表达「在不在跑」。
+  return null;
+}
+
 module.exports = {
   createUiEventStream,
   UI_EVENT_PREFIX,
+  NATIVE_SESSION_EVENT_PREFIX,
+  NATIVE_SESSION_READY_EVENT,
+  NATIVE_SESSION_STOPPED_EVENT,
+  nativeSessionAxisEvent,
   clipTitle,
   mergeStats,
 };
