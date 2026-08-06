@@ -6,7 +6,10 @@ export type OperationClass =
   | 'automation_control'
   | 'platform_api_automation'
   | 'browser_lifecycle'
-  | 'page_automation';
+  | 'page_automation'
+  // 页面观察（change add-state-observation-command；与批 2 recategorize-nonpage-commands 协调，
+  // 落地时对齐类别词汇）：需要浏览器、纯读、不以页面账号名义动作。
+  | 'page_observation';
 
 export interface OperationDescriptor {
   category: OperationClass;
@@ -60,6 +63,10 @@ const browserLifecycle = (
 const pageAutomation = (
   platformFootprint: PlatformFootprint = 'account_visible',
 ): CloudOperationDescriptor => ({ category: 'page_automation', transport: 'automation_ws', identity: 'page_account', browser: 'required', platformFootprint });
+// 页面观察（change add-state-observation-command）：identity 维非 page_account——观察询问的是
+// 「环境→账号」翻译层的现场事实，不代表页面账号动作；身份未落定时它 MUST 可用（正是解开
+// 「不知道浏览器里登着谁」终局的探针之一），故身份闸按 identity 维放行、无需进救援清单。
+const pageObservation = (): CloudOperationDescriptor => ({ category: 'page_observation', transport: 'automation_ws', identity: 'bound_account', browser: 'required', platformFootprint: 'none' });
 
 /** Electron/renderer operations share the same classification vocabulary and never infer browser needs from child state. */
 export const CLIENT_OPERATION_REGISTRY = {
@@ -143,6 +150,8 @@ export const CLOUD_OPERATION_REGISTRY = {
   'profile.open': pageAutomation('none'),
   'identity.read_current': pageAutomation('none'),
   'identity.read_self_profile': pageAutomation('none'),
+  // 观察命令「问现状」（change add-state-observation-command）：纯读探针，一次带回当前面 + 登录身份。
+  'state.read': pageObservation(),
   'notification.open': pageAutomation('none'),
   'notification.browse_comments': pageAutomation('none'),
   'notification.browse_likes': pageAutomation('none'),

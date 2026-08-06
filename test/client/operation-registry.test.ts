@@ -50,8 +50,10 @@ test('every dispatchable page command is actually routed by EdgeClient (no silen
   const { readFileSync } = await import('node:fs');
   const source = readFileSync(new URL('../../src/client/edge-client.ts', import.meta.url), 'utf8');
 
+  // page_observation（change add-state-observation-command）与 page_automation 同走 browseHandler
+  // 主动命令路由：观察命令漏放行同样是「云端 sent=1、边缘静默丢弃、按信封 id 等应答只等到超时」。
   const pageCommands = (Object.entries(CLOUD_OPERATION_REGISTRY) as [MessageType, { category: string }][])
-    .filter(([, descriptor]) => descriptor.category === 'page_automation')
+    .filter(([, descriptor]) => descriptor.category === 'page_automation' || descriptor.category === 'page_observation')
     .map(([type]) => type);
 
   // 防空转：登记表解析不出东西时，上面的循环会「零条全过」，与真的全覆盖同形。
