@@ -60,6 +60,7 @@ import { registerPublishApprovalStdinCommands } from './client/publish-approval-
 import {
   CoreLifecycleController,
   parseCoreLifecycleCommand,
+  parseStandbyDecisionRelay,
   type CoreLifecycleCommand,
 } from './client/core-lifecycle.js';
 import { LifecycleAuthInterruptTracker } from './client/lifecycle-auth-interrupt.js';
@@ -77,7 +78,9 @@ import type {
   EdgeTaskAcquirePayload,
   EdgeTaskReleasePayload,
   Envelope,
+  StandbyDecisionPayload,
 } from './comm/protocol.js';
+import { HOST_STANDBY_DECISION_TELEMETRY_CAPABILITY } from './comm/protocol.js';
 import type { EdgeBrowseSession } from './browse/edge-browse-session.js';
 import type { IdentityDecision, SelfIdentityResult } from './cdp/self-identity.js';
 import {
@@ -213,6 +216,16 @@ async function main(): Promise<void> {
     if (m.type !== 'lifecycle.wake_denied') return undefined;
     return typeof m.detail === 'string' && m.detail ? m.detail : 'wake_denied';
   };
+  /**
+   * 外壳把一次「让不让出浏览器槽位」的判决交给核心转发给云端（change report-host-standby-decisions）。
+   *
+   * **不是生命周期命令**（不进 parseCoreLifecycleCommand，不动状态机、不碰浏览器）：判决在外壳已经作出
+   * 并执行完了，这里只负责把**事实**送出去。云端连接在本进程，外壳没有，所以链路必须是三跳。
+   *
+   * ⚠️ 本处是**逐类具名解析**、不是通配转发：漏加这一段的表现是**静默不转发**——外壳日志显示已发送、
+   * 云端什么都收不到（本仓同形状前科：主动命令白名单漏登记，命令到不了处理器）。端到端断言必须覆盖三跳。
+   */
+  let onStandbyDecision: ((decision: StandbyDecisionPayload) => void) | undefined;
   process.on('message', (message: unknown) => {
     const rebind = parseCloudRebind(message);
     if (rebind) {
@@ -223,6 +236,11 @@ async function main(): Promise<void> {
     const denied = parseWakeDenied(message);
     if (denied !== undefined) {
       onWakeDenied?.(denied);
+      return;
+    }
+    const standbyDecision = parseStandbyDecisionRelay(message);
+    if (standbyDecision) {
+      onStandbyDecision?.(standbyDecision);
       return;
     }
     const command = parseCoreLifecycleCommand(message);
@@ -722,6 +740,17 @@ async function main(): Promise<void> {
   };
   client.onBrowseCommand(dispatchOrQueuePageCommand);
   if (platformDriver.platform === 'xiaohongshu') client.onPlanCommand(dispatchOrQueuePageCommand);
+  // 三跳的第三跳：外壳判决 → 核心（上面的具名解析分支）→ 云端。
+  //   能力位未协商（旧云端 / 本构建未声明）⇒ **不上报，且不产生任何错误**——回执是观测，
+  //   MUST NOT 成为让位的前置条件；一次云端抖动绝不能让整批环境停止让出槽位。
+  onStandbyDecision = (decision: StandbyDecisionPayload): void => {
+    if (!client.supportsCapability(HOST_STANDBY_DECISION_TELEMETRY_CAPABILITY)) return;
+    if (!client.reportStandbyDecision(decision)) {
+      console.warn(
+        `[aidcp-edge] 让位判决回执未送达云端（verdict=${decision.verdict} reason=${decision.reason}）：只影响可见性，让位判决与执行逐字不变`,
+      );
+    }
+  };
   const browserStartupId = `${edgeId}:${process.pid}:${Date.now().toString(36)}`;
 
   // 建号自助人设 stdin 桥（change edge-persona-keyword-generation）：身份已确立、client 就绪后装上，

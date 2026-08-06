@@ -161,7 +161,7 @@ test('edge-client: hello carries platform metadata without changing message type
     edgeId: 'edge-1',
     platform: 'xiaohongshu',
     app: 'xhs',
-    capabilities: ['locating', 'cdp', 'like', 'browse', 'captcha_assist_text_v1', 'client_core_browser_executor_v1', 'client_data_plane_automation_engine_v1', 'search_activity_receipt_v1'],
+    capabilities: ['locating', 'cdp', 'like', 'browse', 'captcha_assist_text_v1', 'client_core_browser_executor_v1', 'client_data_plane_automation_engine_v1', 'search_activity_receipt_v1', 'host_standby_decision_telemetry_v1'],
   });
 
   ws.emitMessage(makeEnvelope('welcome', 'hello-1', 1, { sessionId: 's1', serverVersion: 'v1' }));
@@ -303,7 +303,7 @@ test('edge-client: hello carries optional account nickname for display enrichmen
     edgeId: 'edge-1',
     platform: 'facebook',
     app: 'fb',
-    capabilities: ['identity', 'overlay', 'comment', 'captcha_assist_text_v1', 'client_core_browser_executor_v1', 'client_data_plane_automation_engine_v1', 'search_activity_receipt_v1'],
+    capabilities: ['identity', 'overlay', 'comment', 'captcha_assist_text_v1', 'client_core_browser_executor_v1', 'client_data_plane_automation_engine_v1', 'search_activity_receipt_v1', 'host_standby_decision_telemetry_v1'],
     accountId: '1234567890',
     accountNickname: 'Test User',
   });

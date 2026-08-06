@@ -176,6 +176,64 @@ function shouldLogStandbyRefusal(streak) {
   return streak.count === 1 || streak.count % STANDBY_REFUSAL_LOG_EVERY === 0;
 }
 
+/**
+ * 这一次判决要不要上报云端（change report-host-standby-decisions）。
+ *
+ * **与本地日志留痕共用同一套节流**（`shouldLogStandbyRefusal`，同一个 `STANDBY_REFUSAL_LOG_EVERY`）。
+ * 两处各写一份常量会让「本地日志里有几条」与「云端收到几条」对不上，排障时制造互相矛盾的证据——
+ * 那比没有证据更贵。
+ *
+ * **判决迁移不受节流约束**：由拒转让、由让转拒都是状态变化而非重复，必须立刻发；节流只压重复。
+ *
+ * @param previous 上一次**已上报**的 `{ verdict, reason }`；从未上报过传 null。
+ */
+function shouldReportStandbyDecision(previous, verdict, reason, streak) {
+  if (!previous) return true;
+  if (previous.verdict !== verdict) return true;   // 判决迁移：立即发
+  if (previous.reason !== reason) return true;     // 换因：立即发（与记账的「换因即复位」同步）
+  if (verdict !== 'refused') return false;         // 同因重复让位 = 没有新事实
+  return shouldLogStandbyRefusal(streak);
+}
+
+/**
+ * 组装一次让位判决的上报事实（change report-host-standby-decisions）。
+ *
+ * 纯函数、只产出**事实**：判决、具名原因、连续拒绝次数与首次时刻、所针对提示的标识、判决时刻。
+ * MUST NOT 塞任何形如「云端应该怎么做」的字段——遥测一旦携带诉求，下一轮就会被读成协商。
+ *
+ * 提示标识取该提示的 `generatedAt`：没有它，云端分不清「拒的是刚推那条」与「拒的是三跳之前那条」，
+ * 连续拒绝次数就无法归因。
+ */
+function standbyDecisionFact({ verdict, reason, streak, hint, envId, now = Date.now() }) {
+  const refusing = verdict === 'refused';
+  const count = refusing && streak && Number.isFinite(streak.count) ? streak.count : 0;
+  const since = refusing && streak && Number.isFinite(streak.since) ? streak.since : null;
+  const normalizedHint = normalizeBrowserStandbyHint(hint);
+  return {
+    verdict,
+    reason: typeof reason === 'string' && reason ? reason : 'unknown',
+    refusedCount: count,
+    ...(since === null ? {} : { refusedSince: since }),
+    hintGeneratedAt: normalizedHint ? normalizedHint.generatedAt : 0,
+    decidedAt: now,
+    ...(envId ? { envId } : {}),
+  };
+}
+
+/**
+ * 外壳 → 核心的中转消息类型（change report-host-standby-decisions）。
+ *
+ * **与核心侧的具名解析器共用同一个字面量**（src/client/core-lifecycle.ts 的
+ * `STANDBY_DECISION_RELAY_TYPE`）。两处各写一个字符串的现形方式不是编译报错，是**静默不转发**：
+ * 外壳日志显示已发送，云端什么都收不到。回归断言把两个常量钉在一起。
+ */
+const STANDBY_DECISION_RELAY_TYPE = 'lifecycle.standby_decision';
+
+/** 把一次判决事实包成外壳 → 核心的中转消息。信封形状只在这里定义一次。 */
+function standbyDecisionRelayMessage(fact) {
+  return { type: STANDBY_DECISION_RELAY_TYPE, decision: fact };
+}
+
 function parseBooleanOverride(raw) {
   if (raw === undefined || raw === null) return null;
   const v = String(raw).trim().toLowerCase();
@@ -215,6 +273,10 @@ module.exports = {
   STANDBY_REFUSAL_LOG_EVERY,
   noteStandbyRefusal,
   shouldLogStandbyRefusal,
+  shouldReportStandbyDecision,
+  standbyDecisionFact,
+  standbyDecisionRelayMessage,
+  STANDBY_DECISION_RELAY_TYPE,
   normalizeColdStandbySettings,
   omitLegacyColdStandbyMinWaitSetting,
   normalizeBrowserStandbyHint,

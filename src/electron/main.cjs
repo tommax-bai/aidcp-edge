@@ -111,6 +111,9 @@ const {
   classifyBrowserStandbyHintUpdate,
   noteStandbyRefusal,
   shouldLogStandbyRefusal,
+  shouldReportStandbyDecision,
+  standbyDecisionFact,
+  standbyDecisionRelayMessage,
 } = require('./browser-cold-standby.cjs');
 const fleet = require('./fleet.cjs');
 const { createCoreBootstrapSupervisor } = require('./core-bootstrap.cjs');
@@ -2257,6 +2260,9 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     // 连续拒绝记账（change admit-browser-standby-on-live-facts）：{ reason, count, since }。
     // 单次拒绝正常，连续拒绝＝这个环境正在无限期占着一个浏览器槽位；两者必须可分辨。
     coldStandbyRefusal: null,
+    // 上一次**已上报云端**的判决 { verdict, reason }（change report-host-standby-decisions）。
+    // 只用于节流去重；它 MUST NOT 出现在任何准入判据里——回执是观测，不是让位的前置条件。
+    coldStandbyDecisionReported: null,
     // 正在原地重建浏览器（change browser-slot-scheduling）。唤醒是异步有界的：待机态只在核心回报
     // lifecycle.woken 后才解除，绝不在下发唤醒的那一刻就乐观标成已醒。
     coldStandbyWaking: false,
@@ -3987,6 +3993,38 @@ function clearColdStandbyRefusal(handle) {
   if (handle) handle.coldStandbyRefusal = null;
 }
 
+/**
+ * 把这一次让位判决作为**只读遥测**回执给云端（change report-host-standby-decisions）。
+ *
+ * 为什么必须有：本地留痕只在有人坐在那台机器前时有用，而车队是跨机器的——2026-08-05 的故障形状是
+ * 「一台机器上的某个环境连续 32 分钟拒绝让位、锁死一个浏览器槽位」，而运营在另一处完全看不见。
+ * 宿主层持有槽位决策权的**对价**就是向上可见。
+ *
+ * **回执 MUST NOT 影响准入**（规格 browser-cold-standby）：
+ *   - 判决与其执行在调用方已经定下，本函数只在其后发生，返回值无人读；
+ *   - 三跳里任意一跳失败（核心已退出 / IPC 断开 / 云端不可达 / 对端不支持能力）一律只落一行日志；
+ *   - 本函数不读也不写任何准入输入。回执一旦变成让位的前置条件，一次云端抖动就会让整批环境停止让位。
+ *
+ * 能力位不在这里判：外壳不持有云端连接，握手协商的结果只有核心知道。核心侧未协商到能力位即静默丢弃
+ * （见 src/main.ts 的具名解析分支），那条路径 MUST NOT 产生错误。
+ */
+function reportColdStandbyDecision(handle, { verdict, reason, streak, hint }) {
+  if (!handle) return;
+  const previous = handle.coldStandbyDecisionReported;
+  if (!shouldReportStandbyDecision(previous, verdict, reason, streak)) return;
+  if (!handle.child || typeof handle.child.send !== 'function' || handle.child.connected === false) return;
+  handle.coldStandbyDecisionReported = { verdict, reason };
+  try {
+    handle.child.send(
+      standbyDecisionRelayMessage(standbyDecisionFact({ verdict, reason, streak, hint, envId: handle.envId })),
+    );
+  } catch (error) {
+    // 送不出去就把节流状态还原，让下一次判决重新有机会上报；准入照常，什么都不改。
+    handle.coldStandbyDecisionReported = previous;
+    console.warn(`[cold-standby] ${handle.envId} 让位判决回执未送达核心：${error.message}`);
+  }
+}
+
 /** 把连续拒绝记账摊进待机状态，供开发者详情呈现。 */
 function refusalPatch(streak) {
   if (!streak) return {};
@@ -4053,6 +4091,8 @@ function applyBrowserStandbyHint(handle, rawHint) {
     }
     // 到这里 = **本可以让位、却被本地拒绝**。每一条这样的路径都必须留痕，一条都不许静默返回。
     const streak = noteColdStandbyRefusal(handle, decision.reason);
+    // 留痕的另一半：本地日志只服务「有人坐在这台机器前」，回执让运营在另一处也看得见（只读遥测）。
+    reportColdStandbyDecision(handle, { verdict: 'refused', reason: decision.reason, streak, hint });
     // 最短持有时长未满：**绝不能把这条提示丢掉**。外层那个 if 只处理「待机中」与「disabled」两种情形，
     // 普通 skip 是直接 return、什么都不做的——若在此丢弃，该环境就永远留在开启态、再也不会让出槽位
     // （云端 60s 周期链虽会再推，但那只是碰运气：提示内容不变时判定结果同样是 min_hold，直到某一跳恰好
@@ -4087,6 +4127,8 @@ function applyBrowserStandbyHint(handle, rawHint) {
     return;
   }
   clearColdStandbyRefusal(handle);
+  // 由拒转让是**状态迁移**，节流不许把它吃掉（shouldReportStandbyDecision 对迁移直接放行）。
+  reportColdStandbyDecision(handle, { verdict: 'yielded', reason: 'ok', streak: null, hint: decision.hint });
   if (handle.coldStandbyActive) {
     scheduleColdStandbyWake(handle, decision);
     updateStatus(handle, {
@@ -5468,6 +5510,9 @@ async function spawnEdgeChild(handle, {
     const controlPlaneNeverEstablished = handle.controlPlaneOnly && !handle.controlPlaneBootstrapped;
     const wasColdStandby = !controlPlaneNeverEstablished && (handle.coldStandbyPending || handle.coldStandbyActive);
     handle.child = undefined;
+    // 核心换了一个 ⇒ 云端连接与能力协商也换了一份，上一份的上报去重状态不再代表对端知道什么。
+    // 不清会让重起后的第一条判决被当成「重复」而漏报（change report-host-standby-decisions）。
+    handle.coldStandbyDecisionReported = null;
     handle.status.authReason = null;
     if (!terminalLoginFailure) handle.status.loginFlow = null;
     handle.status.proxyRuntime = invalidateProxyRuntime(handle.status.proxyRuntime);

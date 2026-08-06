@@ -1,5 +1,10 @@
+import type { StandbyDecisionPayload } from '../comm/protocol.js';
+
 export type CoreLifecycleCommand = 'pause' | 'pause_and_exit' | 'resume' | 'close' | 'standby' | 'wake';
 export type CoreLifecycleState = 'active' | 'pausing' | 'paused' | 'standby' | 'waking' | 'finalizing' | 'finished';
+
+/** 外壳 → 核心的让位判决中转消息类型（change report-host-standby-decisions）。两端共用这一个常量。 */
+export const STANDBY_DECISION_RELAY_TYPE = 'lifecycle.standby_decision';
 
 /**
  * 一次进入冷待机的尝试结果（change admit-browser-standby-on-live-facts）。
@@ -68,6 +73,49 @@ export function parseCoreLifecycleCommand(message: unknown): CoreLifecycleComman
   if (type === 'lifecycle.standby') return 'standby';
   if (type === 'lifecycle.wake') return 'wake';
   return null;
+}
+
+/**
+ * 解析外壳中转过来的一次让位判决（change report-host-standby-decisions）。
+ *
+ * **不是生命周期命令**：它不进 `parseCoreLifecycleCommand`、不动状态机、不碰浏览器。判决在外壳
+ * 已经作出并执行完了，核心只负责把**事实**转发给云端（云端连接在核心进程，外壳没有）。
+ *
+ * 与它同族的 `lifecycle.wake_denied` 一样，这里是**逐类具名解析**、不是通配转发：
+ * 漏配这一段的表现是**静默不转发**——外壳日志显示已发送、云端什么都收不到，
+ * 而两侧的编译与各自的用例全绿（本仓同形状前科：主动命令白名单漏登记）。
+ * 因此回归断言必须覆盖完整三跳，只断言「外壳发出了」正好放过这个唯一的静默失败点。
+ *
+ * 不合法即返回 null：MUST NOT 半填一条记录转发出去，那会把「没收到」变成「收到一条假的」。
+ */
+export function parseStandbyDecisionRelay(message: unknown): StandbyDecisionPayload | null {
+  if (!message || typeof message !== 'object') return null;
+  const m = message as { type?: unknown; decision?: unknown };
+  if (m.type !== STANDBY_DECISION_RELAY_TYPE) return null;
+  const d = m.decision;
+  if (!d || typeof d !== 'object') return null;
+  const raw = d as Partial<StandbyDecisionPayload>;
+  if (raw.verdict !== 'yielded' && raw.verdict !== 'refused') return null;
+  if (typeof raw.reason !== 'string' || !raw.reason) return null;
+  const refusedCount = nonNegativeInt(raw.refusedCount);
+  const hintGeneratedAt = nonNegativeInt(raw.hintGeneratedAt);
+  const decidedAt = nonNegativeInt(raw.decidedAt);
+  if (refusedCount === null || hintGeneratedAt === null || decidedAt === null) return null;
+  const refusedSince = nonNegativeInt(raw.refusedSince);
+  return {
+    verdict: raw.verdict,
+    reason: raw.reason,
+    refusedCount,
+    ...(refusedSince === null ? {} : { refusedSince }),
+    hintGeneratedAt,
+    decidedAt,
+    ...(typeof raw.envId === 'string' && raw.envId ? { envId: raw.envId } : {}),
+  };
+}
+
+function nonNegativeInt(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
+  return Math.floor(value);
 }
 
 /**

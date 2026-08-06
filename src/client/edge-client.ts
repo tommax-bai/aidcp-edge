@@ -39,6 +39,7 @@ import {
   type WelcomePayload,
   type BrowserState,
   type BrowserStatusPayload,
+  type StandbyDecisionPayload,
   type PacingSnapshotPayload,
   type EdgeTaskAcquirePayload,
   type EdgeTaskReleasePayload,
@@ -601,6 +602,21 @@ export class EdgeClient {
   /** 上报浏览器执行层真态；不会触发或代替任何页面命令。 */
   reportBrowserStatus(payload: BrowserStatusPayload): void {
     this.send('browser.status', payload);
+  }
+
+  /**
+   * 上报一次宿主层让位判决（只读遥测，change report-host-standby-decisions）。
+   *
+   * **绝不抛**：这条回执是观测，MUST NOT 成为让位的前置条件——一次云端抖动不该让整批环境停止让出
+   * 浏览器槽位，那会把一条观测通道变成新的可用性依赖。未连接 / 发送失败返回 false，调用方只记一行日志。
+   */
+  reportStandbyDecision(payload: StandbyDecisionPayload): boolean {
+    try {
+      this.send('standby.decision', payload);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** 上报当前可见卡片列表 */
