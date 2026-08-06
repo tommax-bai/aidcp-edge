@@ -15,11 +15,51 @@ export interface OperationDescriptor {
   browser: 'forbidden' | 'on_demand' | 'required';
 }
 
+/**
+ * 平台留痕维（platform footprint）——「判错了会不会在平台上留痕」这条尺子的机读形态。
+ *
+ * 判据：这条命令**执行成功后**，平台上是否**直接**出现一个可归因到该账号的新对象
+ * （帖子 / 评论 / 点赞 / 关注关系 / 群成员资格 / 私信…）。三条边界裁定：
+ *   - **按消息类型取最坏一档**：`publish.command` 一个类型下有填标题 / 选图 / 点提交多种原子，
+ *     只有最后一个真留痕，但本表按消息类型编址 ⇒ 整条判 `account_visible`。
+ *     错在保守侧只是少一次自动重试；错在激进侧就是重复对外写入（本仓代价最高的错误）。
+ *   - **只算直接后果，不算间接触发**：`edge.task.acquire` 会让后续留痕动作成为可能，但它自己
+ *     不产生任何对象 ⇒ `none`。算间接则一切操作最终都留痕，本维退化成恒真、失去全部区分力。
+ *   - **本维 MUST NOT 单独决定放行**。反例常驻：`edge.task.acquire` 是 `none`，但身份未落定时
+ *     照拦——认领租约＝马上要以该账号名义动作，拦它的理由是**准入**，不是留痕。
+ *
+ * 当前消费方只有测试断言（身份救援清单成员资格 ⊆ 声明为 `none` 的命令）；将来消费方是
+ * 云端重放决策（可重放 / 绝不重放）。**不参与任何运行时放行 / 拒绝判断。**
+ */
+export type PlatformFootprint = 'account_visible' | 'none';
+
+/**
+ * Cloud→Edge 描述符 = 基础四维 + 平台留痕维。
+ *
+ * 为什么 `platformFootprint` 只加在 Cloud→Edge 这份、`CLIENT_OPERATION_REGISTRY` 那 29 条不加：
+ * 客户端本地 / IPC 操作不经过身份闸、不参与重放决策——本维的两个消费方一个都不沾。
+ * 没有消费方的标注必然漂移，而漂移的标注比没有标注更坏（它看起来像事实源）。
+ */
+export interface CloudOperationDescriptor extends OperationDescriptor {
+  platformFootprint: PlatformFootprint;
+}
+
 const cloudData = (): OperationDescriptor => ({ category: 'cloud_data', transport: 'customer_auth_http', identity: 'customer_environment', browser: 'forbidden' });
-const automationControl = (identity: OperationDescriptor['identity'] = 'bound_account'): OperationDescriptor => ({ category: 'automation_control', transport: 'automation_ws', identity, browser: 'forbidden' });
-const platformApiAutomation = (): OperationDescriptor => ({ category: 'platform_api_automation', transport: 'automation_ws', identity: 'bound_account', browser: 'forbidden' });
-const browserLifecycle = (): OperationDescriptor => ({ category: 'browser_lifecycle', transport: 'automation_ws', identity: 'bound_account', browser: 'on_demand' });
-const pageAutomation = (): OperationDescriptor => ({ category: 'page_automation', transport: 'automation_ws', identity: 'page_account', browser: 'required' });
+// 以下四个构造器只服务 Cloud→Edge 登记表。platformFootprint 默认一律落在 'account_visible'
+// （保守侧）：留痕为默认、不留痕需显式声明——漏判的新命令因此天然进「绝不重放」一侧。
+const automationControl = (
+  identity: OperationDescriptor['identity'] = 'bound_account',
+  platformFootprint: PlatformFootprint = 'account_visible',
+): CloudOperationDescriptor => ({ category: 'automation_control', transport: 'automation_ws', identity, browser: 'forbidden', platformFootprint });
+const platformApiAutomation = (
+  platformFootprint: PlatformFootprint = 'account_visible',
+): CloudOperationDescriptor => ({ category: 'platform_api_automation', transport: 'automation_ws', identity: 'bound_account', browser: 'forbidden', platformFootprint });
+const browserLifecycle = (
+  platformFootprint: PlatformFootprint = 'account_visible',
+): CloudOperationDescriptor => ({ category: 'browser_lifecycle', transport: 'automation_ws', identity: 'bound_account', browser: 'on_demand', platformFootprint });
+const pageAutomation = (
+  platformFootprint: PlatformFootprint = 'account_visible',
+): CloudOperationDescriptor => ({ category: 'page_automation', transport: 'automation_ws', identity: 'page_account', browser: 'required', platformFootprint });
 
 /** Electron/renderer operations share the same classification vocabulary and never infer browser needs from child state. */
 export const CLIENT_OPERATION_REGISTRY = {
@@ -59,53 +99,64 @@ export const CLIENT_OPERATION_REGISTRY = {
  * Correlated request responses are resolved before this table. Missing active operations fail closed.
  */
 export const CLOUD_OPERATION_REGISTRY = {
-  'ui.snapshot': automationControl(),
-  'pacing.update': automationControl(),
-  'interaction.sync.ack': automationControl(),
-  'interaction.reply.result.ack': automationControl(),
-  'interaction.offboard.ack': automationControl(),
-  'interaction.runtime.controls': automationControl(),
-  ping: automationControl('none'),
-  pong: automationControl('none'),
+  // —— 控制与心跳：只动本地投影 / 节奏 / outbox 确认，不触任何平台对象 ——
+  'ui.snapshot': automationControl('bound_account', 'none'),
+  'pacing.update': automationControl('bound_account', 'none'),
+  'interaction.sync.ack': automationControl('bound_account', 'none'),
+  'interaction.reply.result.ack': automationControl('bound_account', 'none'),
+  'interaction.offboard.ack': automationControl('bound_account', 'none'),
+  'interaction.runtime.controls': automationControl('bound_account', 'none'),
+  ping: automationControl('none', 'none'),
+  pong: automationControl('none', 'none'),
 
-  'interaction.sync.request': platformApiAutomation(),
+  // 拉取同步：全部端点为 observed_read_only（request-descriptors.ts），纯读不写平台。
+  'interaction.sync.request': platformApiAutomation('none'),
+  // 真发出私信——唯一的 API 直写留痕命令（且不经页面身份闸，缺口已在 change 里登记待议）。
   'interaction.reply.send': platformApiAutomation(),
-  'interaction.reply.reconcile': platformApiAutomation(),
-  'interaction.offboard.command': platformApiAutomation(),
+  // 协议注释：只核验既有 attempt，绝不发起新平台写。
+  'interaction.reply.reconcile': platformApiAutomation('none'),
+  // 撤权后清理本地加密会话；协议注释：结果可重放。
+  'interaction.offboard.command': platformApiAutomation('none'),
 
-  'interaction.auth.reopen': browserLifecycle(),
-  'interaction.browser.control': browserLifecycle(),
+  'interaction.auth.reopen': browserLifecycle('none'),
+  'interaction.browser.control': browserLifecycle('none'),
 
+  // v1 兼容路径：PlanStep 的 op 含 click / input，可承载点赞 / 评论等写手势 ⇒ 按最坏一档。
   'plan.response': pageAutomation(),
-  'session.end': pageAutomation(),
-  'note.open': pageAutomation(),
-  'note.close': pageAutomation(),
-  'search.execute': pageAutomation(),
-  'page.scroll': pageAutomation(),
-  'feed.refresh': pageAutomation(),
+  'session.end': pageAutomation('none'),
+  'note.open': pageAutomation('none'),
+  'note.close': pageAutomation('none'),
+  // 搜索只产生账号自见的隐式行为记录，不产生平台上可归因的新对象。
+  'search.execute': pageAutomation('none'),
+  'page.scroll': pageAutomation('none'),
+  'feed.refresh': pageAutomation('none'),
+  // —— 互动写：每条直接产生可归因到该账号的新对象 ——
   'interaction.like': pageAutomation(),
   'interaction.collect': pageAutomation(),
   'interaction.follow': pageAutomation(),
   'interaction.comment': pageAutomation(),
   'interaction.like_comment': pageAutomation(),
   'group.join': pageAutomation(),
-  'navigation.back': pageAutomation(),
-  'note.browse_images': pageAutomation(),
-  'note.scroll_comments': pageAutomation(),
-  'profile.open': pageAutomation(),
-  'identity.read_current': pageAutomation(),
-  'identity.read_self_profile': pageAutomation(),
-  'notification.open': pageAutomation(),
-  'notification.browse_comments': pageAutomation(),
-  'notification.browse_likes': pageAutomation(),
-  'notification.browse_follows': pageAutomation(),
-  'notification.back_home': pageAutomation(),
+  'navigation.back': pageAutomation('none'),
+  'note.browse_images': pageAutomation('none'),
+  'note.scroll_comments': pageAutomation('none'),
+  'profile.open': pageAutomation('none'),
+  'identity.read_current': pageAutomation('none'),
+  'identity.read_self_profile': pageAutomation('none'),
+  'notification.open': pageAutomation('none'),
+  'notification.browse_comments': pageAutomation('none'),
+  'notification.browse_likes': pageAutomation('none'),
+  'notification.browse_follows': pageAutomation('none'),
+  'notification.back_home': pageAutomation('none'),
+  // 按最坏一档：多种原子里只有「点提交」真留痕，但本表按消息类型编址。
   'publish.command': pageAutomation(),
-  'edge.task.acquire': pageAutomation(),
-  'edge.task.release': pageAutomation(),
-  'captcha.assist.capture': pageAutomation(),
-  'captcha.assist.click': pageAutomation(),
-} as const satisfies Partial<Record<MessageType, OperationDescriptor>>;
+  // 租约属准入不属留痕：acquire 不产生对象但身份未落定照拦（本维不决定放行的常驻反例）。
+  'edge.task.acquire': pageAutomation('none'),
+  'edge.task.release': pageAutomation('none'),
+  'captcha.assist.capture': pageAutomation('none'),
+  // 人工点位只作用于验证码浮层，解开阻断不产生该账号名下的新对象。
+  'captcha.assist.click': pageAutomation('none'),
+} as const satisfies Partial<Record<MessageType, CloudOperationDescriptor>>;
 
 export type RegisteredCloudOperation = keyof typeof CLOUD_OPERATION_REGISTRY;
 export type RegisteredClientOperation = keyof typeof CLIENT_OPERATION_REGISTRY;
@@ -114,8 +165,8 @@ export function clientOperationDescriptorFor(type: string): OperationDescriptor 
   return (CLIENT_OPERATION_REGISTRY as Record<string, OperationDescriptor>)[type] ?? null;
 }
 
-export function operationDescriptorFor(type: MessageType): OperationDescriptor | null {
-  return (CLOUD_OPERATION_REGISTRY as Partial<Record<MessageType, OperationDescriptor>>)[type] ?? null;
+export function operationDescriptorFor(type: MessageType): CloudOperationDescriptor | null {
+  return (CLOUD_OPERATION_REGISTRY as Partial<Record<MessageType, CloudOperationDescriptor>>)[type] ?? null;
 }
 
 /** Legacy Clouds may still mix client-owned data into ui.snapshot. New clients consume only the
