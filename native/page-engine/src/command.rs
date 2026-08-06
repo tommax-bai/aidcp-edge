@@ -12,6 +12,15 @@ const MAX_LIST_ITEMS: usize = 100;
 /// 这张表是词表一致性检查的唯一豁免通道——新增变体若既不进清单也不进这里，检查即失败。
 pub const MANIFEST_EXCLUDED_COMMAND_KINDS: &[(&str, &str)] = &[
     (
+        "browse_next",
+        "protocol side deleted by change drop-dead-cloud-edge-commands (zero Cloud senders); \
+         Rust variant retained until vocabulary batch 4 touches the engine, unreachable from any envelope",
+    ),
+    (
+        "browse_scroll",
+        "same as browse_next: protocol type deleted, engine-side removal rides batch 4",
+    ),
+    (
         "page_probe",
         "engine-internal page classification: never dispatched from a Cloud envelope, \
          no route key and no Cloud-facing receipt",
@@ -1280,6 +1289,8 @@ mod tests {
         assert_eq!(
             excluded,
             BTreeSet::from([
+                "browse_next",
+                "browse_scroll",
                 "page_probe",
                 "facebook_auth_probe",
                 "facebook_auth_submit_login",
