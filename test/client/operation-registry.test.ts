@@ -7,60 +7,28 @@ import {
   clientOperationDescriptorFor,
   operationDescriptorFor,
 } from '../../src/client/operation-registry.js';
+import { IDENTITY_RESCUE_OPERATIONS } from '../../src/client/identity-command-gate.js';
 import type { MessageType } from '../../src/comm/protocol.js';
 
-const routedActiveCommands = [
-  'ui.snapshot',
-  'pacing.update',
-  'interaction.sync.ack',
-  'interaction.sync.request',
-  'interaction.reply.send',
-  'interaction.auth.reopen',
-  'interaction.browser.control',
-  'interaction.runtime.controls',
-  'interaction.reply.result.ack',
-  'interaction.reply.reconcile',
-  'interaction.offboard.command',
-  'interaction.offboard.ack',
-  'plan.response',
-  'session.end',
-  'browse.next',
-  'browse.scroll',
-  'note.open',
-  'note.close',
-  'search.execute',
-  'page.scroll',
-  'feed.refresh',
-  'interaction.like',
-  'interaction.collect',
-  'interaction.follow',
-  'interaction.comment',
-  'interaction.like_comment',
-  'group.join',
-  'navigation.back',
-  'note.browse_images',
-  'note.scroll_comments',
-  'profile.open',
-  'identity.read_current',
-  'identity.read_self_profile',
-  'notification.open',
-  'notification.browse_comments',
-  'notification.browse_likes',
-  'notification.browse_follows',
-  'notification.back_home',
-  'publish.request',
-  'publish.command',
-  'edge.task.acquire',
-  'edge.task.release',
-  'captcha.assist.capture',
-  'captcha.assist.click',
-] as const satisfies readonly MessageType[];
-
-test('operation registry covers every Cloud active command routed by EdgeClient', () => {
-  for (const type of routedActiveCommands) {
-    assert.ok(operationDescriptorFor(type), `${type} must have an explicit operation classification`);
-  }
-});
+/**
+ * 这里曾有一张 46 条的手抄清单 `routedActiveCommands` 及断言「清单里每条都在登记表里」。
+ * 2026-08-06（change close-account-layer-operation-manual）经两次变异验证坐实其两个方向
+ * 均已被覆盖后删除：
+ *
+ *   - 方向一「登记表有、源码漏路由」：由下面的反向结构断言守着（以登记表为事实源、逐条去
+ *     edge-client.ts 找分派点）。变异坐实：摘掉 `env.type === 'profile.open'` 那条路由分支，
+ *     它当场红并点名 profile.open。
+ *   - 方向二「源码路由了一条未登记命令」：结构上不可能——入口 fail-closed 闸
+ *     （edge-client.ts 的 operation_unclassified 判定）位于全部路由分支之前。变异坐实：
+ *     把 `note.open` 从登记表摘掉后向 onMessage 投递 note.open（它在源码里仍有路由分支），
+ *     被入口闸拒为 operation_unclassified、browseHandler 一次都没被调用；
+ *     「unclassified active message fails closed before any handler」用例常驻守着同一入口。
+ *
+ * 手抄清单唯一多守的场景是「登记表里被删了一条、源码还路由着」——那个场景在运行时是
+ * **响亮的 fail-closed 拒绝**（有诊断、有日志），不是静默错执行；且跨仓对表闸
+ * （scripts/operation-registry-parity）会在两仓键集合上抓住单侧删除。为它保留一份
+ * 46 条、无人守的手抄副本，正是本 change 要消除的形态。
+ */
 
 /**
  * 反向结构断言：登记表说「这条可下发」，EdgeClient 入口就必须真能路由到它。
@@ -103,19 +71,50 @@ test('every dispatchable page command is actually routed by EdgeClient (no silen
 test('operation registry keeps browser acquisition outside automation control and platform API operations', () => {
   assert.deepEqual(CLOUD_OPERATION_REGISTRY['pacing.update'], {
     category: 'automation_control', transport: 'automation_ws', identity: 'bound_account', browser: 'forbidden',
+    platformFootprint: 'none',
   });
   assert.deepEqual(CLOUD_OPERATION_REGISTRY['interaction.reply.send'], {
     category: 'platform_api_automation', transport: 'automation_ws', identity: 'bound_account', browser: 'forbidden',
+    platformFootprint: 'account_visible',
   });
   assert.deepEqual(CLOUD_OPERATION_REGISTRY['interaction.auth.reopen'], {
     category: 'browser_lifecycle', transport: 'automation_ws', identity: 'bound_account', browser: 'on_demand',
+    platformFootprint: 'none',
   });
   assert.deepEqual(CLOUD_OPERATION_REGISTRY['publish.command'], {
     category: 'page_automation', transport: 'automation_ws', identity: 'page_account', browser: 'required',
+    platformFootprint: 'account_visible',
   });
   assert.deepEqual(CLOUD_OPERATION_REGISTRY['edge.task.acquire'], {
     category: 'page_automation', transport: 'automation_ws', identity: 'page_account', browser: 'required',
+    platformFootprint: 'none',
   });
+});
+
+/**
+ * 身份救援清单的成员资格闸（change close-account-layer-operation-manual）：
+ *
+ *   救援清单 ⊆ { 登记表里 platformFootprint === 'none' 的命令 }
+ *
+ * 这是这张清单**唯一的危险方向**——少放行一条只是更难救，多放行一条会在未知身份下
+ * 真发内容、记错账。误把一条会留痕的命令加进救援清单，本断言当场红并点名它。
+ *
+ * ⚠️ MUST NOT 把它「补全」成双向断言（「所有 'none' 命令都该在救援清单里」）。反例现成：
+ * `edge.task.acquire` 是 'none'，但身份未落定时照拦——认领租约＝马上要以该账号名义动作，
+ * 拦它的理由是**准入**，不是留痕。「不留痕」不蕴含「该放行」；清单的另一半判据
+ * （拦掉它会让节点更难救）是闸相对特定终局的策略，推导不出来，只能人判。
+ */
+test('identity rescue allowlist members must all be declared platformFootprint none in the registry', () => {
+  const violations = [...IDENTITY_RESCUE_OPERATIONS].filter((type) => {
+    const descriptor = operationDescriptorFor(type as MessageType);
+    return !descriptor || descriptor.platformFootprint !== 'none';
+  });
+  assert.deepEqual(
+    violations,
+    [],
+    `救援清单里这些命令未在登记表声明为不留痕（platformFootprint 'none'）——身份未落定时放行它们`
+      + `会在未知身份下于平台留下真实痕迹：${violations.join(', ')}`,
+  );
 });
 
 test('client operations declare transport, identity, and browser requirements explicitly', () => {

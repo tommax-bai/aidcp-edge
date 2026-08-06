@@ -18,14 +18,21 @@
  * 被拦的是 `page_account` **减去**一张具名的救援 / 收尾清单。新增命令默认落进被拦的一侧（fail-closed）。
  * 反过来写成「拦这几条」，则今后每加一条页面命令都会**默认放行**，而没有任何机械手段会提醒你漏了它。
  *
- * ── 放行清单为什么是这几条（判据：拦掉它会让节点**更难救**，且它本身不在平台上留痕）──
+ * ── 放行清单为什么是这几条（判据是**合取**，两半的保证方式不同，别混为一谈）──
  *   `edge.task.release`            释放租约永远安全；拦掉则租约挂着不放、云端侧一直以为任务在跑。
  *   `identity.read_current`        「现在到底登着谁」正是解开这个终局所需要的事实，拦掉等于把灯关了。
  *   `identity.read_self_profile`   同上。
  *   `captcha.assist.capture/click` 远程验证码协助是**救援通道**（很多时候正是它挡着身份读不出来）；
  *                                  它不代表账号发内容，拦掉会把唯一的自救路径也堵死。
  *   `session.end`                  云端拆会话是收尾，不是动作。
- * 注意它们全都是「读 / 收尾 / 救援」，没有一条会在平台上产生该账号名下的新痕迹——这就是那条线。
+ * 判据的两半：
+ *   ① 「不在平台留痕」——**已由登记表机械保证**：登记表的 `platformFootprint` 维 + 测试断言
+ *      「本清单 ⊆ 声明为 'none' 的命令」（test/client/operation-registry.test.ts）。误把一条会
+ *      留痕的命令加进来，测试当场红。
+ *   ② 「拦掉它会让节点更难救」——**仍是人工策略，没有任何闸守它**。它不是命令的固有属性，
+ *      而是本闸相对「身份未落定」这个特定终局的裁量；反例：`edge.task.acquire` 同样不留痕，
+ *      但认领租约＝马上要以该账号名义动作，属准入判据，照拦。
+ * 别让①的闸造成「整条判据都被守住了」的错觉——增删成员时②仍要人来判。
  */
 import type { MessageType } from '../comm/protocol.js';
 import type { IdentityHealth } from '../native-page-engine/identity-guard.js';
@@ -35,7 +42,8 @@ export type IdentityCommandVerdict =
   | { kind: 'allow' }
   | { kind: 'refuse'; reason: 'identity_unresolved'; detail: string };
 
-const IDENTITY_RESCUE_OPERATIONS: ReadonlySet<string> = new Set<MessageType>([
+/** 导出仅供成员资格断言消费（清单 ⊆ 登记表 'none'）；运行时消费方只有本文件的身份闸。 */
+export const IDENTITY_RESCUE_OPERATIONS: ReadonlySet<string> = new Set<MessageType>([
   'edge.task.release',
   'identity.read_current',
   'identity.read_self_profile',
