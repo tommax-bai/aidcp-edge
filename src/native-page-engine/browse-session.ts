@@ -19,7 +19,13 @@ import type {
   PacingFloorPayload,
   PacingOp,
   ProfileDetailPayload,
+  StateIdentityObservation,
+  StateReportPayload,
+  StateSurfaceKind,
+  StateSurfaceObservation,
 } from '../comm/protocol.js';
+import { STATE_SURFACE_KINDS } from '../comm/protocol.js';
+import type { SelfIdentityResult } from '../cdp/self-identity.js';
 import {
   facebookFeedVideoViewUiText,
   facebookReadUiText,
@@ -63,6 +69,13 @@ export interface NativeBrowseSessionOptions {
   /** 停手等待循环的轮询间隔（ms）。 */
   blockingPollMs?: number;
   commitWindow?: CommitWindowGuard;
+  /**
+   * 观察命令「问现状」的就地身份读取口（change add-state-observation-command）。
+   * 宿主注入装配层的平台分叉读取（Facebook 走 Native cookie 派生、其余走 TS CDP 就地扫描），
+   * 且 MUST 已强制 `allowNavigate:false`——观察绝不导航。缺席（未注入）时身份维如实回
+   * 「没能确认 read_failed」，绝不用握手身份冒充观察结果。
+   */
+  readIdentity?: () => Promise<SelfIdentityResult>;
 }
 
 /** 阻断桶。`none` 之外的三桶都意味着「此刻不该继续对页面动手」。 */
@@ -175,6 +188,12 @@ const DEFAULT_BLOCKING_POLL_MS = 250;
 // 留在 30s 会让内层几乎顶满外层（已被 fake-CDP 用例当场抓到倒挂）。
 // 抬默认档只放大**容错**，不改变任何成功路径的行为；对另两个平台的唯一影响是诚实失败晚 15s 暴露。
 const DEFAULT_NATIVE_COMMAND_TIMEOUT_MS = 45_000;
+/**
+ * 「问现状」面探针（page_probe）的请求预算（change add-state-observation-command）。
+ * page_probe 是单次纯读 eval，10s 远低于两平台命令天花板（准入校验 `client.ts` 不会拒）；
+ * 探针超时如实归入「没能确认 probe_failed」，绝不静默。
+ */
+const STATE_READ_PROBE_TIMEOUT_MS = 10_000;
 /**
  * Facebook 未专门化命令的原子上限（change unify-facebook-page-readiness-probe）。
  *
@@ -744,6 +763,13 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       this.applyTempoUpdate((env.payload as { tempo?: unknown } | undefined)?.tempo);
       return;
     }
+    if (env.type === 'state.read') {
+      // 观察命令「问现状」：在一切闸门（quiesced / 平台支持 / 停手闸）之前作答。
+      // 它是报错之后云端问真相的探针——验证码 / 登录墙常驻正是最需要它的时刻，
+      // 闸住它只会让云端等满一个静默超时，而「在 captcha 面」这个真相引擎读得出来。
+      await this.answerStateRead(env);
+      return;
+    }
     const ownedTaskId = this.ownedTaskId(env);
     if (this.closed || (this.blocked && !ownedTaskId)) {
       this.reportFailure(env, 'native_session_quiesced', 'not_started');
@@ -813,6 +839,96 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       // 顺序上放在 active / activeAbort 复位之后：此刻这条命令已经落定，
       // stop() 里的中止信号不会打到一条还在跑的命令上。
       if (env.type === 'session.end') this.stop('cloud_session_end');
+    }
+  }
+
+  /**
+   * 观察命令「问现状」（change add-state-observation-command，蓝图批 3）：一次带回
+   * 当前面 + 当前登录身份观察 + 采集时刻，按信封 id 关联回请求（MUST NOT 靠事后回执顺带）。
+   *
+   * 纯读红线（tasks 2.2）：本方法只执行引擎 `page_probe`（两平台都登记为阻断豁免的纯读探针）
+   * 与注入的就地身份读取（宿主已强制 `allowNavigate:false`）——零导航、零输入、零滚动。
+   *
+   * 执行权此刻不在浏览会话手里（closed / 独占任务 quiesce）时，两维一并如实回
+   * 「没能确认 executor_busy」：引擎 owner 位是单写位，抢着执行探针会把在跑任务的引擎会话
+   * 顶掉——观察 MUST NOT 扰动现场。这是非结构性的「此刻读不到」，云端稍后重问即可。
+   */
+  private async answerStateRead(env: Envelope): Promise<void> {
+    const captureId = (env.payload as { captureId?: unknown } | undefined)?.captureId;
+    if (typeof captureId !== 'string' || !captureId.trim()) {
+      // 语法规则二：参数不完整 fail-closed 拒收（与未登记命令同族处理），不伪造应答——
+      // captureId 由云端生成，缺了它云端侧也没有任何 pending 在等这一条应答。
+      this.diagnostic('state_read_rejected', { code: 'missing_capture_id' });
+      this.logger('[native-page] state.read 缺 captureId，按格式错误拒收（fail-closed）');
+      return;
+    }
+    const observedAt = Date.now();
+    const busy = this.closed || this.blocked;
+    const surface: StateSurfaceObservation = busy
+      ? { outcome: 'unconfirmed', reason: 'executor_busy' }
+      : await this.observeSurfaceForStateRead();
+    const identity: StateIdentityObservation = busy
+      ? { outcome: 'unconfirmed', reason: 'executor_busy' }
+      : await this.observeIdentityForStateRead();
+    this.diagnostic('state_read_answered', {
+      surface: surface.outcome === 'confirmed' ? surface.kind : `unconfirmed:${surface.reason}`,
+      identity: identity.outcome === 'confirmed' ? 'confirmed' : `unconfirmed:${identity.reason}`,
+    });
+    try {
+      this.options.client.send('state.report', { captureId, surface, identity, observedAt } satisfies StateReportPayload, env.id);
+    } catch (error) {
+      // 连接已断时发不出去：云端那侧的 pending 会如实超时（有自己的具名结局），这里只留证据。
+      this.logger(
+        `[native-page] state.report 未送出（连接不可用）：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * 面观察：引擎 `page_probe` 一次纯读。两态判定：
+   *   读到且归得进穷举面 ⇒ confirmed；读到但归不进（引擎 `unknown`，含平台分类器未覆盖的
+   *   Reels / 群组页）⇒ unconfirmed `page_unrecognized`；读不到 ⇒ unconfirmed `probe_failed`。
+   * MUST NOT 把任何一种读不出伪装成具体面，也 MUST NOT 回落默认面。
+   */
+  private async observeSurfaceForStateRead(): Promise<StateSurfaceObservation> {
+    try {
+      const execution = await this.options.runtime.execute(
+        this.ownerId,
+        { kind: 'page_probe', params: {} },
+        STATE_READ_PROBE_TIMEOUT_MS,
+      );
+      if (!execution.ok || execution.effectPhase !== 'confirmed' || execution.output?.kind !== 'page_probe') {
+        return { outcome: 'unconfirmed', reason: 'probe_failed' };
+      }
+      const pageKind = (execution.output.value as { pageKind?: unknown } | null | undefined)?.pageKind;
+      if (typeof pageKind === 'string' && (STATE_SURFACE_KINDS as readonly string[]).includes(pageKind)) {
+        return { outcome: 'confirmed', kind: pageKind as StateSurfaceKind };
+      }
+      return { outcome: 'unconfirmed', reason: 'page_unrecognized' };
+    } catch {
+      return { outcome: 'unconfirmed', reason: 'probe_failed' };
+    }
+  }
+
+  /**
+   * 身份观察：注入的就地读取一次（不导航）。读出稳定身份 ⇒ confirmed（复用既有身份载荷口径：
+   * accountId + nickname）；读不出 / 未注入 ⇒ unconfirmed `read_failed`——绝不用握手身份冒充
+   * 页面上观察到的登录身份。
+   */
+  private async observeIdentityForStateRead(): Promise<StateIdentityObservation> {
+    const readIdentity = this.options.readIdentity;
+    if (!readIdentity) return { outcome: 'unconfirmed', reason: 'read_failed' };
+    try {
+      const result = await readIdentity();
+      if (!result.ok) return { outcome: 'unconfirmed', reason: 'read_failed' };
+      const nickname = result.identity.displayName?.trim();
+      return {
+        outcome: 'confirmed',
+        accountId: result.identity.accountId,
+        ...(nickname ? { nickname } : {}),
+      };
+    } catch {
+      return { outcome: 'unconfirmed', reason: 'read_failed' };
     }
   }
 

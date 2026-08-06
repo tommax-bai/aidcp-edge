@@ -839,6 +839,11 @@ export class EdgeClient {
       // 2026-08-05 实测：云端补齐登记表后 sent=1，边缘仍静默 20s，根因即本白名单缺这两条。
       env.type === 'identity.read_current' ||
       env.type === 'identity.read_self_profile' ||
+      // 观察命令「问现状」（change add-state-observation-command）：独立主动命令，MUST 放行到
+      // browseHandler，否则在入口被静默丢弃 → 云端按信封 id 等 state.report 只会等到超时——
+      // 与「边缘没装到」「页面读不出来」同形不可区分（§2 第 4 处同步点）。它是三段对账第③段
+      // 唯一的真相探针：报错之后云端靠它问「现在到底在哪个面、登着谁」，漏放行等于把出路堵死。
+      env.type === 'state.read' ||
       // 通知巡视（软中断离开流程）自身的命令：MUST 放行到 browseHandler，
       // 否则会在入口被静默丢弃 → 巡视无回执 → 恢复链永不收敛 → 会话挂死。
       // 与 command-bridge 的 open_notifications/browse_notification_* 映射对应。

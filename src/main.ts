@@ -79,6 +79,7 @@ import type {
   EdgeTaskReleasePayload,
   Envelope,
   StandbyDecisionPayload,
+  StateReportPayload,
 } from './comm/protocol.js';
 import { HOST_STANDBY_DECISION_TELEMETRY_CAPABILITY } from './comm/protocol.js';
 import type { EdgeBrowseSession } from './browse/edge-browse-session.js';
@@ -1465,6 +1466,14 @@ async function main(): Promise<void> {
       getAccountId: () => accountId,
       logger: (message) => console.log(message),
       commitWindow: browseGuard,
+      // 观察命令「问现状」的就地身份读取口（change add-state-observation-command）：
+      // 复用运行期身份校验体同一条平台分叉读取（Facebook 走 Native cookie 派生、其余走 TS CDP
+      // 就地扫描），`allowNavigate:false` 在此强制——观察绝不导航。
+      readIdentity: () => readPlatformIdentity({
+        allowNavigate: false,
+        hydrateTimeoutMs: PERIODIC_IDENTITY_READ_HYDRATE_MS,
+        logger: () => undefined,
+      }),
     });
     browse = nativeSession;
     nativeBrowse = nativeSession;
@@ -1510,7 +1519,10 @@ async function main(): Promise<void> {
       (env: Envelope): void => {
         const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
         const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
-        if (env.type !== 'pacing.update' && !taskCoordinator.canExecute(ownedTaskId)) {
+        // state.read（观察命令「问现状」，change add-state-observation-command）豁免租约抑制：
+        // 它按信封 id 等 state.report，action.completed 兜底回执对它就是静默超时；任务在跑时
+        // 会话自身的 quiesce 态会把两维如实折成 unconfirmed executor_busy、零引擎触碰。
+        if (env.type !== 'pacing.update' && env.type !== 'state.read' && !taskCoordinator.canExecute(ownedTaskId)) {
           reportLeaseSuppressed(env, ownedTaskId, 'Native');
           return;
         }
@@ -1520,7 +1532,39 @@ async function main(): Promise<void> {
         });
       },
     );
+    /**
+     * 冷待机（浏览器被收起）期间的「问现状」应答（change add-state-observation-command）：
+     * 两维一并如实回「没能确认 browser_unavailable」。观察 MUST NOT 为一次纯读唤醒浏览器
+     * （唤醒占槽位、有真实代价），也 MUST NOT 落进 action.completed 兜底回执——
+     * 云端按信封 id 等 state.report，回错形状对它就是静默超时。
+     */
+    const answerStateReadWhileBrowserAbsent = (env: Envelope): void => {
+      const captureId = (env.payload as { captureId?: unknown } | undefined)?.captureId;
+      if (typeof captureId !== 'string' || !captureId.trim()) {
+        // 语法规则二：参数不完整 fail-closed 拒收（与未登记命令同族处理），不伪造应答。
+        console.warn('[aidcp-edge] state.read 缺 captureId，按格式错误拒收（fail-closed）');
+        return;
+      }
+      const unavailable = { outcome: 'unconfirmed', reason: 'browser_unavailable' } as const;
+      try {
+        client.send(
+          'state.report',
+          { captureId, surface: unavailable, identity: unavailable, observedAt: Date.now() } satisfies StateReportPayload,
+          env.id,
+        );
+      } catch (err) {
+        console.warn(`[aidcp-edge] state.report 未送出（连接不可用）: ${(err as Error).message}`);
+      }
+    };
     const routeNativeCommand = (env: Envelope): void => {
+      // 观察命令「问现状」在冷待机时就地作答：MUST NOT 走 handleBrowserAbsentCommand——
+      // 那条路会为它唤醒浏览器 + 回 action.completed，而云端按信封 id 等 state.report。
+      // 非冷待机时照常走身份闸包裹的唯一执行入口（闸按登记表 identity 维放行观察命令；
+      // 任务在跑时的「读不到现场」由会话 quiesce 态折成 unconfirmed executor_busy）。
+      if (env.type === 'state.read' && coldStandbyActive) {
+        answerStateReadWhileBrowserAbsent(env);
+        return;
+      }
       if (handleBrowserAbsentCommand(env)) return;
       routeNativeCommandUnderIdentity(env);
     };

@@ -157,6 +157,8 @@ export const CLOUD_OPERATION_REGISTRY = {
   'profile.open': pageAutomation('none'),
   'identity.read_current': pageObservation(),
   'identity.read_self_profile': pageObservation(),
+  // 观察命令「问现状」（change add-state-observation-command）：纯读探针，一次带回当前面 + 登录身份。
+  'state.read': pageObservation(),
   'notification.open': pageAutomation('none'),
   'notification.browse_comments': pageAutomation('none'),
   'notification.browse_likes': pageAutomation('none'),
