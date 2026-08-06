@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EdgeClient, type CloudWebSocket } from '../../src/client/edge-client.js';
 import { EDGE_BUILD_CAPABILITIES } from '../../src/client/build-capabilities.js';
 import { COMMAND_DIAGNOSTIC_PREFIX } from '../../src/client/command-diagnostics.js';
-import { makeEnvelope, type Envelope, type PublishRequestPayload, type PublishResultPayload } from '../../src/comm/protocol.js';
+import { makeEnvelope, type Envelope } from '../../src/comm/protocol.js';
 
 class FakeWebSocket implements CloudWebSocket {
   private readonly listeners = {
@@ -540,97 +540,6 @@ test('edge-client: malformed negotiated interaction payload is rejected before t
   assert.ok(logs.some((line) => line.includes('拒绝非法 interaction')));
 });
 
-function publishPayload(): PublishRequestPayload {
-  return {
-    title: '标题',
-    content: '正文',
-    tags: ['tag1', 'tag2'],
-  };
-}
-
-test('edge-client: 收到 publish.request 触发 handler', async () => {
-  const ws = new FakeWebSocket();
-  const client = await connectClient(ws);
-  const calls: Envelope<PublishRequestPayload>[] = [];
-  client.onPublishCommand((env) => {
-    calls.push(env);
-  });
-
-  ws.emitMessage(makeEnvelope('publish.request', 'pub-1', 2, publishPayload()));
-
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].type, 'publish.request');
-  assert.equal(calls[0].id, 'pub-1');
-});
-
-test('edge-client: publish 成功后回 send publish.result', async () => {
-  const ws = new FakeWebSocket();
-  const client = await connectClient(ws);
-  client.onPublishCommand((env) => {
-    const result: PublishResultPayload = { ok: true, postId: 'post-1' };
-    client.send('publish.result', result, env.id);
-  });
-
-  ws.emitMessage(makeEnvelope('publish.request', 'pub-2', 2, publishPayload()));
-
-  assert.equal(ws.sent.length, 1);
-  const sent = JSON.parse(ws.sent[0]) as Envelope<PublishResultPayload>;
-  assert.equal(sent.type, 'publish.result');
-  assert.equal(sent.id, 'pub-2');
-  assert.deepEqual(sent.payload, { ok: true, postId: 'post-1' });
-});
-
-test('edge-client: publish 失败后仍回 result', async () => {
-  const ws = new FakeWebSocket();
-  const client = await connectClient(ws);
-  client.onPublishCommand((env) => {
-    const result: PublishResultPayload = { ok: false, error: '[input_title] failed' };
-    client.send('publish.result', result, env.id);
-  });
-
-  ws.emitMessage(makeEnvelope('publish.request', 'pub-3', 2, publishPayload()));
-
-  const sent = JSON.parse(ws.sent[0]) as Envelope<PublishResultPayload>;
-  assert.equal(sent.type, 'publish.result');
-  assert.equal(sent.id, 'pub-3');
-  assert.deepEqual(sent.payload, { ok: false, error: '[input_title] failed' });
-});
-
-test('edge-client: handler 抛异常时装配层仍可兜底回 result', async () => {
-  const ws = new FakeWebSocket();
-  const client = await connectClient(ws);
-  client.onPublishCommand((env) => {
-    try {
-      throw new Error('boom');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      client.send('publish.result', { ok: false, error: `[unknown] ${message}` }, env.id);
-    }
-  });
-
-  ws.emitMessage(makeEnvelope('publish.request', 'pub-4', 2, publishPayload()));
-
-  const sent = JSON.parse(ws.sent[0]) as Envelope<PublishResultPayload>;
-  assert.equal(sent.type, 'publish.result');
-  assert.equal(sent.id, 'pub-4');
-  assert.deepEqual(sent.payload, { ok: false, error: '[unknown] boom' });
-});
-
-test('edge-client: onPublishCommand 注销后不再触发', async () => {
-  const ws = new FakeWebSocket();
-  const client = await connectClient(ws);
-  let calls = 0;
-  const off = client.onPublishCommand(() => {
-    calls++;
-  });
-  off();
-
-  ws.emitMessage(makeEnvelope('publish.request', 'pub-5', 2, publishPayload()));
-
-  assert.equal(calls, 0);
-  assert.equal(ws.sent.length, 0);
-});
-
 test('edge-client: reportNoteContent 收到 note.ack 正常 resolve', async () => {
   const ws = new FakeWebSocket();
   const client = await connectClient(ws);
@@ -653,15 +562,15 @@ test('edge-client: reportNoteContent 收到 note.ack 正常 resolve', async () =
   assert.deepEqual(resp.payload, { received: true });
 });
 
-test('edge-client: browse.scroll 路由到 browseHandler', async () => {
+test('edge-client: page.scroll 路由到 browseHandler', async () => {
   const ws = new FakeWebSocket();
   const client = await connectClient(ws);
   const calls: Envelope[] = [];
   client.onBrowseCommand((env) => calls.push(env));
 
-  ws.emitMessage(makeEnvelope('browse.scroll', 'cmd-1', 2, { reason: 'scroll' }));
+  ws.emitMessage(makeEnvelope('page.scroll', 'cmd-1', 2, { reason: 'scroll' }));
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].type, 'browse.scroll');
+  assert.equal(calls[0].type, 'page.scroll');
 });
 
 test('edge-client: note.open 路由到 browseHandler', async () => {
@@ -710,12 +619,12 @@ test('edge-client: 旧消息类型仍正常路由（向后兼容）', async () =
   const calls: Envelope[] = [];
   client.onBrowseCommand((env) => calls.push(env));
 
-  ws.emitMessage(makeEnvelope('browse.next', 'cmd-4', 2, { reason: 'next' }));
+  ws.emitMessage(makeEnvelope('page.scroll', 'cmd-4', 2, { reason: 'next' }));
   ws.emitMessage(makeEnvelope('session.end', 'cmd-5', 2, { reason: 'end' }));
   ws.emitMessage(makeEnvelope('search.execute', 'cmd-6', 2, { keyword: 'AI' }));
 
   assert.equal(calls.length, 3);
-  assert.equal(calls[0].type, 'browse.next');
+  assert.equal(calls[0].type, 'page.scroll');
   assert.equal(calls[1].type, 'session.end');
   assert.equal(calls[2].type, 'search.execute');
 });

@@ -6,8 +6,7 @@ import type { NativePageCommand } from './client.js';
  * 而不是去源码里做文本匹配——文本匹配会被注释与错误文案喂绿（handoff §8.2 已三次踩到）。
  */
 export const nativeCommandKindByEnvelopeType = {
-  'plan.response': 'plan_execute', 'session.end': 'session_stop', 'browse.next': 'browse_next',
-  'browse.scroll': 'browse_scroll', 'page.scroll': 'page_scroll', 'feed.refresh': 'feed_refresh',
+  'plan.response': 'plan_execute', 'session.end': 'session_stop', 'page.scroll': 'page_scroll', 'feed.refresh': 'feed_refresh',
   'search.execute': 'search_execute', 'note.open': 'note_open', 'note.close': 'note_close',
   'navigation.back': 'navigation_back', 'note.browse_images': 'note_browse_images',
   'note.scroll_comments': 'note_scroll_comments', 'profile.open': 'profile_open',

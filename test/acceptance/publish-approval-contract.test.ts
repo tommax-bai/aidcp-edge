@@ -98,9 +98,10 @@ describe('AC-PUB 发布人审授权契约（edge）', () => {
     ws.sent.length = 0;
     logs.length = 0;
 
-    // 生产装配（main）从不调用 onPublishCommand —— 这里刻意不注册，复现生产形态。
+    // 旧整页发布消息类型已随 drop-dead-cloud-edge-commands 从协议删除。任何复活尝试（旧云端 / 手工构造）
+    // 都会落进未登记命令的 fail-closed 拒收——红线不变：绝不静默发布、绝不假成功。
     ws.emitMessage(
-      makeEnvelope('publish.request', 'pub-tombstone', 2, { title: 'T', content: 'C', tags: [], images: [] }),
+      makeEnvelope('publish.request' as never, 'pub-tombstone', 2, { title: 'T', content: 'C', tags: [], images: [] } as never),
     );
 
     const diagnostics = logs
@@ -108,7 +109,7 @@ describe('AC-PUB 发布人审授权契约（edge）', () => {
       .map((line) => JSON.parse(line.slice(COMMAND_DIAGNOSTIC_PREFIX.length + 1)) as Record<string, unknown>);
     const rejected = diagnostics.find((d) => d.stage === 'rejected');
     assert.equal(rejected?.type, 'publish.request', '整页发布信封必须被诚实拒绝');
-    assert.equal(rejected?.reason, 'handler_unavailable');
+    assert.equal(rejected?.reason, 'operation_unclassified');
     assert.equal(ws.sent.length, 0, '未注册处理器时不回任何发布结果（绝不假成功）');
   });
 

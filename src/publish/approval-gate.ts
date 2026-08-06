@@ -2,13 +2,19 @@ import { readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { PublishRequestPayload } from '../comm/protocol.js';
+/** 旧整页发布信封的载荷形状（其消息类型已随 drop-dead-cloud-edge-commands 从协议删除；
+ * 本地夹具信号仍沿用这三个字段，故在此自持形状、不再依赖协议）。 */
+interface LegacyPublishSignalShape {
+  title: string;
+  content: string;
+  tags: string[];
+}
 
 export interface PublishApprovalSignal {
   requestId: string;
   approved: boolean;
   ts: number;
-  payload: Pick<PublishRequestPayload, 'title' | 'content' | 'tags'>;
+  payload: LegacyPublishSignalShape;
 }
 
 export interface PublishApprovalGateOptions {
@@ -96,7 +102,7 @@ function validateSignal(raw: unknown, requestId: string): PublishApprovalSignal 
   if (!signal.payload || typeof signal.payload !== 'object') {
     throw new Error('signal_missing_payload');
   }
-  const payload = signal.payload as Partial<PublishRequestPayload>;
+  const payload = signal.payload as Partial<LegacyPublishSignalShape>;
   if (typeof payload.title !== 'string' || typeof payload.content !== 'string' || !Array.isArray(payload.tags)) {
     throw new Error('signal_invalid_payload');
   }
@@ -117,7 +123,7 @@ function validateSignal(raw: unknown, requestId: string): PublishApprovalSignal 
  *
  * 生产人审授权完全在云端完成：授权是云端 `publish_approval_decision` 表上的持久记录，
  * 发布执行由云端 `CommandSequencer` 逐条下发 `publish.command` 原子指令驱动，
- * 桌面客户端的算子路由表里**没有**整页发布处理器（`publish.request` 只是协议兼容墓碑）。
+ * 桌面客户端的算子路由表里**没有**整页发布处理器（旧整页消息类型已随 drop-dead-cloud-edge-commands 从协议删除）。
  *
  * 因此 edge MUST NOT 以任何本机文件作为「是否已授权」的判据。本函数只服务本地 dev 脚本
  * （`scripts/dev-publish.ts`）与同机 mock/e2e，且必须显式启用（见 `approvalGateExplicitlyEnabled`）。

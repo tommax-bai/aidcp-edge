@@ -17,7 +17,6 @@ import type { CdpLike } from '../cdp/file-input-setter.js';
 import type {
   PublishCommandPayload,
   PublishCommandResultPayload,
-  PublishRequestPayload,
 } from '../comm/protocol.js';
 import {
   XHS_PUBLISH_SELECT_MODE_ACTION_ID,
@@ -25,6 +24,7 @@ import {
   XHS_PUBLISH_SELECT_MODE_GOAL,
 } from './anchors.js';
 import {
+  type PublishRequestPayload,
   PublishStepValidator,
   buildContentInputRequest,
   buildEnterPublishPageRequest,

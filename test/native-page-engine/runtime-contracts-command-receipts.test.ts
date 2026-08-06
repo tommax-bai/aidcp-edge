@@ -265,14 +265,6 @@ const BROWSE_SUCCESS_OUTPUTS: Readonly<Record<string, readonly SuccessOutput[]>>
     { output: 'action_receipt', platform: 'xiaohongshu', source: 'xhs-command-router.js kind===session_stop' },
     { output: 'action_receipt', platform: 'facebook', source: 'facebook/session.rs → 90-dispatch.js kind===session_stop' },
   ],
-  browse_next: [
-    { output: 'page_cards', platform: 'xiaohongshu', source: 'engine.rs execute_xhs_feed_scroll（手势在引擎，卡片仍由注入路由的 initial_scan 只读扫描给出）' },
-    { output: 'page_cards', platform: 'facebook', source: 'facebook/feed.rs evaluate_facebook_router' },
-  ],
-  browse_scroll: [
-    { output: 'page_cards', platform: 'xiaohongshu', source: 'engine.rs execute_xhs_feed_scroll（手势在引擎，卡片仍由注入路由的 initial_scan 只读扫描给出）' },
-    { output: 'page_cards', platform: 'facebook', source: 'facebook/feed.rs execute_facebook_initial_feed' },
-  ],
   page_scroll: [
     { output: 'page_cards', platform: 'xiaohongshu', source: 'engine.rs execute_xhs_feed_scroll（手势在引擎，卡片仍由注入路由的 initial_scan 只读扫描给出）' },
     { output: 'page_cards', platform: 'facebook', source: 'facebook/feed.rs execute_facebook_page_scroll' },

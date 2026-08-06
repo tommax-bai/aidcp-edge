@@ -30,8 +30,6 @@ type UnknownRecord = Record<string, unknown>;
 const ACTIVE_COMMAND_TYPES = new Set([
   'plan.response',
   'session.end',
-  'browse.next',
-  'browse.scroll',
   'note.open',
   'note.close',
   'search.execute',
@@ -53,7 +51,6 @@ const ACTIVE_COMMAND_TYPES = new Set([
   'notification.browse_likes',
   'notification.browse_follows',
   'notification.back_home',
-  'publish.request',
   'publish.command',
   'edge.task.acquire',
   'edge.task.release',
@@ -73,8 +70,6 @@ const ACTIVE_COMMAND_TYPES = new Set([
 
 const FIXED_SUMMARIES: Readonly<Record<string, string>> = {
   'session.end': '结束当前浏览会话',
-  'browse.next': '浏览下一条内容',
-  'browse.scroll': '滚动当前页面',
   'note.close': '关闭当前内容',
   'page.scroll': '滚动当前页面',
   'feed.refresh': '刷新当前信息流',
@@ -216,19 +211,6 @@ export function summarizeCommand(type: unknown, payload: unknown): string {
     return joinParts([
       data.click === true ? '申请加入目标群组' : '观察目标群组',
       typeof data.groupUrl === 'string' && data.groupUrl.length > 0 ? '已提供目标地址' : undefined,
-    ]);
-  }
-  if (commandType === 'publish.request') {
-    const title = textLength(data.title);
-    const content = textLength(data.content);
-    const tags = listLength(data.tags);
-    const images = listLength(data.images);
-    return joinParts([
-      '发布内容请求',
-      title === undefined ? undefined : `标题 ${title} 字`,
-      content === undefined ? undefined : `正文 ${content} 字`,
-      tags === undefined ? undefined : `${tags} 个话题`,
-      images === undefined ? undefined : `${images} 张图片`,
     ]);
   }
   if (commandType === 'publish.command') {

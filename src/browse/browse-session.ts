@@ -1440,22 +1440,6 @@ export class BrowseSession {
       if (this.stopRequested) return;
     }
     switch (env.type) {
-      case 'browse.next': {
-        this.logger(`[browse] 命令: browse.next`);
-        await this.safeCloseModal();
-        await this.humanPause(this.cardGapTiming);
-        await this.deps.scroller.scrollNext();
-        await this.waitForCards(5000);
-        await this.reportVisibleCards();
-        break;
-      }
-      case 'browse.scroll': {
-        this.logger(`[browse] 命令: browse.scroll`);
-        await this.deps.scroller.scrollNext();
-        await this.waitForCards(5000);
-        await this.reportVisibleCards();
-        break;
-      }
       case 'page.scroll': {
         const payload = env.payload as PageScrollPayload;
         this.logger(`[browse] 命令: page.scroll (${payload.reason ?? ''})`);

@@ -2,7 +2,7 @@ import process from 'node:process';
 import { writeFileSync } from 'node:fs';
 
 import { attachToPage } from '../src/cdp/index.js';
-import type { PublishRequestPayload } from '../src/comm/protocol.js';
+import type { PublishRequestPayload } from '../src/flows/publish-post.js';
 import {
   buildContentInputRequest,
   buildEnterPublishPageRequest,

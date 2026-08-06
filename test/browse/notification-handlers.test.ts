@@ -88,7 +88,7 @@ function makeHarness(mode: 'normal' | 'throw' | 'disconnect' = 'normal', viewCli
     waitForModal: async () => true,
   };
   const client = {
-    reportNoteContent: async (_p: NoteContentPayload): Promise<Envelope> => makeEnvelope('browse.next', 'ack', 0, { reason: 'ack' }),
+    reportNoteContent: async (_p: NoteContentPayload): Promise<Envelope> => makeEnvelope('page.scroll', 'ack', 0, { reason: 'ack' }),
     reportPageCards: () => {},
     reportNoteDetail: () => {},
     reportProfileDetail: () => {},

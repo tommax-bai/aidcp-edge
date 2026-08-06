@@ -1,6 +1,15 @@
 import { LocatingEngine } from '../locating/engine.js';
-export type { PublishRequestPayload, PublishResultPayload } from '../comm/protocol.js';
-import type { PublishRequestPayload, PublishResultPayload } from '../comm/protocol.js';
+export type { PublishResultPayload } from '../comm/protocol.js';
+import type { PublishResultPayload } from '../comm/protocol.js';
+
+/** 旧整页发布载荷。其消息类型 publish.request 已随 change drop-dead-cloud-edge-commands 从协议删除
+ * （云端零发送点、生产无处理器）；本退役代文件及其复用方仍以此形状传参，故在此自持定义。 */
+export interface PublishRequestPayload {
+  title: string;
+  content: string;
+  tags: string[];
+  images?: string[];
+}
 import type {
   ActionRequest,
   ActionResult,

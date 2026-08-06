@@ -14,7 +14,6 @@ test('command diagnostics: active command families produce useful whitelist-only
     { type: 'search.execute', payload: { keyword: '绝密词', source: 'manager', maxResults: 8 }, expected: /搜索词 3 字/ },
     { type: 'interaction.comment', payload: { text: '不要展示这条评论', groupChatCode: 'chat-secret' }, expected: /评论正文 8 字/ },
     { type: 'group.join', payload: { click: true, groupUrl: 'https://secret.test/group' }, expected: /申请加入目标群组/ },
-    { type: 'publish.request', payload: { title: '私密标题', content: '私密正文', tags: ['secret'], images: ['https://secret.test/a.png'] }, expected: /标题 4 字，正文 4 字，1 个话题，1 张图片/ },
     { type: 'publish.command', payload: { kind: 'fill_field', seq: 2, recordId: 9988, taskId: 'task-secret', params: { value: 'body-secret' } }, expected: /发布步骤 fill_field，序号 2/ },
     { type: 'edge.task.acquire', payload: { kind: 'publish', priority: 'human', taskId: 'task-secret' }, expected: /任务 publish，优先级 human/ },
     { type: 'captcha.assist.click', payload: { points: [{ x: 0.2, y: 0.3 }], text: '答案秘密', snapshotId: 'snapshot-secret', submit: 'enter' }, expected: /1 个点击点，输入 4 字，包含回车提交/ },

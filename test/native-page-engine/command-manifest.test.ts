@@ -43,8 +43,6 @@ async function loadManifest(): Promise<CommandManifest> {
 const platformSpecificExclusions = new Set([
   // Facebook-only page command; it must remain isolated from the XHS engine.
   'group.join',
-  // Protocol tombstone only: no Edge handler or packaged whole-publish implementation remains.
-  'publish.request',
 ]);
 
 test('freezes every registered XHS page-automation route', async () => {

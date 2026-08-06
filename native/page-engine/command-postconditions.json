@@ -71,12 +71,12 @@
     {
       "nativeKind": "browse_next",
       "status": "confirmed",
-      "evidence": "实测位移，双向计；到底判定取滚动后那次读数"
+      "evidence": "实测位移，双向计；到底判定取滚动后那次读数。协议侧 browse.next 已随 drop-dead-cloud-edge-commands 删除、TS 不可达；本条留存至批 4 随 Rust 侧一并移除"
     },
     {
       "nativeKind": "browse_scroll",
       "status": "confirmed",
-      "evidence": "同上"
+      "evidence": "同上。协议侧 browse.scroll 已删；留存至批 4 随 Rust 移除"
     },
     {
       "nativeKind": "page_scroll",

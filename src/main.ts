@@ -8,7 +8,7 @@
  *  - 连接云端 WS（默认 ws://127.0.0.1:8787），握手上线；
  *  - 小红书与 Facebook 页面命令只交给 Native Page Engine；
  *  - 对支持 browse 的平台，登录完成后创建对应的 EdgeBrowseSession 并 start()：自动浏览 feed、
- *    打开笔记、提取内容上报云端、按云端决策（like / browse.next / search / session.end）动作。
+ *    打开笔记、提取内容上报云端、按云端决策（like / page.scroll / search / session.end）动作。
  *
  * 环境变量：
  *  - AIDCP_CLOUD_URL       云端 WS 地址（默认 ws://127.0.0.1:8787）
@@ -1190,7 +1190,7 @@ async function main(): Promise<void> {
   }));
 
   // 指令驱动发布：云端逐条下发 publish.command，边缘逐条执行 + 后置校验 + 如实回报（onPublishAtomCommand，见下）。
-  // 遗留整页发布处理器 client.onPublishCommand（publish.request）已删除（change lease-strict-preemption 5.8）：
+  // 遗留整页发布处理器已删除（change lease-strict-preemption 5.8；其消息类型 publish.request 已随 drop-dead-cloud-edge-commands 从协议移除）：
   //   全程不过租约闸、云端已无发送方（只发 publish.command），保留只会绕过抢占/租约在途发布假成功修复链。
   // 陪伴界面事件（edge-companion-ui 6.4）：发布终态的本地事实经 [ui-event] 行直达桌面壳。
   const publishUiEvents = new PublishUiEventTracker();

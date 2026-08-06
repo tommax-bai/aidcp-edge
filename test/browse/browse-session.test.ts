@@ -105,7 +105,7 @@ function makeHarness(cards: NoteCard[] = [CARD]): Harness {
 
   const client = {
     reportNoteContent: async (_payload: NoteContentPayload): Promise<Envelope> => {
-      return makeEnvelope('browse.next', 'ack', 0, { reason: 'ack' });
+      return makeEnvelope('page.scroll', 'ack', 0, { reason: 'ack' });
     },
     reportPageCards: (payload: PageCardsPayload) => {
       reportedCards.push(payload);
@@ -619,23 +619,6 @@ test('browse-session: note.open 目标滚出视口 → 有界滚动找回并打�
   ]);
   assert.ok(broughtIntoView, '应对 DOM 内的目标卡 scrollIntoView 拉回视口');
   assert.deepEqual(h.openedCards, [2], 'scrollIntoView 找回后应打开目标卡（position 2），而非重报兜底');
-});
-
-test('browse-session: browse.scroll 命令触发滚动并上报新卡片', async () => {
-  const h = makeHarness();
-  let scrolled = false;
-  h.deps.scroller = {
-    ...h.deps.scroller,
-    scrollNext: async () => { scrolled = true; },
-  };
-  const sess = new BrowseSession(h.deps, noOpts());
-  await startAndPush(sess, [
-    makeEnvelope('browse.scroll', 'bs1', 0, { reason: 'scroll' }),
-    makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
-  ]);
-  assert.equal(scrolled, true);
-  // 初始上报 + scroll 后再次上报
-  assert.ok(h.reportedCards.length >= 2);
 });
 
 test('browse-session: plan.response 命令执行步骤', async () => {
@@ -1394,17 +1377,17 @@ test('登录闸门: loop 启动时检测到弹窗则暂停，弹窗消失后恢�
   assert.ok(h.reportedCards.length >= 1, '恢复后应上报 page.cards');
 });
 
-test('登录闸门: 弹窗存在时暂停 browse.next，弹窗消失后才执行滚动', async () => {
+test('登录闸门: 弹窗存在时暂停 page.scroll，弹窗消失后才执行滚动', async () => {
   const h = makeHarness();
   const logs: string[] = [];
   let scrolled = 0;
   h.deps.scroller = { ...h.deps.scroller, scrollNext: async () => { scrolled++; } };
-  // 调用序列：#1 loop 启动闸门→false（放行首屏上报）；#2、#3 browse.next 闸门→true（暂停）；#4→false（放行）
+  // 调用序列：#1 loop 启动闸门→false（放行首屏上报）；#2、#3 page.scroll 闸门→true（暂停）；#4→false（放行）
   let n = 0;
   h.deps.loginGate = { isOpen: async () => { n++; return n >= 2 && n <= 3; } };
   const sess = new BrowseSession(h.deps, captureOpts(logs));
   await startAndPush(sess, [
-    makeEnvelope('browse.next', 'c1', 0, {}),
+    makeEnvelope('page.scroll', 'c1', 0, { reason: 'scroll' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.ok(logs.some((m) => m.includes('检测到登录弹窗')), '应记录暂停');
@@ -1478,12 +1461,12 @@ test('overlayMonitor 闸门: state=captcha 时暂停 browse.next，翻回 none �
   const logs: string[] = [];
   let scrolled = 0;
   h.deps.scroller = { ...h.deps.scroller, scrollNext: async () => { scrolled++; } };
-  // 读序：#1 loop 启动→none（放行首屏上报）；#2、#3 browse.next→captcha（暂停）；#4→none（放行）
+  // 读序：#1 loop 启动→none（放行首屏上报）；#2、#3 page.scroll→captcha（暂停）；#4→none（放行）
   let n = 0;
   h.deps.overlayMonitor = fakeMonitor({ stateSeq: () => { n++; return n >= 2 && n <= 3 ? 'captcha' : 'none'; } });
   const sess = new BrowseSession(h.deps, captureOpts(logs));
   await startAndPush(sess, [
-    makeEnvelope('browse.next', 'c1', 0, {}),
+    makeEnvelope('page.scroll', 'c1', 0, { reason: 'scroll' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.ok(logs.some((m) => m.includes('检测到验证码弹窗')), '应记录验证码暂停');
@@ -1542,7 +1525,7 @@ test('browse-session: 命令执行中 CDP 断线 → 等重连成功后续跑重
   await new Promise((r) => setTimeout(r, 10)); // 初始上报，loop 进 waitForCommand
   const before = h.reportedCards.length;
   armed = true;
-  await sess.onCloudCommand(makeEnvelope('browse.scroll', 'c1', 0, { reason: 'scroll' }));
+  await sess.onCloudCommand(makeEnvelope('page.scroll', 'c1', 0, { reason: 'scroll' }));
   await new Promise((r) => setTimeout(r, 5)); // scrollNext 抛 CdpDisconnectedError → loop 捕获 → waitForReconnect 挂起
   emit('cdp.reconnected'); // 模拟重连成功
   await new Promise((r) => setTimeout(r, 10)); // resumeAfterReconnect 重报
@@ -1645,7 +1628,7 @@ test('browse-session: 输入超时触发的终止与原子操作报错并发时�
   const sess = new BrowseSession(h.deps, noOpts());
   const done = sess.start();
   await new Promise((r) => setTimeout(r, 10));
-  await sess.onCloudCommand(makeEnvelope('browse.scroll', 'timeout-in-flight', 0, { reason: 'unsafe' }));
+  await sess.onCloudCommand(makeEnvelope('page.scroll', 'timeout-in-flight', 0, { reason: 'unsafe' }));
   await assert.doesNotReject(done);
   assert.equal(sess.isRunning(), false);
 });

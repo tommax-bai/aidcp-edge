@@ -8,8 +8,8 @@
  *  - 把每步结果以 action.result 回传云端（观测/训练）；
  *  - 支持以 id 关联的请求/响应（anchor.get / select.request / note.content 等）；
  *  - 自动浏览：把笔记内容以 note.content 作为请求发给云端，等回一个决策信封
- *    （browse.next / search.execute / session.end），交由 BrowseSession 编排。
- *  - 异步命令推送：云端通过 CommandSink 异步推送控制命令（browse.next / browse.scroll /
+ *    （page.scroll / search.execute / session.end），交由 BrowseSession 编排。
+ *  - 异步命令推送：云端通过 CommandSink 异步推送控制命令（page.scroll /
  *    note.open / note.close / search.execute / session.end / notification.*），由 browseHandler 统一分发。
  *
  * 设计：
@@ -27,7 +27,6 @@ import {
   type AnchorGetResultPayload,
   type RemoteAnchor,
   type NoteContentPayload,
-  type PublishRequestPayload,
   type PublishCommandPayload,
   type CaptchaAssistCapturePayload,
   type CaptchaAssistClickPayload,
@@ -113,11 +112,10 @@ export interface StepRunner {
 
 /**
  * 云端主动下发（非请求响应）的浏览命令处理器。
- * 典型用于 session.end / browse.next 这类云端可主动推送的控制信令。
+ * 典型用于 session.end / page.scroll 这类云端可主动推送的控制信令。
  */
 export type BrowseCommandHandler = (env: Envelope) => void;
 export type PlanCommandHandler = (env: Envelope<PlanResponsePayload>) => void;
-export type PublishCommandHandler = (env: Envelope<PublishRequestPayload>) => void;
 /** A 阶段1 指令驱动发布：单条参数化原子指令处理器（publish.command）。 */
 export type PublishAtomCommandHandler = (env: Envelope<PublishCommandPayload>) => void;
 /** 同一 edge/CDP 页面写任务租约控制（acquire/release）。 */
@@ -238,7 +236,6 @@ export class EdgeClient {
   private readonly listeners = new Map<CloudConnectionEvent, Set<CloudConnectionListener>>();
   private browseHandler?: BrowseCommandHandler;
   private planHandler?: PlanCommandHandler;
-  private publishHandler?: PublishCommandHandler;
   private publishAtomHandler?: PublishAtomCommandHandler;
   private edgeTaskHandler?: EdgeTaskCommandHandler;
   private captchaAssistHandler?: CaptchaAssistCommandHandler;
@@ -444,7 +441,7 @@ export class EdgeClient {
   }
 
   /**
-   * 注册"云端主动下发浏览命令"处理器（session.end / browse.next 等）。
+   * 注册"云端主动下发浏览命令"处理器（session.end / page.scroll 等）。
    * 返回取消注册函数。
    */
   onBrowseCommand(handler: BrowseCommandHandler): () => void {
@@ -459,13 +456,6 @@ export class EdgeClient {
     this.planHandler = handler;
     return () => {
       if (this.planHandler === handler) this.planHandler = undefined;
-    };
-  }
-
-  onPublishCommand(handler: PublishCommandHandler): () => void {
-    this.publishHandler = handler;
-    return () => {
-      if (this.publishHandler === handler) this.publishHandler = undefined;
     };
   }
 
@@ -577,7 +567,7 @@ export class EdgeClient {
   }
 
   /**
-   * 上报当前笔记内容并等待云端决策信封（browse.next / search.execute / session.end）。
+   * 上报当前笔记内容并等待云端决策信封（search.execute / session.end 等）。
    * 返回云端回包的整个信封，交由 BrowseSession 按 type 分发执行。
    */
   reportNoteContent(payload: NoteContentPayload, timeoutMs = 20_000): Promise<Envelope> {
@@ -794,8 +784,6 @@ export class EdgeClient {
     // 4) 云端主动下发的浏览控制信令
     if (
       env.type === 'session.end' ||
-      env.type === 'browse.next' ||
-      env.type === 'browse.scroll' ||
       env.type === 'note.open' ||
       env.type === 'note.close' ||
       env.type === 'search.execute' ||
@@ -849,17 +837,6 @@ export class EdgeClient {
       }
       this.emitCommandDiagnostic(env, 'dispatched');
       this.browseHandler(env);
-      return;
-    }
-
-    if (env.type === 'publish.request') {
-      this.emitCommandDiagnostic(env, 'received');
-      if (!this.publishHandler) {
-        this.emitCommandDiagnostic(env, 'rejected', 'handler_unavailable');
-        return;
-      }
-      this.emitCommandDiagnostic(env, 'dispatched');
-      this.publishHandler(env as Envelope<PublishRequestPayload>);
       return;
     }
 

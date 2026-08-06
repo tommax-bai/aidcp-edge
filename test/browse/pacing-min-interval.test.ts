@@ -60,7 +60,7 @@ function makeHarness(): Harness {
     },
   };
   const client = {
-    reportNoteContent: async (_p: NoteContentPayload): Promise<Envelope> => makeEnvelope('browse.next', 'ack', 0, {}),
+    reportNoteContent: async (_p: NoteContentPayload): Promise<Envelope> => makeEnvelope('session.end', 'ack', 0, { reason: 'ack' }),
     reportPageCards: () => {},
     reportNoteDetail: (_p: NoteDetailPayload) => { details++; },
     reportProfileDetail: () => {},
