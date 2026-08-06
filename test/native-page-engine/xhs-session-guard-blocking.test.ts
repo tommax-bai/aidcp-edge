@@ -417,7 +417,7 @@ test('Xiaohongshu unidentified page kind produces no blocking report and no halt
   assert.deepEqual(h.sent, [], '未识别页面 MUST NOT 产生任何阻断上报');
   assert.equal(h.session.observationStatus().blockingKind, 'none');
 
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.feed.scroll', { reason: 'feed_scroll' }));
   assert.equal(h.executions.length, 1, '未识别页面也 MUST NOT 拦下正常动作');
 });
 
@@ -431,7 +431,7 @@ test('Xiaohongshu blocking halt answers ordinary browse with an honest not-start
   assert.deepEqual(h.actions, [{ action: 'like', ok: false, reason: 'blocked_by_captcha' }]);
 
   h.session.observeProbe({ origin: 'https://www.xiaohongshu.com', path: '/explore', pageKind: 'explore' });
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.feed.scroll', { reason: 'feed_scroll' }));
   assert.equal(h.executions.length, 1, '清除后必须恢复下发');
 });
 
@@ -474,7 +474,7 @@ test('Xiaohongshu blocking halt lets a coordinator-owned task command through', 
   });
 
   h.session.observeProbe({ origin: 'https://www.xiaohongshu.com', path: '/explore', pageKind: 'captcha' });
-  await h.session.onCloudCommand(envelope('page.scroll', {
+  await h.session.onCloudCommand(envelope('xiaohongshu.feed.scroll', {
     reason: 'task_leg',
     taskId: 'task-assist-1',
   }));
@@ -684,8 +684,8 @@ test('Xiaohongshu browse loop leaves per-command receipt evidence carrying no pa
   ];
   const h = harness(async () => receipts.shift() ?? assert.fail('unexpected Native execution'));
 
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
-  await h.session.onCloudCommand(envelope('note.open', { noteId: 'note-1' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.feed.scroll', { reason: 'feed_scroll' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1' }));
   await h.session.onCloudCommand(envelope('interaction.like', { noteId: 'note-1' }));
   await h.session.onCloudCommand(envelope('navigation.back', { reason: 'return_feed' }));
 

@@ -28,7 +28,7 @@ test('preserves Facebook first-post selection across the Native command boundary
     v: 1,
     id: 'first-post-open',
     ts: Date.now(),
-    type: 'note.open',
+    type: 'facebook.note.open',
     payload: {
       taskId: 'lease-secret',
       selection: 'first_commentable_group_post',
@@ -44,33 +44,45 @@ test('preserves Facebook first-post selection across the Native command boundary
   });
 });
 
-test('preserves unified resume target while legacy page.scroll remains compatible', () => {
+test('derives the scroll surface from the platform-segmented envelope name', () => {
+  // 词汇批 4：面由命令名声明，mapper 解析为引擎 surface 参数；targetSurface 载荷字段已退役。
   const resume = nativeCommandForEnvelope({
     v: 2,
     id: 'resume-reels',
     ts: Date.now(),
-    type: 'page.scroll',
+    type: 'facebook.reels.scroll',
     payload: {
       taskId: 'must-not-cross-native-boundary',
       reason: 'resume_redrive',
-      targetSurface: 'reels',
     },
   } as never);
   assert.deepEqual(resume, {
     kind: 'page_scroll',
-    params: { reason: 'resume_redrive', targetSurface: 'reels' },
+    params: { reason: 'resume_redrive', surface: 'reels' },
   });
 
-  const legacy = nativeCommandForEnvelope({
+  const feed = nativeCommandForEnvelope({
     v: 2,
-    id: 'legacy-scroll',
+    id: 'feed-scroll',
     ts: Date.now(),
-    type: 'page.scroll',
+    type: 'xiaohongshu.feed.scroll',
     payload: { reason: 'feed_scroll' },
   } as never);
-  assert.deepEqual(legacy, {
+  assert.deepEqual(feed, {
     kind: 'page_scroll',
-    params: { reason: 'feed_scroll' },
+    params: { reason: 'feed_scroll', surface: 'feed' },
+  });
+
+  const search = nativeCommandForEnvelope({
+    v: 2,
+    id: 'search-scroll',
+    ts: Date.now(),
+    type: 'facebook.search.scroll',
+    payload: { reason: 'search_scroll' },
+  } as never);
+  assert.deepEqual(search, {
+    kind: 'page_scroll',
+    params: { reason: 'search_scroll', surface: 'search' },
   });
 });
 

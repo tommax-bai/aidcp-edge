@@ -638,7 +638,6 @@ pub fn parity(command: &NativeCommand) -> Option<&'static FacebookParityEntry> {
         IdentityReadCurrent(_) => "identity_read_current",
         CaptchaCapture(_) => "captcha_capture",
         CaptchaClick(_) => "captcha_click",
-        BrowseNext(_) => "browse_next",
         BrowseScroll(_) => "browse_scroll",
         PageScroll(_) => "page_scroll",
         FeedRefresh(_) => "feed_refresh",

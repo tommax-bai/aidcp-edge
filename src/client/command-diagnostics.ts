@@ -31,27 +31,35 @@ type UnknownRecord = Record<string, unknown>;
 const ACTIVE_COMMAND_TYPES = new Set([
   'plan.response',
   'session.end',
-  'note.open',
-  'note.close',
-  'search.execute',
-  'page.scroll',
-  'feed.refresh',
+  'xiaohongshu.note.open',
+  'facebook.note.open',
+  'xiaohongshu.note.close',
+  'facebook.note.close',
+  'xiaohongshu.search.execute',
+  'facebook.search.execute',
+  'xiaohongshu.feed.scroll',
+  'xiaohongshu.search.scroll',
+  'facebook.feed.scroll',
+  'facebook.search.scroll',
+  'facebook.reels.scroll',
+  'xiaohongshu.feed.refresh',
+  'facebook.feed.refresh',
   'pacing.update',
   'interaction.like',
   'interaction.collect',
   'interaction.follow',
   'interaction.comment',
   'interaction.like_comment',
-  'group.join',
+  'facebook.group.join',
   'navigation.back',
-  'note.browse_images',
-  'note.scroll_comments',
-  'profile.open',
-  'notification.open',
-  'notification.browse_comments',
-  'notification.browse_likes',
-  'notification.browse_follows',
-  'notification.back_home',
+  'xiaohongshu.note.browse_images',
+  'xiaohongshu.note.scroll_comments',
+  'xiaohongshu.profile.open',
+  'xiaohongshu.notification.open',
+  'xiaohongshu.notification.browse_comments',
+  'xiaohongshu.notification.browse_likes',
+  'xiaohongshu.notification.browse_follows',
+  'xiaohongshu.notification.back_home',
   'publish.command',
   'edge.task.acquire',
   'edge.task.release',
@@ -71,23 +79,29 @@ const ACTIVE_COMMAND_TYPES = new Set([
 
 const FIXED_SUMMARIES: Readonly<Record<string, string>> = {
   'session.end': '结束当前浏览会话',
-  'note.close': '关闭当前内容',
-  'page.scroll': '滚动当前页面',
-  'feed.refresh': '刷新当前信息流',
+  'xiaohongshu.note.close': '关闭当前内容',
+  'facebook.note.close': '关闭当前内容',
+  'xiaohongshu.feed.scroll': '滚动当前信息流',
+  'xiaohongshu.search.scroll': '滚动搜索结果页',
+  'facebook.feed.scroll': '滚动当前信息流',
+  'facebook.search.scroll': '滚动搜索结果页',
+  'facebook.reels.scroll': '滚动 Reels',
+  'xiaohongshu.feed.refresh': '刷新当前信息流',
+  'facebook.feed.refresh': '刷新当前信息流',
   'pacing.update': '更新自动化节奏',
   'interaction.like': '点赞当前内容',
   'interaction.collect': '收藏当前内容',
   'interaction.follow': '关注当前作者',
   'interaction.like_comment': '点赞目标评论',
   'navigation.back': '返回上一页面',
-  'note.browse_images': '浏览当前内容配图',
-  'note.scroll_comments': '滚动当前评论区',
-  'profile.open': '打开作者主页',
-  'notification.open': '打开通知中心',
-  'notification.browse_comments': '读取评论通知',
-  'notification.browse_likes': '读取点赞通知',
-  'notification.browse_follows': '读取关注通知',
-  'notification.back_home': '从通知中心返回',
+  'xiaohongshu.note.browse_images': '浏览当前内容配图',
+  'xiaohongshu.note.scroll_comments': '滚动当前评论区',
+  'xiaohongshu.profile.open': '打开作者主页',
+  'xiaohongshu.notification.open': '打开通知中心',
+  'xiaohongshu.notification.browse_comments': '读取评论通知',
+  'xiaohongshu.notification.browse_likes': '读取点赞通知',
+  'xiaohongshu.notification.browse_follows': '读取关注通知',
+  'xiaohongshu.notification.back_home': '从通知中心返回',
   'interaction.sync.ack': '确认互动同步批次',
   'interaction.sync.request': '请求同步互动数据',
   'interaction.auth.reopen': '重新建立互动授权',
@@ -167,12 +181,18 @@ function joinParts(parts: Array<string | undefined>): string {
 export function summarizeCommand(type: unknown, payload: unknown): string {
   const commandType = safeType(type);
   const data = asRecord(payload);
-  if (commandType === 'page.scroll' && data.reason === 'resume_redrive') {
-    return data.targetSurface === 'reels' ? '恢复 Reels 浏览' : '恢复信息流浏览';
+  // 词汇批 4：面进命令名，Reels/恢复语义按类型直判（不再靠 targetSurface 载荷字段）。
+  if (commandType === 'facebook.reels.scroll') {
+    if (data.reason === 'resume_redrive') return '恢复 Reels 浏览';
+    if (typeof data.reason === 'string' && REELS_ENTRY_SUMMARIES[data.reason]) {
+      return REELS_ENTRY_SUMMARIES[data.reason];
+    }
   }
-  if (commandType === 'page.scroll' && typeof data.reason === 'string') {
-    const reelsEntrySummary = REELS_ENTRY_SUMMARIES[data.reason];
-    if (reelsEntrySummary) return reelsEntrySummary;
+  if (
+    (commandType === 'xiaohongshu.feed.scroll' || commandType === 'facebook.feed.scroll') &&
+    data.reason === 'resume_redrive'
+  ) {
+    return '恢复信息流浏览';
   }
   if (FIXED_SUMMARIES[commandType]) return FIXED_SUMMARIES[commandType];
 
@@ -180,7 +200,7 @@ export function summarizeCommand(type: unknown, payload: unknown): string {
     const count = listLength(data.steps);
     return count === undefined ? '顺序执行命令' : `${count} 个顺序步骤`;
   }
-  if (commandType === 'note.open') {
+  if (commandType === 'xiaohongshu.note.open' || commandType === 'facebook.note.open') {
     const surface = safeEnum(data.surface, NOTE_SURFACES);
     const purpose = safeEnum(data.purpose, NOTE_PURPOSES);
     return joinParts([
@@ -190,7 +210,7 @@ export function summarizeCommand(type: unknown, payload: unknown): string {
       typeof data.url === 'string' && data.url.length > 0 ? '已提供目标地址' : undefined,
     ]);
   }
-  if (commandType === 'search.execute') {
+  if (commandType === 'xiaohongshu.search.execute' || commandType === 'facebook.search.execute') {
     const length = textLength(data.keyword);
     const source = safeEnum(data.source, SEARCH_SOURCES);
     const maxResults = safeCount(data.maxResults, 1_000);
@@ -208,7 +228,7 @@ export function summarizeCommand(type: unknown, payload: unknown): string {
       typeof data.groupChatCode === 'string' && data.groupChatCode.length > 0 ? '包含群聊码' : undefined,
     ]);
   }
-  if (commandType === 'group.join') {
+  if (commandType === 'facebook.group.join') {
     return joinParts([
       data.click === true ? '申请加入目标群组' : '观察目标群组',
       typeof data.groupUrl === 'string' && data.groupUrl.length > 0 ? '已提供目标地址' : undefined,

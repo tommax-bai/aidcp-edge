@@ -139,22 +139,17 @@ test('unsupported Facebook commands are rejected before Native/CDP dispatch', as
   const h = harness(async () => assert.fail('unsupported command must not reach Native runtime'), {
     platform: 'facebook',
   });
-  await h.session.onCloudCommand(envelope('profile.open', {
-    authorId: '61591824155856',
-    direct: true,
-  }));
+  // 词汇批 4 后 xhs 专属命令（xiaohongshu.*）由 edge-client 入口平台段闸拒收，不再到达本会话；
+  // 本会话的手抄拒集只剩两条共享名互动命令（批 5 对象化后应归零）。
+  await h.session.onCloudCommand(envelope('interaction.collect', { noteId: 'post-1' }));
   await h.session.onCloudCommand(envelope('interaction.like_comment', {
     noteId: 'post-1',
     commentAnchorId: 'comment-1',
   }));
-  await h.session.onCloudCommand(envelope('note.browse_images', { noteId: 'post-1', count: 2 }));
-  await h.session.onCloudCommand(envelope('note.scroll_comments', { noteId: 'post-1' }));
   assert.equal(h.executions.length, 0);
   assert.deepEqual(h.actions, [
-    { action: 'profile_open', ok: false, reason: 'capability_unsupported' },
+    { action: 'collect', ok: false, reason: 'capability_unsupported' },
     { action: 'comment_like', ok: false, reason: 'capability_unsupported' },
-    { action: 'browse_images', ok: false, reason: 'capability_unsupported' },
-    { action: 'scroll_comments', ok: false, reason: 'capability_unsupported' },
   ]);
 });
 
@@ -215,7 +210,7 @@ test('Native Facebook promotes a Rust groupObservation when generic observation 
     },
   }), { platform: 'facebook' });
 
-  await h.session.onCloudCommand(envelope('group.join', {
+  await h.session.onCloudCommand(envelope('facebook.group.join', {
     taskId: 'task-join-observe',
     groupUrl: groupObservation.groupUrl,
     click: false,
@@ -251,7 +246,7 @@ test('Native Facebook keeps an existing generic observation authoritative over g
     },
   }), { platform: 'facebook' });
 
-  await h.session.onCloudCommand(envelope('group.join', {
+  await h.session.onCloudCommand(envelope('facebook.group.join', {
     taskId: 'task-join-observe-existing',
     groupUrl: 'https://www.facebook.com/groups/42',
     click: false,
@@ -278,7 +273,7 @@ test('Native Facebook keeps Join, comments, and ordinary refresh on their comman
     },
   }), { platform: 'facebook' });
 
-  await h.session.onCloudCommand(envelope('group.join', {
+  await h.session.onCloudCommand(envelope('facebook.group.join', {
     groupUrl: 'https://www.facebook.com/groups/42',
   }));
   await h.session.onCloudCommand(envelope('interaction.comment', {
@@ -290,7 +285,7 @@ test('Native Facebook keeps Join, comments, and ordinary refresh on their comman
     noteId: 'https://www.facebook.com/groups/42/posts/8',
     text: 'x'.repeat(400),
   }));
-  await h.session.onCloudCommand(envelope('feed.refresh', { reason: 'ordinary' }));
+  await h.session.onCloudCommand(envelope('facebook.feed.refresh', { reason: 'ordinary' }));
 
   // 2026-07-29 Facebook 时间预算整体 ×1.5、评论上限单独取 180s。
   // 评论按 code point 算「正文 + 换行 + 联系方式」：100+1+8=109 → 27_000 + 330×109 = 62_970，减回执余量 2_000。
@@ -319,11 +314,11 @@ test('Native Facebook gives the first-post open its own long budget; 普通开�
     },
   }), { platform: 'facebook' });
 
-  await h.session.onCloudCommand(envelope('note.open', {
+  await h.session.onCloudCommand(envelope('facebook.note.open', {
     selection: 'first_commentable_group_post',
     container: 'https://www.facebook.com/groups/42',
   }));
-  await h.session.onCloudCommand(envelope('note.open', {
+  await h.session.onCloudCommand(envelope('facebook.note.open', {
     url: 'https://www.facebook.com/groups/42/posts/7',
   }));
 
@@ -376,7 +371,7 @@ test('Native Facebook forwards the exact Join commit window to the shared coordi
     commitWindow: guard,
   });
 
-  await h.session.onCloudCommand(envelope('group.join', {
+  await h.session.onCloudCommand(envelope('facebook.group.join', {
     taskId: 'task-join-window',
     groupUrl: 'https://www.facebook.com/groups/42',
     click: true,
@@ -437,7 +432,7 @@ test('quiesced Native session admits the coordinator-owned task command', async 
   }));
   await h.session.quiesceForTask();
 
-  await h.session.onCloudCommand(envelope('search.execute', searchPayload));
+  await h.session.onCloudCommand(envelope('xiaohongshu.search.execute', searchPayload));
 
   assert.equal(h.executions.length, 1);
   assert.equal(h.executions[0]?.ownerId, searchPayload.taskId);
@@ -460,7 +455,7 @@ test('quiesced Native session rejects ordinary browse without touching runtime',
   const h = harness(async () => assert.fail('runtime must not execute ordinary browse while quiesced'));
   await h.session.quiesceForTask();
 
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'ordinary' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.feed.scroll', { reason: 'ordinary' }));
 
   assert.equal(h.executions.length, 0);
   assert.deepEqual(h.actions, [{ action: 'scroll', ok: false, reason: 'native_session_quiesced' }]);
@@ -470,7 +465,7 @@ test('pre-actuation Native search rejection keeps one valid correlated terminal'
   const h = harness(async () => assert.fail('runtime must not execute an unowned search while quiesced'));
   await h.session.quiesceForTask();
 
-  await h.session.onCloudCommand(envelope('search.execute', {
+  await h.session.onCloudCommand(envelope('xiaohongshu.search.execute', {
     ...searchPayload,
     taskId: undefined,
   }));
@@ -497,7 +492,7 @@ test('Native empty search cards report no_results exactly once', async () => {
   }));
   await h.session.quiesceForTask();
 
-  await h.session.onCloudCommand(envelope('search.execute', searchPayload));
+  await h.session.onCloudCommand(envelope('xiaohongshu.search.execute', searchPayload));
 
   assert.equal(h.cards.length, 1);
   assert.deepEqual(h.actions, [{
@@ -521,7 +516,7 @@ test('Native non-confirmed search cards never upgrade the action to success', as
   }));
   await h.session.quiesceForTask();
 
-  await h.session.onCloudCommand(envelope('search.execute', searchPayload));
+  await h.session.onCloudCommand(envelope('xiaohongshu.search.execute', searchPayload));
 
   assert.equal(h.cards.length, 1, 'observed cards may still be forwarded as observations');
   assert.deepEqual(h.actions, [{
@@ -557,7 +552,7 @@ test('Native search execution error preserves effect-phase honesty and correlati
   const h = harness(async () => { throw error; });
   await h.session.quiesceForTask();
 
-  await h.session.onCloudCommand(envelope('search.execute', searchPayload));
+  await h.session.onCloudCommand(envelope('xiaohongshu.search.execute', searchPayload));
 
   assert.equal(h.actions.length, 1);
   assert.deepEqual(h.actions[0], {
@@ -637,8 +632,8 @@ test('Native Facebook projects each canonical single-card Reel once and suppress
   });
 
   await h.session.start();
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
-  await h.session.onCloudCommand(envelope('note.open', { noteId: reel.noteId }));
+  await h.session.onCloudCommand(envelope('facebook.feed.scroll', { reason: 'feed_scroll' }));
+  await h.session.onCloudCommand(envelope('facebook.note.open', { noteId: reel.noteId }));
 
   const activities = uiEvents(h.logs).filter((event) => event.kind === 'activity');
   assert.deepEqual(activities, [{
@@ -695,7 +690,7 @@ test('Native Facebook does not project malformed or multi-card Reels batches', a
 
   await h.session.start();
   while (batches.length > 0) {
-    await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+    await h.session.onCloudCommand(envelope('facebook.feed.scroll', { reason: 'feed_scroll' }));
   }
 
   assert.equal(uiEvents(h.logs).some((event) => event.type === 'reel_view'), false);
@@ -752,7 +747,7 @@ test('Native Facebook task resume preserves the current page until the next deli
   );
   assert.equal(h.executions[0]?.timeoutMs, 180_000, 'initial Feed scroll uses the long budget');
 
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+  await h.session.onCloudCommand(envelope('facebook.feed.scroll', { reason: 'feed_scroll' }));
   assert.equal(h.executions.at(-1)?.command.kind, 'page_scroll', 'resume still unblocks the next explicit command');
   assert.equal(h.executions.at(-1)?.timeoutMs, 180_000, 'explicit Feed scroll uses the long budget');
   h.session.close();
@@ -846,8 +841,8 @@ test('Native Facebook projects a unique canonical Feed video once even beside no
   });
 
   await h.session.start();
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
-  await h.session.onCloudCommand(envelope('note.open', { noteId: video.noteId }));
+  await h.session.onCloudCommand(envelope('facebook.feed.scroll', { reason: 'feed_scroll' }));
+  await h.session.onCloudCommand(envelope('facebook.note.open', { noteId: video.noteId }));
 
   const activities = uiEvents(h.logs).filter((event) => event.kind === 'activity');
   assert.deepEqual(
@@ -902,9 +897,9 @@ test('Native Facebook does not project ordinary or ambiguous Feed batches as vid
   }), { platform: 'facebook' });
 
   await h.session.start();
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+  await h.session.onCloudCommand(envelope('facebook.feed.scroll', { reason: 'feed_scroll' }));
+  await h.session.onCloudCommand(envelope('facebook.feed.scroll', { reason: 'feed_scroll' }));
+  await h.session.onCloudCommand(envelope('facebook.feed.scroll', { reason: 'feed_scroll' }));
 
   assert.equal(uiEvents(h.logs).some((event) => event.type === 'feed_video_view'), false);
 });
@@ -925,7 +920,7 @@ test('Native Facebook keeps the existing local read activity for unmatched detai
     output: { kind: 'note_detail', value: detail },
   }), { platform: 'facebook' });
 
-  await h.session.onCloudCommand(envelope('note.open', { noteId: detail.noteId }));
+  await h.session.onCloudCommand(envelope('facebook.note.open', { noteId: detail.noteId }));
 
   assert.deepEqual(
     uiEvents(h.logs).filter((event) => event.type === 'note_open'),
@@ -956,7 +951,7 @@ test('Native Facebook page.scroll waits only the remaining jittered dwell', asyn
   await h.session.start();
   now = 2_000;
 
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 7_000 }));
+  await h.session.onCloudCommand(envelope('facebook.feed.scroll', { reason: 'feed_scroll', dwellMs: 7_000 }));
 
   assert.deepEqual(waits, [6_000]);
   assert.equal(h.executions.at(-1)?.command.kind, 'page_scroll');
@@ -974,8 +969,8 @@ test('Native Facebook page.scroll absorbs elapsed evaluation time and ignores mi
   await h.session.start();
   now = 9_000;
 
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 7_000 }));
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+  await h.session.onCloudCommand(envelope('facebook.feed.scroll', { reason: 'feed_scroll', dwellMs: 7_000 }));
+  await h.session.onCloudCommand(envelope('facebook.feed.scroll', { reason: 'feed_scroll' }));
 
   assert.deepEqual(waits, []);
   assert.equal(h.executions.length, 3);
@@ -995,16 +990,16 @@ test('Native Xiaohongshu page.scroll uses the same platform-neutral dwell anchor
   });
 
   // 还没有任何一批卡到达 ⇒ 无锚点，不凭空补停留。
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 7_000 }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.feed.scroll', { reason: 'feed_scroll', dwellMs: 7_000 }));
   assert.deepEqual(waits, []);
 
   await h.session.start(); // 首屏扫描回 page.cards ⇒ 立下锚点
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 7_000 }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.feed.scroll', { reason: 'feed_scroll', dwellMs: 7_000 }));
   assert.deepEqual(waits, [7_000]);
 
   // 云端没给中心值（返回未刷新 / 旧云端 / 断连）⇒ 立即翻页、不额外等待。
   waits.length = 0;
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.feed.scroll', { reason: 'feed_scroll' }));
   assert.deepEqual(waits, []);
 });
 
@@ -1023,7 +1018,7 @@ test('Native Facebook dwell wait is cancelled before runtime actuation', async (
   });
   await h.session.start();
 
-  const pending = h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 7_000 }));
+  const pending = h.session.onCloudCommand(envelope('facebook.feed.scroll', { reason: 'feed_scroll', dwellMs: 7_000 }));
   await enteredWait;
   h.session.stop();
   await pending;
@@ -1071,9 +1066,9 @@ test('Native in-place read floor and cloud dwell take the larger, never the sum'
   });
 
   await h.session.start();       // 立下「本批卡到达」锚点（now=1000）
-  await h.session.onCloudCommand(envelope('note.open', { noteId: detail.noteId, surface: 'feed' }));
+  await h.session.onCloudCommand(envelope('facebook.note.open', { noteId: detail.noteId, surface: 'feed' }));
   now = 2_000;                   // 就地读花掉 1s
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 3_000 }));
+  await h.session.onCloudCommand(envelope('facebook.feed.scroll', { reason: 'feed_scroll', dwellMs: 3_000 }));
 
   // dwell 剩余 = 3000-(2000-1000) = 2000；read floor 剩余 = 5200-(2000-1000) = 4200 ⇒ 取 4200，不是 6200。
   assert.deepEqual(waits, [4_200]);
@@ -1099,8 +1094,8 @@ test('A short in-place read still gets a floor instead of a zero-delay scroll', 
     sleep: async (ms) => { waits.push(ms); now += ms; },
   });
 
-  await h.session.onCloudCommand(envelope('note.open', { noteId: detail.noteId, surface: 'feed' }));
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' })); // 云端没给 dwell
+  await h.session.onCloudCommand(envelope('facebook.note.open', { noteId: detail.noteId, surface: 'feed' }));
+  await h.session.onCloudCommand(envelope('facebook.feed.scroll', { reason: 'feed_scroll' })); // 云端没给 dwell
 
   assert.deepEqual(waits, [1_240]);
 });
@@ -1122,8 +1117,8 @@ test('A failed in-place read leaves no read floor behind', async () => {
     sleep: async (ms) => { waits.push(ms); now += ms; },
   });
 
-  await h.session.onCloudCommand(envelope('note.open', { noteId: 'https://www.facebook.com/Example/posts/779', surface: 'feed' }));
-  await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll' }));
+  await h.session.onCloudCommand(envelope('facebook.note.open', { noteId: 'https://www.facebook.com/Example/posts/779', surface: 'feed' }));
+  await h.session.onCloudCommand(envelope('facebook.feed.scroll', { reason: 'feed_scroll' }));
 
   assert.deepEqual(waits, []);
 });

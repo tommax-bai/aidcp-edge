@@ -336,18 +336,18 @@ function positiveNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
+// 词汇批 4 起浏览命令带平台段，「FB 没有的 xhs 专属命令」由名表 + 入口平台段闸推导（xiaohongshu.*
+// 发到 FB 会话在 edge-client 即 platform_mismatch 拒收），不再需要手抄。剩下两条互动命令仍是共享名
+// （对象化改名在批 5），批 5 落地后本集合应归零删除。
 export const FACEBOOK_UNSUPPORTED_COMMANDS = new Set<Envelope['type']>([
   'interaction.collect',
   'interaction.like_comment',
-  'note.browse_images',
-  'note.scroll_comments',
-  'profile.open',
-  'notification.open',
-  'notification.browse_comments',
-  'notification.browse_likes',
-  'notification.browse_follows',
-  'notification.back_home',
 ]);
+
+/** 搜索命令的平台段变体（回执特判用；词汇批 4 拆名后同一特判覆盖两平台）。 */
+function isSearchExecuteType(type: string | undefined): boolean {
+  return type === 'xiaohongshu.search.execute' || type === 'facebook.search.execute';
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 会话启动失败的**具名上报口**（change restore-xiaohongshu-native-session-honesty §2）
@@ -761,7 +761,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
    */
   private lastCardsAt = 0;
   /**
-   * 内容开始展示的时刻（详情停留的锚点）。`note.close` / `navigation.back` 据此只补差额，
+   * 内容开始展示的时刻（详情停留的锚点）。`{p}.note.close` / `navigation.back` 据此只补差额，
    * 把云端评估耗时天然吸收掉。锚点缺席（没有打开中的内容）时**不补一段等待**——
    * 「读不到锚点」与「停留不足」是两态，压成一态就会在 feed 上凭空补停留。
    */
@@ -1297,7 +1297,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
         this.options.client.reportPageCards({ ...(value as unknown as PageCardsPayload), startupId: this.options.startupId });
         // 「本批卡到达时刻」与平台无关：翻页停留在两个平台上都靠它起算。搜索结果不是「在浏览的这一批」，
         // 排除掉，否则一次搜索会把翻页停留的锚点推到搜索时刻上。
-        if (env?.type !== 'search.execute') {
+        if (!isSearchExecuteType(env?.type)) {
           this.lastCardsAt = (this.options.clock ?? monotonicNow)();
         }
         if (this.options.platform === 'facebook') {
@@ -1310,7 +1310,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
             loopStage: 'feed',
           });
         }
-        if (env?.type === 'search.execute') {
+        if (env && isSearchExecuteType(env.type)) {
           if (!execution.ok || execution.effectPhase !== 'confirmed') {
             this.reportFailure(env, execution.reasonCode, execution.effectPhase);
             return;
@@ -1442,7 +1442,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
         `[native-page] action.completed action=${action} ok=${receipt.ok} effectPhase=${execution.effectPhase} reason=${reason}`,
       );
     }
-    if (env?.type === 'search.execute') {
+    if (env && isSearchExecuteType(env.type)) {
       const ok = receipt.ok && execution.effectPhase === 'confirmed';
       if (!ok) {
         this.reportFailure(env, receipt.reason ?? execution.reasonCode, execution.effectPhase);
@@ -1510,7 +1510,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     reason: string,
     effectPhase: NativePageCommandExecution['effectPhase'],
   ): void {
-    if (env.type !== 'search.execute') {
+    if (!isSearchExecuteType(env.type)) {
       this.options.client.reportActionCompleted({ action: nativeActionNameForCommand(env.type), ok: false, reason });
       return;
     }

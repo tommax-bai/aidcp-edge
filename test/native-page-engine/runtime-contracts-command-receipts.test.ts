@@ -21,8 +21,7 @@ import { nativeCommandKindByEnvelopeType } from '../../src/native-page-engine/co
 const repoFile = (relative: string): string => fileURLToPath(new URL(`../../${relative}`, import.meta.url));
 
 interface ManifestCommand {
-  routeKey: string;
-  edgeType: string;
+  edgeTypes: string[];
   nativeKind: string;
   requestContract: string;
   receipts: string[];
@@ -34,6 +33,9 @@ const manifest = JSON.parse(
   await readFile(repoFile('native/page-engine/command-manifest.json'), 'utf8'),
 ) as { commands: ManifestCommand[]; sessionControls: Array<{ edgeType: string; requestContract: string; receipt: string | null }> };
 const browseSessionSource = await readFile(repoFile('src/native-page-engine/browse-session.ts'), 'utf8');
+
+/** isSearchExecuteType 助手覆盖的两平台搜索信封（与 browse-session.ts 的实现保持一致）。 */
+const SEARCH_EXECUTE_TYPES = ['xiaohongshu.search.execute', 'facebook.search.execute'] as const;
 const protocolSource = await readFile(repoFile('src/comm/protocol.ts'), 'utf8');
 const commandRsSource = await readFile(repoFile('native/page-engine/src/command.rs'), 'utf8');
 
@@ -101,7 +103,7 @@ function collectReceipts(body: string, seen = new Set<string>()): SegmentReceipt
   const always = new Set<string>();
   const whenEnvelope = new Map<string, Set<string>>();
   const whenCompanion = new Map<string, Set<string>>();
-  const conditions: Array<{ envelopeType?: string; companion?: string; depth: number }> = [];
+  const conditions: Array<{ envelopeTypes?: string[]; companion?: string; depth: number }> = [];
   const companionBindings = new Map<string, string>();
   let depth = 0;
   for (const rawLine of body.split('\n')) {
@@ -109,10 +111,13 @@ function collectReceipts(body: string, seen = new Set<string>()): SegmentReceipt
     const binding = line.match(/^const ([A-Za-z]+) = value\.([A-Za-z]+);$/);
     if (binding) companionBindings.set(binding[1]!, binding[2]!);
     const envelopeGuard = line.match(/env\?\.type === '([a-z._]+)'/);
+    // 词汇批 4：搜索回执特判经 isSearchExecuteType 助手覆盖两平台变体；非取反调用视作对两个搜索信封的守卫。
+    const searchExecuteGuard = !line.includes('!isSearchExecuteType')
+      && /isSearchExecuteType\((?:env\.|env\?\.)type\)/.test(line);
     const companionGuard = [...companionBindings.entries()]
       .find(([identifier]) => line.startsWith(`if (${identifier} && `))?.[1];
-    const activeEnvelope = conditions.find((entry) => entry.envelopeType)?.envelopeType
-      ?? envelopeGuard?.[1];
+    const activeEnvelopes = conditions.find((entry) => entry.envelopeTypes)?.envelopeTypes
+      ?? (envelopeGuard ? [envelopeGuard[1]!] : searchExecuteGuard ? [...SEARCH_EXECUTE_TYPES] : undefined);
     const activeCompanion = conditions.find((entry) => entry.companion)?.companion
       ?? companionGuard;
     const record = (receipt: string): void => {
@@ -122,10 +127,12 @@ function collectReceipts(body: string, seen = new Set<string>()): SegmentReceipt
         whenCompanion.set(activeCompanion, bucket);
         return;
       }
-      if (activeEnvelope) {
-        const bucket = whenEnvelope.get(activeEnvelope) ?? new Set<string>();
-        bucket.add(receipt);
-        whenEnvelope.set(activeEnvelope, bucket);
+      if (activeEnvelopes) {
+        for (const envelopeType of activeEnvelopes) {
+          const bucket = whenEnvelope.get(envelopeType) ?? new Set<string>();
+          bucket.add(receipt);
+          whenEnvelope.set(envelopeType, bucket);
+        }
         return;
       }
       always.add(receipt);
@@ -169,7 +176,8 @@ function collectReceipts(body: string, seen = new Set<string>()): SegmentReceipt
         `unknown host receipt emitter client.${name}(); register it in RECEIPT_EMITTERS`,
       );
     }
-    if (envelopeGuard) conditions.push({ envelopeType: envelopeGuard[1], depth });
+    if (envelopeGuard) conditions.push({ envelopeTypes: [envelopeGuard[1]!], depth });
+    if (searchExecuteGuard) conditions.push({ envelopeTypes: [...SEARCH_EXECUTE_TYPES], depth });
     if (companionGuard) conditions.push({ companion: companionGuard, depth });
     depth += (line.match(/[{[(]/g)?.length ?? 0) - (line.match(/[}\])]/g)?.length ?? 0);
     while (conditions.length > 0 && depth <= conditions[conditions.length - 1]!.depth) {
@@ -212,7 +220,10 @@ test('report() 的输出分派表未漂移（导出值 vs 本检查所依据的�
   assert.deepEqual(flattened, {
     page_cards: {
       always: ['page.cards'],
-      whenEnvelope: { 'search.execute': ['action.completed'] },
+      whenEnvelope: {
+        'xiaohongshu.search.execute': ['action.completed'],
+        'facebook.search.execute': ['action.completed'],
+      },
       whenCompanion: {},
     },
     note_detail: { always: ['note.detail'], whenEnvelope: {}, whenCompanion: {} },
@@ -223,12 +234,18 @@ test('report() 的输出分派表未漂移（导出值 vs 本检查所依据的�
     // 动作回执的统一处理段里，搜索执行那条分支同样只发动作完成，故与无条件一致。
     action_receipt: {
       always: ['action.completed'],
-      whenEnvelope: { 'search.execute': ['action.completed'] },
+      whenEnvelope: {
+        'xiaohongshu.search.execute': ['action.completed'],
+        'facebook.search.execute': ['action.completed'],
+      },
       whenCompanion: {},
     },
     action_receipt_with_observation: {
       always: ['action.completed'],
-      whenEnvelope: { 'search.execute': ['action.completed'] },
+      whenEnvelope: {
+        'xiaohongshu.search.execute': ['action.completed'],
+        'facebook.search.execute': ['action.completed'],
+      },
       whenCompanion: {
         noteDetail: ['note.detail'],
         notificationItems: ['notification.items'],
@@ -422,7 +439,9 @@ function reachableReceipts(command: ManifestCommand): Set<string> {
   for (const entry of BROWSE_SUCCESS_OUTPUTS[command.nativeKind] ?? []) {
     const dispatch = DISPATCH.get(entry.output)!;
     for (const receipt of dispatch.always) reachable.add(receipt);
-    for (const receipt of dispatch.whenEnvelope.get(command.edgeType) ?? []) reachable.add(receipt);
+    for (const edgeType of command.edgeTypes) {
+      for (const receipt of dispatch.whenEnvelope.get(edgeType) ?? []) reachable.add(receipt);
+    }
     for (const companion of entry.companions ?? []) {
       const receipts = dispatch.whenCompanion.get(companion);
       assert.ok(receipts, `${command.nativeKind} 声明的随行载荷 ${companion} 在 report() 里没有归宿`);

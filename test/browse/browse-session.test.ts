@@ -105,7 +105,7 @@ function makeHarness(cards: NoteCard[] = [CARD]): Harness {
 
   const client = {
     reportNoteContent: async (_payload: NoteContentPayload): Promise<Envelope> => {
-      return makeEnvelope('page.scroll', 'ack', 0, { reason: 'ack' });
+      return makeEnvelope('xiaohongshu.feed.scroll', 'ack', 0, { reason: 'ack' });
     },
     reportPageCards: (payload: PageCardsPayload) => {
       reportedCards.push(payload);
@@ -376,7 +376,7 @@ test('browse-session: note.open 命令打开卡片并上报 note.detail', async 
   const h = makeHarness();
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.deepEqual(h.openedCards, [0]);
@@ -389,7 +389,7 @@ test('browse-session: note.open surface=feed 小红书诚实拒 capability_unsup
   const h = makeHarness();
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.open', 'n-feed', 0, { index: 0, surface: 'feed' }),
+    makeEnvelope('xiaohongshu.note.open', 'n-feed', 0, { index: 0, surface: 'feed' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.equal(h.openedCards.length, 0, '绝不回落打开卡片');
@@ -419,7 +419,7 @@ test('browse-session: note.open 预算耗尽后如实失败，接管等待到安
   const sess = new BrowseSession(h.deps, { ...noOpts(), now: () => clock, noteOpenTimeoutMs: 10, logger: (line) => logs.push(line) });
   const running = sess.start();
   await new Promise((resolve) => setTimeout(resolve, 10));
-  await sess.onCloudCommand(makeEnvelope('note.open', 'n-timeout', 0, { index: 0 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'n-timeout', 0, { index: 0 }));
   await clickStarted;
 
   let quiesced = false;
@@ -443,7 +443,7 @@ test('browse-session: note.open 视频卡上报 note.detail.mediaType=video', as
   const h = makeHarness([{ ...CARD, title: 'V', isVideo: true }]);
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.equal(h.reportedDetails[0].mediaType, 'video');
@@ -470,7 +470,7 @@ test('browse-session: note.open 长正文后执行正文小步滚动阅读', asy
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.ok(bodyScrolls >= 1, '长正文打开后应滚动正文阅读');
@@ -493,7 +493,7 @@ test('browse-session: note.open 探测到已关注 → note.detail 带 authorFol
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.equal(details.length, 1, '应上报一次 note.detail');
@@ -507,7 +507,7 @@ test('browse-session: note.open 未关注/读不到 → note.detail authorFollow
   h.deps.client.reportNoteDetail = (p: NoteDetailPayload) => { details.push(p); };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.equal(details.length, 1, '应上报一次 note.detail');
@@ -530,7 +530,7 @@ test('browse-session: 详情页地址栏带 xsec_token → note.detail 带真实
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.equal(details.length, 1);
@@ -544,7 +544,7 @@ test('browse-session: 详情页地址栏无 xsec_token → note.detail url 诚�
   h.deps.client.reportNoteDetail = (p: NoteDetailPayload) => { details.push(p); };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.equal(details.length, 1);
@@ -561,7 +561,7 @@ test('browse-session: note.open 按 noteId 命中目标卡（index 已失效也�
   const h = makeHarness(cards);
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.open', 'n1', 0, { index: 0, noteId: 'llm' }),
+    makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0, noteId: 'llm' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.deepEqual(h.openedCards, [1], '应按 noteId 命中 LLM 卡（position 1），而非过期 index=0 指向的 NPD');
@@ -577,7 +577,7 @@ test('browse-session: note.open 目标已滚走时重报当前卡片（不开邻
   h.deps.scroller = { ...h.deps.scroller, scrollNext: async () => { scrolled += 1; } };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.open', 'n1', 0, { index: 0, noteId: 'gone' }),
+    makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0, noteId: 'gone' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   // 目标 noteId 真不在 DOM（scrollIntoView 命不中）→ 不开任何卡、【不盲滚】、重报当前快照（初始 1 + 重报 1）。
@@ -614,7 +614,7 @@ test('browse-session: note.open 目标滚出视口 → 有界滚动找回并打�
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.open', 'n1', 0, { index: 0, noteId: 'target' }),
+    makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0, noteId: 'target' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.ok(broughtIntoView, '应对 DOM 内的目标卡 scrollIntoView 拉回视口');
@@ -795,7 +795,7 @@ test('browse-session: search.execute 命令触发搜索', async () => {
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('search.execute', 'se1', 0, { keyword: '奶茶', activityId: 'activity-xhs-1', purpose: 'discovery', scope: 'global' }),
+    makeEnvelope('xiaohongshu.search.execute', 'se1', 0, { keyword: '奶茶', activityId: 'activity-xhs-1', purpose: 'discovery', scope: 'global' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.ok(calls.includes('Input.dispatchKeyEvent'), '应触发键盘输入搜索');
@@ -835,7 +835,7 @@ test('browse-session: search.execute 上报前等待搜索卡片 noteId 水合',
 
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('search.execute', 'se1', 0, { keyword: '目标' }),
+    makeEnvelope('xiaohongshu.search.execute', 'se1', 0, { keyword: '目标' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
 
@@ -871,7 +871,7 @@ test('browse-session: search.execute 未到结果页（恒停 /explore）→ 不
   const done = sess.start();
   await new Promise(r => setTimeout(r, 10)); // 让 start 完成初始 feed 上报
   const before = h.reportedCards.length;
-  await sess.onCloudCommand(makeEnvelope('search.execute', 'se1', 0, { keyword: 'Claude Code实测' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.search.execute', 'se1', 0, { keyword: 'Claude Code实测' }));
   await new Promise(r => setTimeout(r, 5));
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }));
   await done;
@@ -889,7 +889,7 @@ test('browse-session: search.execute 空关键词 → not_submitted，绝不把�
   const h = makeHarness();
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('search.execute', 'empty-search', 0, { keyword: '' }),
+    makeEnvelope('xiaohongshu.search.execute', 'empty-search', 0, { keyword: '' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const receipt = h.completedActions.find((a) => a.action === 'search');
@@ -910,7 +910,7 @@ test('browse-session: note.browse_images 命中轮播 → 如实回报 browsed=N
   })) as unknown as BrowseSessionDeps['noteExtractor'];
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.browse_images', 'bi1', 0, { noteId: 'n1', count: 4 }),
+    makeEnvelope('xiaohongshu.note.browse_images', 'bi1', 0, { noteId: 'n1', count: 4 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const act = h.completedActions.find(a => a.action === 'browse_images');
@@ -937,7 +937,7 @@ test('browse-session: note.browse_images 无轮播 → no_target 不假报成功
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.browse_images', 'bi2', 0, { noteId: 'n1', count: 3 }),
+    makeEnvelope('xiaohongshu.note.browse_images', 'bi2', 0, { noteId: 'n1', count: 3 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const act = h.completedActions.find(a => a.action === 'browse_images');
@@ -949,7 +949,7 @@ test('browse-session: note.scroll_comments 命中评论区 → 如实回报 scro
   const h = makeHarness();
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.scroll_comments', 'sc1', 0, { noteId: 'n1', count: 5 }),
+    makeEnvelope('xiaohongshu.note.scroll_comments', 'sc1', 0, { noteId: 'n1', count: 5 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const act = h.completedActions.find(a => a.action === 'scroll_comments');
@@ -973,7 +973,7 @@ test('browse-session: note.scroll_comments 无评论区 → no_target', async ()
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.scroll_comments', 'sc2', 0, { noteId: 'n1', count: 3 }),
+    makeEnvelope('xiaohongshu.note.scroll_comments', 'sc2', 0, { noteId: 'n1', count: 3 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const act = h.completedActions.find(a => a.action === 'scroll_comments');
@@ -997,7 +997,7 @@ test('browse-session: note.scroll_comments 命中但不可滚/已到底（scroll
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.scroll_comments', 'sc3', 0, { noteId: 'n1', count: 3 }),
+    makeEnvelope('xiaohongshu.note.scroll_comments', 'sc3', 0, { noteId: 'n1', count: 3 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const act = h.completedActions.find(a => a.action === 'scroll_comments');
@@ -1025,7 +1025,7 @@ test('browse-session: note.scroll_comments 短评论区 no_scroll 仍带回可�
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.scroll_comments', 'scb1', 0, { noteId: 'n1', count: 2 }),
+    makeEnvelope('xiaohongshu.note.scroll_comments', 'scb1', 0, { noteId: 'n1', count: 2 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const act = h.completedActions.find(a => a.action === 'scroll_comments');
@@ -1052,7 +1052,7 @@ test('browse-session: note.scroll_comments 无可滚容器 no_target 仍带回�
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.scroll_comments', 'scb2', 0, { noteId: 'n1', count: 2 }),
+    makeEnvelope('xiaohongshu.note.scroll_comments', 'scb2', 0, { noteId: 'n1', count: 2 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const act = h.completedActions.find(a => a.action === 'scroll_comments');
@@ -1078,7 +1078,7 @@ test('browse-session: note.scroll_comments 滚动成功经 harvest 回流评论�
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.scroll_comments', 'scb3', 0, { noteId: 'n1', count: 3 }),
+    makeEnvelope('xiaohongshu.note.scroll_comments', 'scb3', 0, { noteId: 'n1', count: 3 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const act = h.completedActions.find(a => a.action === 'scroll_comments');
@@ -1114,7 +1114,7 @@ test('browse-session: note.scroll_comments 使用 feed 同款多帧 mouseWheel �
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.scroll_comments', 'scb4', 0, { noteId: 'n1', count: 1 }),
+    makeEnvelope('xiaohongshu.note.scroll_comments', 'scb4', 0, { noteId: 'n1', count: 1 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const act = h.completedActions.find(a => a.action === 'scroll_comments');
@@ -1141,7 +1141,7 @@ test('browse-session: profile.open 进主页抽到资料 → reportProfileDetail
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('profile.open', 'po1', 0, { authorId: 'abc123' }),
+    makeEnvelope('xiaohongshu.profile.open', 'po1', 0, { authorId: 'abc123' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.equal(h.reportedProfiles.length, 1, '应上报一次 profile.detail');
@@ -1169,7 +1169,7 @@ test('browse-session: profile.open 找不到作者入口 → 上报 extracted:fa
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('profile.open', 'po2', 0, { authorId: 'abc123' }),
+    makeEnvelope('xiaohongshu.profile.open', 'po2', 0, { authorId: 'abc123' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.equal(h.reportedProfiles.length, 1);
@@ -1192,7 +1192,7 @@ test('browse-session: legacy profile.open{direct} 在 CDP 前拒绝', async () =
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('profile.open', 'pod', 0, { authorId: 'abc123', direct: true } as never),
+    makeEnvelope('xiaohongshu.profile.open', 'pod', 0, { authorId: 'abc123', direct: true } as never),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.equal(navUrls.some((url) => url.includes('/user/profile/')), false);
@@ -1225,7 +1225,7 @@ test('pacing: navigation.back 带 dwellMs 且停留不足 → 兜底停留（治
   const sleeps: number[] = [];
   const sess = new BrowseSession(h.deps, pacingOpts(sleeps, () => 1000)); // 时钟恒定 → 已停留≈0
   await startAndPush(sess, [
-    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0 }),
     makeEnvelope('navigation.back', 'b', 0, { reason: 'quality_rejected', targetPage: 'feed', dwellMs: DWELL_SENTINEL }),
     makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
   ]);
@@ -1240,7 +1240,7 @@ test('pacing: 真实阅读已超过 dwellMs → 不叠加等待（无双重延�
   const now = () => { const v = t; t += 40000; return v; };
   const sess = new BrowseSession(h.deps, pacingOpts(sleeps, now));
   await startAndPush(sess, [
-    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0 }),
     makeEnvelope('navigation.back', 'b', 0, { reason: 'quality_rejected', targetPage: 'feed', dwellMs: DWELL_SENTINEL }),
     makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
   ]);
@@ -1252,7 +1252,7 @@ test('pacing: navigation.back 缺 dwellMs（旧云端）仍非零停留（不秒
   const sleeps: number[] = [];
   const sess = new BrowseSession(h.deps, pacingOpts(sleeps, () => 1000));
   await startAndPush(sess, [
-    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0 }),
     makeEnvelope('navigation.back', 'b', 0, { reason: 'quality_rejected', targetPage: 'feed' }), // 无 dwellMs
     makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
   ]);
@@ -1265,7 +1265,7 @@ test('pacing: interaction.like 的 thinkMs → 执行前犹豫等待', async () 
   const sleeps: number[] = [];
   const sess = new BrowseSession(h.deps, pacingOpts(sleeps, () => 1000));
   await startAndPush(sess, [
-    makeEnvelope('note.open', 'n1', 0, { index: 0 }),
+    makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0 }),
     makeEnvelope('interaction.like', 'l', 0, { noteId: 'x', thinkMs: DWELL_SENTINEL }),
     makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
   ]);
@@ -1387,7 +1387,7 @@ test('登录闸门: 弹窗存在时暂停 page.scroll，弹窗消失后才执行
   h.deps.loginGate = { isOpen: async () => { n++; return n >= 2 && n <= 3; } };
   const sess = new BrowseSession(h.deps, captureOpts(logs));
   await startAndPush(sess, [
-    makeEnvelope('page.scroll', 'c1', 0, { reason: 'scroll' }),
+    makeEnvelope('xiaohongshu.feed.scroll', 'c1', 0, { reason: 'scroll' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.ok(logs.some((m) => m.includes('检测到登录弹窗')), '应记录暂停');
@@ -1466,7 +1466,7 @@ test('overlayMonitor 闸门: state=captcha 时暂停 browse.next，翻回 none �
   h.deps.overlayMonitor = fakeMonitor({ stateSeq: () => { n++; return n >= 2 && n <= 3 ? 'captcha' : 'none'; } });
   const sess = new BrowseSession(h.deps, captureOpts(logs));
   await startAndPush(sess, [
-    makeEnvelope('page.scroll', 'c1', 0, { reason: 'scroll' }),
+    makeEnvelope('xiaohongshu.feed.scroll', 'c1', 0, { reason: 'scroll' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.ok(logs.some((m) => m.includes('检测到验证码弹窗')), '应记录验证码暂停');
@@ -1525,7 +1525,7 @@ test('browse-session: 命令执行中 CDP 断线 → 等重连成功后续跑重
   await new Promise((r) => setTimeout(r, 10)); // 初始上报，loop 进 waitForCommand
   const before = h.reportedCards.length;
   armed = true;
-  await sess.onCloudCommand(makeEnvelope('page.scroll', 'c1', 0, { reason: 'scroll' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.scroll', 'c1', 0, { reason: 'scroll' }));
   await new Promise((r) => setTimeout(r, 5)); // scrollNext 抛 CdpDisconnectedError → loop 捕获 → waitForReconnect 挂起
   emit('cdp.reconnected'); // 模拟重连成功
   await new Promise((r) => setTimeout(r, 10)); // resumeAfterReconnect 重报
@@ -1542,7 +1542,7 @@ test('browse-session: 云端 WS 重连后丢弃旧队列并重报 page.cards', a
   await new Promise((r) => setTimeout(r, 10)); // 初始上报，loop 进 waitForCommand
   const before = h.reportedCards.length;
   (sess as unknown as { commandQueue: Envelope[] }).commandQueue = [
-    makeEnvelope('page.scroll', 'stale-scroll', 0, { reason: 'stale_before_reconnect' }),
+    makeEnvelope('xiaohongshu.feed.scroll', 'stale-scroll', 0, { reason: 'stale_before_reconnect' }),
   ];
 
   await sess.recoverAfterCloudReconnect();
@@ -1574,7 +1574,7 @@ test('browse-session: 输入控制不可用 → 停止浏览并丢弃未开始�
   const done = sess.start();
   await new Promise((r) => setTimeout(r, 10));
   (sess as unknown as { commandQueue: Envelope[] }).commandQueue = [
-    makeEnvelope('page.scroll', 'stale-after-timeout', 0, { reason: 'unsafe' }),
+    makeEnvelope('xiaohongshu.feed.scroll', 'stale-after-timeout', 0, { reason: 'unsafe' }),
   ];
   emit('cdp.control_unavailable');
   await Promise.race([
@@ -1592,7 +1592,7 @@ test('browse-session: CDP 软恢复开始时丢弃本地旧浏览队列，避免
   const done = sess.start();
   await new Promise((r) => setTimeout(r, 10));
   (sess as unknown as { commandQueue: Envelope[] }).commandQueue = [
-    makeEnvelope('page.scroll', 'queued-before-reconnect', 0, { reason: 'stale' }),
+    makeEnvelope('xiaohongshu.feed.scroll', 'queued-before-reconnect', 0, { reason: 'stale' }),
   ];
   emit('cdp.control_recovering');
   assert.equal((sess as unknown as { commandQueue: Envelope[] }).commandQueue.length, 0);
@@ -1628,7 +1628,7 @@ test('browse-session: 输入超时触发的终止与原子操作报错并发时�
   const sess = new BrowseSession(h.deps, noOpts());
   const done = sess.start();
   await new Promise((r) => setTimeout(r, 10));
-  await sess.onCloudCommand(makeEnvelope('page.scroll', 'timeout-in-flight', 0, { reason: 'unsafe' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.scroll', 'timeout-in-flight', 0, { reason: 'unsafe' }));
   await assert.doesNotReject(done);
   assert.equal(sess.isRunning(), false);
 });
@@ -1677,7 +1677,7 @@ test('browse-session: 循环因 session.end 停止后，收到 page.scroll → �
 
   // 阶段2：循环已停，收到一条续场引导 page.scroll → 应唤醒重启循环、重新上报 cards
   //（旧行为：命令静默堆进无人消费的队列，循环不复活、不再上报）。
-  await sess.onCloudCommand(makeEnvelope('page.scroll', 's1', 0, { reason: 'resume_redrive' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.scroll', 's1', 0, { reason: 'resume_redrive' }));
   await new Promise((r) => setTimeout(r, 30)); // 等重启循环 init + 重报（sleep 已被桩为 no-op）
   assert.ok(h.reportedCards.length > afterStop, 'A②：唤醒重启后应重新上报 page.cards');
 
@@ -1695,7 +1695,7 @@ test('browse-session: session.end 收尾竞态中收到 page.scroll → 停稳�
   assert.ok(h.reportedCards.length >= 1, '首轮应至少上报一次 page.cards');
 
   await sess.onCloudCommand(makeEnvelope('session.end', 'e1', 0, { reason: 'publish_takeover' }));
-  await sess.onCloudCommand(makeEnvelope('page.scroll', 's1', 0, { reason: 'resume_redrive' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.scroll', 's1', 0, { reason: 'resume_redrive' }));
   await firstRun;
   const afterFirstRun = h.reportedCards.length;
 
@@ -1743,7 +1743,7 @@ test('browse-session: 发布续场 page.scroll 在创作平台页时先回 explo
   await new Promise((r) => setTimeout(r, 10));
 
   currentUrl = 'https://creator.xiaohongshu.com/publish/publish?source=official&published=true';
-  await sess.onCloudCommand(makeEnvelope('page.scroll', 's1', 0, { reason: 'resume_redrive' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.scroll', 's1', 0, { reason: 'resume_redrive' }));
   await new Promise((r) => setTimeout(r, 10));
 
   assert.ok(navigates.includes('https://www.xiaohongshu.com/explore'), 'resume_redrive 应先导航回 explore feed');
@@ -1760,7 +1760,7 @@ test('browse-session: 终态关闭（close）后收到迟到命令 → MUST NOT 
   const afterStop = h.reportedCards.length;
 
   sess.close(); // 终态关闭（进程下线语义）：置 closing
-  await sess.onCloudCommand(makeEnvelope('page.scroll', 's1', 0, { reason: 'late_after_close' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.scroll', 's1', 0, { reason: 'late_after_close' }));
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(h.reportedCards.length, afterStop, 'A②：终态关闭后迟到命令 MUST NOT 唤醒重启循环');
 });
@@ -1898,7 +1898,7 @@ test('navigateBack: 搜索来源记录 URL → 直接 Page.navigate 回搜索结
 
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('note.open', 'n', 0, { index: 0, noteId: 'abc123' }),
+    makeEnvelope('xiaohongshu.note.open', 'n', 0, { index: 0, noteId: 'abc123' }),
     makeEnvelope('navigation.back', 'b', 0, { reason: 'back_to_feed', targetPage: 'search' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
@@ -1936,7 +1936,7 @@ test('pacing: page.scroll 带 dwellMs 且刚到卡（停留不足）→ 翻页�
   const sleeps: number[] = [];
   const sess = new BrowseSession(h.deps, pacingOpts(sleeps, () => 1000)); // 时钟恒定 → 已停≈0
   await startAndPush(sess, [
-    makeEnvelope('page.scroll', 's', 0, { reason: 'feed_scroll', dwellMs: DWELL_SENTINEL }),
+    makeEnvelope('xiaohongshu.feed.scroll', 's', 0, { reason: 'feed_scroll', dwellMs: DWELL_SENTINEL }),
     makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
   ]);
   assert.ok(sleeps.some((ms) => ms > ISOLATE), `翻页前应有≈dwellMs的兜底停留，实际: ${sleeps}`);
@@ -1950,7 +1950,7 @@ test('pacing: page.scroll 已停够（评估耗时被吸收）→ 不叠加等�
   const now = () => { const v = t; t += 40000; return v; };
   const sess = new BrowseSession(h.deps, pacingOpts(sleeps, now));
   await startAndPush(sess, [
-    makeEnvelope('page.scroll', 's', 0, { reason: 'feed_scroll', dwellMs: DWELL_SENTINEL }),
+    makeEnvelope('xiaohongshu.feed.scroll', 's', 0, { reason: 'feed_scroll', dwellMs: DWELL_SENTINEL }),
     makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
   ]);
   assert.ok(!sleeps.some((ms) => ms > ISOLATE), `已停够不应再兜底停留，实际: ${sleeps}`);
@@ -1961,7 +1961,7 @@ test('pacing: page.scroll 缺 dwellMs（返回未刷新/旧云端）→ 立即�
   const sleeps: number[] = [];
   const sess = new BrowseSession(h.deps, pacingOpts(sleeps, () => 1000));
   await startAndPush(sess, [
-    makeEnvelope('page.scroll', 's', 0, { reason: 'feed_scroll' }), // 无 dwellMs
+    makeEnvelope('xiaohongshu.feed.scroll', 's', 0, { reason: 'feed_scroll' }), // 无 dwellMs
     makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
   ]);
   assert.ok(!sleeps.some((ms) => ms > ISOLATE), `缺 dwellMs 不应有 feed 兜底停留，实际: ${sleeps}`);
@@ -1982,7 +1982,7 @@ test('task quiesce: 等当前浏览原子动作完成、取消未开始旧命令
   const sess = new BrowseSession(h.deps, noOpts());
   const running = sess.start();
   await new Promise((resolve) => setTimeout(resolve, 10));
-  await sess.onCloudCommand(makeEnvelope('page.scroll', 'active-scroll', 0, { reason: 'active' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.scroll', 'active-scroll', 0, { reason: 'active' }));
   await started;
   // 当前 scroll 执行中，把一个旧 back 排进队列；quiesce 必须丢它而不是先排空。
   await sess.onCloudCommand(makeEnvelope('navigation.back', 'stale-back', 0, { reason: 'stale' }));
@@ -1994,7 +1994,7 @@ test('task quiesce: 等当前浏览原子动作完成、取消未开始旧命令
   assert.equal(await quiesced, 1, '未开始的旧 back 被取消');
 
   await sess.resumeAfterTask();
-  await sess.onCloudCommand(makeEnvelope('page.scroll', 'fresh-scroll', 0, { reason: 'new_page_decision' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.scroll', 'fresh-scroll', 0, { reason: 'new_page_decision' }));
   await new Promise((resolve) => setTimeout(resolve, 5));
   await sess.onCloudCommand(makeEnvelope('session.end', 'end-after-task', 0, { reason: 'done' }));
   await running;
@@ -2028,7 +2028,7 @@ test('task quiesce regression: 在途 navigation.back 完成后才允许发布 a
   detailMode = true;
   await sess.onCloudCommand(makeEnvelope('navigation.back', 'active-back', 0, { reason: 'back_to_feed' }));
   await navigateStarted;
-  await sess.onCloudCommand(makeEnvelope('page.scroll', 'stale-scroll', 0, { reason: 'old_page_decision' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.scroll', 'stale-scroll', 0, { reason: 'old_page_decision' }));
   let acquired = false;
   const quiesced = sess.quiesceForTask().then((count) => { acquired = true; return count; });
   await new Promise((resolve) => setImmediate(resolve));
@@ -2082,7 +2082,7 @@ test('feed.refresh: 定位到刷新按钮 + 点后回顶换新批 → ok:true �
   const done = sess.start();
   await new Promise((r) => setTimeout(r, 15)); // start 初扫会先报一次 page.cards
   const before = h.reportedCards.length;
-  await sess.onCloudCommand(makeEnvelope('feed.refresh', 'r1', 0, { reason: 'feed_refresh', thinkMs: 300 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.refresh', 'r1', 0, { reason: 'feed_refresh', thinkMs: 300 }));
   await new Promise((r) => setTimeout(r, 5));
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }));
   await done;
@@ -2099,7 +2099,7 @@ test('feed.refresh: 点后首卡为空（仅回到顶部、内容未换）→ no
   const done = sess.start();
   await new Promise((r) => setTimeout(r, 15)); // start 初扫会先报一次 page.cards
   const before = h.reportedCards.length;
-  await sess.onCloudCommand(makeEnvelope('feed.refresh', 'r1', 0, { reason: 'feed_refresh' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.refresh', 'r1', 0, { reason: 'feed_refresh' }));
   await new Promise((r) => setTimeout(r, 5));
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }));
   await done;
@@ -2114,7 +2114,7 @@ test('feed.refresh: 找不到悬浮容器 → ok:false no_floating_btn（不假�
   const h = refreshHarness({ locate: '{"error":"no_floating_btn"}' });
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('feed.refresh', 'r1', 0, { reason: 'feed_refresh' }),
+    makeEnvelope('xiaohongshu.feed.refresh', 'r1', 0, { reason: 'feed_refresh' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const r = h.completedActions.find((a) => a.action === 'refresh');
@@ -2130,7 +2130,7 @@ test('feed.refresh: 不在 explore feed → ok:false wrong_context（不点、�
   const done = sess.start();
   await new Promise((r) => setTimeout(r, 10));
   ctl.url = 'https://www.xiaohongshu.com/explore/6abc12345678?xsec_token=t'; // 详情页（非 feed）
-  await sess.onCloudCommand(makeEnvelope('feed.refresh', 'r1', 0, { reason: 'feed_refresh' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.refresh', 'r1', 0, { reason: 'feed_refresh' }));
   await new Promise((r) => setTimeout(r, 1));
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }));
   await done;
@@ -2237,7 +2237,7 @@ test('让路: 命令停在阻断浮层闸时被接管 → 交接立即收敛、�
   const sess = new BrowseSession(h.deps, yieldingOpts());
   const running = sess.start();
   await new Promise((r) => setTimeout(r, 10));
-  await sess.onCloudCommand(makeEnvelope('page.scroll', 'stuck-scroll', 0, { reason: 'active' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.scroll', 'stuck-scroll', 0, { reason: 'active' }));
   await new Promise((r) => setTimeout(r, 10)); // 让它真正进到浮层闸里等着
 
   // 关键断言：交接必须立即收敛——绝不等那个永不消失的验证码。
@@ -2247,7 +2247,7 @@ test('让路: 命令停在阻断浮层闸时被接管 → 交接立即收敛、�
   const preempted = h.completedActions.filter((a) => a.reason === 'preempted_by_task');
   assert.equal(preempted.length, 1, '被接管的命令必须回恰好一条诚实失败回执（MUST NOT 静默丢弃）');
   assert.equal(preempted[0].ok, false, '被接管 = 失败，绝不假装成功');
-  assert.equal(preempted[0].action, 'page.scroll', '回执动作名 = 协议消息名（边缘不建映射表）');
+  assert.equal(preempted[0].action, 'xiaohongshu.feed.scroll', '回执动作名 = 协议消息名（边缘不建映射表）');
   assert.equal(scrolled, 0, '接管信号之后 MUST 记录到零次页面改写调用');
 
   sess.stop();
@@ -2266,7 +2266,7 @@ test('让路: 命令停在翻页前停留时被接管 → 交接毫秒级收敛�
 
   // 翻页前的「看完本批新卡」停留：下发 90s 预算，命令会停在停留里、尚未滚动。
   ctl.armDwellBlock = true;
-  await sess.onCloudCommand(makeEnvelope('page.scroll', 'dwelling-scroll', 0, { reason: 'active', dwellMs: 90_000 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.scroll', 'dwelling-scroll', 0, { reason: 'active', dwellMs: 90_000 }));
   await new Promise((r) => setTimeout(r, 30));
 
   const t0 = Date.now();
@@ -2297,7 +2297,7 @@ test('让路判据是接管世代号，不是「浏览已冻结」标志：持�
   // 独占任务自己的命令（带 taskId）跑在冻结期内：世代号仍是 N ⇒ MUST 正常执行。
   // 若判据误用 taskBlocked 标志，这条命令会在自己的第一个安全取消点当场自尽。
   await sess.onCloudCommand({
-    ...makeEnvelope('page.scroll', 'task-owned-scroll', 0, { reason: 'task' }),
+    ...makeEnvelope('xiaohongshu.feed.scroll', 'task-owned-scroll', 0, { reason: 'task' }),
     payload: { reason: 'task', taskId: 'T1' },
   } as unknown as Envelope);
   await new Promise((r) => setTimeout(r, 20));
@@ -2320,7 +2320,7 @@ test('交接有界且不撒谎: 真写段永不收敛 → quiesce 抛出（MUST 
   const sess = new BrowseSession(h.deps, yieldingOpts());
   const running = sess.start();
   await new Promise((r) => setTimeout(r, 10));
-  await sess.onCloudCommand(makeEnvelope('page.scroll', 'never-ends', 0, { reason: 'active' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.scroll', 'never-ends', 0, { reason: 'active' }));
   await new Promise((r) => setTimeout(r, 10));
 
   await assert.rejects(

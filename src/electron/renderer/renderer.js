@@ -2556,21 +2556,26 @@ const COMMAND_DIAGNOSTIC_REASONS = {
 const COMMAND_DIAGNOSTIC_LABELS = {
   'plan.response': '顺序步骤',
   'session.end': '结束浏览',
-  'browse.next': '浏览下一条',
-  'browse.scroll': '页面滚动',
-  'note.open': '打开内容',
-  'note.close': '关闭内容',
-  'search.execute': '关键词搜索',
-  'page.scroll': '页面滚动',
-  'feed.refresh': '刷新信息流',
+  'xiaohongshu.note.open': '打开内容',
+  'facebook.note.open': '打开内容',
+  'xiaohongshu.note.close': '关闭内容',
+  'facebook.note.close': '关闭内容',
+  'xiaohongshu.search.execute': '关键词搜索',
+  'facebook.search.execute': '关键词搜索',
+  'xiaohongshu.feed.scroll': '信息流滚动',
+  'xiaohongshu.search.scroll': '搜索页滚动',
+  'facebook.feed.scroll': '信息流滚动',
+  'facebook.search.scroll': '搜索页滚动',
+  'facebook.reels.scroll': 'Reels 滚动',
+  'xiaohongshu.feed.refresh': '刷新信息流',
+  'facebook.feed.refresh': '刷新信息流',
   'pacing.update': '更新节奏',
   'interaction.like': '点赞',
   'interaction.collect': '收藏',
   'interaction.follow': '关注',
   'interaction.comment': '评论',
   'interaction.like_comment': '评论点赞',
-  'group.join': '群组加入',
-  'publish.request': '发布请求',
+  'facebook.group.join': '群组加入',
   'publish.command': '发布步骤',
   'edge.task.acquire': '申请写租约',
   'edge.task.release': '释放写租约',
@@ -2603,7 +2608,7 @@ function renderCommandDiagnostics(status, now = Date.now()) {
     return;
   }
   fields.commandDiagnosticList.innerHTML = entries.map((entry) => {
-    const reelsEntry = entry.type === 'page.scroll'
+    const reelsEntry = entry.type === 'facebook.reels.scroll'
       && (entry.summary === '进入 Reels 主浏览' || entry.summary === '信息流结束，进入 Reels');
     const label = reelsEntry ? '进入 Reels' : (COMMAND_DIAGNOSTIC_LABELS[entry.type] || entry.type);
     const stage = COMMAND_DIAGNOSTIC_STAGES[entry.stage];

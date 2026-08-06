@@ -1,5 +1,5 @@
 use aidcp_page_engine::command::{
-    CaptchaCaptureParams, CaptchaClickParams, CaptchaPoint, CommentParams, FacebookBrowseSurface,
+    BrowseSurface, CaptchaCaptureParams, CaptchaClickParams, CaptchaPoint, CommentParams,
     FollowParams, GroupJoinParams, IdentityCaptureParams, NoteInteractionParams, NoteOpenParams,
     NoteOpenSelection, NotePurpose, NoteSurface, PageScrollParams, ReasonParams,
     SearchExecuteParams,
@@ -474,7 +474,7 @@ async fn facebook_feed_scroll_dispatches_a_humanized_multi_frame_wheel_gesture()
             deadline_unix_ms: unix_time_ms() + 8_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("feed_scroll".to_owned()),
-                target_surface: None,
+                surface: None,
                 dwell_ms: None,
             }),
         })
@@ -761,7 +761,7 @@ async fn facebook_watchdog_feed_recovery_foregrounds_once_without_duplicate_acti
             deadline_unix_ms: unix_time_ms() + 30_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("idle_recover_nudge".to_owned()),
-                target_surface: None,
+                surface: None,
                 dwell_ms: None,
             }),
         })
@@ -863,7 +863,7 @@ async fn facebook_resume_redrive_on_active_reel_reports_current_without_extra_na
             deadline_unix_ms: unix_time_ms() + 10_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("resume_redrive".to_owned()),
-                target_surface: Some(FacebookBrowseSurface::Reels),
+                surface: Some(BrowseSurface::Reels),
                 dwell_ms: None,
             }),
         })
@@ -905,7 +905,7 @@ async fn facebook_watchdog_reel_scroll_foregrounds_once_before_trusted_arrow() {
             deadline_unix_ms: unix_time_ms() + 5_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("idle_recover_nudge".to_owned()),
-                target_surface: None,
+                surface: None,
                 dwell_ms: Some(7_000),
             }),
         })
@@ -976,7 +976,7 @@ async fn facebook_axisless_live_shape_uses_the_default_horizontal_probe() {
             deadline_unix_ms: unix_time_ms() + 5_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("feed_scroll".to_owned()),
-                target_surface: None,
+                surface: None,
                 dwell_ms: None,
             }),
         })
@@ -1037,7 +1037,7 @@ async fn facebook_reel_ambiguous_active_structure_still_probes_once_when_safe() 
             deadline_unix_ms: unix_time_ms() + 5_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("feed_scroll".to_owned()),
-                target_surface: None,
+                surface: None,
                 dwell_ms: None,
             }),
         })
@@ -1325,7 +1325,7 @@ async fn facebook_reel_scroll_without_active_video_uses_one_safe_probe() {
             deadline_unix_ms: unix_time_ms() + 5_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("feed_scroll".to_owned()),
-                target_surface: None,
+                surface: None,
                 dwell_ms: None,
             }),
         })
@@ -1409,7 +1409,7 @@ async fn facebook_reel_probe_key_alternates_then_retains_the_confirmed_key() {
         deadline_unix_ms: unix_time_ms() + 25_000,
         command: NativeCommand::PageScroll(PageScrollParams {
             reason: Some("feed_scroll".to_owned()),
-            target_surface: None,
+            surface: None,
             dwell_ms: None,
         }),
     };
@@ -3206,7 +3206,7 @@ fn facebook_reel_scroll_command(id: &str, command_id: u64, timeout_ms: u64) -> C
         deadline_unix_ms: unix_time_ms() + timeout_ms,
         command: NativeCommand::PageScroll(PageScrollParams {
             reason: Some("feed_scroll".to_owned()),
-            target_surface: None,
+            surface: None,
             dwell_ms: None,
         }),
     }
@@ -4614,7 +4614,7 @@ async fn run_facebook_feed_scroll_recovery(
             deadline_unix_ms: unix_time_ms() + 20_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("feed_scroll".to_owned()),
-                target_surface: None,
+                surface: None,
                 dwell_ms: None,
             }),
         })
@@ -5683,7 +5683,7 @@ async fn run_facebook_reels_entry(
             deadline_unix_ms: unix_time_ms() + FACEBOOK_REELS_ENTRY_TEST_TIMEOUT_MS,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("resume_redrive".to_owned()),
-                target_surface: Some(FacebookBrowseSurface::Reels),
+                surface: Some(BrowseSurface::Reels),
                 dwell_ms: None,
             }),
         })
@@ -5717,7 +5717,7 @@ async fn run_facebook_reels_entry_with_cancellation(
                 deadline_unix_ms: unix_time_ms() + FACEBOOK_REELS_ENTRY_TEST_TIMEOUT_MS,
                 command: NativeCommand::PageScroll(PageScrollParams {
                     reason: Some("resume_redrive".to_owned()),
-                    target_surface: Some(FacebookBrowseSurface::Reels),
+                    surface: Some(BrowseSurface::Reels),
                     dwell_ms: None,
                 }),
             },
@@ -6029,7 +6029,7 @@ async fn run_facebook_reel_active_key_probe(
             deadline_unix_ms: unix_time_ms() + 25_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("feed_scroll".to_owned()),
-                target_surface: None,
+                surface: None,
                 dwell_ms: None,
             }),
         })
@@ -6728,7 +6728,7 @@ async fn facebook_identity_acquisition_hovers_without_ever_pressing() {
             deadline_unix_ms: unix_time_ms() + 30_000,
             command: NativeCommand::PageScroll(PageScrollParams {
                 reason: Some("feed_scroll".to_owned()),
-                target_surface: None,
+                surface: None,
                 dwell_ms: None,
             }),
         })

@@ -1388,7 +1388,7 @@ test('T17 重立成功之后收尾步骤抛异常：MUST NOT 报成身份终局�
 test('T18 身份闸：写动作与重绑被拦并如实回执，救援 / 读 / 收尾类照常放行', () => {
   // ── ① 写动作（以页面账号名义动作的那些）在两种未落定态下都 MUST 被拦。
   for (const health of ['invalid', 'reestablishing'] as const) {
-    for (const type of ['publish.command', 'interaction.comment', 'interaction.like', 'edge.task.acquire', 'group.join'] as const) {
+    for (const type of ['publish.command', 'interaction.comment', 'interaction.like', 'edge.task.acquire', 'facebook.group.join'] as const) {
       const verdict = judgeCommandUnderIdentity(health, type);
       assert.equal(verdict.kind, 'refuse', `${health} 下 ${type} MUST 被拦：它会在平台上留下该账号名下的真实痕迹`);
       assert.equal(verdict.kind === 'refuse' ? verdict.reason : '', 'identity_unresolved',

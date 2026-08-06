@@ -116,7 +116,7 @@ function makeSession(opts: {
 
 test('note.open surface=feed → 就地读 → note.detail（noteId 页面派生），不导航详情', async () => {
   const h = makeSession({ inline: { ok: true, permalinkHref: A, postId: 'fb:pfbidAAA', body: 'inline full body', reactionCount: 9, author: 'iQIYI', isVideo: false, articleIndex: 0 } });
-  await h.session.onCloudCommand(makeEnv('note.open', { noteId: A, surface: 'feed' }));
+  await h.session.onCloudCommand(makeEnv('facebook.note.open', { noteId: A, surface: 'feed' }));
   assert.equal(h.details.length, 1);
   assert.equal(h.details[0].noteId, A);
   assert.equal(h.details[0].content, 'inline full body');
@@ -128,7 +128,7 @@ test('note.open surface=feed → 就地读 → note.detail（noteId 页面派生
 
 test('note.open 缺省 surface=detail → 导航详情深读（今天行为，inline 不触发）', async () => {
   const h = makeSession({});
-  await h.session.onCloudCommand(makeEnv('note.open', { noteId: A }));
+  await h.session.onCloudCommand(makeEnv('facebook.note.open', { noteId: A }));
   assert.equal(h.details.length, 1);
   assert.equal(h.postOpenCalls.length, 1, '走详情导航');
   assert.equal(h.inlineCalls.length, 0, 'inline 不触发');
@@ -136,7 +136,7 @@ test('note.open 缺省 surface=detail → 导航详情深读（今天行为，in
 
 test('note.open purpose=navigate → 落地详情但 MUST NOT 上报 note.detail，只回 action.completed', async () => {
   const h = makeSession({});
-  await h.session.onCloudCommand(makeEnv('note.open', { noteId: A, purpose: 'navigate' }));
+  await h.session.onCloudCommand(makeEnv('facebook.note.open', { noteId: A, purpose: 'navigate' }));
   assert.equal(h.details.length, 0, 'navigate 绝不上报 note.detail');
   assert.equal(h.actions.length, 1);
   assert.equal(h.actions[0].action, 'open_note');
@@ -147,7 +147,7 @@ test('note.open purpose=navigate → 落地详情但 MUST NOT 上报 note.detail
 
 test('note.open surface=feed 环境变化 → 回落 detail 导航（诚实读详情）', async () => {
   const h = makeSession({ inline: { ok: false, reason: 'context_changed' } });
-  await h.session.onCloudCommand(makeEnv('note.open', { noteId: A, surface: 'feed' }));
+  await h.session.onCloudCommand(makeEnv('facebook.note.open', { noteId: A, surface: 'feed' }));
   assert.equal(h.inlineCalls.length, 1);
   assert.equal(h.postOpenCalls.length, 1, 'context_changed → 回落详情导航');
   assert.equal(h.details.length, 1, '回落后照实上报 note.detail');
@@ -155,7 +155,7 @@ test('note.open surface=feed 环境变化 → 回落 detail 导航（诚实读�
 
 test('note.open surface=feed 诚实失败（no_target）→ action.completed，不假 note.detail', async () => {
   const h = makeSession({ inline: { ok: false, reason: 'no_target' } });
-  await h.session.onCloudCommand(makeEnv('note.open', { noteId: A, surface: 'feed' }));
+  await h.session.onCloudCommand(makeEnv('facebook.note.open', { noteId: A, surface: 'feed' }));
   assert.equal(h.details.length, 0);
   assert.equal(h.actions[0].action, 'open_note');
   assert.equal(h.actions[0].ok, false);
@@ -175,7 +175,7 @@ test('page.scroll 只上报未见过的新卡（回收重现被滤掉）', async
   await h.session.start(); // 首屏
   assert.equal(h.cards.length, 1);
   assert.equal(h.cards[0].cards.length, 2, '首屏播种 A,B');
-  await h.session.onCloudCommand(makeEnv('page.scroll', {}));
+  await h.session.onCloudCommand(makeEnv('facebook.feed.scroll', {}));
   assert.equal(h.cards.length, 2);
   assert.equal(h.cards[1].cards.length, 1, '滚动只报新卡 C');
   assert.equal(h.cards[1].cards[0].noteId, C);
@@ -185,7 +185,7 @@ test('page.scroll 只上报未见过的新卡（回收重现被滤掉）', async
 test('page.scroll 连续无新卡（全回收重现）→ 有界续滚后 feed_exhausted', async () => {
   const h = makeSession({ settle: () => ({ cards: [fbCard(A), fbCard(B, 1)], degraded: false }) });
   await h.session.start(); // 首屏播种 A,B
-  await h.session.onCloudCommand(makeEnv('page.scroll', {}));
+  await h.session.onCloudCommand(makeEnv('facebook.feed.scroll', {}));
   const last = h.actions[h.actions.length - 1];
   assert.equal(last.action, 'scroll');
   assert.equal(last.ok, false);
@@ -205,10 +205,10 @@ test('feed.refresh 换批成功 → 重置游标，随后 scroll 重新把换批
     },
   });
   await h.session.start();
-  await h.session.onCloudCommand(makeEnv('feed.refresh', {}));
+  await h.session.onCloudCommand(makeEnv('facebook.feed.refresh', {}));
   assert.equal(h.cards.length, 2);
   assert.equal(h.cards[1].cards[0].noteId, B, 'refresh 报换批后的 B');
-  await h.session.onCloudCommand(makeEnv('page.scroll', {}));
+  await h.session.onCloudCommand(makeEnv('facebook.feed.scroll', {}));
   assert.equal(h.cards.length, 3);
   assert.equal(h.cards[2].cards.length, 1);
   assert.equal(h.cards[2].cards[0].noteId, C, 'B 已随 refresh 播种，scroll 只报新的 C');

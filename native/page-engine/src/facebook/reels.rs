@@ -198,16 +198,38 @@ pub(crate) async fn execute_facebook_page_scroll(
     cancellation: Option<&AtomicBool>,
     deadline_unix_ms: u64,
 ) -> Result<(EffectPhase, CommandOutput), EngineError> {
-    let foreground_activated = matches!(
-        command,
-        NativeCommand::PageScroll(params)
-            if params.reason.as_deref() == Some("idle_recover_nudge")
-    );
+    let (declared_surface, foreground_activated) = match command {
+        NativeCommand::PageScroll(params) => (
+            params.surface,
+            params.reason.as_deref() == Some("idle_recover_nudge"),
+        ),
+        _ => (None, false),
+    };
     if foreground_activated {
         session.cdp.bring_to_front().await?;
     }
     let before = probe_facebook_reel(session).await?;
-    if !before.is_reels_surface() {
+    let observed_reels = before.is_reels_surface();
+    // 词汇批 4：面由命令名声明。声明与观测不符 ⇒ 诚实失败（确认到不符，回报观测面），
+    // MUST NOT 静默改跑另一面的执行器（facebook-reels-native-scroll spec）。
+    match declared_surface {
+        Some(crate::command::BrowseSurface::Reels) if !observed_reels => {
+            return Ok(facebook_scroll_failure(
+                EffectPhase::NotStarted,
+                "surface_mismatch_observed_list",
+            ));
+        }
+        Some(crate::command::BrowseSurface::Feed | crate::command::BrowseSurface::Search)
+            if observed_reels =>
+        {
+            return Ok(facebook_scroll_failure(
+                EffectPhase::NotStarted,
+                "surface_mismatch_observed_reels",
+            ));
+        }
+        _ => {}
+    }
+    if !observed_reels {
         return execute_facebook_feed_scroll(
             session,
             cancellation,

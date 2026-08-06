@@ -25,7 +25,7 @@ export class FacebookJoinHandler {
   }
 
   async handle(env: Envelope): Promise<void> {
-    if (env.type !== 'group.join') {
+    if (env.type !== 'facebook.group.join') {
       this.client.reportActionCompleted({ action: env.type, ok: false, reason: 'capability_unsupported' });
       return;
     }

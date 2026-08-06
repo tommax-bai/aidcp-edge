@@ -722,9 +722,7 @@ pub(crate) fn facebook_command_requires_gate(command: &NativeCommand) -> bool {
 
 pub(crate) fn facebook_action_name(command: &NativeCommand) -> &'static str {
     match command {
-        NativeCommand::BrowseNext(_)
-        | NativeCommand::BrowseScroll(_)
-        | NativeCommand::PageScroll(_) => "scroll",
+        NativeCommand::BrowseScroll(_) | NativeCommand::PageScroll(_) => "scroll",
         NativeCommand::FeedRefresh(_) => "refresh",
         NativeCommand::SearchExecute(_) => "search",
         NativeCommand::NoteOpen(_) => "open_note",

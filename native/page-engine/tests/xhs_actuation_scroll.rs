@@ -92,7 +92,7 @@ impl Observed {
 struct FakePage {
     /// 页面是否真的随滚轮位移。false = 到底 / 不可滚。
     scrolls: bool,
-    /// 详情浮层是否存在（`browse_next` 滚前须先关）。
+    /// 详情浮层是否存在（历史 `browse_next` 滚前须先关；该变体已随词汇批 4 删除，字段留给评论区滚动场景）。
     overlay: bool,
     /// 拒发第几次 `mouseWheel`（0 = 从不）。
     reject_wheel_at: usize,
@@ -474,7 +474,7 @@ async fn an_initial_scan_reads_the_page_without_dispatching_any_gesture() {
     let result = engine
         .execute(&scroll_command(
             1,
-            command(r#"{"kind":"browse_next","params":{"reason":"initial_scan"}}"#),
+            command(r#"{"kind":"browse_scroll","params":{"reason":"initial_scan"}}"#),
             25_000,
         ))
         .await
@@ -571,77 +571,6 @@ async fn a_takeover_during_a_feed_gesture_passes_through_as_cancelled() {
 
     drop(engine);
     let _ = server.await.expect("fake page");
-}
-
-#[tokio::test]
-async fn browse_next_closes_the_detail_overlay_before_it_scrolls() {
-    let cancellation = Arc::new(AtomicBool::new(false));
-    let (port, server) = spawn_page(
-        FakePage {
-            overlay: true,
-            ..FakePage::default()
-        },
-        cancellation.clone(),
-    )
-    .await;
-    let mut engine = Engine::default();
-    engine.open(&session_open(port)).await.expect("open");
-
-    engine
-        .execute(&scroll_command(
-            1,
-            command(r#"{"kind":"browse_next","params":{"reason":"feed_paging"}}"#),
-            25_000,
-        ))
-        .await
-        .expect("command result");
-
-    drop(engine);
-    let observed = server.await.expect("fake page");
-    // 浮层没关就滚 = 在浮层上滚：位移读到了，feed 却一步没动。
-    let press_at = observed
-        .first_index("mousePressed")
-        .expect("浮层在场时必须先点关闭");
-    let wheel_at = observed.first_index("mouseWheel").expect("随后才滚");
-    assert!(press_at < wheel_at, "关闭浮层必须发生在第一帧滚轮之前");
-}
-
-/// 「浮层不在」与「浮层在不在读不到」是两态。
-///
-/// 把读不到当成「浮层不在」就直接跳过关闭，手势于是落在浮层上 —— 浮层自己也能滚：
-/// 位移**读到了**、feed 却一步没动，回执还是诚实的（位移确实实测），云端照单全收当成翻了一页。
-/// 这一场里关闭控件本身认出来了、坐标也给了，只有「浮层在不在」这一项分片给不出来；
-/// 该走的处置是「按浮层可能在办」，照常去点关闭。
-#[tokio::test]
-async fn browse_next_still_closes_the_overlay_when_the_overlay_verdict_is_unreadable() {
-    let cancellation = Arc::new(AtomicBool::new(false));
-    let (port, server) = spawn_page(
-        FakePage {
-            omit_overlay_verdict: true,
-            ..FakePage::default()
-        },
-        cancellation.clone(),
-    )
-    .await;
-    let mut engine = Engine::default();
-    engine.open(&session_open(port)).await.expect("open");
-
-    engine
-        .execute(&scroll_command(
-            1,
-            command(r#"{"kind":"browse_next","params":{"reason":"feed_paging"}}"#),
-            25_000,
-        ))
-        .await
-        .expect("command result");
-
-    drop(engine);
-    let observed = server.await.expect("fake page");
-    let press_at = observed
-        .first_index("mousePressed")
-        .expect("「浮层在不在」读不到被当成了「浮层不在」：关闭一次都没点");
-    let wheel_at = observed.first_index("mouseWheel").expect("随后才滚");
-    assert!(press_at < wheel_at, "关闭浮层必须发生在第一帧滚轮之前");
 }
 
 #[tokio::test]

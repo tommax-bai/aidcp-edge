@@ -79,26 +79,28 @@ export function usesFacebookBrowseSession(driver: PlatformDriver): boolean {
  * `note.browse_images` 误当成未知失败并在详情页下发 feed scroll。
  */
 const FB_COMMAND_ACTION_NAMES: Readonly<Record<string, string>> = {
-  'page.scroll': 'scroll',
-  'feed.refresh': 'refresh',
+  'facebook.feed.scroll': 'scroll',
+  'facebook.search.scroll': 'scroll',
+  'facebook.reels.scroll': 'scroll',
+  'facebook.feed.refresh': 'refresh',
   'interaction.like': 'like',
   'interaction.collect': 'collect',
   'interaction.follow': 'follow',
   'interaction.comment': 'comment',
   'interaction.like_comment': 'comment_like',
-  'search.execute': 'search',
-  'note.open': 'open_note',
-  'note.close': 'close',
-  'note.browse_images': 'browse_images',
-  'note.scroll_comments': 'scroll_comments',
+  'facebook.search.execute': 'search',
+  'facebook.note.open': 'open_note',
+  'facebook.note.close': 'close',
+  'xiaohongshu.note.browse_images': 'browse_images',
+  'xiaohongshu.note.scroll_comments': 'scroll_comments',
   'navigation.back': 'back',
-  'profile.open': 'profile_open',
-  'group.join': 'join_group',
-  'notification.open': 'open_notifications',
-  'notification.browse_comments': 'browse_notification_comments',
-  'notification.browse_likes': 'browse_notification_likes',
-  'notification.browse_follows': 'browse_notification_follows',
-  'notification.back_home': 'notification_back_home',
+  'xiaohongshu.profile.open': 'profile_open',
+  'facebook.group.join': 'join_group',
+  'xiaohongshu.notification.open': 'open_notifications',
+  'xiaohongshu.notification.browse_comments': 'browse_notification_comments',
+  'xiaohongshu.notification.browse_likes': 'browse_notification_likes',
+  'xiaohongshu.notification.browse_follows': 'browse_notification_follows',
+  'xiaohongshu.notification.back_home': 'notification_back_home',
   'pacing.update': 'pacing_update',
   'session.end': 'session.end',
 };
@@ -507,7 +509,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       // —— 委托给评论处理器（定向评论搜索/评论/加群；已测、自带诚实回执与单飞）——
       // 普通浏览搜索没有 taskId/container，走 FB BrowseSession 自己的全站搜索；
       // 定向评论搜索必须带 taskId 或 container，仍由 commentHandler fail-closed 处理。
-      case 'search.execute': {
+      case 'facebook.search.execute': {
         const payload = (env.payload ?? {}) as SearchExecutePayload;
         if (!payload.taskId && !payload.container) {
           const context = searchExecutionContext(payload, env.id);
@@ -522,10 +524,10 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         return;
       }
       case 'interaction.comment':
-      case 'group.join':
+      case 'facebook.group.join':
         await this.trackWriter(() => this.commentHandler.handle(env, () => this.throwIfTakeover())); // 委托执行体同样是页面写者：让位必须等它真停
         return;
-      case 'note.open': {
+      case 'facebook.note.open': {
         const payload = (env.payload ?? {}) as NoteOpenPayload;
         // url 存在 = 评论支线按 permalink 开帖（读评论供撰写）；否则 = 浏览闭环按卡片 noteId 深读。
         if (payload.url) {
@@ -538,27 +540,34 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         });
         return;
       }
-      // —— 浏览/点赞类（受 kill switch 门控）——
-      case 'page.scroll': {
+      // —— 浏览/点赞类（受 kill switch 门控；词汇批 4：面由命令名声明，不再读 targetSurface）——
+      case 'facebook.reels.scroll': {
         const payload = (env.payload ?? {}) as PageScrollPayload;
         await this.runBrowseCommand('scroll', async () => {
           await this.ensureFeedDwell(payload.dwellMs);
           if (
             payload.reason === 'empty_feed_reels_fallback'
             || payload.reason === 'facebook_reels_primary'
-            || (payload.reason === 'resume_redrive' && payload.targetSurface === 'reels')
+            || payload.reason === 'resume_redrive'
           ) return this.enterReels();
-          if (payload.reason === 'resume_redrive' && payload.targetSurface === 'feed') {
+          return this.scrollReels();
+        });
+        return;
+      }
+      case 'facebook.feed.scroll':
+      case 'facebook.search.scroll': {
+        const payload = (env.payload ?? {}) as PageScrollPayload;
+        await this.runBrowseCommand('scroll', async () => {
+          await this.ensureFeedDwell(payload.dwellMs);
+          if (payload.reason === 'resume_redrive') {
             this.listMode = 'feed';
             this.activeFeedUrl = this.feedUrl;
-            return this.scrollFeed();
           }
-          if (this.listMode === 'reels') return this.scrollReels();
           return this.scrollFeed();
         });
         return;
       }
-      case 'feed.refresh':
+      case 'facebook.feed.refresh':
         await this.runBrowseCommand('refresh', () => (this.listMode === 'reels' ? this.scrollReels() : this.refreshFeed()));
         return;
       case 'interaction.like': {
@@ -584,10 +593,10 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       case 'navigation.back':
         await this.runBrowseCommand('back', () => this.backToFeed());
         return;
-      case 'note.close':
+      case 'facebook.note.close':
         await this.runBrowseCommand('close', () => this.closeNote());
         return;
-      case 'profile.open': {
+      case 'xiaohongshu.profile.open': {
         this.log('[fb-session] profile.open 在 Facebook runtime 不支持，回 capability_unsupported');
         this.client.reportActionCompleted({ action: 'profile_open', ok: false, reason: 'capability_unsupported' });
         return;
@@ -607,13 +616,13 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       // action 名称，让 DeepReader / CommentReviewer / 通知恢复链能消费失败并退出详情页。
       case 'interaction.collect':
       case 'interaction.like_comment':
-      case 'note.browse_images':
-      case 'note.scroll_comments':
-      case 'notification.open':
-      case 'notification.browse_comments':
-      case 'notification.browse_likes':
-      case 'notification.browse_follows':
-      case 'notification.back_home':
+      case 'xiaohongshu.note.browse_images':
+      case 'xiaohongshu.note.scroll_comments':
+      case 'xiaohongshu.notification.open':
+      case 'xiaohongshu.notification.browse_comments':
+      case 'xiaohongshu.notification.browse_likes':
+      case 'xiaohongshu.notification.browse_follows':
+      case 'xiaohongshu.notification.back_home':
         this.reportUnsupportedCommand(env.type);
         return;
       // —— 未知消息同样诚实失败，绝不静默丢弃或伪造成功 ——

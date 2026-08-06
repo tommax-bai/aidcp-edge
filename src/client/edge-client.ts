@@ -8,9 +8,9 @@
  *  - 把每步结果以 action.result 回传云端（观测/训练）；
  *  - 支持以 id 关联的请求/响应（anchor.get / select.request / note.content 等）；
  *  - 自动浏览：把笔记内容以 note.content 作为请求发给云端，等回一个决策信封
- *    （page.scroll / search.execute / session.end），交由 BrowseSession 编排。
- *  - 异步命令推送：云端通过 CommandSink 异步推送控制命令（page.scroll /
- *    note.open / note.close / search.execute / session.end / notification.*），由 browseHandler 统一分发。
+ *    （{p}.feed.scroll / {p}.search.execute / session.end 等），交由 BrowseSession 编排。
+ *  - 异步命令推送：云端通过 CommandSink 异步推送控制命令（{p}.feed.scroll /
+ *    {p}.note.open / {p}.note.close / {p}.search.execute / session.end / xiaohongshu.notification.*），由 browseHandler 统一分发。
  *
  * 设计：
  *  - WebSocket 通过工厂注入（默认用运行时全局 WebSocket，Node>=22），便于单测打桩；
@@ -115,7 +115,7 @@ export interface StepRunner {
 
 /**
  * 云端主动下发（非请求响应）的浏览命令处理器。
- * 典型用于 session.end / page.scroll 这类云端可主动推送的控制信令。
+ * 典型用于 session.end / {p}.feed.scroll 这类云端可主动推送的控制信令。
  */
 export type BrowseCommandHandler = (env: Envelope) => void;
 export type PlanCommandHandler = (env: Envelope<PlanResponsePayload>) => void;
@@ -444,7 +444,7 @@ export class EdgeClient {
   }
 
   /**
-   * 注册"云端主动下发浏览命令"处理器（session.end / page.scroll 等）。
+   * 注册"云端主动下发浏览命令"处理器（session.end / {p}.feed.scroll 等）。
    * 返回取消注册函数。
    */
   onBrowseCommand(handler: BrowseCommandHandler): () => void {
@@ -570,7 +570,7 @@ export class EdgeClient {
   }
 
   /**
-   * 上报当前笔记内容并等待云端决策信封（search.execute / session.end 等）。
+   * 上报当前笔记内容并等待云端决策信封（{p}.search.execute / session.end 等）。
    * 返回云端回包的整个信封，交由 BrowseSession 按 type 分发执行。
    */
   reportNoteContent(payload: NoteContentPayload, timeoutMs = 20_000): Promise<Envelope> {
@@ -715,7 +715,7 @@ export class EdgeClient {
 
     // 平台段入口闸（edge-command-grammar「平台能力命令 MUST 以平台为顶层命名空间」的入口半边，
     // change recategorize-nonpage-commands）：命令名首段 ∈ 平台枚举 ⇒ 必须等于本会话平台。
-    // 本闸对现役词汇零命中（无平台段命令），置于未登记检查之前——发错平台的未来命令拿到的是
+    // 词汇批 4 起浏览命令携平台段，本闸现役生效；置于未登记检查之前——发错平台的命令拿到的是
     // 精确拒因而非 unclassified，且闸的活性今天就可被测试驱动。
     {
       const head = env.type.split('.')[0];
@@ -802,14 +802,23 @@ export class EdgeClient {
     // 4) 云端主动下发的浏览控制信令
     if (
       env.type === 'session.end' ||
-      env.type === 'note.open' ||
-      env.type === 'note.close' ||
-      env.type === 'search.execute' ||
-      env.type === 'page.scroll' ||
+      // 词汇批 4：浏览命令平台段化（xiaohongshu./facebook. 前缀）。⚠️ 此白名单 typecheck 抓不到——
+      // 漏加任何一条新名即在入口被静默丢弃（同 §2 第4处同步点，notification-monitor 活锁前车之鉴）。
+      env.type === 'xiaohongshu.note.open' ||
+      env.type === 'facebook.note.open' ||
+      env.type === 'xiaohongshu.note.close' ||
+      env.type === 'facebook.note.close' ||
+      env.type === 'xiaohongshu.search.execute' ||
+      env.type === 'facebook.search.execute' ||
+      env.type === 'xiaohongshu.feed.scroll' ||
+      env.type === 'xiaohongshu.search.scroll' ||
+      env.type === 'facebook.feed.scroll' ||
+      env.type === 'facebook.search.scroll' ||
+      env.type === 'facebook.reels.scroll' ||
       // feed 深度到阈值改点右下「刷新」（change feed-refresh-on-depth）：独立主动命令 MUST 放行到 browseHandler。
-      // ⚠️ 此白名单 typecheck 抓不到——漏加则 feed.refresh 在入口被静默丢弃，browse-session 的处理分支永不可达
-      //    （同 §2 第4处同步点，notification-monitor 活锁前车之鉴）。与 command-bridge 的 refresh→feed.refresh 映射对应。
-      env.type === 'feed.refresh' ||
+      // 与 command-bridge 的 refresh→{p}.feed.refresh 映射对应。
+      env.type === 'xiaohongshu.feed.refresh' ||
+      env.type === 'facebook.feed.refresh' ||
       // 中途风控档位刷新（change pacing-fallback-hardening）：独立主动命令，MUST 放行到 browseHandler，
       // 否则在入口被静默丢弃 → 边缘兜底节奏收不到升档（notification-monitor 活锁前车，同 §2 第4处同步点）。
       env.type === 'pacing.update' ||
@@ -825,11 +834,11 @@ export class EdgeClient {
       // 的处理分支永不可达（2026-07-03 收口 edge-companion-ui 时发现的存量缺口，同 §2 第4处同步点）。
       env.type === 'interaction.like_comment' ||
       // Facebook 加群原子指令：走 Facebook 命令处理器（不是 xhs BrowseSession）。漏白名单会在入口静默丢弃。
-      env.type === 'group.join' ||
+      env.type === 'facebook.group.join' ||
       env.type === 'navigation.back' ||
-      env.type === 'note.browse_images' ||
-      env.type === 'note.scroll_comments' ||
-      env.type === 'profile.open' ||
+      env.type === 'xiaohongshu.note.browse_images' ||
+      env.type === 'xiaohongshu.note.scroll_comments' ||
+      env.type === 'xiaohongshu.profile.open' ||
       // 运行期身份读取（edge 侧 identity-command-gate 的救援放行清单成员）：独立主动命令，
       // MUST 放行到 browseHandler，否则在入口被静默丢弃 → command-mapper 的
       // identity_read_current 映射与 browse-session 的 identity_observation 回报分支**永不可达**，
@@ -847,11 +856,11 @@ export class EdgeClient {
       // 通知巡视（软中断离开流程）自身的命令：MUST 放行到 browseHandler，
       // 否则会在入口被静默丢弃 → 巡视无回执 → 恢复链永不收敛 → 会话挂死。
       // 与 command-bridge 的 open_notifications/browse_notification_* 映射对应。
-      env.type === 'notification.open' ||
-      env.type === 'notification.browse_comments' ||
-      env.type === 'notification.browse_likes' ||
-      env.type === 'notification.browse_follows' ||
-      env.type === 'notification.back_home'
+      env.type === 'xiaohongshu.notification.open' ||
+      env.type === 'xiaohongshu.notification.browse_comments' ||
+      env.type === 'xiaohongshu.notification.browse_likes' ||
+      env.type === 'xiaohongshu.notification.browse_follows' ||
+      env.type === 'xiaohongshu.notification.back_home'
     ) {
       this.emitCommandDiagnostic(env, 'received');
       if (!this.browseHandler) {

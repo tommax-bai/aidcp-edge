@@ -1050,18 +1050,6 @@ async fn execute_xhs_command_once(
             execute_xhs_publish_add_topic(session, params, cancellation, deadline_unix_ms).await
         }
         // 滚动特化：共享惯性滚轮手势（滚前把光标移到**实测**可滚区中心），位移按实测回报。
-        // 只有 `browse_next` 需要先关详情浮层——注入路由也只在这一条上关，另两条是纯翻页。
-        BrowseNext(params) => {
-            execute_xhs_feed_scroll(
-                session,
-                command,
-                params.reason.as_deref(),
-                true,
-                cancellation,
-                deadline_unix_ms,
-            )
-            .await
-        }
         BrowseScroll(params) => {
             execute_xhs_feed_scroll(
                 session,
@@ -2805,16 +2793,13 @@ async fn execute_xhs_feed_scroll(
 fn xhs_initial_scan_command(command: &NativeCommand) -> Result<NativeCommand, EngineError> {
     let reason = Some(XHS_INITIAL_SCAN_REASON.to_owned());
     Ok(match command {
-        NativeCommand::BrowseNext(_) => {
-            NativeCommand::BrowseNext(crate::command::ReasonParams { reason })
-        }
         NativeCommand::BrowseScroll(_) => {
             NativeCommand::BrowseScroll(crate::command::ReasonParams { reason })
         }
         NativeCommand::PageScroll(params) => {
             NativeCommand::PageScroll(crate::command::PageScrollParams {
                 reason,
-                target_surface: params.target_surface,
+                surface: params.surface,
                 dwell_ms: params.dwell_ms,
             })
         }

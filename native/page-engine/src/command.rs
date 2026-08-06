@@ -12,13 +12,10 @@ const MAX_LIST_ITEMS: usize = 100;
 /// 这张表是词表一致性检查的唯一豁免通道——新增变体若既不进清单也不进这里，检查即失败。
 pub const MANIFEST_EXCLUDED_COMMAND_KINDS: &[(&str, &str)] = &[
     (
-        "browse_next",
-        "protocol side deleted by change drop-dead-cloud-edge-commands (zero Cloud senders); \
-         Rust variant retained until vocabulary batch 4 touches the engine, unreachable from any envelope",
-    ),
-    (
         "browse_scroll",
-        "same as browse_next: protocol type deleted, engine-side removal rides batch 4",
+        "engine-internal carrier only: the first-commentable-group-post probe constructs it \
+         (facebook/runtime.rs) to drive in-container scrolling; protocol type deleted in batch 1, \
+         unreachable from any envelope and MUST stay that way",
     ),
     (
         "page_probe",
@@ -156,15 +153,16 @@ pub struct PageScrollParams {
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
-    pub target_surface: Option<FacebookBrowseSurface>,
+    pub surface: Option<BrowseSurface>,
     #[serde(default)]
     pub dwell_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum FacebookBrowseSurface {
+pub enum BrowseSurface {
     Feed,
+    Search,
     Reels,
 }
 
@@ -546,7 +544,6 @@ native_commands! {
     FacebookAuthStartSuspensionAppeal(FacebookAuthSignalParams) => "facebook_auth_start_suspension_appeal",
     PlanExecute(PlanExecuteParams) => "plan_execute",
     SessionStop(ReasonParams) => "session_stop",
-    BrowseNext(ReasonParams) => "browse_next",
     BrowseScroll(ReasonParams) => "browse_scroll",
     PageScroll(PageScrollParams) => "page_scroll",
     FeedRefresh(FeedRefreshParams) => "feed_refresh",
@@ -703,13 +700,11 @@ impl NativeCommand {
                 }
                 Ok(())
             }
-            Self::SessionStop(params) | Self::BrowseNext(params) | Self::BrowseScroll(params) => {
-                validate_optional(
-                    &params.reason,
-                    MAX_REASON_BYTES,
-                    "reason exceeds protocol limit",
-                )
-            }
+            Self::SessionStop(params) | Self::BrowseScroll(params) => validate_optional(
+                &params.reason,
+                MAX_REASON_BYTES,
+                "reason exceeds protocol limit",
+            ),
             Self::PageScroll(params) => validate_optional(
                 &params.reason,
                 MAX_REASON_BYTES,
@@ -1289,7 +1284,6 @@ mod tests {
         assert_eq!(
             excluded,
             BTreeSet::from([
-                "browse_next",
                 "browse_scroll",
                 "page_probe",
                 "facebook_auth_probe",

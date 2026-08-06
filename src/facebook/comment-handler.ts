@@ -107,21 +107,21 @@ export class FacebookCommentHandler {
    * 空闲看门狗把整会话杀掉。
    */
   async handle(env: Envelope, checkpoint?: () => void): Promise<void> {
-    const searchContext = env.type === 'search.execute'
+    const searchContext = env.type === 'facebook.search.execute'
       ? makeSearchReceiptContext((env.payload ?? {}) as SearchExecutePayload, env.id)
       : undefined;
     try {
       switch (env.type) {
-        case 'search.execute':
+        case 'facebook.search.execute':
           await this.onSearch((env.payload ?? {}) as SearchExecutePayload, searchContext!);
           return;
-        case 'note.open':
+        case 'facebook.note.open':
           await this.onOpen(env.payload as NoteOpenPayload);
           return;
         case 'interaction.comment':
           await this.onComment(env.payload as InteractionCommentPayload, checkpoint);
           return;
-        case 'group.join':
+        case 'facebook.group.join':
           await this.onJoin(env.payload as GroupJoinPayload, checkpoint);
           return;
         default:
@@ -132,7 +132,7 @@ export class FacebookCommentHandler {
       }
     } catch (err) {
       // 归一到该命令的回执面，让云端 sendAndAwait 不至于干等超时。
-      const action = env.type === 'search.execute' ? 'search' : env.type === 'note.open' ? 'open_note' : env.type === 'interaction.comment' ? 'comment' : env.type;
+      const action = env.type === 'facebook.search.execute' ? 'search' : env.type === 'facebook.note.open' ? 'open_note' : env.type === 'interaction.comment' ? 'comment' : env.type;
       if (err instanceof TaskTakeoverError) {
         // 被接管 = **未开始 / 已作废**，不是一次业务失败。绝不降级成 handler_error。
         this.log(`[fb-comment] 命令 ${env.type} 在安全取消点被独占任务接管 → 零页面副作用作废`);

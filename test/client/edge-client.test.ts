@@ -586,48 +586,48 @@ test('edge-client: 平台段匹配但未登记的命令仍走 fail-closed 未登
     '平台对了但没登记，闸放行到未登记检查——两道闸各答各的问题');
 });
 
-test('edge-client: page.scroll 路由到 browseHandler', async () => {
+test('edge-client: xiaohongshu.feed.scroll 路由到 browseHandler', async () => {
   const ws = new FakeWebSocket();
-  const client = await connectClient(ws);
+  const client = await connectClient(ws, { platform: 'xiaohongshu' });
   const calls: Envelope[] = [];
   client.onBrowseCommand((env) => calls.push(env));
 
-  ws.emitMessage(makeEnvelope('page.scroll', 'cmd-1', 2, { reason: 'scroll' }));
+  ws.emitMessage(makeEnvelope('xiaohongshu.feed.scroll', 'cmd-1', 2, { reason: 'scroll' }));
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].type, 'page.scroll');
+  assert.equal(calls[0].type, 'xiaohongshu.feed.scroll');
 });
 
-test('edge-client: note.open 路由到 browseHandler', async () => {
+test('edge-client: xiaohongshu.note.open 路由到 browseHandler', async () => {
   const ws = new FakeWebSocket();
-  const client = await connectClient(ws);
+  const client = await connectClient(ws, { platform: 'xiaohongshu' });
   const calls: Envelope[] = [];
   client.onBrowseCommand((env) => calls.push(env));
 
-  ws.emitMessage(makeEnvelope('note.open', 'cmd-2', 2, { index: 3, reason: 'open' }));
+  ws.emitMessage(makeEnvelope('xiaohongshu.note.open', 'cmd-2', 2, { index: 3, reason: 'open' }));
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].type, 'note.open');
+  assert.equal(calls[0].type, 'xiaohongshu.note.open');
   assert.equal((calls[0].payload as any).index, 3);
 });
 
-test('edge-client: note.close 路由到 browseHandler', async () => {
+test('edge-client: xiaohongshu.note.close 路由到 browseHandler', async () => {
   const ws = new FakeWebSocket();
-  const client = await connectClient(ws);
+  const client = await connectClient(ws, { platform: 'xiaohongshu' });
   const calls: Envelope[] = [];
   client.onBrowseCommand((env) => calls.push(env));
 
-  ws.emitMessage(makeEnvelope('note.close', 'cmd-3', 2, { reason: 'close' }));
+  ws.emitMessage(makeEnvelope('xiaohongshu.note.close', 'cmd-3', 2, { reason: 'close' }));
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].type, 'note.close');
+  assert.equal(calls[0].type, 'xiaohongshu.note.close');
 });
 
 // change facebook-browse-and-like-loop（task 4.4）：FB 浏览/点赞独立命令 MUST 放行到 browseHandler，
-// 绝不落入「其他主动消息暂忽略」被静默丢弃（typecheck 抓不到白名单遗漏）。这些类型与小红书共用同一
-// 平台中立白名单（零改 protocol.ts）；此断言锁死它们不被误当「xhs-only」移除而回归静默丢弃。
-const FB_BROWSE_COMMANDS = ['page.scroll', 'note.open', 'note.close', 'interaction.like', 'navigation.back'] as const;
+// 绝不落入「其他主动消息暂忽略」被静默丢弃（typecheck 抓不到白名单遗漏）。词汇批 4 起 FB 浏览命令
+// 带 facebook. 平台段；此断言锁死它们不被误从白名单移除而回归静默丢弃。
+const FB_BROWSE_COMMANDS = ['facebook.feed.scroll', 'facebook.note.open', 'facebook.note.close', 'interaction.like', 'navigation.back'] as const;
 for (const type of FB_BROWSE_COMMANDS) {
   test(`edge-client: Facebook 浏览命令 ${type} 路由到 browseHandler（不得静默丢弃）`, async () => {
     const ws = new FakeWebSocket();
-    const client = await connectClient(ws);
+    const client = await connectClient(ws, { platform: 'facebook' });
     const calls: Envelope[] = [];
     client.onBrowseCommand((env) => calls.push(env));
 
@@ -637,20 +637,20 @@ for (const type of FB_BROWSE_COMMANDS) {
   });
 }
 
-test('edge-client: 旧消息类型仍正常路由（向后兼容）', async () => {
+test('edge-client: 平台段命令与无平台段控制命令混发均正常路由', async () => {
   const ws = new FakeWebSocket();
-  const client = await connectClient(ws);
+  const client = await connectClient(ws, { platform: 'xiaohongshu' });
   const calls: Envelope[] = [];
   client.onBrowseCommand((env) => calls.push(env));
 
-  ws.emitMessage(makeEnvelope('page.scroll', 'cmd-4', 2, { reason: 'next' }));
+  ws.emitMessage(makeEnvelope('xiaohongshu.feed.scroll', 'cmd-4', 2, { reason: 'next' }));
   ws.emitMessage(makeEnvelope('session.end', 'cmd-5', 2, { reason: 'end' }));
-  ws.emitMessage(makeEnvelope('search.execute', 'cmd-6', 2, { keyword: 'AI' }));
+  ws.emitMessage(makeEnvelope('xiaohongshu.search.execute', 'cmd-6', 2, { keyword: 'AI' }));
 
   assert.equal(calls.length, 3);
-  assert.equal(calls[0].type, 'page.scroll');
+  assert.equal(calls[0].type, 'xiaohongshu.feed.scroll');
   assert.equal(calls[1].type, 'session.end');
-  assert.equal(calls[2].type, 'search.execute');
+  assert.equal(calls[2].type, 'xiaohongshu.search.execute');
 });
 
 // 回归：通知巡视（软中断离开流程）自身的命令 MUST 放行到 browseHandler。
@@ -658,17 +658,17 @@ test('edge-client: 旧消息类型仍正常路由（向后兼容）', async () =
 // 导致巡视无回执 → 恢复链（excursion_resumer）永不收敛 → 浏览永挂 → 会话被看门狗杀。
 // 与 cloud command-bridge 的 open_notifications/browse_notification_*/notification_back_home 映射一一对应。
 const NOTIFICATION_EXCURSION_COMMANDS = [
-  'notification.open',
-  'notification.browse_comments',
-  'notification.browse_likes',
-  'notification.browse_follows',
-  'notification.back_home',
+  'xiaohongshu.notification.open',
+  'xiaohongshu.notification.browse_comments',
+  'xiaohongshu.notification.browse_likes',
+  'xiaohongshu.notification.browse_follows',
+  'xiaohongshu.notification.back_home',
 ] as const;
 
 for (const type of NOTIFICATION_EXCURSION_COMMANDS) {
   test(`edge-client: ${type} 路由到 browseHandler（不得静默丢弃）`, async () => {
     const ws = new FakeWebSocket();
-    const client = await connectClient(ws);
+    const client = await connectClient(ws, { platform: 'xiaohongshu' });
     const calls: Envelope[] = [];
     client.onBrowseCommand((env) => calls.push(env));
 
@@ -707,16 +707,16 @@ for (const type of INTERACTION_COMMANDS) {
   });
 }
 
-test('edge-client: group.join 路由到 browseHandler（Facebook 命令处理器），不得静默丢弃', async () => {
+test('edge-client: facebook.group.join 路由到 browseHandler（Facebook 命令处理器），不得静默丢弃', async () => {
   const ws = new FakeWebSocket();
-  const client = await connectClient(ws);
+  const client = await connectClient(ws, { platform: 'facebook' });
   const calls: Envelope[] = [];
   client.onBrowseCommand((env) => calls.push(env));
 
-  ws.emitMessage(makeEnvelope('group.join', 'cmd-group-join', 2, { groupUrl: 'https://www.facebook.com/groups/1' }));
+  ws.emitMessage(makeEnvelope('facebook.group.join', 'cmd-group-join', 2, { groupUrl: 'https://www.facebook.com/groups/1' }));
 
-  assert.equal(calls.length, 1, 'group.join 应被路由到 handler 而非在入口丢弃');
-  assert.equal(calls[0].type, 'group.join');
+  assert.equal(calls.length, 1, 'facebook.group.join 应被路由到 handler 而非在入口丢弃');
+  assert.equal(calls[0].type, 'facebook.group.join');
 });
 
 test('edge-client: edge.task.acquire/release 路由到任务控制处理器', async () => {
@@ -864,11 +864,11 @@ test('edge-client: Cloud rebind closes only the old transport and completes a fr
 test('edge-client: active browse command emits received then dispatched without exposing payload content', async () => {
   const ws = new FakeWebSocket();
   const logs: string[] = [];
-  const client = await connectClient(ws, { logger: (line) => logs.push(line) });
+  const client = await connectClient(ws, { logger: (line) => logs.push(line), platform: 'facebook' });
   let routed = false;
   client.onBrowseCommand(() => { routed = true; });
 
-  ws.emitMessage(makeEnvelope('search.execute', 'search-secret-id', 1, {
+  ws.emitMessage(makeEnvelope('facebook.search.execute', 'search-secret-id', 1, {
     keyword: '绝密关键词',
     source: 'manager',
     maxResults: 12,
@@ -878,7 +878,7 @@ test('edge-client: active browse command emits received then dispatched without 
   assert.equal(routed, true);
   const events = diagnosticEvents(logs);
   assert.deepEqual(events.map((event) => event.stage), ['received', 'dispatched']);
-  assert.equal(events[0].type, 'search.execute');
+  assert.equal(events[0].type, 'facebook.search.execute');
   assert.match(String(events[0].summary), /搜索词 5 字/);
   assert.match(String(events[0].summary), /已限定搜索容器/);
   assert.doesNotMatch(logs.join('\n'), /绝密关键词|facebook\.com|token=secret|search-secret-id/);
@@ -887,9 +887,9 @@ test('edge-client: active browse command emits received then dispatched without 
 test('edge-client: command without a handler is rejected and never presented as executed', async () => {
   const ws = new FakeWebSocket();
   const logs: string[] = [];
-  await connectClient(ws, { logger: (line) => logs.push(line) });
+  await connectClient(ws, { logger: (line) => logs.push(line), platform: 'xiaohongshu' });
 
-  ws.emitMessage(makeEnvelope('note.open', 'note-open-1', 1, {
+  ws.emitMessage(makeEnvelope('xiaohongshu.note.open', 'note-open-1', 1, {
     noteId: 'private-note-id',
     url: 'https://example.test/secret?auth=token',
     surface: 'detail',

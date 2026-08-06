@@ -119,7 +119,7 @@ test('fb-handler: search.execute 命中候选 → page.cards（permalink 放 not
     },
   });
   const { handler, cap } = makeHandler(exec);
-  await handler.handle(makeEnvelope('search.execute', 'c1', 1, {
+  await handler.handle(makeEnvelope('facebook.search.execute', 'c1', 1, {
     keyword: '咖啡', container: 'https://www.facebook.com/groups/1',
     activityId: 'fb-container-1', purpose: 'task_targeting', scope: 'container',
   } as never));
@@ -136,7 +136,7 @@ test('fb-handler: search.execute 命中候选 → page.cards（permalink 放 not
 test('fb-handler: search.execute 无容器 → permission_gated（绝不全站搜）', async () => {
   const exec = new FakeExecutor();
   const { handler, cap } = makeHandler(exec);
-  await handler.handle(makeEnvelope('search.execute', 'c1', 1, { keyword: '咖啡' } as never));
+  await handler.handle(makeEnvelope('facebook.search.execute', 'c1', 1, { keyword: '咖啡' } as never));
   assert.equal(cap.cards.length, 0);
   assert.equal(cap.actions[0].action, 'search');
   assert.equal(cap.actions[0].ok, false);
@@ -149,7 +149,7 @@ test('fb-handler: search.execute 无容器 → permission_gated（绝不全站�
 test('fb-handler: search 导航后被阻断 → failed_after_submit 且 actuated=true', async () => {
   const exec = new FakeExecutor({ search: { ok: false, actuated: true, reason: 'login_required', candidates: [] } });
   const { handler, cap } = makeHandler(exec);
-  await handler.handle(makeEnvelope('search.execute', 'c1', 1, { keyword: '咖啡', container: 'https://www.facebook.com/groups/1' } as never));
+  await handler.handle(makeEnvelope('facebook.search.execute', 'c1', 1, { keyword: '咖啡', container: 'https://www.facebook.com/groups/1' } as never));
   assert.equal(cap.actions[0].action, 'search');
   assert.equal(cap.actions[0].reason, 'login_required');
   assert.equal(cap.actions[0].actuated, true);
@@ -160,7 +160,7 @@ test('fb-handler: search 导航后被阻断 → failed_after_submit 且 actuated
 test('fb-handler: note.open{url} 开帖+评论框就绪 → note.detail', async () => {
   const exec = new FakeExecutor({ open: { ok: true, editorReady: true } });
   const { handler, cap } = makeHandler(exec);
-  await handler.handle(makeEnvelope('note.open', 'c1', 1, { url: 'https://www.facebook.com/groups/1/posts/2' } as never));
+  await handler.handle(makeEnvelope('facebook.note.open', 'c1', 1, { url: 'https://www.facebook.com/groups/1/posts/2' } as never));
   assert.equal(cap.details.length, 1);
   assert.equal(cap.details[0].noteId, 'https://www.facebook.com/groups/1/posts/2');
   assert.equal(exec.openArg, 'https://www.facebook.com/groups/1/posts/2');
@@ -172,7 +172,7 @@ test('fb-handler: note.open{selection,container} 取群内首帖 → 用实际 p
     firstOpen: { ok: true, editorReady: true, permalink, postText: '首帖正文' },
   });
   const { handler, cap } = makeHandler(exec);
-  await handler.handle(makeEnvelope('note.open', 'c1', 1, {
+  await handler.handle(makeEnvelope('facebook.note.open', 'c1', 1, {
     selection: 'first_commentable_group_post',
     container: 'https://www.facebook.com/groups/1',
   } as never));
@@ -188,7 +188,7 @@ test('fb-handler: 群内首帖不可评论 → open_note no_candidates', async (
     firstOpen: { ok: false, editorReady: false, reason: 'no_candidates' },
   });
   const { handler, cap } = makeHandler(exec);
-  await handler.handle(makeEnvelope('note.open', 'c1', 1, {
+  await handler.handle(makeEnvelope('facebook.note.open', 'c1', 1, {
     selection: 'first_commentable_group_post',
     container: 'https://www.facebook.com/groups/1',
   } as never));
@@ -199,7 +199,7 @@ test('fb-handler: 群内首帖不可评论 → open_note no_candidates', async (
 test('fb-handler: note.open 无 url → open_note no_target', async () => {
   const exec = new FakeExecutor();
   const { handler, cap } = makeHandler(exec);
-  await handler.handle(makeEnvelope('note.open', 'c1', 1, {} as never));
+  await handler.handle(makeEnvelope('facebook.note.open', 'c1', 1, {} as never));
   assert.equal(cap.details.length, 0);
   assert.equal(cap.actions[0].action, 'open_note');
   assert.equal(cap.actions[0].reason, 'no_target');
@@ -208,7 +208,7 @@ test('fb-handler: note.open 无 url → open_note no_target', async () => {
 test('fb-handler: note.open 评论框催不出 → open_note editor_not_found（换下一个候选）', async () => {
   const exec = new FakeExecutor({ open: { ok: true, editorReady: false } });
   const { handler, cap } = makeHandler(exec);
-  await handler.handle(makeEnvelope('note.open', 'c1', 1, { url: 'https://www.facebook.com/groups/1/posts/2' } as never));
+  await handler.handle(makeEnvelope('facebook.note.open', 'c1', 1, { url: 'https://www.facebook.com/groups/1/posts/2' } as never));
   assert.equal(cap.details.length, 0);
   assert.equal(cap.actions[0].action, 'open_note');
   assert.equal(cap.actions[0].reason, 'editor_not_found');
@@ -289,7 +289,7 @@ test('fb-handler: group.join 路由到 join executor，回 action.completed{join
     observation: { groupUrl: 'https://www.facebook.com/groups/1', mainCtaText: 'Join group' },
   });
   const { handler, cap } = makeHandler(exec, joinExec);
-  await handler.handle(makeEnvelope('group.join', 'c1', 1, { groupUrl: 'https://www.facebook.com/groups/1', click: false } as never));
+  await handler.handle(makeEnvelope('facebook.group.join', 'c1', 1, { groupUrl: 'https://www.facebook.com/groups/1', click: false } as never));
   assert.equal(cap.actions[0].action, 'join_group');
   assert.equal(cap.actions[0].ok, false);
   assert.equal(cap.actions[0].reason, 'observation_only');
@@ -299,7 +299,7 @@ test('fb-handler: group.join 路由到 join executor，回 action.completed{join
 
 test('fb-handler: group.join 未装配 join executor → capability_unsupported', async () => {
   const { handler, cap } = makeHandler(new FakeExecutor());
-  await handler.handle(makeEnvelope('group.join', 'c1', 1, { groupUrl: 'https://www.facebook.com/groups/1' } as never));
+  await handler.handle(makeEnvelope('facebook.group.join', 'c1', 1, { groupUrl: 'https://www.facebook.com/groups/1' } as never));
   assert.equal(cap.actions[0].action, 'join_group');
   assert.equal(cap.actions[0].ok, false);
   assert.equal(cap.actions[0].reason, 'capability_unsupported');
@@ -393,7 +393,7 @@ test('fb-ui: 加群成功以「ok && clicked」为闸（镜像云端证据闸）
     postObservation: { title: '(3) Việc Làm KCN | Facebook' },
   });
   const { handler, cap } = makeHandler(new FakeExecutor(), join);
-  await handler.handle(makeEnvelope('group.join', 'c1', 1, { groupUrl: 'https://www.facebook.com/groups/1' } as never));
+  await handler.handle(makeEnvelope('facebook.group.join', 'c1', 1, { groupUrl: 'https://www.facebook.com/groups/1' } as never));
   const ev = cap.ui.filter((e) => e.kind === 'activity');
   assert.equal(ev.length, 1);
   assert.equal(ev[0].type, 'join_group');
@@ -411,7 +411,7 @@ test('fb-ui: 超长群名有界截断（越南语群名常超 18 字，活动流
     postObservation: { title: 'Việc Làm KCN Long Hậu | Facebook' },
   });
   const { handler, cap } = makeHandler(new FakeExecutor(), join);
-  await handler.handle(makeEnvelope('group.join', 'c1', 1, { groupUrl: 'https://www.facebook.com/groups/1' } as never));
+  await handler.handle(makeEnvelope('facebook.group.join', 'c1', 1, { groupUrl: 'https://www.facebook.com/groups/1' } as never));
   const s = cap.ui.filter((e) => e.kind === 'activity')[0].sentence ?? '';
   assert.match(s, /加入了小组「Việc Làm KCN Long …」/); // 截断而非截错、不露 URL
 });
@@ -425,7 +425,7 @@ test('fb-ui【红线】: 加群待批准 → join_pending，绝不说「加入�
     postObservation: { title: 'Việc Làm KCN Quang Minh | Facebook' },
   });
   const { handler, cap } = makeHandler(new FakeExecutor(), join);
-  await handler.handle(makeEnvelope('group.join', 'c1', 1, { groupUrl: 'https://www.facebook.com/groups/1' } as never));
+  await handler.handle(makeEnvelope('facebook.group.join', 'c1', 1, { groupUrl: 'https://www.facebook.com/groups/1' } as never));
   const ev = cap.ui.filter((e) => e.kind === 'activity');
   assert.equal(ev.length, 1);
   assert.equal(ev[0].type, 'join_pending');
@@ -437,7 +437,7 @@ test('fb-ui: 已是成员 / 只观察 → 没发生一次加群动作，不产�
   for (const reason of ['already_member', 'observation_only'] as const) {
     const join = new FakeJoinExecutor({ ok: false, reason, clicked: false, groupUrl: 'https://www.facebook.com/groups/1' });
     const { handler, cap } = makeHandler(new FakeExecutor(), join);
-    await handler.handle(makeEnvelope('group.join', 'c1', 1, { groupUrl: 'https://www.facebook.com/groups/1' } as never));
+    await handler.handle(makeEnvelope('facebook.group.join', 'c1', 1, { groupUrl: 'https://www.facebook.com/groups/1' } as never));
     assert.equal(cap.ui.filter((e) => e.kind === 'activity').length, 0, `${reason} 不应产条目`);
   }
 });
@@ -445,7 +445,7 @@ test('fb-ui: 已是成员 / 只观察 → 没发生一次加群动作，不产�
 test('fb-ui: 群名读不到 → 回落通用文案，绝不用 URL 顶替', async () => {
   const join = new FakeJoinExecutor({ ok: true, clicked: true, groupUrl: 'https://www.facebook.com/groups/1' });
   const { handler, cap } = makeHandler(new FakeExecutor(), join);
-  await handler.handle(makeEnvelope('group.join', 'c1', 1, { groupUrl: 'https://www.facebook.com/groups/1' } as never));
+  await handler.handle(makeEnvelope('facebook.group.join', 'c1', 1, { groupUrl: 'https://www.facebook.com/groups/1' } as never));
   const ev = cap.ui.filter((e) => e.kind === 'activity');
   assert.match(ev[0].sentence ?? '', /加入了小组「一个小组」/);
   assert.doesNotMatch(ev[0].sentence ?? '', /facebook\.com/);
@@ -454,7 +454,7 @@ test('fb-ui: 群名读不到 → 回落通用文案，绝不用 URL 顶替', asy
 test('fb-ui: 搜索零结果与搜索失败可区分', async () => {
   const ok0 = new FakeExecutor({ search: { ok: true, actuated: true, candidates: [], containerName: '越南招工群' } });
   const { handler: h1, cap: c1 } = makeHandler(ok0);
-  await h1.handle(makeEnvelope('search.execute', 'c1', 1, { keyword: 'tuyển dụng', container: 'https://www.facebook.com/groups/1' } as never));
+  await h1.handle(makeEnvelope('facebook.search.execute', 'c1', 1, { keyword: 'tuyển dụng', container: 'https://www.facebook.com/groups/1' } as never));
   const e1 = c1.ui.filter((e) => e.kind === 'activity');
   assert.equal(e1[0].type, 'search');
   assert.match(e1[0].sentence ?? '', /没有匹配的帖子/);
@@ -463,7 +463,7 @@ test('fb-ui: 搜索零结果与搜索失败可区分', async () => {
 
   const failed = new FakeExecutor({ search: { ok: false, actuated: true, reason: 'login_required', candidates: [] } });
   const { handler: h2, cap: c2 } = makeHandler(failed);
-  await h2.handle(makeEnvelope('search.execute', 'c1', 1, { keyword: 'tuyển dụng', container: 'https://www.facebook.com/groups/1' } as never));
+  await h2.handle(makeEnvelope('facebook.search.execute', 'c1', 1, { keyword: 'tuyển dụng', container: 'https://www.facebook.com/groups/1' } as never));
   const e2 = c2.ui.filter((e) => e.kind === 'activity');
   assert.equal(e2[0].type, 'search_failed');
   assert.match(e2[0].sentence ?? '', /登录已失效/);
@@ -472,7 +472,7 @@ test('fb-ui: 搜索零结果与搜索失败可区分', async () => {
 test('fb-ui: 评论路径开帖产出与浏览路径一致的读条目 + views:1', async () => {
   const exec = new FakeExecutor({ open: { ok: true, editorReady: true, postText: 'Cần tuyển 5 công nhân' } as never });
   const { handler, cap } = makeHandler(exec);
-  await handler.handle(makeEnvelope('note.open', 'c1', 1, { url: 'https://www.facebook.com/groups/1/posts/2' } as never));
+  await handler.handle(makeEnvelope('facebook.note.open', 'c1', 1, { url: 'https://www.facebook.com/groups/1/posts/2' } as never));
   const ev = cap.ui.filter((e) => e.kind === 'activity');
   assert.equal(ev.length, 1);
   assert.equal(ev[0].type, 'note_open');
@@ -483,7 +483,7 @@ test('fb-ui: 评论路径开帖产出与浏览路径一致的读条目 + views:1
 test('fb-ui: 开帖成功但评论框没找到 → 不叙述为读失败（沉默才诚实）', async () => {
   const exec = new FakeExecutor({ open: { ok: true, editorReady: false, postText: 'x' } as never });
   const { handler, cap } = makeHandler(exec);
-  await handler.handle(makeEnvelope('note.open', 'c1', 1, { url: 'https://www.facebook.com/groups/1/posts/2' } as never));
+  await handler.handle(makeEnvelope('facebook.note.open', 'c1', 1, { url: 'https://www.facebook.com/groups/1/posts/2' } as never));
   assert.equal(cap.ui.filter((e) => e.kind === 'activity').length, 0);
   assert.equal(cap.actions[0].reason, 'editor_not_found'); // 回执照旧诚实
 });

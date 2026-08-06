@@ -185,6 +185,9 @@ function envelope(type: MessageType, payload: Record<string, unknown>): Envelope
 
 /** 该命令在哪个平台上不会被宿主的能力闸挡掉——挡掉的话行为断言就变成恒真的空跑。 */
 function platformFor(type: MessageType): 'xiaohongshu' | 'facebook' {
+  // 词汇批 4：平台段进名，优先按前缀判；无平台段的共享名沿用拒集判断。
+  if (type.startsWith('xiaohongshu.')) return 'xiaohongshu';
+  if (type.startsWith('facebook.')) return 'facebook';
   return FACEBOOK_UNSUPPORTED_COMMANDS.has(type) ? 'xiaohongshu' : 'facebook';
 }
 
@@ -279,7 +282,7 @@ test('每条登记为消费停留的命令，都以内容开始展示的时刻�
     if (kind === 'page_scroll') {
       await h.session.start(); // 首屏扫描回 page.cards ⇒ 立下「本批卡到达」锚点
     } else {
-      await h.session.onCloudCommand(envelope('note.open', { noteId: 'note-1' })); // ⇒ 立下详情展示锚点
+      await h.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1' })); // ⇒ 立下详情展示锚点
     }
     waits.length = 0;
     await h.session.onCloudCommand(envelope(type, { reason: 'r', dwellMs: 6_000 }));
@@ -308,7 +311,7 @@ test('Facebook page_scroll 使用 11s 中心的有界采样、只补已用时间
   h.runtimeTimeouts.length = 0;
   now = 3_000;
 
-  const pending = h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 11_000 }));
+  const pending = h.session.onCloudCommand(envelope('facebook.feed.scroll', { reason: 'feed_scroll', dwellMs: 11_000 }));
   await within(sleepStarted, 100, 'Facebook dwell 等待应在 Native 执行前开始');
   assert.deepEqual(waits, [9_000], '11s 目标减去已用 2s，只补 9s');
   assert.equal(h.executions.filter((command) => command.kind === 'page_scroll').length, 0, '补等完成前不得启动页面命令');
@@ -336,7 +339,7 @@ test('更宽的有界分布只作用于 Facebook page_scroll，非 Facebook 继�
     const h = harness({ platform, random: () => 0, sleep: async (ms) => { waits.push(ms); } });
     await h.session.start();
     waits.length = 0;
-    await h.session.onCloudCommand(envelope('page.scroll', { reason: 'feed_scroll', dwellMs: 11_000 }));
+    await h.session.onCloudCommand(envelope(platform === 'facebook' ? 'facebook.feed.scroll' : 'xiaohongshu.feed.scroll', { reason: 'feed_scroll', dwellMs: 11_000 }));
     await h.session.stopAndWait();
     return waits[0];
   }
@@ -356,12 +359,12 @@ test('登记为不消费停留的命令确实一步都不等，而同一锚点�
   for (const kind of kinds) {
     const waits: number[] = [];
     const h = harness({ platform: 'xiaohongshu', sleep: async (ms) => { waits.push(ms); } });
-    await h.session.onCloudCommand(envelope('note.open', { noteId: 'note-1' }));
+    await h.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1' }));
     waits.length = 0;
     await h.session.onCloudCommand(envelope(envelopeTypeForKind(kind), { noteId: 'note-1', dwellMs: 6_000 }));
     assert.deepEqual(waits, [], `${kind} 不该消费停留`);
     // 锚点确实是活的——否则上面那条断言只是「锚点缺席」的空跑。
-    await h.session.onCloudCommand(envelope('note.close', { reason: 'r', dwellMs: 6_000 }));
+    await h.session.onCloudCommand(envelope('xiaohongshu.note.close', { reason: 'r', dwellMs: 6_000 }));
     assert.deepEqual(waits, [6_000], `${kind} 之后详情停留锚点必须仍然可用`);
   }
 });
@@ -374,12 +377,12 @@ test('改变风控档位不改变云端已下发时长的等待中心值，只�
   for (const tempo of [1.0, 1.6]) {
     const cloud = harness({ platform: 'xiaohongshu', sleep: async (ms) => { cloudWaits.push(ms); } });
     cloud.session.applyPacingSnapshot(undefined, tempo);
-    await cloud.session.onCloudCommand(envelope('note.open', { noteId: 'note-1', thinkMs: 2_400 }));
+    await cloud.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1', thinkMs: 2_400 }));
     await cloud.session.onCloudCommand(envelope('navigation.back', { reason: 'r', dwellMs: 6_000 }));
 
     const fallback = harness({ platform: 'xiaohongshu', sleep: async (ms) => { fallbackWaits.push(ms); } });
     fallback.session.applyPacingSnapshot(undefined, tempo);
-    await fallback.session.onCloudCommand(envelope('note.open', { noteId: 'note-1' }));
+    await fallback.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1' }));
     await fallback.session.onCloudCommand(envelope('navigation.back', { reason: 'r' })); // 旧云端 / 断连：无 dwellMs
   }
 
@@ -397,7 +400,7 @@ test('中途档位刷新只改档位、绝不清掉离页停留锚点', async ()
   async function backFallbackWait(update?: number): Promise<number[]> {
     const waits: number[] = [];
     const h = harness({ platform: 'xiaohongshu', sleep: async (ms) => { waits.push(ms); } });
-    await h.session.onCloudCommand(envelope('note.open', { noteId: 'note-1' }));
+    await h.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1' }));
     waits.length = 0;
     if (update !== undefined) await h.session.onCloudCommand(envelope('pacing.update', { tempo: update }));
     await h.session.onCloudCommand(envelope('navigation.back', { reason: 'r' })); // 无 dwellMs ⇒ 走本地兜底
@@ -417,10 +420,10 @@ test('重连重注入的每类操作 floor 区间真的被本地兜底采纳', a
   const waits: number[] = [];
   const h = harness({ platform: 'xiaohongshu', sleep: async (ms) => { waits.push(ms); } });
   h.session.applyPacingSnapshot({ detail_dwell: { minMs: 8_000, maxMs: 8_000 } }, 1.0);
-  await h.session.onCloudCommand(envelope('note.open', { noteId: 'note-1' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1' }));
   waits.length = 0;
 
-  await h.session.onCloudCommand(envelope('note.close', { reason: 'r' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.note.close', { reason: 'r' }));
 
   assert.deepEqual(waits, [8_000]);
 });
@@ -439,7 +442,7 @@ test('离页停留等待被接管时当场让路，且零执行器派发', async
       signal?.addEventListener('abort', fail, { once: true });
     }),
   });
-  await h.session.onCloudCommand(envelope('note.open', { noteId: 'note-1' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1' }));
   const dispatched = h.executions.length;
 
   const pending = h.session.onCloudCommand(envelope('navigation.back', { reason: 'r', dwellMs: 60_000 }));
@@ -465,7 +468,7 @@ test('被接管掐断的停留不消费锚点：重下的返回命令仍然补�
       queueMicrotask(() => h.session.discardQueuedCloudCommands());
     }),
   });
-  await h.session.onCloudCommand(envelope('note.open', { noteId: 'note-1' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1' }));
   waits.length = 0;
 
   await within(
@@ -502,8 +505,8 @@ test('节奏等待期间被接管：零派发的命令报「未开始」，绝�
   // 犹豫面与停留面各取一条：两条腿都在派发之前等，两条都必须收窄。
   const cases: Array<{ type: MessageType; payload: Record<string, unknown>; anchor?: MessageType }> = [
     { type: 'interaction.like', payload: { noteId: 'note-1', thinkMs: 2_400 } },
-    { type: 'note.close', payload: { reason: 'r', dwellMs: 6_000 }, anchor: 'note.open' },
-    { type: 'navigation.back', payload: { reason: 'r', dwellMs: 6_000 }, anchor: 'note.open' },
+    { type: 'xiaohongshu.note.close', payload: { reason: 'r', dwellMs: 6_000 }, anchor: 'xiaohongshu.note.open' },
+    { type: 'navigation.back', payload: { reason: 'r', dwellMs: 6_000 }, anchor: 'xiaohongshu.note.open' },
   ];
 
   for (const item of cases) {

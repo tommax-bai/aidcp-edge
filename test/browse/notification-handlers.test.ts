@@ -88,7 +88,7 @@ function makeHarness(mode: 'normal' | 'throw' | 'disconnect' = 'normal', viewCli
     waitForModal: async () => true,
   };
   const client = {
-    reportNoteContent: async (_p: NoteContentPayload): Promise<Envelope> => makeEnvelope('page.scroll', 'ack', 0, { reason: 'ack' }),
+    reportNoteContent: async (_p: NoteContentPayload): Promise<Envelope> => makeEnvelope('xiaohongshu.feed.scroll', 'ack', 0, { reason: 'ack' }),
     reportPageCards: () => {},
     reportNoteDetail: () => {},
     reportProfileDetail: () => {},
@@ -128,7 +128,7 @@ test('notification.open → 导航通知首页并上报 notification.home（各�
   const h = makeHarness();
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('notification.open', 'n1', 0, {}),
+    makeEnvelope('xiaohongshu.notification.open', 'n1', 0, {}),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const home = h.sent.find((s) => s.type === 'notification.home');
@@ -140,7 +140,7 @@ test('notification.browse_comments → 抽取评论/@ 原始项并上报 notific
   const h = makeHarness();
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('notification.browse_comments', 'n2', 0, { scrollMax: 2 }),
+    makeEnvelope('xiaohongshu.notification.browse_comments', 'n2', 0, { scrollMax: 2 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const items = h.sent.find((s) => s.type === 'notification.items');
@@ -155,7 +155,7 @@ test('notification.browse_likes → 看一眼清未读 + 如实 action.completed
   const h = makeHarness();
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('notification.browse_likes', 'n3', 0, {}),
+    makeEnvelope('xiaohongshu.notification.browse_likes', 'n3', 0, {}),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const rec = h.completed.find((c) => c.action === 'browse_notification_likes');
@@ -167,7 +167,7 @@ test('失败不静默吞：cdp 抛错 → home 上报全 0', async () => {
   const h = makeHarness('throw');
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('notification.open', 'n4', 0, {}),
+    makeEnvelope('xiaohongshu.notification.open', 'n4', 0, {}),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const home = h.sent.find((s) => s.type === 'notification.home');
@@ -179,8 +179,8 @@ test('失败不静默吞：cdp 抛错 → items 上报空 + likes 回执 ok:fals
   const h = makeHarness('throw');
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('notification.browse_comments', 'n5', 0, {}),
-    makeEnvelope('notification.browse_likes', 'n6', 0, {}),
+    makeEnvelope('xiaohongshu.notification.browse_comments', 'n5', 0, {}),
+    makeEnvelope('xiaohongshu.notification.browse_likes', 'n6', 0, {}),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const items = h.sent.find((s) => s.type === 'notification.items');
@@ -194,7 +194,7 @@ test('NM-C-1: 看一眼未命中分类 tab → ok:false reason:no_target（绝�
   const h = makeHarness('normal', false); // 分类 tab 点击返回 false（选择器漂移/未渲染）
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('notification.browse_likes', 'n', 0, {}),
+    makeEnvelope('xiaohongshu.notification.browse_likes', 'n', 0, {}),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const rec = h.completed.find((c) => c.action === 'browse_notification_likes');
@@ -207,7 +207,7 @@ test('CDP-NOTIF-1: 通知 open 断连 → 重抛冒泡、绝不假报 notificati
   const h = makeHarness('disconnect'); // 无 on → waitForReconnect 立即 false → 会话诚实结束
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('notification.open', 'n', 0, {}),
+    makeEnvelope('xiaohongshu.notification.open', 'n', 0, {}),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.ok(!h.sent.find((s) => s.type === 'notification.home'), '断连绝不假报 notification.home');
@@ -217,7 +217,7 @@ test('CDP-NOTIF-1: 通知 browse_comments 断连 → 绝不假报空 items', asy
   const h = makeHarness('disconnect');
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('notification.browse_comments', 'n', 0, { scrollMax: 1 }),
+    makeEnvelope('xiaohongshu.notification.browse_comments', 'n', 0, { scrollMax: 1 }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   assert.ok(!h.sent.find((s) => s.type === 'notification.items'), '断连绝不假报空 items');
@@ -251,7 +251,7 @@ test('CDP-NOTIF-1: 巡视中断连重连成功 → 发诚实 ok:false(cdp_reconn
   const sess = new BrowseSession(h.deps, noOpts());
   const done = sess.start();
   await new Promise((r) => setTimeout(r, 10));
-  await sess.onCloudCommand(makeEnvelope('notification.open', 'n', 0, {}));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.notification.open', 'n', 0, {}));
   await new Promise((r) => setTimeout(r, 30));
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }));
   await done;

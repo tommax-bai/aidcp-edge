@@ -127,12 +127,12 @@ async function driveTwoOpens(
   const done = sess.start();
   await tick(30);
   // 第一条 note.open：锚点 null → gate 跳过；处理后记账 lastActionEndAt = firstMono。
-  await sess.onCloudCommand(makeEnvelope('note.open', 'o1', 0, { index: 0 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o1', 0, { index: 0 }));
   await waitDetails(h, 1);
   const before = sleeps.length;
   // 推进单调时钟 → 控制第二条的 elapsed = gateMono − firstMono。
   mono.t = gateMono;
-  await sess.onCloudCommand(makeEnvelope('note.open', 'o2', 0, { index: 0, thinkMs: secondThinkMs }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o2', 0, { index: 0, thinkMs: secondThinkMs }));
   await waitDetails(h, 2);
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));
   await done;
@@ -153,11 +153,11 @@ async function driveWithSnapshot(
   mono.t = firstMono;
   const done = sess.start();
   await tick(30);
-  await sess.onCloudCommand(makeEnvelope('note.open', 'o1', 0, { index: 0 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o1', 0, { index: 0 }));
   await waitDetails(h, 1);
   const before = sleeps.length;
   mono.t = gateMono;
-  await sess.onCloudCommand(makeEnvelope('note.open', 'o2', 0, { index: 0 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o2', 0, { index: 0 }));
   await waitDetails(h, 2);
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));
   await done;
@@ -233,11 +233,11 @@ test('min-interval: think 与间隔取 max 非相加（remaining 主导）', asy
   mono.t = 1000;
   const done = sess.start();
   await tick(30);
-  await sess.onCloudCommand(makeEnvelope('note.open', 'o1', 0, { index: 0 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o1', 0, { index: 0 }));
   await waitDetails(h, 1);
   const before = sleeps.length;
   mono.t = 3000;
-  await sess.onCloudCommand(makeEnvelope('note.open', 'o2', 0, { index: 0, thinkMs: 4000 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o2', 0, { index: 0, thinkMs: 4000 }));
   await waitDetails(h, 2);
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));
   await done;
@@ -255,11 +255,11 @@ test('min-interval: think 主导时 wait = think（间隔较小），仍不相�
   mono.t = 1000;
   const done = sess.start();
   await tick(30);
-  await sess.onCloudCommand(makeEnvelope('note.open', 'o1', 0, { index: 0 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o1', 0, { index: 0 }));
   await waitDetails(h, 1);
   const before = sleeps.length;
   mono.t = 1000; // elapsed=0
-  await sess.onCloudCommand(makeEnvelope('note.open', 'o2', 0, { index: 0, thinkMs: 30000 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o2', 0, { index: 0, thinkMs: 30000 }));
   await waitDetails(h, 2);
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));
   await done;
@@ -281,11 +281,11 @@ test('min-interval: 重连 applyPacingSnapshot 后 gate 用新 floor（连接级
   mono.t = 1000;
   const done = sess.start();
   await tick(30);
-  await sess.onCloudCommand(makeEnvelope('note.open', 'o1', 0, { index: 0 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o1', 0, { index: 0 }));
   await waitDetails(h, 1);
   const before = sleeps.length;
   mono.t = 1000; // elapsed=0 → 待等 = 新 floor 13000
-  await sess.onCloudCommand(makeEnvelope('note.open', 'o2', 0, { index: 0 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o2', 0, { index: 0 }));
   await waitDetails(h, 2);
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));
   await done;
@@ -302,14 +302,14 @@ test('min-interval: 重连 applyPacingSnapshot 重置锚点 → 紧接动作跳�
   const done = sess.start();
   await tick(30);
   // o1 建立锚点 lastActionEndAt = 1000。
-  await sess.onCloudCommand(makeEnvelope('note.open', 'o1', 0, { index: 0 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o1', 0, { index: 0 }));
   await waitDetails(h, 1);
   await tick(60); // 等 o1 的 markActionEnd（uplink 后记账）落定，再模拟重连——真实重连在 loop 停止后重注入、无竞争。
   // 模拟身份翻转重连：applyPacingSnapshot 重注入 + 重置锚点（页面已变、首操作跳过间隔）。
   sess.applyPacingSnapshot({ action: { minMs: 12000, maxMs: 12000 } }, 1.0);
   const before = sleeps.length;
   mono.t = 1100; // 相对旧锚点仅 elapsed=100（≪ floor）；若锚点未清则会补差额 ~11900。
-  await sess.onCloudCommand(makeEnvelope('note.open', 'o2', 0, { index: 0 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o2', 0, { index: 0 }));
   await waitDetails(h, 2);
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));
   await done;
@@ -336,7 +336,7 @@ test('pacing.update: 中途升档放大最小间隔且不重置锚点', async ()
   mono.t = 1000;
   const done = sess.start();
   await tick(30);
-  await sess.onCloudCommand(makeEnvelope('note.open', 'o1', 0, { index: 0 })); // 锚点 = 1000
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o1', 0, { index: 0 })); // 锚点 = 1000
   await waitDetails(h, 1);
   // 时钟推进到 2000 后中途升档 tempo=2.0。若误经 markActionEnd 记账，锚点会被推进到 2000。
   mono.t = 2000;
@@ -344,7 +344,7 @@ test('pacing.update: 中途升档放大最小间隔且不重置锚点', async ()
   const before = sleeps.length;
   // o2 仍在 2000：正确 → elapsed=2000−1000=1000、floor=3000×2.0=6000 → gate=5000；
   //           误推进锚点 → elapsed=0 → gate=6000（本断言据此把关「不重置锚点」）。
-  await sess.onCloudCommand(makeEnvelope('note.open', 'o2', 0, { index: 0 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o2', 0, { index: 0 }));
   await waitDetails(h, 2);
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));
   await done;
@@ -365,10 +365,10 @@ async function driveOpenClose(
   const sess = new BrowseSession(h.deps, opts);
   const done = sess.start();
   await tick(30);
-  await sess.onCloudCommand(makeEnvelope('note.open', 'o1', 0, { index: 0 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o1', 0, { index: 0 }));
   await waitDetails(h, 1);
   const before = sleeps.length;
-  await sess.onCloudCommand(makeEnvelope('note.close', 'c1', 0, dwellMs === undefined ? {} : { dwellMs }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.close', 'c1', 0, dwellMs === undefined ? {} : { dwellMs }));
   const start = Date.now();
   while (sleeps.length === before) { if (Date.now() - start > 2000) break; await tick(5); }
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));
@@ -423,10 +423,10 @@ test('applyTempoUpdate: 越界 tempo（>上限）被忽略、兜底停留不失�
   const done = sess.start();
   await tick(30);
   await sess.onCloudCommand(makeEnvelope('pacing.update', 'pu', 0, { tempo: 99 })); // 越界 → 忽略
-  await sess.onCloudCommand(makeEnvelope('note.open', 'o1', 0, { index: 0 }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o1', 0, { index: 0 }));
   await waitDetails(h, 1);
   const before = sleeps.length;
-  await sess.onCloudCommand(makeEnvelope('note.close', 'c1', 0, {})); // 缺 dwellMs → 兜底停留 = sample×tempo
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.close', 'c1', 0, {})); // 缺 dwellMs → 兜底停留 = sample×tempo
   const start = Date.now();
   while (sleeps.length === before) { if (Date.now() - start > 2000) break; await tick(5); }
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));

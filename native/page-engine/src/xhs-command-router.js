@@ -549,9 +549,8 @@ async function(input){
   };
 
   if(kind==='session_stop')return done(action('session_stop',true));
-  if(kind==='browse_next'||kind==='browse_scroll'||kind==='page_scroll'){
+  if(kind==='browse_scroll'||kind==='page_scroll'){
     if(p.reason==='initial_scan')return done(cards());
-    const modal=detailRoot(); if(kind==='browse_next'&&modal){const close=first(['[class*="close"]','button[aria-label*="关闭"]'],modal);if(close)click(close);}
     const before=window.scrollY; window.scrollBy({top:Math.max(360,Math.round(innerHeight*0.78)),behavior:'smooth'}); await sleep(500);
     const output=cards(); output.value.movement={before,after:window.scrollY,moved:window.scrollY!==before,atBottom:window.scrollY+innerHeight>=document.documentElement.scrollHeight-24};
     return done(output);

@@ -5,8 +5,7 @@ import test from 'node:test';
 import { CLOUD_OPERATION_REGISTRY } from '../../src/client/operation-registry.js';
 
 interface ManifestCommand {
-  routeKey: string;
-  edgeType: string;
+  edgeTypes: string[];
   publishKind?: string;
   nativeKind: string;
   family: string;
@@ -40,35 +39,31 @@ async function loadManifest(): Promise<CommandManifest> {
   return JSON.parse(await readFile(manifestPath, 'utf8')) as CommandManifest;
 }
 
-const platformSpecificExclusions = new Set([
-  // Facebook-only page command; it must remain isolated from the XHS engine.
-  'group.join',
-]);
-
-test('freezes every registered XHS page-automation route', async () => {
+// 词汇批 4：平台段进命令名后，「哪条命令在哪个平台存在」由 edgeTypes 直接声明，
+// 原「FB 独有命令排除清单」（group.join 手抄）随之退役——登记表里每条 page_automation
+// 路由都必须能在 manifest 的 edgeTypes 并集里找到归宿，不再有平台例外。
+test('freezes every registered page-automation route across platforms', async () => {
   const manifest = await loadManifest();
   const manifestTypes = new Set([
-    ...manifest.commands.map((command) => command.edgeType),
+    ...manifest.commands.flatMap((command) => command.edgeTypes),
     ...manifest.sessionControls.map((control) => control.edgeType),
   ]);
-  const registeredXhsRoutes = Object.entries(CLOUD_OPERATION_REGISTRY)
-    .filter(([type, descriptor]) => (
-      descriptor.category === 'page_automation' && !platformSpecificExclusions.has(type)
-    ))
+  const registeredRoutes = Object.entries(CLOUD_OPERATION_REGISTRY)
+    .filter(([, descriptor]) => descriptor.category === 'page_automation')
     .map(([type]) => type)
     .sort();
 
   assert.deepEqual(
-    registeredXhsRoutes.filter((type) => !manifestTypes.has(type)),
+    registeredRoutes.filter((type) => !manifestTypes.has(type)),
     [],
-    'every registered XHS page route must have a Native command or lifecycle mapping',
+    'every registered page route must have a Native command or lifecycle mapping',
   );
 });
 
 test('freezes every publish.command kind exactly once', async () => {
   const manifest = await loadManifest();
   const kinds = manifest.commands
-    .filter((command) => command.edgeType === 'publish.command')
+    .filter((command) => command.edgeTypes.includes('publish.command'))
     .map((command) => command.publishKind)
     .sort();
 
@@ -109,12 +104,16 @@ test('manifest route and Native command identities are unique and bounded', asyn
     },
   ]);
 
-  const routeKeys = manifest.commands.map((command) => command.routeKey);
+  // publish.command 一个信封类型承载多个原子 kind（publishKind 区分）是唯一合法复用；
+  // 其余 edgeTypes 不得在两个条目间重复——同一信封映射两个 kind 就是路由歧义。
+  const nonPublishEdgeTypes = manifest.commands
+    .filter((command) => !command.edgeTypes.includes('publish.command'))
+    .flatMap((command) => command.edgeTypes);
   const nativeKinds = [
     ...manifest.commands.map((command) => command.nativeKind),
     ...manifest.sessionControls.map((control) => control.nativeKind),
   ];
-  assert.equal(new Set(routeKeys).size, routeKeys.length);
+  assert.equal(new Set(nonPublishEdgeTypes).size, nonPublishEdgeTypes.length);
   assert.equal(new Set(nativeKinds).size, nativeKinds.length);
   for (const command of manifest.commands) {
     assert.ok(command.requestContract.length > 0);

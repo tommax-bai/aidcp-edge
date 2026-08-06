@@ -626,7 +626,7 @@ mod tests {
     fn page_scroll_strictly_decodes_the_optional_resume_target() {
         let resume = valid_command().replace(
             r#"{"kind":"page_probe","params":{}}"#,
-            r#"{"kind":"page_scroll","params":{"reason":"resume_redrive","targetSurface":"reels"}}"#,
+            r#"{"kind":"page_scroll","params":{"reason":"resume_redrive","surface":"reels"}}"#,
         );
         let InputRecord::Command(record) = parse_input(&resume).expect("targeted resume") else {
             panic!("expected command");
@@ -635,10 +635,7 @@ mod tests {
             panic!("expected page scroll");
         };
         assert_eq!(params.reason.as_deref(), Some("resume_redrive"));
-        assert_eq!(
-            params.target_surface,
-            Some(crate::command::FacebookBrowseSurface::Reels),
-        );
+        assert_eq!(params.surface, Some(crate::command::BrowseSurface::Reels),);
 
         let legacy = valid_command().replace(
             r#"{"kind":"page_probe","params":{}}"#,

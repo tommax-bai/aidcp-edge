@@ -26,8 +26,9 @@
   "duplicatePolicy": "return_recorded_terminal_without_redispatch",
   "commands": [
     {
-      "routeKey": "plan.response",
-      "edgeType": "plan.response",
+      "edgeTypes": [
+        "plan.response"
+      ],
       "nativeKind": "plan_execute",
       "family": "legacy_plan",
       "requestContract": "PlanResponsePayloadAllowlistedProjection",
@@ -38,8 +39,9 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "session.end",
-      "edgeType": "session.end",
+      "edgeTypes": [
+        "session.end"
+      ],
       "nativeKind": "session_stop",
       "family": "session_control",
       "requestContract": "SessionEndPayload",
@@ -48,8 +50,13 @@
       "cancellation": "immediate_before_next_dispatch"
     },
     {
-      "routeKey": "page.scroll",
-      "edgeType": "page.scroll",
+      "edgeTypes": [
+        "xiaohongshu.feed.scroll",
+        "xiaohongshu.search.scroll",
+        "facebook.feed.scroll",
+        "facebook.search.scroll",
+        "facebook.reels.scroll"
+      ],
       "nativeKind": "page_scroll",
       "family": "browse",
       "requestContract": "PageScrollPayload",
@@ -61,8 +68,10 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "feed.refresh",
-      "edgeType": "feed.refresh",
+      "edgeTypes": [
+        "xiaohongshu.feed.refresh",
+        "facebook.feed.refresh"
+      ],
       "nativeKind": "feed_refresh",
       "family": "browse",
       "requestContract": "FeedRefreshPayload",
@@ -74,8 +83,10 @@
       "cancellation": "atomic_input_then_safe_point"
     },
     {
-      "routeKey": "search.execute",
-      "edgeType": "search.execute",
+      "edgeTypes": [
+        "xiaohongshu.search.execute",
+        "facebook.search.execute"
+      ],
       "nativeKind": "search_execute",
       "family": "search",
       "requestContract": "SearchExecutePayload",
@@ -87,8 +98,10 @@
       "cancellation": "atomic_input_then_safe_point"
     },
     {
-      "routeKey": "note.open",
-      "edgeType": "note.open",
+      "edgeTypes": [
+        "xiaohongshu.note.open",
+        "facebook.note.open"
+      ],
       "nativeKind": "note_open",
       "family": "note",
       "requestContract": "NoteOpenPayload",
@@ -100,8 +113,10 @@
       "cancellation": "atomic_input_then_safe_point"
     },
     {
-      "routeKey": "note.close",
-      "edgeType": "note.close",
+      "edgeTypes": [
+        "xiaohongshu.note.close",
+        "facebook.note.close"
+      ],
       "nativeKind": "note_close",
       "family": "note",
       "requestContract": "NoteClosePayload",
@@ -113,8 +128,9 @@
       "cancellation": "atomic_input_then_safe_point"
     },
     {
-      "routeKey": "navigation.back",
-      "edgeType": "navigation.back",
+      "edgeTypes": [
+        "navigation.back"
+      ],
       "nativeKind": "navigation_back",
       "family": "note",
       "requestContract": "NavigationBackPayload",
@@ -126,8 +142,9 @@
       "cancellation": "atomic_input_then_safe_point"
     },
     {
-      "routeKey": "note.browse_images",
-      "edgeType": "note.browse_images",
+      "edgeTypes": [
+        "xiaohongshu.note.browse_images"
+      ],
       "nativeKind": "note_browse_images",
       "family": "note",
       "requestContract": "NoteBrowseImagesPayload",
@@ -139,8 +156,9 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "note.scroll_comments",
-      "edgeType": "note.scroll_comments",
+      "edgeTypes": [
+        "xiaohongshu.note.scroll_comments"
+      ],
       "nativeKind": "note_scroll_comments",
       "family": "note",
       "requestContract": "NoteScrollCommentsPayload",
@@ -151,8 +169,9 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "profile.open",
-      "edgeType": "profile.open",
+      "edgeTypes": [
+        "xiaohongshu.profile.open"
+      ],
       "nativeKind": "profile_open",
       "family": "profile",
       "requestContract": "ProfileOpenPayload",
@@ -164,8 +183,9 @@
       "cancellation": "atomic_input_then_safe_point"
     },
     {
-      "routeKey": "identity.read_current",
-      "edgeType": "identity.read_current",
+      "edgeTypes": [
+        "identity.read_current"
+      ],
       "nativeKind": "identity_read_current",
       "family": "identity",
       "requestContract": "IdentityReadPayloadWithEdgeBoundAccount",
@@ -176,8 +196,9 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "identity.read_self_profile",
-      "edgeType": "identity.read_self_profile",
+      "edgeTypes": [
+        "identity.read_self_profile"
+      ],
       "nativeKind": "identity_read_self_profile",
       "family": "identity",
       "requestContract": "IdentityReadPayloadWithEdgeBoundAccount",
@@ -188,8 +209,9 @@
       "cancellation": "atomic_input_then_safe_point"
     },
     {
-      "routeKey": "notification.open",
-      "edgeType": "notification.open",
+      "edgeTypes": [
+        "xiaohongshu.notification.open"
+      ],
       "nativeKind": "notification_open",
       "family": "notification",
       "requestContract": "NotificationOpenPayload",
@@ -201,8 +223,9 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "notification.browse_comments",
-      "edgeType": "notification.browse_comments",
+      "edgeTypes": [
+        "xiaohongshu.notification.browse_comments"
+      ],
       "nativeKind": "notification_browse_comments",
       "family": "notification",
       "requestContract": "NotificationBrowseCommentsPayload",
@@ -214,8 +237,9 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "notification.browse_likes",
-      "edgeType": "notification.browse_likes",
+      "edgeTypes": [
+        "xiaohongshu.notification.browse_likes"
+      ],
       "nativeKind": "notification_browse_likes",
       "family": "notification",
       "requestContract": "NotificationBrowseLikesPayload",
@@ -226,8 +250,9 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "notification.browse_follows",
-      "edgeType": "notification.browse_follows",
+      "edgeTypes": [
+        "xiaohongshu.notification.browse_follows"
+      ],
       "nativeKind": "notification_browse_follows",
       "family": "notification",
       "requestContract": "NotificationBrowseFollowsPayload",
@@ -238,8 +263,9 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "notification.back_home",
-      "edgeType": "notification.back_home",
+      "edgeTypes": [
+        "xiaohongshu.notification.back_home"
+      ],
       "nativeKind": "notification_back_home",
       "family": "notification",
       "requestContract": "NotificationBackHomePayload",
@@ -251,8 +277,9 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "interaction.like",
-      "edgeType": "interaction.like",
+      "edgeTypes": [
+        "interaction.like"
+      ],
       "nativeKind": "interaction_like",
       "family": "interaction",
       "requestContract": "InteractionLikePayload",
@@ -263,8 +290,9 @@
       "cancellation": "atomic_dispatch_then_verify"
     },
     {
-      "routeKey": "interaction.collect",
-      "edgeType": "interaction.collect",
+      "edgeTypes": [
+        "interaction.collect"
+      ],
       "nativeKind": "interaction_collect",
       "family": "interaction",
       "requestContract": "InteractionCollectPayload",
@@ -275,8 +303,9 @@
       "cancellation": "atomic_dispatch_then_verify"
     },
     {
-      "routeKey": "interaction.follow",
-      "edgeType": "interaction.follow",
+      "edgeTypes": [
+        "interaction.follow"
+      ],
       "nativeKind": "interaction_follow",
       "family": "interaction",
       "requestContract": "InteractionFollowPayload",
@@ -287,8 +316,9 @@
       "cancellation": "atomic_dispatch_then_verify"
     },
     {
-      "routeKey": "interaction.comment",
-      "edgeType": "interaction.comment",
+      "edgeTypes": [
+        "interaction.comment"
+      ],
       "nativeKind": "interaction_comment",
       "family": "interaction",
       "requestContract": "InteractionCommentPayload",
@@ -299,8 +329,9 @@
       "cancellation": "atomic_dispatch_then_verify"
     },
     {
-      "routeKey": "interaction.like_comment",
-      "edgeType": "interaction.like_comment",
+      "edgeTypes": [
+        "interaction.like_comment"
+      ],
       "nativeKind": "interaction_like_comment",
       "family": "interaction",
       "requestContract": "InteractionLikeCommentPayload",
@@ -311,8 +342,9 @@
       "cancellation": "atomic_dispatch_then_verify"
     },
     {
-      "routeKey": "group.join",
-      "edgeType": "group.join",
+      "edgeTypes": [
+        "facebook.group.join"
+      ],
       "nativeKind": "group_join",
       "family": "group",
       "requestContract": "GroupJoinPayload",
@@ -323,8 +355,9 @@
       "cancellation": "atomic_dispatch_then_verify"
     },
     {
-      "routeKey": "internal.wechat_capture_session",
-      "edgeType": "internal.wechat_capture_session",
+      "edgeTypes": [
+        "internal.wechat_capture_session"
+      ],
       "nativeKind": "wechat_capture_session",
       "family": "wechat_auth",
       "requestContract": "EmptyParams",
@@ -335,8 +368,9 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "internal.identity_bootstrap",
-      "edgeType": "internal.identity_bootstrap",
+      "edgeTypes": [
+        "internal.identity_bootstrap"
+      ],
       "nativeKind": "identity_bootstrap",
       "family": "identity",
       "requestContract": "EmptyParams",
@@ -347,8 +381,9 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "captcha.assist.capture",
-      "edgeType": "captcha.assist.capture",
+      "edgeTypes": [
+        "captcha.assist.capture"
+      ],
       "nativeKind": "captcha_capture",
       "family": "captcha_assist",
       "requestContract": "CaptchaAssistCapturePayload",
@@ -359,8 +394,9 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "captcha.assist.click",
-      "edgeType": "captcha.assist.click",
+      "edgeTypes": [
+        "captcha.assist.click"
+      ],
       "nativeKind": "captcha_click",
       "family": "captcha_assist",
       "requestContract": "CaptchaAssistClickPayload",
@@ -372,8 +408,9 @@
       "cancellation": "atomic_dispatch_then_verify"
     },
     {
-      "routeKey": "publish.command:navigate_entry",
-      "edgeType": "publish.command",
+      "edgeTypes": [
+        "publish.command"
+      ],
       "publishKind": "navigate_entry",
       "nativeKind": "publish_navigate_entry",
       "family": "publish",
@@ -385,8 +422,9 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "publish.command:select_mode",
-      "edgeType": "publish.command",
+      "edgeTypes": [
+        "publish.command"
+      ],
       "publishKind": "select_mode",
       "nativeKind": "publish_select_mode",
       "family": "publish",
@@ -398,8 +436,9 @@
       "cancellation": "atomic_input_then_safe_point"
     },
     {
-      "routeKey": "publish.command:upload_image",
-      "edgeType": "publish.command",
+      "edgeTypes": [
+        "publish.command"
+      ],
       "publishKind": "upload_image",
       "nativeKind": "publish_upload_image",
       "family": "publish",
@@ -411,8 +450,9 @@
       "cancellation": "atomic_input_then_safe_point"
     },
     {
-      "routeKey": "publish.command:set_cover",
-      "edgeType": "publish.command",
+      "edgeTypes": [
+        "publish.command"
+      ],
       "publishKind": "set_cover",
       "nativeKind": "publish_set_cover",
       "family": "publish",
@@ -424,8 +464,9 @@
       "cancellation": "atomic_input_then_safe_point"
     },
     {
-      "routeKey": "publish.command:fill_field",
-      "edgeType": "publish.command",
+      "edgeTypes": [
+        "publish.command"
+      ],
       "publishKind": "fill_field",
       "nativeKind": "publish_fill_field",
       "family": "publish",
@@ -437,8 +478,9 @@
       "cancellation": "atomic_input_then_safe_point"
     },
     {
-      "routeKey": "publish.command:add_with_candidate",
-      "edgeType": "publish.command",
+      "edgeTypes": [
+        "publish.command"
+      ],
       "publishKind": "add_with_candidate",
       "nativeKind": "publish_add_with_candidate",
       "family": "publish",
@@ -450,8 +492,9 @@
       "cancellation": "atomic_input_then_safe_point"
     },
     {
-      "routeKey": "publish.command:set_option",
-      "edgeType": "publish.command",
+      "edgeTypes": [
+        "publish.command"
+      ],
       "publishKind": "set_option",
       "nativeKind": "publish_set_option",
       "family": "publish",
@@ -463,8 +506,9 @@
       "cancellation": "atomic_input_then_safe_point"
     },
     {
-      "routeKey": "publish.command:set_schedule",
-      "edgeType": "publish.command",
+      "edgeTypes": [
+        "publish.command"
+      ],
       "publishKind": "set_schedule",
       "nativeKind": "publish_set_schedule",
       "family": "publish",
@@ -476,8 +520,9 @@
       "cancellation": "atomic_input_then_safe_point"
     },
     {
-      "routeKey": "publish.command:submit_publish",
-      "edgeType": "publish.command",
+      "edgeTypes": [
+        "publish.command"
+      ],
       "publishKind": "submit_publish",
       "nativeKind": "publish_submit",
       "family": "publish",
@@ -489,8 +534,9 @@
       "cancellation": "atomic_dispatch_then_verify"
     },
     {
-      "routeKey": "publish.command:capture_postId",
-      "edgeType": "publish.command",
+      "edgeTypes": [
+        "publish.command"
+      ],
       "publishKind": "capture_postId",
       "nativeKind": "publish_capture_post_id",
       "family": "publish",
@@ -502,8 +548,9 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "publish.command:capture_scheduled",
-      "edgeType": "publish.command",
+      "edgeTypes": [
+        "publish.command"
+      ],
       "publishKind": "capture_scheduled",
       "nativeKind": "publish_capture_scheduled",
       "family": "publish",
@@ -515,8 +562,9 @@
       "cancellation": "safe_points"
     },
     {
-      "routeKey": "publish.command:reconcile_scheduled",
-      "edgeType": "publish.command",
+      "edgeTypes": [
+        "publish.command"
+      ],
       "publishKind": "reconcile_scheduled",
       "nativeKind": "publish_reconcile_scheduled",
       "family": "publish",

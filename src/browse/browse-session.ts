@@ -1346,7 +1346,7 @@ export class BrowseSession {
         // 漂移点，typecheck 抓不到，回错名的后果是角色永远等不到回执）。
         if (err instanceof TaskTakeoverError) {
           this.logger(`[browse] 命令 ${cmd.type} 在安全取消点被独占任务接管 → 零副作用作废`);
-          if (cmd.type === 'search.execute') {
+          if (cmd.type === 'xiaohongshu.search.execute') {
             const payload = (cmd.payload ?? {}) as SearchExecutePayload;
             this.deps.client.reportActionCompleted?.({
               action: 'search',
@@ -1368,7 +1368,7 @@ export class BrowseSession {
           // 断连中止的若是通知巡视命令：重连后必须给云端一个诚实的 ok:false 终止回执，触发 excursion_resumer
           // 关暂停 + 回 feed。否则云端 excursionActive 永真 → 发命令暂停出口扣住 feed 命令 → 看门狗 ~240s 杀整会话，
           // 且 gatekeeper 此后永久忽略新通知。reason 如实 = cdp_reconnect_aborted（非伪造成功）。
-          const wasExcursion = typeof cmd?.type === 'string' && cmd.type.startsWith('notification.');
+          const wasExcursion = typeof cmd?.type === 'string' && cmd.type.startsWith('xiaohongshu.notification.');
           // 终态关闭（冷待机 / 退出）：浏览器是我们自己关的，等重连毫无意义。但云端连接还活着，
           // 在途巡视必须照样收到诚实的终止回执，否则云端 excursionActive 永真、看门狗随后杀会话。
           if (this.closing) {
@@ -1440,7 +1440,8 @@ export class BrowseSession {
       if (this.stopRequested) return;
     }
     switch (env.type) {
-      case 'page.scroll': {
+      case 'xiaohongshu.feed.scroll':
+      case 'xiaohongshu.search.scroll': {
         const payload = env.payload as PageScrollPayload;
         this.logger(`[browse] 命令: page.scroll (${payload.reason ?? ''})`);
         if (payload.reason === 'resume_redrive') await this.ensureExplore();
@@ -1450,13 +1451,13 @@ export class BrowseSession {
         await this.reportVisibleCards();
         break;
       }
-      case 'feed.refresh': {
+      case 'xiaohongshu.feed.refresh': {
         const payload = env.payload as FeedRefreshPayload;
         this.logger(`[browse] 命令: feed.refresh (${payload.reason ?? ''})`);
         await this.refreshFeed(payload.thinkMs);
         break;
       }
-      case 'note.open': {
+      case 'xiaohongshu.note.open': {
         const payload = env.payload as NoteOpenPayload;
         this.logger(`[browse] 命令: note.open (index=${payload.index}, noteId=${payload.noteId ?? '?'})`);
         // 小红书页面模型无「feed 就地读全文」——收到 surface='feed' 绝不静默回落 detail，
@@ -1470,7 +1471,7 @@ export class BrowseSession {
         await this.openAndReportNote(payload.index ?? 0, payload.noteId);
         break;
       }
-      case 'note.close': {
+      case 'xiaohongshu.note.close': {
         const payload = env.payload as NoteClosePayload;
         this.logger(`[browse] 命令: note.close`);
         await this.ensureDetailDwell(payload.dwellMs); // 关闭前确保停留达标
@@ -1525,7 +1526,7 @@ export class BrowseSession {
         await this.executeLikeComment(payload.commentAnchorId);
         break;
       }
-      case 'search.execute': {
+      case 'xiaohongshu.search.execute': {
         const payload = (env.payload ?? {}) as SearchExecutePayload;
         const kw = String(payload.keyword ?? '').trim();
         const activityId = payload.activityId?.trim() || env.id;
@@ -1636,7 +1637,7 @@ export class BrowseSession {
         await this.navigateBack(payload.targetPage, payload.reason);
         break;
       }
-      case 'note.browse_images': {
+      case 'xiaohongshu.note.browse_images': {
         const payload = env.payload as NoteBrowseImagesPayload;
         const count = payload.count ?? 3;
         this.logger(`[browse] 命令: note.browse_images (noteId=${payload.noteId}, count=${count})`);
@@ -1644,7 +1645,7 @@ export class BrowseSession {
         await this.browseNoteImages(payload.noteId, count);
         break;
       }
-      case 'note.scroll_comments': {
+      case 'xiaohongshu.note.scroll_comments': {
         const payload = env.payload as NoteScrollCommentsPayload;
         const count = payload.count ?? 3;
         this.logger(`[browse] 命令: note.scroll_comments (noteId=${payload.noteId}, count=${count})`);
@@ -1652,7 +1653,7 @@ export class BrowseSession {
         await this.scrollNoteComments(payload.noteId, count);
         break;
       }
-      case 'profile.open': {
+      case 'xiaohongshu.profile.open': {
         const rawPayload = (env.payload ?? {}) as Record<string, unknown>;
         if (Object.prototype.hasOwnProperty.call(rawPayload, 'direct')) {
           this.deps.client.reportActionCompleted?.({
@@ -1668,35 +1669,35 @@ export class BrowseSession {
         await this.openAuthorProfile(payload.authorId);
         break;
       }
-      case 'notification.open': {
+      case 'xiaohongshu.notification.open': {
         const payload = env.payload as NotificationOpenPayload;
         this.logger('[browse] 命令: notification.open (导航通知首页)');
         await this.thinkBefore(payload.thinkMs);
         await this.openNotificationsHome();
         break;
       }
-      case 'notification.browse_comments': {
+      case 'xiaohongshu.notification.browse_comments': {
         const payload = env.payload as NotificationBrowseCommentsPayload;
         this.logger('[browse] 命令: notification.browse_comments');
         await this.thinkBefore(payload.thinkMs);
         await this.browseNotificationComments(payload.scrollMax ?? 3);
         break;
       }
-      case 'notification.browse_likes': {
+      case 'xiaohongshu.notification.browse_likes': {
         const payload = env.payload as NotificationBrowseLikesPayload;
         this.logger('[browse] 命令: notification.browse_likes');
         await this.thinkBefore(payload.thinkMs);
         await this.viewNotificationCategory('likes');
         break;
       }
-      case 'notification.browse_follows': {
+      case 'xiaohongshu.notification.browse_follows': {
         const payload = env.payload as NotificationBrowseFollowsPayload;
         this.logger('[browse] 命令: notification.browse_follows');
         await this.thinkBefore(payload.thinkMs);
         await this.viewNotificationCategory('follows');
         break;
       }
-      case 'notification.back_home': {
+      case 'xiaohongshu.notification.back_home': {
         const payload = env.payload as NotificationBackHomePayload;
         this.logger('[browse] 命令: notification.back_home (返回通知首页)');
         await this.thinkBefore(payload.thinkMs);

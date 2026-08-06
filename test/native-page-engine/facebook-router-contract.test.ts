@@ -993,7 +993,7 @@ test('Facebook Reels entry reasons return the current canonical Reel card', asyn
   for (const params of [
     { reason: 'facebook_reels_primary' },
     { reason: 'empty_feed_reels_fallback' },
-    { reason: 'resume_redrive', targetSurface: 'reels' },
+    { reason: 'resume_redrive', surface: 'reels' },
   ]) {
     const { reason } = params;
     const dom = install(`

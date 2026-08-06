@@ -6,43 +6,70 @@ import type { NativePageCommand } from './client.js';
  * 而不是去源码里做文本匹配——文本匹配会被注释与错误文案喂绿（handoff §8.2 已三次踩到）。
  */
 export const nativeCommandKindByEnvelopeType = {
-  'plan.response': 'plan_execute', 'session.end': 'session_stop', 'page.scroll': 'page_scroll', 'feed.refresh': 'feed_refresh',
-  'search.execute': 'search_execute', 'note.open': 'note_open', 'note.close': 'note_close',
-  'navigation.back': 'navigation_back', 'note.browse_images': 'note_browse_images',
-  'note.scroll_comments': 'note_scroll_comments', 'profile.open': 'profile_open',
+  'plan.response': 'plan_execute', 'session.end': 'session_stop',
+  // 词汇批 4：面进命令名；五条 scroll 信封同映 page_scroll，面由 mapper 从信封名解析后以参数下传引擎。
+  'xiaohongshu.feed.scroll': 'page_scroll', 'xiaohongshu.search.scroll': 'page_scroll',
+  'facebook.feed.scroll': 'page_scroll', 'facebook.search.scroll': 'page_scroll',
+  'facebook.reels.scroll': 'page_scroll',
+  'xiaohongshu.feed.refresh': 'feed_refresh', 'facebook.feed.refresh': 'feed_refresh',
+  'xiaohongshu.search.execute': 'search_execute', 'facebook.search.execute': 'search_execute',
+  'xiaohongshu.note.open': 'note_open', 'facebook.note.open': 'note_open',
+  'xiaohongshu.note.close': 'note_close', 'facebook.note.close': 'note_close',
+  'navigation.back': 'navigation_back', 'xiaohongshu.note.browse_images': 'note_browse_images',
+  'xiaohongshu.note.scroll_comments': 'note_scroll_comments', 'xiaohongshu.profile.open': 'profile_open',
   'identity.read_current': 'identity_read_current',
   'identity.read_self_profile': 'identity_read_self_profile',
-  'notification.open': 'notification_open', 'notification.browse_comments': 'notification_browse_comments',
-  'notification.browse_likes': 'notification_browse_likes', 'notification.browse_follows': 'notification_browse_follows',
-  'notification.back_home': 'notification_back_home', 'interaction.like': 'interaction_like',
+  'xiaohongshu.notification.open': 'notification_open',
+  'xiaohongshu.notification.browse_comments': 'notification_browse_comments',
+  'xiaohongshu.notification.browse_likes': 'notification_browse_likes',
+  'xiaohongshu.notification.browse_follows': 'notification_browse_follows',
+  'xiaohongshu.notification.back_home': 'notification_back_home', 'interaction.like': 'interaction_like',
   'interaction.collect': 'interaction_collect', 'interaction.follow': 'interaction_follow',
   'interaction.comment': 'interaction_comment', 'interaction.like_comment': 'interaction_like_comment',
-  'group.join': 'group_join',
+  'facebook.group.join': 'group_join',
 } as const;
 
+/** 五条 scroll 信封名 → 面（引擎参数 `surface` 的唯一来源；协议层不再有 targetSurface 字段）。 */
+const scrollSurfaceByEnvelopeType: Readonly<Record<string, 'feed' | 'search' | 'reels'>> = {
+  'xiaohongshu.feed.scroll': 'feed',
+  'xiaohongshu.search.scroll': 'search',
+  'facebook.feed.scroll': 'feed',
+  'facebook.search.scroll': 'search',
+  'facebook.reels.scroll': 'reels',
+};
+
+// 动作关联键命名空间（值侧）本批不动——键随词汇批 4 平台段化，值到批 5（对象化）才动。
 const actionNames: Readonly<Record<string, string>> = {
-  'page.scroll': 'scroll',
-  'feed.refresh': 'refresh',
+  'xiaohongshu.feed.scroll': 'scroll',
+  'xiaohongshu.search.scroll': 'scroll',
+  'facebook.feed.scroll': 'scroll',
+  'facebook.search.scroll': 'scroll',
+  'facebook.reels.scroll': 'scroll',
+  'xiaohongshu.feed.refresh': 'refresh',
+  'facebook.feed.refresh': 'refresh',
   'interaction.like': 'like',
   'interaction.collect': 'collect',
   'interaction.follow': 'follow',
   'interaction.comment': 'comment',
   'interaction.like_comment': 'comment_like',
-  'search.execute': 'search',
-  'note.open': 'open_note',
-  'note.close': 'close',
-  'note.browse_images': 'browse_images',
-  'note.scroll_comments': 'scroll_comments',
+  'xiaohongshu.search.execute': 'search',
+  'facebook.search.execute': 'search',
+  'xiaohongshu.note.open': 'open_note',
+  'facebook.note.open': 'open_note',
+  'xiaohongshu.note.close': 'close',
+  'facebook.note.close': 'close',
+  'xiaohongshu.note.browse_images': 'browse_images',
+  'xiaohongshu.note.scroll_comments': 'scroll_comments',
   'navigation.back': 'back',
-  'profile.open': 'profile_open',
+  'xiaohongshu.profile.open': 'profile_open',
   'identity.read_current': 'identity_read_current',
   'identity.read_self_profile': 'identity_read_self_profile',
-  'group.join': 'join_group',
-  'notification.open': 'open_notifications',
-  'notification.browse_comments': 'browse_notification_comments',
-  'notification.browse_likes': 'browse_notification_likes',
-  'notification.browse_follows': 'browse_notification_follows',
-  'notification.back_home': 'notification_back_home',
+  'facebook.group.join': 'join_group',
+  'xiaohongshu.notification.open': 'open_notifications',
+  'xiaohongshu.notification.browse_comments': 'browse_notification_comments',
+  'xiaohongshu.notification.browse_likes': 'browse_notification_likes',
+  'xiaohongshu.notification.browse_follows': 'browse_notification_follows',
+  'xiaohongshu.notification.back_home': 'notification_back_home',
   'pacing.update': 'pacing_update',
   'session.end': 'session.end',
 };
@@ -57,8 +84,8 @@ export function nativeActionNameForCommand(type: string): string {
  * 并各自有一个可观测的消费点（见 test/native-page-engine/pacing-consumption.test.ts）。
  */
 export const nativeAllowedParamsByKind: Record<string, readonly string[]> = {
-  plan_execute: ['steps'], session_stop: ['reason'], browse_next: ['reason'], browse_scroll: ['reason'],
-  page_scroll: ['reason', 'targetSurface', 'dwellMs'], feed_refresh: ['reason', 'thinkMs'],
+  plan_execute: ['steps'], session_stop: ['reason'],
+  page_scroll: ['reason', 'dwellMs'], feed_refresh: ['reason', 'thinkMs'],
   search_execute: ['keyword', 'container', 'source', 'maxResults', 'sort', 'timeWindow'],
   note_open: ['noteId', 'index', 'reason', 'url', 'surface', 'purpose', 'thinkMs', 'selection', 'container'],
   note_close: ['reason', 'dwellMs'], navigation_back: ['reason', 'targetPage', 'dwellMs'],
@@ -89,6 +116,10 @@ export function nativeCommandForEnvelope(
   const kind = nativeCommandKindByEnvelopeType[env.type as keyof typeof nativeCommandKindByEnvelopeType];
   if (!kind) return undefined;
   const params = project(env.payload, nativeAllowedParamsByKind[kind]);
+  if (kind === 'page_scroll') {
+    // 面由信封名唯一决定（词汇批 4）；引擎据此路由 feed/search/reels 执行器。
+    params.surface = scrollSurfaceByEnvelopeType[env.type] ?? 'feed';
+  }
   if (kind === 'plan_execute' && Array.isArray(params.steps)) {
     params.steps = params.steps.map((step) => project(step, ['actionId', 'op', 'value']));
   }
