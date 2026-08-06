@@ -1365,6 +1365,13 @@ async fn facebook_reel_scroll_returns_ambiguous_after_one_key_without_fabricated
         receipt.reason.as_deref(),
         Some("reels_navigation_unconfirmed")
     );
+    // 未确认回执 MUST 带回此刻站着的 Reel 身份（change converge-facebook-reel-navigation-confirmation）：
+    // 消费方靠它把「没往前走」与「读不出身份」分开。该场景里 Reel 始终停在 reel/1。
+    assert_eq!(
+        receipt.note_id.as_deref(),
+        Some("https://www.facebook.com/reel/1"),
+        "unconfirmed navigation must name the Reel it is standing on"
+    );
 
     assert!(
         requests
@@ -1417,6 +1424,12 @@ async fn facebook_reel_probe_key_alternates_then_retains_the_confirmed_key() {
     assert_eq!(
         first_receipt.reason.as_deref(),
         Some("reels_navigation_unconfirmed")
+    );
+    // 第一次 ArrowRight 没能推进 ⇒ 仍停在 reel/1，回执 MUST 具名说出这一点，
+    // 否则「没往前走」和「读不出身份」在下游又并成一态。
+    assert_eq!(
+        first_receipt.note_id.as_deref(),
+        Some("https://www.facebook.com/reel/1")
     );
 
     let second = engine

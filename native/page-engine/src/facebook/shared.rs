@@ -1195,7 +1195,7 @@ pub(crate) fn facebook_scroll_failure(
     phase: EffectPhase,
     reason: &str,
 ) -> (EffectPhase, CommandOutput) {
-    facebook_scroll_failure_on_surface(phase, reason, None)
+    facebook_scroll_failure_parts(phase, reason, None, None)
 }
 
 /// 带列表面观测的滚动失败回执。「本批看完」的处置在首页与小组页 / 搜索页上并不相同，
@@ -1205,13 +1205,36 @@ pub(crate) fn facebook_scroll_failure_on_surface(
     reason: &str,
     surface: Option<&str>,
 ) -> (EffectPhase, CommandOutput) {
+    facebook_scroll_failure_parts(phase, reason, surface, None)
+}
+
+/// 带**已观测身份**的滚动失败回执。用于 Reels 有界观测结束仍未确认时：驱动此刻站在哪条 Reel 上
+/// 是已经读到的事实，回执里带上它，消费方才能把「没往前走」（身份与前态相同）和「读不出身份」
+/// 分开，而不必自己再推一遍。带身份**不等于**产出卡片：这里仍是一条失败回执、不含任何卡片，
+/// 既有的「未确认不产卡、不记 view」规则不变。
+///
+/// 不新增协议字段——复用既有 `ActionReceipt.note_id`。
+pub(crate) fn facebook_scroll_failure_with_identity(
+    phase: EffectPhase,
+    reason: &str,
+    note_id: Option<String>,
+) -> (EffectPhase, CommandOutput) {
+    facebook_scroll_failure_parts(phase, reason, None, note_id)
+}
+
+fn facebook_scroll_failure_parts(
+    phase: EffectPhase,
+    reason: &str,
+    surface: Option<&str>,
+    note_id: Option<String>,
+) -> (EffectPhase, CommandOutput) {
     (
         phase,
         CommandOutput::ActionReceipt(Box::new(ActionReceipt {
             action: "scroll".to_owned(),
             ok: false,
             reason: Some(reason.to_owned()),
-            note_id: None,
+            note_id,
             observation: surface.filter(|value| !value.is_empty()).map(|value| {
                 crate::model::ActionEvidence {
                     surface: Some(value.to_owned()),

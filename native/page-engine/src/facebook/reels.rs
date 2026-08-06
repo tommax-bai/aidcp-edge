@@ -4,7 +4,7 @@ use crate::engine::{CommandOutput, EngineSession, FacebookReelProbeKey};
 use crate::error::{EngineError, ErrorCode};
 use crate::facebook;
 use crate::input::unix_time_ms;
-use crate::model::{FacebookListKind, FacebookListState, PostIdentityKind};
+use crate::model::FacebookListKind;
 use crate::protocol::{EffectPhase, NativeCommand};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -309,13 +309,34 @@ async fn execute_facebook_reel_navigation(
         return Ok((EffectPhase::Confirmed, output));
     }
 
+    // 有界观测结束仍未确认。这里已经为了选原因码再读了一次页面，读到的身份 MUST NOT 再丢掉：
+    // 它是「此刻站在哪条 Reel 上」这个事实的唯一现成证据，消费方靠它把「没往前走」（身份与前态
+    // 相同）与「读不出身份」分开。
     let current = probe_facebook_reel(session).await?;
-    let reason = if canonical_reel_id(current.note_id.as_deref()).is_none() {
-        "reels_identity_unresolved"
+    Ok(unconfirmed_navigation_receipt(current.note_id.as_deref()))
+}
+
+/// 未确认回执：原因码与所带身份出自**同一次解析**，因此二者不可能不一致——解析得到 canonical
+/// Reel 身份即 `reels_navigation_unconfirmed` 并带上该 Reel，解析不到即 `reels_identity_unresolved`
+/// 且不带身份。MUST NOT 拆成两处分别判断：一旦出现「报了 unconfirmed 却不带身份」，消费方就又回到
+/// 分不清「没往前走」和「读不出来」的状态，而这正是本 change 要消除的那个二义。
+///
+/// 回传的是**观测到的原始 note_id**（完整 Reel 链接），不是 `canonical_reel_id` 规范化后的裸 id：
+/// 卡片侧 `note_id` 用的就是完整链接，消费方要拿这两者比对。回传规范化裸 id 会让它跟自己手上的
+/// 上一条 Reel 身份比不上——格式不同，比对恒不相等，「没往前走」会被读成「换了一条」。
+/// 规范化只用于**判定**身份是否可用，不用于回传。
+///
+/// 带身份不产出卡片、不记 view——既有的「未确认不产卡」规则不变。
+fn unconfirmed_navigation_receipt(observed_note_id: Option<&str>) -> (EffectPhase, CommandOutput) {
+    let (reason, identity) = if canonical_reel_id(observed_note_id).is_some() {
+        (
+            "reels_navigation_unconfirmed",
+            observed_note_id.map(str::to_owned),
+        )
     } else {
-        "reels_navigation_unconfirmed"
+        ("reels_identity_unresolved", None)
     };
-    Ok(facebook_scroll_failure(EffectPhase::Ambiguous, reason))
+    facebook_scroll_failure_with_identity(EffectPhase::Ambiguous, reason, identity)
 }
 
 pub(crate) async fn probe_facebook_reel(
@@ -372,6 +393,21 @@ async fn read_facebook_reel_card_snapshot(
     Ok((output, current))
 }
 
+/// 翻页后的确认判据，只由四件事组成：观测是卡片批次、面别是 Reels、卡片侧与探针侧身份**各自**
+/// 都能解析成 canonical Reel 身份、以及（需要位移时）探针侧身份不同于前态身份。
+///
+/// **MUST NOT 再加回「两侧身份必须相等」那一条。** 它看着像交叉验证，实际两侧同源：卡片侧走
+/// `feedCards()`，而它在 Reels 面上第一行就调 `safeActiveReel()`、并只用该调用返回的那个节点产卡
+/// （`facebook-router/20-feed.js:122-124`）；探针侧直接调同一个函数。两者只可能因「两次 CDP 往返
+/// 之间页面推进了」而不等 —— 而刚投递完翻页键正是最容易推进的时刻。所以那条判据抓不到任何来源
+/// 分歧（根本没有第二个来源），只会把真实的翻页判成未确认。
+///
+/// 卡片侧身份仍要求可解析,但理由与位移无关:云端后续按卡片身份定位这条 Reel 去点赞,身份不可用
+/// 的卡片报上去会把一次「未确认翻页」换成一次「点赞找不到目标」。
+///
+/// 同理 MUST NOT 加回 list_state / 卡片计数 / 探针 ok 标志 / is_video / 身份种类白名单:前两者在
+/// Reels 面上互为同义（该面读取器只产 0 或 1 张卡,ready 的定义即非空）,探针 ok 被「身份可解析」
+/// 蕴含（探针失败时结构里没有身份字段）,后两者是在收窄一个已经是 canonical `/reel/` 的链接。
 fn canonical_facebook_reel_card_matches(
     output: &CommandOutput,
     current: &facebook::FacebookReelProbe,
@@ -381,28 +417,20 @@ fn canonical_facebook_reel_card_matches(
     let CommandOutput::PageCards(cards) = output else {
         return false;
     };
-    if cards.list_kind != Some(FacebookListKind::Reels)
-        || cards.list_state != Some(FacebookListState::Ready)
-        || cards.cards.len() != 1
-        || !current.ok
-    {
+    if cards.list_kind != Some(FacebookListKind::Reels) {
         return false;
     }
-    let card = &cards.cards[0];
-    if card.is_video != Some(true)
-        || !matches!(card.note_id_kind, Some(PostIdentityKind::Permalink) | None)
-    {
+    // checked 取值：卡片计数判断已删除，这里 MUST NOT 退回定长索引——空批次会越界 panic。
+    // 取不到卡片即判不确认，与删除计数判断前的行为一致。
+    let Some(card) = cards.cards.first() else {
         return false;
-    }
-    let (Some(current_id), Some(card_id)) = (
+    };
+    let (Some(current_id), Some(_card_id)) = (
         canonical_reel_id(current.note_id.as_deref()),
         canonical_reel_id(card.note_id.as_deref()),
     ) else {
         return false;
     };
-    if current_id != card_id {
-        return false;
-    }
     if !require_movement {
         return true;
     }
@@ -459,7 +487,7 @@ pub(crate) fn reel_probe_key_params(key: FacebookReelProbeKey) -> (&'static str,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{FacebookListState, PageCard, PageCards};
+    use crate::model::{FacebookListState, PageCard, PageCards, PostIdentityKind};
 
     fn reel_probe(note_id: Option<&str>) -> facebook::FacebookReelProbe {
         facebook::FacebookReelProbe {
@@ -538,23 +566,12 @@ mod tests {
     }
 
     #[test]
-    fn canonical_reel_completion_rejects_malformed_or_mismatched_cards() {
+    fn canonical_reel_completion_rejects_uncanonical_card_identity() {
         let before = reel_probe(Some("https://www.facebook.com/reel/1"));
-        let current = reel_probe(Some("https://www.facebook.com/reel/2"));
 
-        let multiple = reel_cards("https://www.facebook.com/reel/2", None, 2);
-        assert!(!canonical_facebook_reel_card_matches(
-            &multiple, &current, &before, true,
-        ));
-
-        let mismatched = reel_cards("https://www.facebook.com/reel/3", None, 1);
-        assert!(!canonical_facebook_reel_card_matches(
-            &mismatched,
-            &current,
-            &before,
-            true,
-        ));
-
+        // 卡片身份解析不出 canonical Reel 身份 ⇒ 不确认。这一条与位移无关：云端后续按卡片身份
+        // 定位该 Reel 去点赞，放行一张身份不可用的卡片，只是把「未确认翻页」换成后面一次
+        // 「点赞找不到目标」。
         let content_ref = reel_cards(
             "facebook-content-ref:session:2",
             Some(PostIdentityKind::ContentRef),
@@ -567,6 +584,121 @@ mod tests {
             &before,
             true,
         ));
+
+        // 探针身份解析不出 ⇒ 同样不确认（位移无从判起）。
+        let good_card = reel_cards("https://www.facebook.com/reel/2", None, 1);
+        assert!(!canonical_facebook_reel_card_matches(
+            &good_card,
+            &content_ref_probe,
+            &before,
+            true,
+        ));
+    }
+
+    /// 判据收敛（change converge-facebook-reel-navigation-confirmation）：结构性观测 MUST NOT
+    /// 否决一次已经由身份位移证明了的翻页。这些条件此前各自都能把真实翻页判成未确认。
+    #[test]
+    fn structural_observations_do_not_veto_confirmed_transition() {
+        let before = reel_probe(Some("https://www.facebook.com/reel/1"));
+        let current = reel_probe(Some("https://www.facebook.com/reel/2"));
+
+        // list_state 非 Ready、卡片非视频、身份种类非 Permalink —— 三者同时不满足。
+        let mut cards = reel_cards(
+            "https://www.facebook.com/reel/2",
+            Some(PostIdentityKind::ContentRef),
+            1,
+        );
+        if let CommandOutput::PageCards(ref mut value) = cards {
+            value.list_state = Some(FacebookListState::PresentUnreportable);
+            value.cards[0].is_video = Some(false);
+        }
+        assert!(canonical_facebook_reel_card_matches(
+            &cards, &current, &before, true,
+        ));
+
+        // 探针 ok 标志为假，但身份仍解析得到 —— ok 标志被「身份可解析」蕴含，不再单独判。
+        let mut not_ok = current.clone();
+        not_ok.ok = false;
+        assert!(canonical_facebook_reel_card_matches(
+            &cards, &not_ok, &before, true,
+        ));
+
+        // 多卡批次：取第一张判定，不再因计数否决。真实 Reels 面上该分支不可达——该面读取器
+        // 只产 0 或 1 张卡（facebook-router/20-feed.js:122-124），此处仅锁住取值行为。
+        let multiple = reel_cards("https://www.facebook.com/reel/2", None, 2);
+        assert!(canonical_facebook_reel_card_matches(
+            &multiple, &current, &before, true,
+        ));
+    }
+
+    /// 卡片侧与探针侧同源（`feedCards()` 内部就调 `safeActiveReel()`），两者只可能因一次 CDP
+    /// 往返间的推进而不等。要求相等抓不到任何来源分歧，只会把真实翻页判成未确认。
+    #[test]
+    fn settling_surface_does_not_defeat_real_transition() {
+        let before = reel_probe(Some("https://www.facebook.com/reel/1"));
+        let current = reel_probe(Some("https://www.facebook.com/reel/2"));
+        let later_card = reel_cards("https://www.facebook.com/reel/3", None, 1);
+
+        assert!(canonical_facebook_reel_card_matches(
+            &later_card,
+            &current,
+            &before,
+            true,
+        ));
+    }
+
+    /// 删掉卡片计数判断后，取值 MUST 是 checked 的：空批次判不确认，绝不越界 panic。
+    #[test]
+    fn empty_card_batch_is_unconfirmed_not_fatal() {
+        let before = reel_probe(Some("https://www.facebook.com/reel/1"));
+        let current = reel_probe(Some("https://www.facebook.com/reel/2"));
+        let empty = reel_cards("https://www.facebook.com/reel/2", None, 0);
+
+        assert!(!canonical_facebook_reel_card_matches(
+            &empty, &current, &before, true,
+        ));
+        assert!(!canonical_facebook_reel_card_matches(
+            &empty, &current, &before, false,
+        ));
+    }
+
+    /// 未确认回执：原因码与所带身份出自同一次解析，二者不可能不一致；且回传的是完整链接、
+    /// 不是规范化裸 id——消费方要拿它跟卡片侧的 `note_id` 比对，格式必须同源。
+    #[test]
+    fn unconfirmed_receipt_carries_the_identity_it_named() {
+        let (phase, output) =
+            unconfirmed_navigation_receipt(Some("https://www.facebook.com/reel/2"));
+        assert_eq!(phase, EffectPhase::Ambiguous);
+        let CommandOutput::ActionReceipt(receipt) = output else {
+            panic!("expected unconfirmed receipt")
+        };
+        assert_eq!(
+            receipt.reason.as_deref(),
+            Some("reels_navigation_unconfirmed")
+        );
+        assert_eq!(
+            receipt.note_id.as_deref(),
+            Some("https://www.facebook.com/reel/2"),
+            "identity must round-trip in the same shape the card side uses"
+        );
+        assert!(!receipt.ok);
+
+        // 读不到任何身份。
+        let (_, output) = unconfirmed_navigation_receipt(None);
+        let CommandOutput::ActionReceipt(receipt) = output else {
+            panic!("expected unresolved receipt")
+        };
+        assert_eq!(receipt.reason.as_deref(), Some("reels_identity_unresolved"));
+        assert_eq!(receipt.note_id, None);
+
+        // 读到了某个身份，但它不是 canonical Reel 链接 ⇒ 与「读不到」同档，且 MUST NOT 把这个
+        // 不可用的值当身份传下去。
+        let (_, output) = unconfirmed_navigation_receipt(Some("facebook-content-ref:session:2"));
+        let CommandOutput::ActionReceipt(receipt) = output else {
+            panic!("expected unresolved receipt")
+        };
+        assert_eq!(receipt.reason.as_deref(), Some("reels_identity_unresolved"));
+        assert_eq!(receipt.note_id, None);
     }
 
     #[test]
