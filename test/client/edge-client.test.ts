@@ -623,7 +623,17 @@ test('edge-client: xiaohongshu.note.close 路由到 browseHandler', async () => 
 // change facebook-browse-and-like-loop（task 4.4）：FB 浏览/点赞独立命令 MUST 放行到 browseHandler，
 // 绝不落入「其他主动消息暂忽略」被静默丢弃（typecheck 抓不到白名单遗漏）。词汇批 4 起 FB 浏览命令
 // 带 facebook. 平台段；此断言锁死它们不被误从白名单移除而回归静默丢弃。
-const FB_BROWSE_COMMANDS = ['facebook.feed.scroll', 'facebook.note.open', 'facebook.note.close', 'interaction.like', 'navigation.back'] as const;
+const FB_BROWSE_COMMANDS = [
+  'facebook.feed.scroll',
+  'facebook.search.scroll',
+  'facebook.reels.scroll',
+  'facebook.feed.refresh',
+  'facebook.search.execute',
+  'facebook.note.open',
+  'facebook.note.close',
+  'interaction.like',
+  'navigation.back',
+] as const;
 for (const type of FB_BROWSE_COMMANDS) {
   test(`edge-client: Facebook 浏览命令 ${type} 路由到 browseHandler（不得静默丢弃）`, async () => {
     const ws = new FakeWebSocket();
@@ -657,6 +667,32 @@ test('edge-client: 平台段命令与无平台段控制命令混发均正常路�
 // 历史 bug：入口路由白名单漏接 notification.*，命令在到达处理器前被静默丢弃，
 // 导致巡视无回执 → 恢复链（excursion_resumer）永不收敛 → 浏览永挂 → 会话被看门狗杀。
 // 与 cloud command-bridge 的 open_notifications/browse_notification_*/notification_back_home 映射一一对应。
+// 词汇批 4：小红书侧全部平台段浏览命令逐条锁死路由（白名单 typecheck 抓不到，删一条测试必须红）。
+const XHS_BROWSE_COMMANDS = [
+  'xiaohongshu.feed.scroll',
+  'xiaohongshu.search.scroll',
+  'xiaohongshu.feed.refresh',
+  'xiaohongshu.search.execute',
+  'xiaohongshu.note.open',
+  'xiaohongshu.note.close',
+  'xiaohongshu.note.browse_images',
+  'xiaohongshu.note.scroll_comments',
+  'xiaohongshu.profile.open',
+] as const;
+
+for (const type of XHS_BROWSE_COMMANDS) {
+  test(`edge-client: 小红书浏览命令 ${type} 路由到 browseHandler（不得静默丢弃）`, async () => {
+    const ws = new FakeWebSocket();
+    const client = await connectClient(ws, { platform: 'xiaohongshu' });
+    const calls: Envelope[] = [];
+    client.onBrowseCommand((env) => calls.push(env));
+
+    ws.emitMessage(makeEnvelope(type, `xhs-${type}`, 2, { thinkMs: 0 }));
+    assert.equal(calls.length, 1, `${type} 应被路由到 browseHandler 而非在入口丢弃`);
+    assert.equal(calls[0].type, type);
+  });
+}
+
 const NOTIFICATION_EXCURSION_COMMANDS = [
   'xiaohongshu.notification.open',
   'xiaohongshu.notification.browse_comments',
