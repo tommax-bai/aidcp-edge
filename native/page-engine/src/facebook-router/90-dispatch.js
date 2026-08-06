@@ -43,6 +43,11 @@
     const surface=classify();
     const cards=topArticles().length;
     const probedKind=blocking.kind==='captcha'?'captcha':blocking.kind==='login'?'login':blocking.kind==='unknown'?'unknown':surface==='home'?'home':surface==='search'?'search':surface.endsWith('_post')?'note_detail':surface==='login'?'login':'unknown';
+    // 现场采集只在**已判出阻断**之后跑，且只在 page_probe 这一路（change blocking-overlay-dom-capture）。
+    // 刻意不放进 blockingProbe()：那个函数在**每一条命令**派发前都跑一次，把 DOM 遍历塞进去
+    // 等于给每条命令加一次全页扫描，而只有 page_probe 的输出会走到阻断上报——纯成本、零收益。
+    // 采集结果 MUST NOT 回喂判定：probedKind / blockingKind 已在上面算完，此处只做留证。
+    const overlayCapture=blocking.kind!=='none'?captureBlockingOverlays(blocking.kind):undefined;
     return done({kind:'page_probe',value:{
       targetId:'',
       origin:location.origin,
@@ -51,6 +56,7 @@
       pageKind:probedKind,
       blockingKind:blocking.kind,
       blockingText:blocking.text?blocking.text.slice(0,1000):undefined,
+      overlayCapture,
       signals:{feedCardCount:cards,noteDetailCount:surface.endsWith('_post')?1:0,loginWallCount:blocking.kind==='login'?1:0,captchaSignalCount:blocking.kind==='captcha'?1:0,dialogCount:all('[role="dialog"],[aria-modal="true"]').filter(visible).length,profileSignalCount:surface==='page'?1:0,notificationSignalCount:0,publishSignalCount:0,errorSignalCount:blocking.kind==='unknown'?1:0,mainCount:all('main,[role="main"]').length},
     }});
   }

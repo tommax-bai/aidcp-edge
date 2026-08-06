@@ -12,6 +12,7 @@ import {
 import type {
   ActionCompletedPayload,
   ActionResultPayload,
+  BlockingOverlayDomFeaturePayload,
   Envelope,
   IdentityObservedPayload,
   NoteDetailPayload,
@@ -104,6 +105,58 @@ interface BlockingPolicy {
   haltsLocalDispatch: boolean;
   /** 是否产出陪伴界面事件（产品范围，非可观测性）。 */
   emitsCompanionUi: boolean;
+}
+
+/**
+ * 页面规则产出的阻断现场（change blocking-overlay-dom-capture）在宿主侧的形状。
+ *
+ * 结构与协议载荷同形，故承接后可直接进 `overlay.dom` / `overlay.candidates`，
+ * 不做第二次字段翻译——多一层手抄映射就多一处会静默漂移的地方。
+ */
+interface OverlayCaptureEvidence {
+  captureId: string;
+  status: 'captured' | 'none_visible' | 'failed';
+  reason?: string;
+  viewport?: { width: number; height: number };
+  seenCount?: number;
+  truncated?: boolean;
+  budgetExhausted?: boolean;
+  containers: BlockingOverlayDomFeaturePayload[];
+}
+
+/**
+ * 承接页面规则的采集结果。
+ *
+ * 红线：**残缺 / 不可解的载荷绝不冒充「采到了」**。缺 `captureId` 或状态不认识时，一律回 undefined
+ * ——「没采到」与「采到了但里面是空的」是两态，压成一态就是本仓点名的静默假成功。
+ * 同理，状态字段不合法时不猜、不回落成 `captured`。
+ */
+function readOverlayCapture(raw: unknown): OverlayCaptureEvidence | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const obj = raw as Record<string, unknown>;
+  const captureId = typeof obj.captureId === 'string' ? obj.captureId.trim() : '';
+  if (!captureId) return undefined;
+  const status = obj.status;
+  if (status !== 'captured' && status !== 'none_visible' && status !== 'failed') return undefined;
+  const containers = Array.isArray(obj.containers)
+    ? (obj.containers.filter(
+      (item): item is BlockingOverlayDomFeaturePayload =>
+        Boolean(item) && typeof item === 'object' && typeof (item as { tag?: unknown }).tag === 'string',
+    ))
+    : [];
+  const viewport = obj.viewport && typeof obj.viewport === 'object'
+    ? obj.viewport as { width: number; height: number }
+    : undefined;
+  return {
+    captureId,
+    status,
+    ...(typeof obj.reason === 'string' && obj.reason ? { reason: obj.reason } : {}),
+    ...(viewport ? { viewport } : {}),
+    ...(typeof obj.seenCount === 'number' ? { seenCount: obj.seenCount } : {}),
+    ...(obj.truncated === true ? { truncated: true } : {}),
+    ...(obj.budgetExhausted === true ? { budgetExhausted: true } : {}),
+    containers,
+  };
 }
 
 const FACEBOOK_BLOCKING_POLICY: BlockingPolicy = {
@@ -681,7 +734,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   private blockingKind: BlockingKind = 'none';
   private reportedBlockingKind?: 'captcha' | 'unknown';
   private unknownConfirmTimer?: NodeJS.Timeout;
-  private lastBlockingEvidence?: { url?: string; text?: string };
+  private lastBlockingEvidence?: { url?: string; text?: string; capture?: OverlayCaptureEvidence };
   /**
    * 阻断 episode 世代号：离开云端上报态即自增，令在途的延后确认当场作废。
    * 少了它，一个已经自愈的低置信阻断仍会在确认窗到点时补发一次 detected（配对随之错位）。
@@ -1645,7 +1698,9 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     const evidence = typeof value.blockingText === 'string' && value.blockingText.trim()
       ? value.blockingText.trim().slice(0, 1_000)
       : undefined;
-    this.lastBlockingEvidence = { url, text: evidence };
+    // 现场采集（change blocking-overlay-dom-capture）：页面规则只在判出阻断后才产出这一格，
+    // 故此处**只承接、不判断**。采集结果 MUST NOT 参与 policy.classify —— 上面那行已经判完了。
+    this.lastBlockingEvidence = { url, text: evidence, capture: readOverlayCapture(value.overlayCapture) };
     const previous = this.blockingKind;
     this.blockingKind = kind;
     if (kind !== previous) this.diagnostic('blocking_state', { from: previous, to: kind });
@@ -1772,24 +1827,48 @@ export class NativeBrowseSession implements EdgeBrowseSession {
   private reportBlocking(kind: 'captcha' | 'unknown'): void {
     this.reportedBlockingKind = kind;
     const evidence = this.lastBlockingEvidence;
+    const capture = evidence?.capture;
+    const containers = capture?.containers ?? [];
+    // 证据文案仍**只**取自分类判定时的同一份页面文本：采集结果 MUST NOT 用于回填 text，
+    // 否则证据与判定不同源，云端的限流判据会在一份它没判过的文本上重算。
+    const overlay = evidence?.text || capture
+      ? {
+        kind,
+        ...(evidence?.url ? { firstDetectedUrl: evidence.url } : {}),
+        capturedAt: Date.now(),
+        ...(evidence?.text ? { text: evidence.text } : {}),
+        ...(containers[0] ? { dom: containers[0] } : {}),
+        candidates: containers,
+        ...(capture
+          ? {
+            captureId: capture.captureId,
+            captureStatus: capture.status,
+            ...(capture.reason ? { captureReason: capture.reason } : {}),
+            ...(capture.viewport ? { viewport: capture.viewport } : {}),
+            ...(capture.seenCount !== undefined ? { seenCount: capture.seenCount } : {}),
+            ...(capture.truncated ? { truncated: true } : {}),
+            ...(capture.budgetExhausted ? { budgetExhausted: true } : {}),
+          }
+          : {}),
+      }
+      : undefined;
     this.options.client.send('risk.captcha_detected', {
       edgeId: this.options.edgeId,
       accountId: this.options.getAccountId?.(),
       kind,
       ...(evidence?.url ? { url: evidence.url } : {}),
-      ...(evidence?.text ? {
-        overlay: {
-          kind,
-          ...(evidence.url ? { firstDetectedUrl: evidence.url } : {}),
-          capturedAt: Date.now(),
-          text: evidence.text,
-          candidates: [],
-        },
-      } : {}),
+      ...(overlay ? { overlay } : {}),
       reason: 'native_page_probe',
     });
-    // 诊断只记「有没有证据文案」，不记文案本身：那是页面正文。
-    this.diagnostic('blocking_detected', { kind, evidence: evidence?.text ? 'present' : 'absent' });
+    // 诊断只记「有没有证据文案 / 采到几个」，不记文案、HTML 原文或子元素文字本身：那是页面正文。
+    // captureId 必须进诊断行——它是边缘侧与云端样本对上号的唯一凭据。
+    this.diagnostic('blocking_detected', {
+      kind,
+      evidence: evidence?.text ? 'present' : 'absent',
+      ...(capture
+        ? { captureId: capture.captureId, capture: capture.status, containers: containers.length }
+        : { capture: 'absent' }),
+    });
     if (this.blockingPolicy.emitsCompanionUi) {
       const what = kind === 'captcha' ? '验证码' : '未知阻断/限流';
       this.emitUi({

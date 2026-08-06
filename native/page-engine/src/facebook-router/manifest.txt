@@ -1,4 +1,5 @@
 00-shared.js
+04-blocking-capture.js
 05-session.js
 06-auth.js
 08-reaction-semantics.js
