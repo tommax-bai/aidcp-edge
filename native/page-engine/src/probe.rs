@@ -811,7 +811,10 @@ mod tests {
         // 旧客户端 / 小红书路径不带这一格。缺席 MUST 解码成功并回落为「未采集」，
         // MUST NOT 报错——否则一次向后兼容的缺省就把阻断监测打瞎。
         let mut value = probe_json_with_capture();
-        value.as_object_mut().expect("object").remove("overlayCapture");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("overlayCapture");
         let probe: ProbeResult = serde_json::from_value(value).expect("probe without capture");
         assert!(probe.overlay_capture.is_none());
     }
@@ -819,9 +822,14 @@ mod tests {
     #[test]
     fn overlay_capture_three_states_survive_round_trip() {
         // 「确实没有」与「没能采到」端到端必须是两态，MUST NOT 压成同一个空结果。
-        for (status, reason) in [("none_visible", None), ("failed", Some("capture query exploded"))] {
+        for (status, reason) in [
+            ("none_visible", None),
+            ("failed", Some("capture query exploded")),
+        ] {
             let mut value = probe_json_with_capture();
-            let capture = value["overlayCapture"].as_object_mut().expect("capture object");
+            let capture = value["overlayCapture"]
+                .as_object_mut()
+                .expect("capture object");
             capture.insert("status".into(), serde_json::json!(status));
             capture.insert("containers".into(), serde_json::json!([]));
             if let Some(reason) = reason {
