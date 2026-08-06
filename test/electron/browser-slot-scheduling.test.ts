@@ -98,10 +98,55 @@ test('启动排队准入：未满可加入、满时拒绝、同一环境重复�
   });
 });
 
-test('客户端将等待浏览器执行位统一显示为“排队中”', () => {
+test('主进程没说在哪一段时，等待浏览器执行位回落显示为“排队中”', () => {
   const status = { automationState: 'waiting_resource' };
   assert.equal(uiLogic.synthesizeHealth(status).label, '排队中');
   assert.equal(uiLogic.fleetLevel(status, Date.now()).label, '排队中');
+});
+
+// 四条通道各自从 1 开始数位次，左栏只有一个数字的位置 → 段名必须进标签，否则同一时刻出现四个 `#1`
+// 会被读成「编号重复」。这里钉死的是「同号不同段 MUST 有不同标签」，不是具体用词。
+test('排队位次按段命名：不同队伍的同一位次不得显示成同一个状态', () => {
+  const labelFor = (queueStage: string) => uiLogic.fleetLevel(
+    { automationState: 'waiting_resource', queueStage, queuePosition: 1 },
+    Date.now(),
+  ).label;
+  const labels = ['preparing', 'launch', 'slot', 'transient'].map(labelFor);
+  assert.deepEqual(labels, ['准备', '待启动', '排队中', '等通道']);
+  assert.equal(new Set(labels).size, labels.length, '同为 #1 的四条队伍必须各自可辨');
+  assert.equal(labelFor('unknown-stage'), '排队中', '认不出的段回落，绝不猜一个段名');
+});
+
+test('排队组先按段聚拢再按段内位次，绝不把四条队伍的数字混排成一个全局名次', () => {
+  const now = Date.now();
+  const queued = (envId: string, queueStage: string, queuePosition: number) => ({
+    envId,
+    name: envId,
+    status: {
+      automationState: 'waiting_resource',
+      engineLinkState: 'disconnected',
+      browserState: 'queued',
+      queueStage,
+      queuePosition,
+      updatedAt: new Date(now).toISOString(),
+    },
+  });
+  const model = uiLogic.fleetRailModel([
+    queued('prep-1', 'preparing', 1),
+    queued('slot-2', 'slot', 2),
+    queued('launch-1', 'launch', 1),
+    queued('slot-1', 'slot', 1),
+    queued('prep-2', 'preparing', 2),
+  ], now);
+  assert.deepEqual(
+    model.rows.map((r: { envId: string }) => r.envId),
+    ['slot-1', 'slot-2', 'launch-1', 'prep-1', 'prep-2'],
+    '段内 FIFO，段间按「离拿到浏览器还有几段」聚拢',
+  );
+  assert.deepEqual(
+    model.rows.map((r: { label: string; queuePosition: number }) => `${r.label} #${r.queuePosition}`),
+    ['排队中 #1', '排队中 #2', '待启动 #1', '准备 #1', '准备 #2'],
+  );
 });
 
 test('平台能力：视频号使用独立临时通道且不适用人设，其他平台保持公共浏览器与人设', () => {

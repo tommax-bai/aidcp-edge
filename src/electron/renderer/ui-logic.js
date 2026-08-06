@@ -813,6 +813,29 @@
   //   offline(灰)          已停止 / 已暂停
   const FLEET_STALE_MS = 5 * 60_000; // 状态投影超 5 分钟无任何更新即判失联（诚实：不确定 ≠ 在线）
 
+  // ── 排队位次的分段命名（change browser-slot-scheduling）────────────────────────
+  //
+  // 「等着开浏览器」实际是四条互不相干的通道：准备（错峰前置）→ 待启动（串行启动队）→
+  // 排队中（等执行位）；视频号那类一次性浏览器另走临时通道。**每条队伍各自从 1 开始数**，
+  // 主进程也如实按「你当前在哪一段」投影位次。左栏过去把四段统一写成「排队中」再拼一个裸 `#N`，
+  // 于是同一时刻能出现四个 `#1`，看起来像编号重复——丢的不是数字，是「这是第几段的号」这个前提。
+  //
+  // 因此段名 MUST 进标签本身。**MUST NOT 把四段合成一个全局名次**：等执行位的环境要靠别人让出
+  // 位子才能走，待启动队列则是自己往前推，谁先起来没有硬保证；编一个「你是全场第 7」就是把一个
+  // 证明不了的先后关系写死给用户看。段未知（旧版主进程 / 尚未投影）时回落「排队中」，不猜。
+  const QUEUE_STAGE_LABELS = { preparing: '准备', launch: '待启动', slot: '排队中', transient: '等通道' };
+  // 列表内的分段先后只表达「离拿到浏览器还有几段」，不承诺段间的绝对先后。
+  const QUEUE_STAGE_RANK = { slot: 0, transient: 1, launch: 2, preparing: 3 };
+  const QUEUE_STAGE_DETAILS = {
+    preparing: '正在按顺序做启动前准备',
+    launch: '已排上启动队列，等待轮到它开浏览器',
+    slot: '等待浏览器执行位',
+    transient: '等待临时浏览器通道',
+  };
+  const queueStageOf = (stage) => (Object.prototype.hasOwnProperty.call(QUEUE_STAGE_LABELS, stage) ? stage : null);
+  const queueStageLabel = (stage) => QUEUE_STAGE_LABELS[stage] || '排队中';
+  const queueStageDetail = (stage) => QUEUE_STAGE_DETAILS[stage] || '等待浏览器执行位';
+
   function fleetLevel(status, nowMs) {
     const s = lifecycleView(status);
     const result = (level, needsAction, label, state, railGroup, detail = '') => (
@@ -845,7 +868,8 @@
       return result('launching', false, '登录中', 'starting', 'starting', '系统正在自动登录，无需人工操作');
     }
     if (s.automationState === 'waiting_resource') {
-      return result('launching', false, '排队中', 'queued', 'queued', '等待浏览器执行位');
+      const stage = queueStageOf(s.queueStage);
+      return result('launching', false, queueStageLabel(stage), 'queued', 'queued', queueStageDetail(stage));
     }
     if (s.automationState === 'pausing') {
       return result('launching', false, '暂停中', 'starting', 'paused', '正在暂停自动化');
@@ -867,7 +891,10 @@
       if (s.automationState === 'running') return result('running', false, '运行中', 'running', 'running', '正在执行任务');
       if (s.browserState === 'closed') return result('running', false, '待机中', 'standby', 'standby', '引擎在线，浏览器已关闭且不占槽位');
       if (s.browserState === 'ready') return result('running', false, '待任务', 'ready', 'ready', '引擎和浏览器已就绪，等待任务');
-      if (s.browserState === 'queued') return result('launching', false, '排队中', 'queued', 'queued', '等待浏览器执行位');
+      if (s.browserState === 'queued') {
+        const stage = queueStageOf(s.queueStage);
+        return result('launching', false, queueStageLabel(stage), 'queued', 'queued', queueStageDetail(stage));
+      }
       return result('launching', false, '启动中', 'starting', 'starting', '正在准备浏览器');
     }
     if (s.automationState === 'paused') return result('offline', false, '已暂停', 'paused', 'paused', '自动化已暂停');
@@ -905,6 +932,7 @@
         detail: lv.detail,
         state: lv.state,
         railGroup: lv.railGroup,
+        queueStage: queueStageOf(e && e.status && e.status.queueStage),
         queuePosition: Number.isInteger(e && e.status && e.status.queuePosition) && e.status.queuePosition > 0
           ? e.status.queuePosition
           : null,
@@ -918,6 +946,11 @@
       const levelOrder = FLEET_LEVEL_RANK[a.level] - FLEET_LEVEL_RANK[b.level];
       if (levelOrder !== 0) return levelOrder;
       if (a.railGroup === 'queued') {
+        // 先按段聚拢再按段内位次：四条队伍各自从 1 数起，只按数字排会把两段交叉插花，
+        // 列表顺序看起来像乱跳（同一批「全部启动」的环境被后面段的 #1 #2 顶开）。
+        const aStage = a.queueStage === null ? Number.POSITIVE_INFINITY : QUEUE_STAGE_RANK[a.queueStage];
+        const bStage = b.queueStage === null ? Number.POSITIVE_INFINITY : QUEUE_STAGE_RANK[b.queueStage];
+        if (aStage !== bStage) return aStage - bStage;
         const aPosition = a.queuePosition === null ? Number.POSITIVE_INFINITY : a.queuePosition;
         const bPosition = b.queuePosition === null ? Number.POSITIVE_INFINITY : b.queuePosition;
         if (aPosition !== bPosition) return aPosition - bPosition;

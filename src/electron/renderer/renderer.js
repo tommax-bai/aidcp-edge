@@ -6539,7 +6539,7 @@ function renderRail() {
     slots: fleetView.slots,
     // platform 必须进签名：改平台后行才会重建上色（漏掉则签名未变、UI 停留旧平台）。
     rows: model.rows.map((r) => [r.envId, r.level, r.state, r.railGroup, r.needsAction, railDisplayName(r), r.nameSource,
-      r.nameSyncState, manualNicknamePendingEnvIds.has(r.envId), r.label, r.detail, r.queuePosition,
+      r.nameSyncState, manualNicknamePendingEnvIds.has(r.envId), r.label, r.detail, r.queueStage, r.queuePosition,
       Boolean(r.status && r.status.personaBound), normPlatform(r.platform),
       // 规则模式真态是异步读回来的：不进签名，人设图标就会停留在读到之前的「未设置」口径。
       personaRuleModeWithoutPersona(r, r.status)]),
@@ -6674,7 +6674,9 @@ function makeRailRow(row) {
     const queueBadge = document.createElement('span');
     queueBadge.className = 'rail-queue-badge';
     queueBadge.textContent = String(row.queuePosition);
-    queueBadge.setAttribute('aria-label', `排队第 ${row.queuePosition} 位`);
+    // 位次只在它自己那条队伍里成立（准备 / 待启动 / 排队中 / 等通道 各自从 1 起算），
+    // 所以读屏文案必须带上段名，不能只说「排队第 N 位」。
+    queueBadge.setAttribute('aria-label', `${row.label} · 第 ${row.queuePosition} 位`);
     ava.appendChild(queueBadge);
   }
   btn.appendChild(ava);
@@ -6746,7 +6748,7 @@ function makeRailRow(row) {
     const queuePosition = document.createElement('span');
     queuePosition.className = 'rail-queue-position';
     queuePosition.textContent = `#${row.queuePosition}`;
-    queuePosition.setAttribute('aria-label', `排队第 ${row.queuePosition} 位`);
+    queuePosition.setAttribute('aria-label', `${row.label} · 第 ${row.queuePosition} 位`);
     stateEl.appendChild(queuePosition);
   }
   if (row.detail) stateEl.title = row.detail;

@@ -2607,7 +2607,9 @@ test('视频号行不显示人设入口、不触发人设弹窗，并分开展�
   const row = w.document.querySelector('.rail-row[data-env-id="ads-wx1"]') as HTMLElement;
   assert.ok(row);
   assert.equal(row.querySelector('.rail-persona'), null, '视频号行不得渲染人设图标');
-  assert.equal(row.querySelector('.rail-state')?.textContent?.replace(/\s+/g, ''), '排队中#2');
+  // 临时通道与公共执行位是两条独立队伍、各自从 1 数起 → 位次必须带段名，
+  // 否则视频号的 #2 和公共槽位的 #2 会在同一张列表里撞成「重复编号」。
+  assert.equal(row.querySelector('.rail-state')?.textContent?.replace(/\s+/g, ''), '等通道#2');
   assert.equal(w.document.querySelector('#rail-capacity')?.textContent, '公共浏览器 2/2 · 临时通道 1/1');
   assert.equal(w.document.querySelector('#persona-pop')?.classList.contains('open'), false);
   assert.equal(calls.notify.length, 0, 'personaBound=false 不得对视频号触发人设检测通知或自动弹窗');
