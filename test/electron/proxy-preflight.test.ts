@@ -290,3 +290,106 @@ test('控制器仅在 Cloud 代理权威 revision 相同时复用缓存', async 
   assert.equal(changed.authorityRevision, 4);
   assert.equal(probes, 2);
 });
+
+// ── 确定失败的处置决策（change bound-proxy-preflight-retry）──────────────────────
+//
+// 这些用例驱动的是**真实现**，不是源码文本：把重排改成无条件、把预算判反、把不可恢复也放进
+// 重排通道——每一种削弱形态都会在下面当场变红。
+
+const {
+  decideProxyPreflightFailure,
+  preflightFailureIsRecoverable,
+  NON_RECOVERABLE_PREFLIGHT_REASONS,
+  DEFAULT_REQUEUE_DELAYS_MS,
+} = require('../../src/electron/proxy-preflight.cjs') as {
+  decideProxyPreflightFailure: (input: {
+    reason?: string;
+    requeuesUsed?: number;
+    maxRequeues?: number;
+    delaysMs?: number[];
+  }) => {
+    action: string;
+    terminal?: string;
+    reason?: string;
+    probes?: number;
+    attempt?: number;
+    maxRequeues?: number;
+    delayMs?: number;
+  };
+  preflightFailureIsRecoverable: (reason: string) => boolean;
+  NON_RECOVERABLE_PREFLIGHT_REASONS: Set<string>;
+  DEFAULT_REQUEUE_DELAYS_MS: number[];
+};
+
+test('未识别的失败原因按可恢复处置，绝不折进终局', () => {
+  // 这是分类器的红线：把没认出来的原因归进不可恢复，就是让一个谁也没做过的决定
+  // 变成「这件事做不到」。新增原因串必须自动落进重排通道。
+  for (const unknown of ['some_reason_nobody_has_seen_yet', 'proxy_chain_future_failure', '']) {
+    assert.equal(preflightFailureIsRecoverable(unknown), true, `${unknown} 必须按可恢复处置`);
+    const decision = decideProxyPreflightFailure({ reason: unknown, requeuesUsed: 0 });
+    assert.equal(decision.action, 'requeue', `${unknown} 必须进重排通道`);
+  }
+});
+
+test('链路瞬时失败进重排通道，配置类失败当场终结', () => {
+  const recoverable = [
+    'timeout', 'connection_refused', 'host_unresolved', 'proxy_connect_failed', 'request_failed',
+    'proxy_chain_port_unavailable', 'proxy_chain_spawn_failed', 'proxy_chain_exited',
+    'proxy_chain_ready_timeout', 'system_proxy_read_failed',
+  ];
+  for (const reason of recoverable) {
+    const decision = decideProxyPreflightFailure({ reason, requeuesUsed: 0 });
+    assert.equal(decision.action, 'requeue', `${reason} 应重排`);
+  }
+  const nonRecoverable = [
+    'config_invalid', 'protocol_mismatch', 'authentication_failed', 'environment_proxy_missing',
+    'system_proxy_not_configured', 'system_proxy_pac_unsupported', 'proxy_chain_duplicate_hop',
+    'proxy_authority_unavailable', 'proxy_authority_revision_changed', 'proxy_chain_binary_missing',
+  ];
+  for (const reason of nonRecoverable) {
+    const decision = decideProxyPreflightFailure({ reason, requeuesUsed: 0 });
+    assert.equal(decision.action, 'terminate', `${reason} 应当场终结`);
+    assert.equal(decision.terminal, 'config', `${reason} 应走配置类终局`);
+  }
+  // 清单本身也锁住：任何一条被误删都会让它悄悄变成「可重排」，这里当场报出来。
+  for (const reason of nonRecoverable) {
+    assert.ok(NON_RECOVERABLE_PREFLIGHT_REASONS.has(reason), `${reason} 必须在不可恢复清单里`);
+  }
+});
+
+test('重排预算耗尽后终结，且回执口径是「试了几次」而非「确认做不到」', () => {
+  const first = decideProxyPreflightFailure({ reason: 'timeout', requeuesUsed: 0, maxRequeues: 2 });
+  assert.deepEqual(
+    { action: first.action, attempt: first.attempt, delayMs: first.delayMs },
+    { action: 'requeue', attempt: 1, delayMs: DEFAULT_REQUEUE_DELAYS_MS[0] },
+  );
+  const second = decideProxyPreflightFailure({ reason: 'timeout', requeuesUsed: 1, maxRequeues: 2 });
+  assert.deepEqual(
+    { action: second.action, attempt: second.attempt, delayMs: second.delayMs },
+    { action: 'requeue', attempt: 2, delayMs: DEFAULT_REQUEUE_DELAYS_MS[1] },
+  );
+  const exhausted = decideProxyPreflightFailure({ reason: 'timeout', requeuesUsed: 2, maxRequeues: 2 });
+  assert.equal(exhausted.action, 'terminate');
+  // exhausted 与 config 是**两个不同的终局**：前者「试了 3 次没通、链路可能还在抖」，
+  // 后者「配置就是错的、再试也没用」。压成一态运营就无从判断下一步。
+  assert.equal(exhausted.terminal, 'exhausted');
+  assert.equal(exhausted.probes, 3, '探测总次数 = 首探 1 次 + 重排 2 次');
+});
+
+test('预算设 0 逐字退回旧行为：连终局措辞一起回到配置类', () => {
+  const decision = decideProxyPreflightFailure({ reason: 'timeout', requeuesUsed: 0, maxRequeues: 0 });
+  assert.equal(decision.action, 'terminate');
+  assert.equal(decision.terminal, 'config',
+    '回滚旋钮必须连回执措辞一起退回，否则一个「什么都没变」的回滚会读到新造的预算耗尽文案');
+});
+
+test('重排间隔递增且在末位饱和', () => {
+  const delays = [10, 30];
+  const at = (used: number) => decideProxyPreflightFailure({
+    reason: 'timeout', requeuesUsed: used, maxRequeues: 5, delaysMs: delays,
+  }).delayMs;
+  assert.equal(at(0), 10);
+  assert.equal(at(1), 30);
+  assert.equal(at(2), 30, '超出末位一律用末位值，不得回绕到第一跳');
+  assert.equal(at(3), 30);
+});

@@ -87,7 +87,9 @@ const {
 const commandDiagnostics = require('./command-diagnostics.cjs');
 const { invalidateProxyRuntime, normalizeProxyRuntime } = require('./proxy-runtime.cjs');
 const {
+  DEFAULT_REQUEUE_DELAYS_MS,
   createProxyPreflightController,
+  decideProxyPreflightFailure,
   preflightFacebookProxy,
 } = require('./proxy-preflight.cjs');
 const { createProxyChainManager } = require('./proxy-chain-manager.cjs');
@@ -2174,6 +2176,103 @@ function stopStartForProxyFailure(handle, result) {
   });
 }
 
+// ── 代理预检失败的有界重排通道（change bound-proxy-preflight-retry）─────────────────
+//
+// 代理抖动是**非结构性**失败：同一次探测稍后原样重来，完全可能得到不同结果。按
+// docs/stop-or-continue.md §Q2，这类失败 MUST 留带上限的自愈通道、MUST NOT 落终态。
+// 旧行为正相反——确定失败当场终结，手动启动要人再点一次。
+//
+// 重排刻意实现成「**延迟重入既有启动入口**」而不是新建一条重试队列：那个入口自带幂等闸、
+// 并发计数闸准入、以及出栈时归还排队容量的 finally，于是「排到队尾 + 重新受闸 + 不能插队」
+// 是这个落点的**结构性后果**，不需要额外代码去保证。
+//
+// 延迟到出栈之后是刚性要求：当前这条启动流仍持有幂等标志与排队名额，在栈上直接重入会被幂等闸
+// 挡掉、什么都不发生（静默无效）。
+
+/** 重排预算：默认 2 次（＝最多探 3 次）。设 0 逐字退回旧行为（确定失败当场终结），秒级回滚旋钮。 */
+const PROXY_PREFLIGHT_REQUEUE_MAX = (() => {
+  const raw = Number(process.env.AIDCP_PROXY_PREFLIGHT_REQUEUE_MAX);
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 2;
+})();
+/** 递增间隔：让两跳落在明显不同的时间点上，避免都撞进同一个波谷。超出末位一律用末位值。 */
+const PROXY_PREFLIGHT_REQUEUE_DELAYS_MS = DEFAULT_REQUEUE_DELAYS_MS;
+
+function clearProxyRequeueTimer(handle) {
+  if (!handle || !handle.proxyRequeueTimer) return;
+  clearTimeout(handle.proxyRequeueTimer);
+  handle.proxyRequeueTimer = null;
+}
+
+/** 预检成功 / 用户显式重试 ⇒ 预算归零（人的重试意图不该继承机器上一轮用掉的额度）。 */
+function resetProxyRequeueBudget(handle) {
+  if (!handle) return;
+  clearProxyRequeueTimer(handle);
+  handle.proxyRequeueStreak = 0;
+}
+
+/** 预算耗尽的终局：措辞必须是「试了几次没通」，MUST NOT 说成「已确认这个代理不可用」。 */
+function stopStartForProxyRetriesExhausted(handle, result, probes) {
+  const reason = proxyPreflightFailureText(result && result.reason);
+  const summary = `代理重试预算耗尽（已探测 ${probes} 次）：${reason}`;
+  updateStatus(handle, {
+    edge: 'stopped',
+    session: 'idle',
+    lastMessage: `自动化未启动：${summary}。链路可能仍在波动，可稍后重新启动；若持续如此请检查代理配置。`,
+    ...edgeFailurePatch(summary),
+    ...presencePatch('代理重试预算耗尽，自动化未启动'),
+  });
+}
+
+function scheduleProxyRequeue(handle, result, decision, generation) {
+  const { attempt, delayMs, maxRequeues } = decision;
+  const reasonText = proxyPreflightFailureText(result && result.reason);
+  clearProxyRequeueTimer(handle);
+  handle.proxyRequeueTimer = setTimeout(() => {
+    handle.proxyRequeueTimer = null;
+    // 排队期间可能已被暂停 / 移出 / 停止 / 退出，或已由别的入口起来了：一律作废，
+    // MUST NOT 把一个已被叫停的环境重新拉起来。
+    if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested || handle.removed
+      || isQuitting || handle.child || handle.status.session === 'paused') return;
+    // 重排是一次**真的**重试 ⇒ 必须先作废旧结论。不作废的话，轮到它时会复用正被这次重试所针对
+    // 的那个失败结论、根本不发探测，整跳是空的（冷待机唤醒的 60s 那一跳过去就是这么白跑的）。
+    proxyPreflight.invalidate(handle.envId);
+    enqueueStartFlow(handle, generation);
+  }, delayMs);
+  handle.proxyRequeueTimer.unref?.();
+  console.log(`[proxy-preflight] ${handle.envId} 代理不通（${reasonText}），${Math.round(delayMs / 1000)}s 后重排重试（第 ${attempt}/${maxRequeues} 次）`);
+  updateStatus(handle, {
+    edge: 'idle',
+    session: 'idle',
+    lastMessage: `代理不通（${reasonText}）：${Math.round(delayMs / 1000)}s 后重新排队重试（第 ${attempt}/${maxRequeues} 次）。`,
+    // 仍在自愈中 ⇒ 明确不是终态失败。写 edgeFailure 就是提前宣告死亡（静默假失败的镜像）。
+    ...clearEdgeFailurePatch(handle),
+    ...presencePatch(`代理不通，${Math.round(delayMs / 1000)}s 后重试`),
+  });
+}
+
+/**
+ * 预检确定失败的处置分流。返回 true = 已安排重排（调用方 MUST NOT 再走终结路径）。
+ *
+ * 三条出口互不重叠：不可恢复 → 当场终结（原文案）；可恢复且预算未尽 → 重排；
+ * 可恢复但预算已尽 → 终结，且回执明写是预算耗尽而非「确认做不到」。
+ */
+function handleProxyPreflightFailure(handle, result, generation) {
+  const decision = decideProxyPreflightFailure({
+    reason: result && result.reason,
+    requeuesUsed: Number(handle.proxyRequeueStreak) || 0,
+    maxRequeues: PROXY_PREFLIGHT_REQUEUE_MAX,
+    delaysMs: PROXY_PREFLIGHT_REQUEUE_DELAYS_MS,
+  });
+  if (decision.action === 'terminate') {
+    if (decision.terminal === 'exhausted') stopStartForProxyRetriesExhausted(handle, result, decision.probes);
+    else stopStartForProxyFailure(handle, result);
+    return false;
+  }
+  handle.proxyRequeueStreak = decision.attempt;
+  scheduleProxyRequeue(handle, result, decision, generation);
+  return true;
+}
+
 function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, nameSyncState, platform, cascadeIndex }) {
   return {
     envId,
@@ -2237,6 +2336,9 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     runtimePostureCore: null,
     respawnStreak: 0,
     respawnTimer: null,
+    // 代理预检的重排预算与在途重排（change bound-proxy-preflight-retry）
+    proxyRequeueStreak: 0,
+    proxyRequeueTimer: null,
     gaveUp: false,
     spawnedAtMs: 0,
     browserAlreadyRunning: false,
@@ -2772,6 +2874,8 @@ function advanceLifecycleGeneration(handle, reason) {
   lifecycleQueue.cancel?.(handle.envId);
   launchQueue.cancel?.(handle.envId);
   launchQueue.cancel?.(`${handle.envId}:wake`);
+  // 换代次＝暂停 / 停止 / 移出 / 重配：在途的代理重排一律作废，绝不把已被叫停的环境重新拉起来。
+  clearProxyRequeueTimer(handle);
   cancelQueuedTransientBrowser(handle, reason || 'generation_changed');
   if (handle.transientBrowserActive && !handle.child) {
     settleTransientBrowserLease(handle, 'generation_changed_without_child', false);
@@ -4315,6 +4419,10 @@ function rearmWakeRetry(handle, generation = handle && handle.lifecycleGeneratio
   handle.coldStandbyTimer = setTimeout(() => {
     handle.coldStandbyTimer = null;
     if (!isCurrentLifecycleGeneration(handle, generation) || handle.stopRequested) return;
+    // 这一跳是**以重试为目的**的重探 ⇒ 先作废上一次的确定结论。不作废的话，第一跳（60s）落在
+    // 结论 120s 的缓存有效期内，会复用正被这次重试所针对的那个失败、一个探测都不发——那一跳整个是空的
+    // （真正的第二次探测要拖到约 3 分钟后）。作废只影响已完成结论，在途单飞仍按原样等待并复用。
+    proxyPreflight.invalidate(handle.envId);
     wakeColdStandby(handle, 'wake_retry');
   }, delayMs);
   if (typeof handle.coldStandbyTimer.unref === 'function') handle.coldStandbyTimer.unref();
@@ -6073,9 +6181,12 @@ async function startAdsPowerFlow(handle, generation = handle && handle.lifecycle
   if (!isCurrentLifecycleGeneration(handle, generation) || handle.removed || handle.stopRequested
     || isQuitting || handle.status.session === 'paused') return;
   if (preflight && preflight.state === 'unavailable') {
-    stopStartForProxyFailure(handle, preflight);
+    // 可恢复的链路失败进有界重排通道（不落终态）；不可恢复 / 预算耗尽才终结。
+    handleProxyPreflightFailure(handle, preflight, generation);
     return;
   }
+  // 走到这里＝这一代的网络准备已经过关：把上一轮抖动用掉的重排预算还回去。
+  resetProxyRequeueBudget(handle);
   startEdge(handle, { generation });
 }
 
@@ -6133,6 +6244,8 @@ function queueStartEnv(handle, queuePosition) {
   handle.stopRequested = false; // 显式启动意图：解除任何在途取消闸
   clearRespawnTimer(handle);
   clearColdStandbyTimer(handle);
+  // 人的显式重试不继承机器上一轮用掉的重排额度（也撤掉在途重排，改由这次点击驱动）。
+  resetProxyRequeueBudget(handle);
   const queued = enqueueStartFlow(handle, generation);
   if (!queued) return false;
   updateStatus(handle, usesTransientBrowserLane(handle) ? {
