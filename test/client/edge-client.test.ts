@@ -776,6 +776,29 @@ test('edge-client: facebook.group.join 路由到 browseHandler（Facebook 命令
   assert.equal(calls[0].type, 'facebook.group.join');
 });
 
+// 回归（词汇批 7 补锁）：身份读取与「问现状」是独立主动命令，MUST 放行到 browseHandler；
+// 白名单漏接 typecheck 抓不到，命令在入口被静默丢弃 → 云端按信封 id 等应答只会等到超时
+// （与「边缘没装到」「页面读不出来」同形不可区分）。删掉白名单任一条，本组测试必须红。
+const IDENTITY_AND_STATE_OBSERVATION_COMMANDS = [
+  ['identity.read_current_page', { captureId: 'cap-1' }],
+  ['identity.read_self_profile', { captureId: 'cap-2' }],
+  ['state.read', { captureId: 'cap-3' }],
+] as const;
+
+for (const [type, payload] of IDENTITY_AND_STATE_OBSERVATION_COMMANDS) {
+  test(`edge-client: ${type} 路由到 browseHandler（不得静默丢弃）`, async () => {
+    const ws = new FakeWebSocket();
+    const client = await connectClient(ws, { platform: 'xiaohongshu' });
+    const calls: Envelope[] = [];
+    client.onBrowseCommand((env) => calls.push(env));
+
+    ws.emitMessage(makeEnvelope(type, `cmd-${type}`, 2, payload));
+
+    assert.equal(calls.length, 1, `${type} 应被路由到 browseHandler 而非在入口丢弃`);
+    assert.equal(calls[0].type, type);
+  });
+}
+
 test('edge-client: edge.task.acquire/release 路由到任务控制处理器', async () => {
   const ws = new FakeWebSocket();
   const client = await connectClient(ws);
