@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { CLOUD_OPERATION_REGISTRY } from '../../src/client/operation-registry.js';
+import { nativeCommandKindByEnvelopeType } from '../../src/native-page-engine/command-mapper.js';
 
 interface ManifestCommand {
   edgeTypes: string[];
@@ -120,5 +121,35 @@ test('manifest route and Native command identities are unique and bounded', asyn
     assert.ok(command.cancellation.length > 0);
     assert.ok(command.effect.length > 0);
     assert.ok(command.nativeKind.length <= 64);
+  }
+});
+
+// 词汇批 7 补锁：消息改名时 manifest 的 edgeTypes 漏改是静默的——上面的 page_automation
+// 冻结测试按登记表类别过滤，page_observation 路由（identity.read_current_page 等）不在其覆盖面里，
+// 改坏了没有任何测试红。绑定规则：manifest 每条非 publish 命令声明的每个 edgeType，
+// 要么是 internal.* 边缘本地命令（非云端信封，豁免），要么必须仍是登记在册的云端路由；
+// 且凡经 envelope->kind mapper 派发的，映射到的 nativeKind 必须与 manifest 一致——
+// 改名只改一侧（协议/登记表/mapper 改了而 manifest 没改，或反之）时此处必须红。
+test('manifest edgeTypes stay bound to the live cloud routes and mapper (rename drift gate)', async () => {
+  const manifest = await loadManifest();
+  const mapper = nativeCommandKindByEnvelopeType as Record<string, string>;
+  const registered = new Set(Object.keys(CLOUD_OPERATION_REGISTRY));
+  for (const command of manifest.commands) {
+    // publish.command 的原子按 publishKind 走独立派发面，不经 envelope->kind mapper。
+    if (command.edgeTypes.includes('publish.command')) continue;
+    for (const edgeType of command.edgeTypes) {
+      if (edgeType.startsWith('internal.')) continue; // 边缘本地命令，永远不是云端信封
+      assert.ok(
+        registered.has(edgeType),
+        `manifest edgeType ${edgeType} 不在云端路由登记表里（消息改名漏改 manifest 时此处必须红）`,
+      );
+      if (edgeType in mapper) {
+        assert.equal(
+          mapper[edgeType],
+          command.nativeKind,
+          `manifest edgeType ${edgeType} 与 mapper 的 nativeKind 不一致`,
+        );
+      }
+    }
   }
 });
