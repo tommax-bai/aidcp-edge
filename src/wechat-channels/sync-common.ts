@@ -23,12 +23,12 @@ export function assertMatchingAck(batch: InteractionSyncBatchPayload, ack: Inter
     ack.platform === batch.platform &&
     ack.channel === batch.channel &&
     ack.scopeExternalId === batch.scopeExternalId;
-  if (!same) throw new WechatChannelsError('invalid_scope', 'interaction.sync.ack', 'Sync ack scope did not match the emitted batch', false);
+  if (!same) throw new WechatChannelsError('invalid_scope', 'wechat_channels.inbox.sync.ack', 'Sync ack scope did not match the emitted batch', false);
   if (ack.status !== 'accepted' && ack.status !== 'duplicate') {
-    throw new WechatChannelsError('platform_rejected', 'interaction.sync.ack', 'Cloud rejected the interaction sync batch', false);
+    throw new WechatChannelsError('platform_rejected', 'wechat_channels.inbox.sync.ack', 'Cloud rejected the interaction sync batch', false);
   }
   if (ack.cursorAfter !== batch.cursorAfter) {
-    throw new WechatChannelsError('invalid_scope', 'interaction.sync.ack', 'Sync ack cursor did not match the emitted batch', false);
+    throw new WechatChannelsError('invalid_scope', 'wechat_channels.inbox.sync.ack', 'Sync ack cursor did not match the emitted batch', false);
   }
 }
 

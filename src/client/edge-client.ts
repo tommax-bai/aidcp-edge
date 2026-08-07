@@ -759,16 +759,16 @@ export class EdgeClient {
         return;
       }
       if (
-        env.type === 'interaction.sync.ack' ||
-        env.type === 'interaction.sync.request' ||
-        env.type === 'interaction.reply.send' ||
-        env.type === 'interaction.auth.reopen' ||
-        env.type === 'interaction.browser.control' ||
-        env.type === 'interaction.runtime.controls' ||
-        env.type === 'interaction.reply.result.ack' ||
-        env.type === 'interaction.reply.reconcile' ||
-        env.type === 'interaction.offboard.command' ||
-        env.type === 'interaction.offboard.ack'
+        env.type === 'wechat_channels.inbox.sync.ack' ||
+        env.type === 'wechat_channels.inbox.sync.request' ||
+        env.type === 'wechat_channels.inbox.reply.send' ||
+        env.type === 'wechat_channels.inbox.auth.reopen' ||
+        env.type === 'wechat_channels.inbox.browser.control' ||
+        env.type === 'wechat_channels.inbox.runtime.controls' ||
+        env.type === 'wechat_channels.inbox.reply.result.ack' ||
+        env.type === 'wechat_channels.inbox.reply.reconcile' ||
+        env.type === 'wechat_channels.inbox.offboard.command' ||
+        env.type === 'wechat_channels.inbox.offboard.ack'
       ) {
         if (!this.interactionHandler) {
           this.emitCommandDiagnostic(env, 'rejected', 'handler_unavailable');
@@ -1014,12 +1014,12 @@ export class EdgeClient {
 }
 
 function interactionExtensionCapability(type: string): string | null {
-  if (type === 'interaction.browser.control') return INTERACTION_BROWSER_CONTROL_CAPABILITY;
-  if (type === 'interaction.runtime.controls') return INTERACTION_RUNTIME_CONTROLS_CAPABILITY;
-  if (type.startsWith('interaction.reply.result.') || type.startsWith('interaction.reply.reconcile')) {
+  if (type === 'wechat_channels.inbox.browser.control') return INTERACTION_BROWSER_CONTROL_CAPABILITY;
+  if (type === 'wechat_channels.inbox.runtime.controls') return INTERACTION_RUNTIME_CONTROLS_CAPABILITY;
+  if (type.startsWith('wechat_channels.inbox.reply.result.') || type.startsWith('wechat_channels.inbox.reply.reconcile')) {
     return INTERACTION_REPLY_RECOVERY_CAPABILITY;
   }
-  if (type.startsWith('interaction.offboard.')) return INTERACTION_OFFBOARDING_CAPABILITY;
+  if (type.startsWith('wechat_channels.inbox.offboard.')) return INTERACTION_OFFBOARDING_CAPABILITY;
   return null;
 }
 

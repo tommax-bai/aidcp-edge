@@ -17,7 +17,7 @@ test('command diagnostics: active command families produce useful whitelist-only
     { type: 'publish.command', payload: { kind: 'fill_field', seq: 2, recordId: 9988, taskId: 'task-secret', params: { value: 'body-secret' } }, expected: /发布步骤 fill_field，序号 2/ },
     { type: 'edge.task.acquire', payload: { kind: 'publish', priority: 'human', taskId: 'task-secret' }, expected: /任务 publish，优先级 human/ },
     { type: 'captcha.assist.click', payload: { points: [{ x: 0.2, y: 0.3 }], text: '答案秘密', snapshotId: 'snapshot-secret', submit: 'enter' }, expected: /1 个点击点，输入 4 字，包含回车提交/ },
-    { type: 'interaction.reply.send', payload: { channel: 'dm', content: { type: 'text', text: '私信秘密' }, accountId: 'account-secret' }, expected: /渠道 dm，回复正文 4 字/ },
+    { type: 'wechat_channels.inbox.reply.send', payload: { channel: 'dm', content: { type: 'text', text: '私信秘密' }, accountId: 'account-secret' }, expected: /渠道 dm，回复正文 4 字/ },
   ];
 
   for (const item of cases) {

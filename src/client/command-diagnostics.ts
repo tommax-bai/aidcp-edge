@@ -69,16 +69,16 @@ const ACTIVE_COMMAND_TYPES = new Set([
   'edge.task.release',
   'captcha.assist.capture',
   'captcha.assist.click',
-  'interaction.sync.ack',
-  'interaction.sync.request',
-  'interaction.reply.send',
-  'interaction.auth.reopen',
-  'interaction.browser.control',
-  'interaction.runtime.controls',
-  'interaction.reply.result.ack',
-  'interaction.reply.reconcile',
-  'interaction.offboard.command',
-  'interaction.offboard.ack',
+  'wechat_channels.inbox.sync.ack',
+  'wechat_channels.inbox.sync.request',
+  'wechat_channels.inbox.reply.send',
+  'wechat_channels.inbox.auth.reopen',
+  'wechat_channels.inbox.browser.control',
+  'wechat_channels.inbox.runtime.controls',
+  'wechat_channels.inbox.reply.result.ack',
+  'wechat_channels.inbox.reply.reconcile',
+  'wechat_channels.inbox.offboard.command',
+  'wechat_channels.inbox.offboard.ack',
 ]);
 
 const FIXED_SUMMARIES: Readonly<Record<string, string>> = {
@@ -109,15 +109,15 @@ const FIXED_SUMMARIES: Readonly<Record<string, string>> = {
   'xiaohongshu.notification.browse_likes': '读取点赞通知',
   'xiaohongshu.notification.browse_follows': '读取关注通知',
   'xiaohongshu.notification.back_home': '从通知中心返回',
-  'interaction.sync.ack': '确认互动同步批次',
-  'interaction.sync.request': '请求同步互动数据',
-  'interaction.auth.reopen': '重新建立互动授权',
-  'interaction.browser.control': '控制互动浏览器状态',
-  'interaction.runtime.controls': '更新互动运行开关',
-  'interaction.reply.result.ack': '确认回复结果',
-  'interaction.reply.reconcile': '核对待确认回复',
-  'interaction.offboard.command': '清理已解绑互动环境',
-  'interaction.offboard.ack': '确认互动环境清理',
+  'wechat_channels.inbox.sync.ack': '确认互动同步批次',
+  'wechat_channels.inbox.sync.request': '请求同步互动数据',
+  'wechat_channels.inbox.auth.reopen': '重新建立互动授权',
+  'wechat_channels.inbox.browser.control': '控制互动浏览器状态',
+  'wechat_channels.inbox.runtime.controls': '更新互动运行开关',
+  'wechat_channels.inbox.reply.result.ack': '确认回复结果',
+  'wechat_channels.inbox.reply.reconcile': '核对待确认回复',
+  'wechat_channels.inbox.offboard.command': '清理已解绑互动环境',
+  'wechat_channels.inbox.offboard.ack': '确认互动环境清理',
 };
 
 const PUBLISH_KINDS = new Set([
@@ -276,7 +276,7 @@ export function summarizeCommand(type: unknown, payload: unknown): string {
       data.submit === 'enter' ? '包含回车提交' : undefined,
     ]);
   }
-  if (commandType === 'interaction.reply.send') {
+  if (commandType === 'wechat_channels.inbox.reply.send') {
     const channel = safeEnum(data.channel, INTERACTION_CHANNELS);
     const content = asRecord(data.content);
     const length = textLength(content.text);

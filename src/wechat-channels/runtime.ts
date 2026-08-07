@@ -127,13 +127,13 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
     publishAuthStatus: (payload) => {
       validateInteractionAuthStatus(payload);
       if (!client.isInteractionInboxNegotiated()) return;
-      client.send('interaction.auth.status', payload);
+      client.send('wechat_channels.inbox.auth.status', payload);
     },
     publishSyncBatch: async (payload) => {
       if (!client.isInteractionInboxNegotiated()) throw new Error('interaction_inbox_v1 is not negotiated');
       validateInteractionSyncBatch(payload);
-      const response = await client.request('interaction.sync.batch', payload, envMs(env.AIDCP_WECHAT_SYNC_ACK_TIMEOUT_MS, 30_000));
-      if (response.type !== 'interaction.sync.ack') throw new Error(`unexpected sync response type=${response.type}`);
+      const response = await client.request('wechat_channels.inbox.sync.batch', payload, envMs(env.AIDCP_WECHAT_SYNC_ACK_TIMEOUT_MS, 30_000));
+      if (response.type !== 'wechat_channels.inbox.sync.ack') throw new Error(`unexpected sync response type=${response.type}`);
       return validateInteractionSyncAck(response.payload);
     },
   };
@@ -241,7 +241,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
         for (const result of await state.pendingReplyResults()) {
           try {
             validateInteractionReplyResult(result);
-            client.send('interaction.reply.result', result);
+            client.send('wechat_channels.inbox.reply.result', result);
           } catch (error) {
             safeLog(`[wechat-channels] reply result remains durable: ${safeCode(error)}`);
             break;
@@ -256,9 +256,9 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
           try {
             validateInteractionReplyResult(result);
             const response = await client.request(
-              'interaction.reply.result', result, envMs(env.AIDCP_WECHAT_RESULT_ACK_TIMEOUT_MS, 30_000),
+              'wechat_channels.inbox.reply.result', result, envMs(env.AIDCP_WECHAT_RESULT_ACK_TIMEOUT_MS, 30_000),
             );
-            if (response.type !== 'interaction.reply.result.ack') throw new Error(`unexpected result ack type=${response.type}`);
+            if (response.type !== 'wechat_channels.inbox.reply.result.ack') throw new Error(`unexpected result ack type=${response.type}`);
             const ack = validateInteractionReplyResultAck(response.payload);
             if (!(await state.acknowledgeReplyResult(ack))) return;
           } catch (error) {
@@ -284,9 +284,9 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
           try {
             validateInteractionOffboardResult(result);
             const response = await client.request(
-              'interaction.offboard.result', result, envMs(env.AIDCP_WECHAT_OFFBOARD_ACK_TIMEOUT_MS, 30_000),
+              'wechat_channels.inbox.offboard.result', result, envMs(env.AIDCP_WECHAT_OFFBOARD_ACK_TIMEOUT_MS, 30_000),
             );
-            if (response.type !== 'interaction.offboard.ack') throw new Error(`unexpected offboard ack type=${response.type}`);
+            if (response.type !== 'wechat_channels.inbox.offboard.ack') throw new Error(`unexpected offboard ack type=${response.type}`);
             const ack = validateInteractionOffboardAck(response.payload);
             if (!(await state.acknowledgeOffboard(ack))) return;
           } catch (error) {
@@ -315,7 +315,7 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
   };
 
   client.onInteractionCommand((envelope) => {
-    if (cleanupOnly && envelope.type !== 'interaction.offboard.command' && envelope.type !== 'interaction.offboard.ack') {
+    if (cleanupOnly && envelope.type !== 'wechat_channels.inbox.offboard.command' && envelope.type !== 'wechat_channels.inbox.offboard.ack') {
       safeLog(`[wechat-channels] restricted cleanup rejected command type=${envelope.type}`);
       return;
     }
@@ -327,14 +327,14 @@ export async function runWechatChannelsRuntime(driver: InteractionPlatformDriver
       safeLog('[wechat-channels] restricted cleanup rejected mismatched offboard command');
       return;
     }
-    if (envelope.type === 'interaction.runtime.controls') {
+    if (envelope.type === 'wechat_channels.inbox.runtime.controls') {
       void applyRuntimeControls(envelope.payload as InteractionRuntimeControlsPayload);
       return;
     }
     void handleInteractionCommand({ client, connector: connector!, state, auth, sidecar, ensureBrowserAwake,
       flushReplyResultOutbox, flushOffboardResultOutbox, offboardFlights }, envelope as Parameters<typeof handleInteractionCommand>[1])
       .then(() => {
-        if (cleanupOnly && envelope.type === 'interaction.offboard.ack'
+        if (cleanupOnly && envelope.type === 'wechat_channels.inbox.offboard.ack'
           && typeof process.send === 'function' && process.connected) {
           process.send({ type: 'lifecycle.offboard_cleanup_complete', offboardId: cleanupOffboardId });
         }
@@ -524,11 +524,11 @@ export async function handleInteractionCommand(
   >,
 ): Promise<void> {
   const { client, connector, state, auth, sidecar } = deps;
-  if (envelope.type === 'interaction.sync.ack') {
+  if (envelope.type === 'wechat_channels.inbox.sync.ack') {
     connector.acceptSyncAck(envelope.payload as InteractionSyncAckPayload);
     return;
   }
-  if (envelope.type === 'interaction.sync.request') {
+  if (envelope.type === 'wechat_channels.inbox.sync.request') {
     try {
       await connector.sync(envelope.payload as InteractionSyncRequestPayload);
     } catch (error) {
@@ -536,7 +536,7 @@ export async function handleInteractionCommand(
     }
     return;
   }
-  if (envelope.type === 'interaction.reply.send') {
+  if (envelope.type === 'wechat_channels.inbox.reply.send') {
     const command = envelope.payload as InteractionReplySendPayload;
     let result: InteractionReplyResultPayload;
     try {
@@ -569,11 +569,11 @@ export async function handleInteractionCommand(
     await deps.flushReplyResultOutbox();
     return;
   }
-  if (envelope.type === 'interaction.reply.result.ack') {
+  if (envelope.type === 'wechat_channels.inbox.reply.result.ack') {
     await state.acknowledgeReplyResult(envelope.payload as InteractionReplyResultAckPayload);
     return;
   }
-  if (envelope.type === 'interaction.reply.reconcile') {
+  if (envelope.type === 'wechat_channels.inbox.reply.reconcile') {
     const request = envelope.payload as InteractionReplyReconcilePayload;
     const attempts: InteractionReplyReconcileResultPayload['attempts'] = [];
     for (const entry of request.attempts) {
@@ -590,10 +590,10 @@ export async function handleInteractionCommand(
       platform: 'wechat_channels', attempts, finishedAt: Date.now(),
     };
     validateInteractionReplyReconcileResult(result);
-    client.send('interaction.reply.reconcile.result', result, envelope.id);
+    client.send('wechat_channels.inbox.reply.reconcile.result', result, envelope.id);
     return;
   }
-  if (envelope.type === 'interaction.auth.reopen') {
+  if (envelope.type === 'wechat_channels.inbox.auth.reopen') {
     if (deps.ensureBrowserAwake && !(await deps.ensureBrowserAwake())) {
       safeLog('[wechat-channels] auth reopen deferred: browser slot unavailable');
       connector.reportStatus();
@@ -607,7 +607,7 @@ export async function handleInteractionCommand(
     }
     return;
   }
-  if (envelope.type === 'interaction.browser.control') {
+  if (envelope.type === 'wechat_channels.inbox.browser.control') {
     if (deps.ensureBrowserAwake && !(await deps.ensureBrowserAwake())) {
       safeLog('[wechat-channels] browser control deferred: browser slot unavailable');
       connector.reportStatus();
@@ -621,7 +621,7 @@ export async function handleInteractionCommand(
     }
     return;
   }
-  if (envelope.type === 'interaction.offboard.command') {
+  if (envelope.type === 'wechat_channels.inbox.offboard.command') {
     const command = envelope.payload as InteractionOffboardCommandPayload;
     const active = deps.offboardFlights.get(command.offboardId);
     if (active) {
@@ -656,7 +656,7 @@ export async function handleInteractionCommand(
     await deps.flushOffboardResultOutbox();
     return;
   }
-  if (envelope.type === 'interaction.offboard.ack') {
+  if (envelope.type === 'wechat_channels.inbox.offboard.ack') {
     await state.acknowledgeOffboard(envelope.payload as InteractionOffboardAckPayload);
   }
 }

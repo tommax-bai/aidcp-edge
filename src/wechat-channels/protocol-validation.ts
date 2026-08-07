@@ -22,21 +22,21 @@ import type {
 } from '../comm/protocol.js';
 
 const INTERACTION_TYPES = new Set<MessageType>([
-  'interaction.auth.status',
-  'interaction.sync.batch',
-  'interaction.sync.ack',
-  'interaction.reply.result',
-  'interaction.reply.result.ack',
-  'interaction.reply.reconcile',
-  'interaction.reply.reconcile.result',
-  'interaction.sync.request',
-  'interaction.reply.send',
-  'interaction.auth.reopen',
-  'interaction.browser.control',
-  'interaction.runtime.controls',
-  'interaction.offboard.command',
-  'interaction.offboard.result',
-  'interaction.offboard.ack',
+  'wechat_channels.inbox.auth.status',
+  'wechat_channels.inbox.sync.batch',
+  'wechat_channels.inbox.sync.ack',
+  'wechat_channels.inbox.reply.result',
+  'wechat_channels.inbox.reply.result.ack',
+  'wechat_channels.inbox.reply.reconcile',
+  'wechat_channels.inbox.reply.reconcile.result',
+  'wechat_channels.inbox.sync.request',
+  'wechat_channels.inbox.reply.send',
+  'wechat_channels.inbox.auth.reopen',
+  'wechat_channels.inbox.browser.control',
+  'wechat_channels.inbox.runtime.controls',
+  'wechat_channels.inbox.offboard.command',
+  'wechat_channels.inbox.offboard.result',
+  'wechat_channels.inbox.offboard.ack',
 ]);
 
 const ERROR_CODES = new Set<InteractionErrorCode>([
@@ -568,21 +568,21 @@ export function isInteractionMessageType(type: string): type is MessageType {
 
 export function validateInteractionPayload(type: MessageType, payload: unknown): unknown {
   switch (type) {
-    case 'interaction.auth.status': return validateInteractionAuthStatus(payload);
-    case 'interaction.sync.batch': return validateInteractionSyncBatch(payload);
-    case 'interaction.sync.ack': return validateInteractionSyncAck(payload);
-    case 'interaction.reply.result': return validateInteractionReplyResult(payload);
-    case 'interaction.reply.result.ack': return validateInteractionReplyResultAck(payload);
-    case 'interaction.reply.reconcile': return validateInteractionReplyReconcile(payload);
-    case 'interaction.reply.reconcile.result': return validateInteractionReplyReconcileResult(payload);
-    case 'interaction.sync.request': return validateInteractionSyncRequest(payload);
-    case 'interaction.reply.send': return validateInteractionReplySend(payload);
-    case 'interaction.auth.reopen': return validateInteractionAuthReopen(payload);
-    case 'interaction.browser.control': return validateInteractionBrowserControl(payload);
-    case 'interaction.runtime.controls': return validateInteractionRuntimeControls(payload);
-    case 'interaction.offboard.command': return validateInteractionOffboardCommand(payload);
-    case 'interaction.offboard.result': return validateInteractionOffboardResult(payload);
-    case 'interaction.offboard.ack': return validateInteractionOffboardAck(payload);
+    case 'wechat_channels.inbox.auth.status': return validateInteractionAuthStatus(payload);
+    case 'wechat_channels.inbox.sync.batch': return validateInteractionSyncBatch(payload);
+    case 'wechat_channels.inbox.sync.ack': return validateInteractionSyncAck(payload);
+    case 'wechat_channels.inbox.reply.result': return validateInteractionReplyResult(payload);
+    case 'wechat_channels.inbox.reply.result.ack': return validateInteractionReplyResultAck(payload);
+    case 'wechat_channels.inbox.reply.reconcile': return validateInteractionReplyReconcile(payload);
+    case 'wechat_channels.inbox.reply.reconcile.result': return validateInteractionReplyReconcileResult(payload);
+    case 'wechat_channels.inbox.sync.request': return validateInteractionSyncRequest(payload);
+    case 'wechat_channels.inbox.reply.send': return validateInteractionReplySend(payload);
+    case 'wechat_channels.inbox.auth.reopen': return validateInteractionAuthReopen(payload);
+    case 'wechat_channels.inbox.browser.control': return validateInteractionBrowserControl(payload);
+    case 'wechat_channels.inbox.runtime.controls': return validateInteractionRuntimeControls(payload);
+    case 'wechat_channels.inbox.offboard.command': return validateInteractionOffboardCommand(payload);
+    case 'wechat_channels.inbox.offboard.result': return validateInteractionOffboardResult(payload);
+    case 'wechat_channels.inbox.offboard.ack': return validateInteractionOffboardAck(payload);
     default: fail('type', 'not an interaction message');
   }
 }

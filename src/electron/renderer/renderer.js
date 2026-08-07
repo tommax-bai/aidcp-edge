@@ -2585,7 +2585,7 @@ const COMMAND_DIAGNOSTIC_LABELS = {
   'edge.task.release': '释放写租约',
   'captcha.assist.capture': '验证码采集',
   'captcha.assist.click': '验证码协助',
-  'interaction.reply.send': '发送互动回复',
+  'wechat_channels.inbox.reply.send': '发送互动回复',
 };
 
 function safeCommandDiagnostics(status, now) {

@@ -150,7 +150,7 @@ export class WechatChannelsConnector implements InteractionConnector {
     this.assertScope(request);
     const capability = this.getAuthStatus().capabilities;
     if ((request.channel === 'comment' && !capability.commentsRead) || (request.channel === 'dm' && !capability.dmRead)) {
-      throw new WechatChannelsError('permission_denied', 'interaction.sync.request', 'Requested sync capability is disabled', false);
+      throw new WechatChannelsError('permission_denied', 'wechat_channels.inbox.sync.request', 'Requested sync capability is disabled', false);
     }
     const previous = this.syncLocks.get(request.channel) ?? Promise.resolve();
     const current = previous

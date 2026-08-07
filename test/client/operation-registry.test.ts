@@ -75,11 +75,11 @@ test('operation registry keeps browser acquisition outside automation control an
     category: 'automation_control', transport: 'automation_ws', identity: 'bound_account', browser: 'forbidden',
     platformFootprint: 'none',
   });
-  assert.deepEqual(CLOUD_OPERATION_REGISTRY['interaction.reply.send'], {
+  assert.deepEqual(CLOUD_OPERATION_REGISTRY['wechat_channels.inbox.reply.send'], {
     category: 'platform_api_automation', transport: 'automation_ws', identity: 'bound_account', browser: 'forbidden',
     platformFootprint: 'account_visible',
   });
-  assert.deepEqual(CLOUD_OPERATION_REGISTRY['interaction.auth.reopen'], {
+  assert.deepEqual(CLOUD_OPERATION_REGISTRY['wechat_channels.inbox.auth.reopen'], {
     category: 'browser_lifecycle', transport: 'automation_ws', identity: 'bound_account', browser: 'on_demand',
     platformFootprint: 'none',
   });
@@ -117,12 +117,12 @@ test('identity gate blocked set is derived from the registry and covers every fo
     .map(([type]) => type)
     .sort();
   // 棘轮：留痕却不受页面身份闸约束的，恰好只许是这一条**已登记的已知缺口**——
-  // interaction.reply.send 走视频号 API、identity 是 bound_account（令牌鉴权，与页面登录态无关），
+  // wechat_channels.inbox.reply.send 走视频号 API、identity 是 bound_account（令牌鉴权，与页面登录态无关），
   // 页面身份未落定不构成其身份失效。该缺口登记于 close-account-layer-operation-manual tasks 9.1，
   // 是否给 API 写路径设独立身份闸属产品裁决。新增任何「留痕且不被拦」的命令 ⇒ 本断言当场红。
   assert.deepEqual(
     footprintedOutsideGate,
-    ['interaction.reply.send'],
+    ['wechat_channels.inbox.reply.send'],
     `留痕且不受身份闸约束的集合变了（只许恰好等于已登记的唯一例外）：${footprintedOutsideGate.join(', ')}`,
   );
 

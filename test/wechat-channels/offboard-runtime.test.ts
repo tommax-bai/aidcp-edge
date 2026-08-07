@@ -44,7 +44,7 @@ test('offboard runtime durably claims, drains, clears credentials, closes sideca
       flushOffboardResultOutbox: async () => { order.push('flush-durable-result'); },
       offboardFlights: new Map<string, Promise<void>>(),
     };
-    const envelope = makeEnvelope('interaction.offboard.command', 'offboard-envelope-1', now, command) as
+    const envelope = makeEnvelope('wechat_channels.inbox.offboard.command', 'offboard-envelope-1', now, command) as
       Envelope<InteractionOffboardCommandPayload>;
     const first = handleInteractionCommand(deps, envelope);
     await entered;
@@ -61,7 +61,7 @@ test('offboard runtime durably claims, drains, clears credentials, closes sideca
     assert.equal(order.filter((item) => item === 'clear-encrypted-session').length, 1);
     assert.equal(order.filter((item) => item === 'close-sidecar').length, 1,
       'duplicate command must replay without repeating credential deletion');
-    await handleInteractionCommand(deps, makeEnvelope('interaction.offboard.ack', 'offboard-result-1', now + 2, {
+    await handleInteractionCommand(deps, makeEnvelope('wechat_channels.inbox.offboard.ack', 'offboard-result-1', now + 2, {
       offboardId: command.offboardId, envKey: command.envKey, accountId: command.accountId,
       platform: 'wechat_channels', status: 'accepted', errorCode: null, receivedAt: now + 2,
     }) as Envelope<InteractionOffboardAckPayload>);

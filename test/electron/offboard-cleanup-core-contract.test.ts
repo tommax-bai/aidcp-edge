@@ -22,7 +22,7 @@ test('offboard recovery consumes a bound grant and never falls back to browser s
 
 test('restricted runtime advertises only inbox/offboard/browser-absent capabilities and rejects every other command', () => {
   assert.match(runtime, /cleanupOnly\s*\? \['interaction_inbox_v1', 'interaction_offboarding_v1', 'browser_absent_v1'\]/);
-  assert.match(runtime, /cleanupOnly && envelope\.type !== 'interaction\.offboard\.command' && envelope\.type !== 'interaction\.offboard\.ack'/);
+  assert.match(runtime, /cleanupOnly && envelope\.type !== 'wechat_channels\.inbox\.offboard\.command' && envelope\.type !== 'wechat_channels\.inbox\.offboard\.ack'/);
   assert.match(runtime, /restricted cleanup rejected mismatched offboard command/);
   assert.match(runtime, /if \(!cleanupOnly\) await flushReplyResultOutbox\(\)/);
 });

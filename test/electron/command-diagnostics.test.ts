@@ -82,10 +82,10 @@ test('electron command diagnostics: retention is bounded by count and time', () 
 
 test('electron command diagnostics: raw structured JSON is reduced to a fixed safe trace', () => {
   const event = diagnostics.parseCommandDiagnosticLine(line({
-    key: '1234abcd', type: 'interaction.reply.send', stage: 'rejected', summary: 'secret-summary', reason: 'payload_invalid',
+    key: '1234abcd', type: 'wechat_channels.inbox.reply.send', stage: 'rejected', summary: 'secret-summary', reason: 'payload_invalid',
   }), 1_000);
   const trace = diagnostics.commandDiagnosticTraceLine(event);
-  assert.equal(trace, '[command-diagnostic] interaction.reply.send rejected');
+  assert.equal(trace, '[command-diagnostic] wechat_channels.inbox.reply.send rejected');
   assert.equal(trace.includes('secret-summary'), false);
 
   const main = readFileSync(new URL('../../src/electron/main.cjs', import.meta.url), 'utf8');

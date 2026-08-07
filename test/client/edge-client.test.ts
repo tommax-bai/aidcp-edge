@@ -399,9 +399,9 @@ test('edge-client: negotiated runtime-control updates reach the active route and
     commentsReadEnabled: true, commentsReplyEnabled: false,
     dmReadEnabled: false, dmSendTextEnabled: false, dmSendImageEnabled: false as const,
   };
-  ws.emitMessage(makeEnvelope('interaction.runtime.controls', 'controls-3', 2, payload));
-  ws.emitMessage(makeEnvelope('interaction.runtime.controls', 'controls-bad', 2, { ...payload, dmSendImageEnabled: true } as never));
-  assert.deepEqual(calls.map((env) => env.type), ['interaction.runtime.controls']);
+  ws.emitMessage(makeEnvelope('wechat_channels.inbox.runtime.controls', 'controls-3', 2, payload));
+  ws.emitMessage(makeEnvelope('wechat_channels.inbox.runtime.controls', 'controls-bad', 2, { ...payload, dmSendImageEnabled: true } as never));
+  assert.deepEqual(calls.map((env) => env.type), ['wechat_channels.inbox.runtime.controls']);
   assert.ok(logs.some((line) => line.includes('拒绝非法 interaction')));
 });
 
@@ -411,7 +411,7 @@ test('edge-client: old Cloud cannot activate interaction commands or cause a ret
   const client = await connectInteractionClient(ws, false, (message) => logs.push(message));
   const calls: Envelope[] = [];
   client.onInteractionCommand((env) => calls.push(env));
-  ws.emitMessage(makeEnvelope('interaction.sync.request', 'sync-old-cloud', 2, {
+  ws.emitMessage(makeEnvelope('wechat_channels.inbox.sync.request', 'sync-old-cloud', 2, {
     requestId: 'request-1',
     envKey: 'env-a',
     accountId: 'finder-a',
@@ -451,35 +451,35 @@ test('edge-client: negotiated interaction sync/send/reopen/browser-control and l
   const client = await connectInteractionClient(ws, true);
   const calls: Envelope[] = [];
   client.onInteractionCommand((env) => calls.push(env));
-  ws.emitMessage(makeEnvelope('interaction.sync.request', 'sync-1', 2, {
+  ws.emitMessage(makeEnvelope('wechat_channels.inbox.sync.request', 'sync-1', 2, {
     requestId: 'request-1', envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels',
     channel: 'comment', scopeExternalId: null, reason: 'scheduled', requestedAt: 1,
   }));
-  ws.emitMessage(makeEnvelope('interaction.reply.send', 'send-1', 2, {
+  ws.emitMessage(makeEnvelope('wechat_channels.inbox.reply.send', 'send-1', 2, {
     jobId: 'job-1', attemptId: 'attempt-1', idempotencyKey: 'a'.repeat(64),
     envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels', channel: 'dm',
     target: { threadExternalId: 'thread-1', inboundMessageExternalId: 'message-1', parentExternalId: null },
     content: { type: 'text', text: 'hello' }, expiresAt: 100,
   }));
-  ws.emitMessage(makeEnvelope('interaction.auth.reopen', 'reopen-1', 2, {
+  ws.emitMessage(makeEnvelope('wechat_channels.inbox.auth.reopen', 'reopen-1', 2, {
     requestId: 'reopen-request-1', envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels',
     reason: 'user_requested', requestedAt: 1,
   }));
-  ws.emitMessage(makeEnvelope('interaction.browser.control', 'browser-open-1', 2, {
+  ws.emitMessage(makeEnvelope('wechat_channels.inbox.browser.control', 'browser-open-1', 2, {
     requestId: 'browser-control-request-1', envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels',
     action: 'open', requestedAt: 1,
   }));
-  ws.emitMessage(makeEnvelope('interaction.sync.ack', 'late-ack-1', 2, {
+  ws.emitMessage(makeEnvelope('wechat_channels.inbox.sync.ack', 'late-ack-1', 2, {
     batchId: 'batch-1', envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels',
     channel: 'dm', scopeExternalId: 'thread-1', status: 'duplicate', cursorAfter: 'cursor-1',
     persisted: { threads: 1, messages: 1 }, errorCode: null, receivedAt: 2,
   }));
   assert.deepEqual(calls.map((env) => env.type), [
-    'interaction.sync.request',
-    'interaction.reply.send',
-    'interaction.auth.reopen',
-    'interaction.browser.control',
-    'interaction.sync.ack',
+    'wechat_channels.inbox.sync.request',
+    'wechat_channels.inbox.reply.send',
+    'wechat_channels.inbox.auth.reopen',
+    'wechat_channels.inbox.browser.control',
+    'wechat_channels.inbox.sync.ack',
   ]);
 });
 
@@ -488,16 +488,16 @@ test('edge-client: recovery/offboard commands require their negotiated extension
   const client = await connectInteractionClient(ws, true);
   const calls: Envelope[] = [];
   client.onInteractionCommand((env) => calls.push(env));
-  ws.emitMessage(makeEnvelope('interaction.reply.result.ack', 'ack-1', 2, {
+  ws.emitMessage(makeEnvelope('wechat_channels.inbox.reply.result.ack', 'ack-1', 2, {
     jobId: 'job-1', attemptId: 'attempt-1', idempotencyKey: 'a'.repeat(64), envKey: 'env-a',
     accountId: 'finder-a', platform: 'wechat_channels', status: 'accepted', errorCode: null, receivedAt: 2,
   }));
-  ws.emitMessage(makeEnvelope('interaction.offboard.command', 'offboard-1', 2, {
+  ws.emitMessage(makeEnvelope('wechat_channels.inbox.offboard.command', 'offboard-1', 2, {
     offboardId: 'offboard-1', envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels',
     reason: 'environment_unbind', requestedAt: 2, expiresAt: 100,
   }));
   assert.deepEqual(calls.map((env) => env.type), [
-    'interaction.reply.result.ack', 'interaction.offboard.command',
+    'wechat_channels.inbox.reply.result.ack', 'wechat_channels.inbox.offboard.command',
   ]);
 });
 
@@ -507,15 +507,15 @@ test('edge-client: base-only Cloud cannot activate recovery/offboard/browser-con
   const client = await connectInteractionClient(ws, true, (message) => logs.push(message), false);
   const calls: Envelope[] = [];
   client.onInteractionCommand((env) => calls.push(env));
-  ws.emitMessage(makeEnvelope('interaction.reply.reconcile', 'reconcile-unsupported', 2, {
+  ws.emitMessage(makeEnvelope('wechat_channels.inbox.reply.reconcile', 'reconcile-unsupported', 2, {
     reconcileId: 'reconcile-1', envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels',
     attempts: [], requestedAt: 2,
   }));
-  ws.emitMessage(makeEnvelope('interaction.offboard.command', 'offboard-unsupported', 2, {
+  ws.emitMessage(makeEnvelope('wechat_channels.inbox.offboard.command', 'offboard-unsupported', 2, {
     offboardId: 'offboard-1', envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels',
     reason: 'environment_unbind', requestedAt: 2, expiresAt: 100,
   }));
-  ws.emitMessage(makeEnvelope('interaction.browser.control', 'browser-control-unsupported', 2, {
+  ws.emitMessage(makeEnvelope('wechat_channels.inbox.browser.control', 'browser-control-unsupported', 2, {
     requestId: 'browser-control-request-1', envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels',
     action: 'open', requestedAt: 2,
   }));
@@ -533,7 +533,7 @@ test('edge-client: malformed negotiated interaction payload is rejected before t
   const client = await connectInteractionClient(ws, true, (message) => logs.push(message));
   const calls: Envelope[] = [];
   client.onInteractionCommand((env) => calls.push(env));
-  ws.emitMessage(makeEnvelope('interaction.sync.request', 'sync-invalid', 2, {
+  ws.emitMessage(makeEnvelope('wechat_channels.inbox.sync.request', 'sync-invalid', 2, {
     requestId: 'request-1', envKey: 'env-a', accountId: 'finder-a', platform: 'wechat_channels',
     channel: 'comment', scopeExternalId: null, reason: 'scheduled', requestedAt: 1,
     cookie: 'must-not-be-accepted',
@@ -1018,7 +1018,7 @@ test('edge-client: unnegotiated interaction command is visibly rejected without 
   const logs: string[] = [];
   await connectInteractionClient(ws, false, (line) => logs.push(line));
 
-  ws.emitMessage(makeEnvelope('interaction.reply.send', 'reply-private-id', 1, {
+  ws.emitMessage(makeEnvelope('wechat_channels.inbox.reply.send', 'reply-private-id', 1, {
     jobId: 'job-secret',
     attemptId: 'attempt-secret',
     idempotencyKey: 'idempotency-secret',
