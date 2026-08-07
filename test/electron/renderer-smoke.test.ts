@@ -317,7 +317,7 @@ test('开发者详情：旧状态为空态，结构化命令展示诚实阶段�
       envName: '环境 A',
       commandDiagnostics: [{
         key: '1234abcd',
-        type: 'interaction.comment',
+        type: 'xiaohongshu.note.comment',
         stage: 'dispatched',
         summary: '评论正文 8 字',
         receivedAt: now - 1_000,

@@ -12,7 +12,6 @@ import type {
   PageCardsPayload,
 } from '../../src/comm/protocol.js';
 import {
-  FACEBOOK_UNSUPPORTED_COMMANDS,
   NativeBrowseSession,
 } from '../../src/native-page-engine/browse-session.js';
 import {
@@ -185,10 +184,9 @@ function envelope(type: MessageType, payload: Record<string, unknown>): Envelope
 
 /** 该命令在哪个平台上不会被宿主的能力闸挡掉——挡掉的话行为断言就变成恒真的空跑。 */
 function platformFor(type: MessageType): 'xiaohongshu' | 'facebook' {
-  // 词汇批 4：平台段进名，优先按前缀判；无平台段的共享名沿用拒集判断。
+  // 词汇批 5：互动命令也平台段化，平台一律由名表前缀推导（手抄拒集已归零删除）。
   if (type.startsWith('xiaohongshu.')) return 'xiaohongshu';
-  if (type.startsWith('facebook.')) return 'facebook';
-  return FACEBOOK_UNSUPPORTED_COMMANDS.has(type) ? 'xiaohongshu' : 'facebook';
+  return 'facebook';
 }
 
 // ─────────────────────────── 腿①/腿②：登记表 vs 转发面 ───────────────────────────
@@ -504,7 +502,7 @@ test('节奏等待期间被接管：零派发的命令报「未开始」，绝�
   };
   // 犹豫面与停留面各取一条：两条腿都在派发之前等，两条都必须收窄。
   const cases: Array<{ type: MessageType; payload: Record<string, unknown>; anchor?: MessageType }> = [
-    { type: 'interaction.like', payload: { noteId: 'note-1', thinkMs: 2_400 } },
+    { type: 'xiaohongshu.note.like', payload: { noteId: 'note-1', thinkMs: 2_400 } },
     { type: 'xiaohongshu.note.close', payload: { reason: 'r', dwellMs: 6_000 }, anchor: 'xiaohongshu.note.open' },
     { type: 'navigation.back', payload: { reason: 'r', dwellMs: 6_000 }, anchor: 'xiaohongshu.note.open' },
   ];
@@ -544,7 +542,7 @@ test('已经交给执行器之后再失败，仍然是「已提交、结果未�
       throw new Error('engine died mid-command');
     },
   });
-  await h.session.onCloudCommand(envelope('interaction.like', { noteId: 'note-1' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.note.like', { noteId: 'note-1' }));
 
   assert.equal(h.executions.length, 1, '这一条确实到达了执行器');
   assert.equal(h.actions[0]?.reason, 'native_effect_ambiguous');
@@ -561,7 +559,7 @@ test('运行时在开会话阶段失败：零命令写入仍报「未开始」',
     },
   });
 
-  await h.session.onCloudCommand(envelope('interaction.like', { noteId: 'note-1' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.note.like', { noteId: 'note-1' }));
 
   assert.equal(h.actions.length, 1);
   assert.deepEqual(h.actions[0], {

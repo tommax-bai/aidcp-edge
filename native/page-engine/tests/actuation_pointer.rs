@@ -213,6 +213,7 @@ fn like_command() -> CommandRecord {
             note_id: FEED_NOTE_ID.to_owned(),
             reason: Some("feed_like".to_owned()),
             think_ms: None,
+            object: None,
         }),
     }
 }

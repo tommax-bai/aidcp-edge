@@ -44,7 +44,23 @@ pub(crate) async fn execute_facebook_like(
     if let Some(output) = ensure_facebook_action_gate(session, command).await? {
         return Ok((EffectPhase::NotStarted, output));
     }
-    if !probe_facebook_reel(session).await?.is_reels_surface() {
+    let observed_reels = probe_facebook_reel(session).await?.is_reels_surface();
+    // 词汇批 5：对象由命令名声明（facebook.video.like / facebook.note.like，「按对象拆、不按位置拆」）。
+    // video 对象在两个位置都合法（Reels 的活动视频 / feed 里的视频帖，后者走精确目标帖级执行器）；
+    // 唯一不可能的组合是「note 对象 × Reels 面」——Reels 上的对象只能是视频，声明与观测不符 ⇒
+    // 诚实失败（确认到不符，回报观测面），MUST NOT 静默改跑视频执行器（facebook-reels-browse spec）。
+    // None＝内部构造路径，沿用现场探测路由。
+    if matches!(params.object, Some(crate::command::LikeObject::Note)) && observed_reels {
+        return Ok(facebook_action_result(
+            EffectPhase::NotStarted,
+            "like",
+            false,
+            "object_mismatch_observed_reels",
+            Some(params.note_id.clone()),
+            None,
+        ));
+    }
+    if !observed_reels {
         return execute_facebook_feed_like(session, params, cancellation, deadline_unix_ms).await;
     }
     execute_facebook_reel_like(session, params).await

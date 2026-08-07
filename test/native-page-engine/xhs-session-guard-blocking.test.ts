@@ -425,7 +425,7 @@ test('Xiaohongshu blocking halt answers ordinary browse with an honest not-start
   const h = harness(async () => okScroll, { blockingWaitMs: 0 });
 
   h.session.observeProbe({ origin: 'https://www.xiaohongshu.com', path: '/explore', pageKind: 'captcha' });
-  await h.session.onCloudCommand(envelope('interaction.like', { noteId: 'note-1' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.note.like', { noteId: 'note-1' }));
 
   assert.equal(h.executions.length, 0, '停手期间一个字节都不许写页面');
   assert.deepEqual(h.actions, [{ action: 'like', ok: false, reason: 'blocked_by_captcha' }]);
@@ -439,7 +439,7 @@ test('Xiaohongshu login halt answers with login_required rather than a captcha r
   const h = harness(async () => okScroll, { blockingWaitMs: 0 });
 
   h.session.observeProbe({ origin: 'https://www.xiaohongshu.com', path: '/explore', pageKind: 'login' });
-  await h.session.onCloudCommand(envelope('interaction.follow', { authorId: 'a1', noteId: 'note-1' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.user.follow', { authorId: 'a1', noteId: 'note-1' }));
 
   assert.equal(h.executions.length, 0);
   assert.deepEqual(h.actions, [{ action: 'follow', ok: false, reason: 'login_required' }]);
@@ -501,7 +501,7 @@ test('Xiaohongshu blocking halt exit 3: task takeover throws so the command is v
 
   h.session.observeProbe({ origin: 'https://www.xiaohongshu.com', path: '/explore', pageKind: 'captcha' });
   await assert.rejects(
-    h.session.onCloudCommand(envelope('interaction.like', { noteId: 'note-1' })),
+    h.session.onCloudCommand(envelope('xiaohongshu.note.like', { noteId: 'note-1' })),
     (error: { code?: string }) => error.code === 'preempted_by_task',
   );
 
@@ -522,7 +522,7 @@ test('Xiaohongshu blocking halt exit 1: a local stop ends the wait with an hones
   });
 
   h.session.observeProbe({ origin: 'https://www.xiaohongshu.com', path: '/explore', pageKind: 'captcha' });
-  await h.session.onCloudCommand(envelope('interaction.collect', { noteId: 'note-1' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.note.collect', { noteId: 'note-1' }));
 
   assert.equal(h.executions.length, 0);
   assert.deepEqual(h.actions, [{ action: 'collect', ok: false, reason: 'session_stopped' }]);
@@ -686,7 +686,7 @@ test('Xiaohongshu browse loop leaves per-command receipt evidence carrying no pa
 
   await h.session.onCloudCommand(envelope('xiaohongshu.feed.scroll', { reason: 'feed_scroll' }));
   await h.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1' }));
-  await h.session.onCloudCommand(envelope('interaction.like', { noteId: 'note-1' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.note.like', { noteId: 'note-1' }));
   await h.session.onCloudCommand(envelope('navigation.back', { reason: 'return_feed' }));
 
   const receiptLogs = h.logs.filter((line) => line.includes('action.completed'));

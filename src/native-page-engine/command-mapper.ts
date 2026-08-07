@@ -23,9 +23,14 @@ export const nativeCommandKindByEnvelopeType = {
   'xiaohongshu.notification.browse_comments': 'notification_browse_comments',
   'xiaohongshu.notification.browse_likes': 'notification_browse_likes',
   'xiaohongshu.notification.browse_follows': 'notification_browse_follows',
-  'xiaohongshu.notification.back_home': 'notification_back_home', 'interaction.like': 'interaction_like',
-  'interaction.collect': 'interaction_collect', 'interaction.follow': 'interaction_follow',
-  'interaction.comment': 'interaction_comment', 'interaction.like_comment': 'interaction_like_comment',
+  'xiaohongshu.notification.back_home': 'notification_back_home',
+  // 词汇批 5：互动信封平台段+对象化；kind 仍 5 个不拆。like 的对象（note/video）由 mapper 从信封名解析下传。
+  'xiaohongshu.note.like': 'interaction_like', 'facebook.note.like': 'interaction_like',
+  'facebook.video.like': 'interaction_like',
+  'xiaohongshu.note.collect': 'interaction_collect',
+  'xiaohongshu.user.follow': 'interaction_follow', 'facebook.user.follow': 'interaction_follow',
+  'xiaohongshu.note.comment': 'interaction_comment', 'facebook.note.comment': 'interaction_comment',
+  'xiaohongshu.comment.like': 'interaction_like_comment',
   'facebook.group.join': 'group_join',
 } as const;
 
@@ -38,7 +43,16 @@ const scrollSurfaceByEnvelopeType: Readonly<Record<string, 'feed' | 'search' | '
   'facebook.reels.scroll': 'reels',
 };
 
-// 动作关联键命名空间（值侧）本批不动——键随词汇批 4 平台段化，值到批 5（对象化）才动。
+/** 三条 like 信封名 → 对象（引擎参数 `object` 的唯一来源；词汇批 5「按对象拆、不按位置拆」）。 */
+const likeObjectByEnvelopeType: Readonly<Record<string, 'note' | 'video'>> = {
+  'xiaohongshu.note.like': 'note',
+  'facebook.note.like': 'note',
+  'facebook.video.like': 'video',
+};
+
+// 动作关联键命名空间（值侧）与协议名刻意脱钩（词汇批 5 定案）：值＝云端角色关联键 = 风控动作名
+// （RISK_ACTIONS，kernel 枚举 + DB CHECK 钉死），MUST NOT 随协议改名——多个对象化新名映回同一个值是设计
+// （facebook.video.like 与 {p}.note.like 都回 'like'）。互动族 9 键必须有显式表项（测试断言杀 ?? type 回落）。
 const actionNames: Readonly<Record<string, string>> = {
   'xiaohongshu.feed.scroll': 'scroll',
   'xiaohongshu.search.scroll': 'scroll',
@@ -47,11 +61,15 @@ const actionNames: Readonly<Record<string, string>> = {
   'facebook.reels.scroll': 'scroll',
   'xiaohongshu.feed.refresh': 'refresh',
   'facebook.feed.refresh': 'refresh',
-  'interaction.like': 'like',
-  'interaction.collect': 'collect',
-  'interaction.follow': 'follow',
-  'interaction.comment': 'comment',
-  'interaction.like_comment': 'comment_like',
+  'xiaohongshu.note.like': 'like',
+  'facebook.note.like': 'like',
+  'facebook.video.like': 'like',
+  'xiaohongshu.note.collect': 'collect',
+  'xiaohongshu.user.follow': 'follow',
+  'facebook.user.follow': 'follow',
+  'xiaohongshu.note.comment': 'comment',
+  'facebook.note.comment': 'comment',
+  'xiaohongshu.comment.like': 'comment_like',
   'xiaohongshu.search.execute': 'search',
   'facebook.search.execute': 'search',
   'xiaohongshu.note.open': 'open_note',
@@ -119,6 +137,10 @@ export function nativeCommandForEnvelope(
   if (kind === 'page_scroll') {
     // 面由信封名唯一决定（词汇批 4）；引擎据此路由 feed/search/reels 执行器。
     params.surface = scrollSurfaceByEnvelopeType[env.type] ?? 'feed';
+  }
+  if (kind === 'interaction_like') {
+    // 对象由信封名唯一决定（词汇批 5）；FB 引擎据此路由视频/帖级执行器，现场不符诚实失败。
+    params.object = likeObjectByEnvelopeType[env.type] ?? 'note';
   }
   if (kind === 'plan_execute' && Array.isArray(params.steps)) {
     params.steps = params.steps.map((step) => project(step, ['actionId', 'op', 'value']));

@@ -11,7 +11,7 @@
  *      --disable-blink-features=AutomationControlled
  *   2. 登录小红书（首次）
  *   3. 启动 edge 连 ECS：AIDCP_CLOUD_URL=ws://121.89.85.150:8787 npm start
- *   4. 观察自动浏览闭环（page.cards 上报 → 云端下发 interaction.like / page.scroll）
+ *   4. 观察自动浏览闭环（page.cards 上报 → 云端下发 {p}.note.like / {p}.{surface}.scroll）
  *   5. 发布联调：飞书点[授权发布] → 信号文件 → AIDCP_REAL_PUBLISH=true 真发一条
  */
 import { describe, it } from 'node:test';

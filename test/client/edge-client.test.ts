@@ -631,7 +631,7 @@ const FB_BROWSE_COMMANDS = [
   'facebook.search.execute',
   'facebook.note.open',
   'facebook.note.close',
-  'interaction.like',
+  'facebook.note.like',
   'navigation.back',
 ] as const;
 for (const type of FB_BROWSE_COMMANDS) {
@@ -716,23 +716,28 @@ for (const type of NOTIFICATION_EXCURSION_COMMANDS) {
 }
 
 // 回归：浏览闭环互动命令（点赞 / 收藏 / 关注 / 发评论）MUST 放行到 browseHandler。
-// 历史 bug：入口路由白名单漏接 interaction.comment，云端 sendCommand action=comment 已发（飞书已审通过），
+// 历史 bug：入口路由白名单漏接评论命令，云端 sendCommand action=comment 已发（飞书已审通过），
 // 但命令在到达处理器前被静默丢弃 → 评论永不发出、无回执（实测 8 发 / 0 执行 / 0 回执）。
-// 与 cloud command-bridge 的 comment→interaction.comment / like→interaction.like 映射一一对应（§2 第4处同步点）。
+// 词汇批 5 起互动命令平台段+对象化（9 条），与 cloud command-bridge 的
+// (action, platform[, object]) 组合表一一对应（§2 第4处同步点）；逐条锁死不得从白名单误删。
 const INTERACTION_COMMANDS = [
-  'interaction.like',
-  'interaction.collect',
-  'interaction.follow',
-  'interaction.comment',
+  { type: 'xiaohongshu.note.like', platform: 'xiaohongshu' },
+  { type: 'facebook.note.like', platform: 'facebook' },
+  { type: 'facebook.video.like', platform: 'facebook' },
+  { type: 'xiaohongshu.note.collect', platform: 'xiaohongshu' },
+  { type: 'xiaohongshu.user.follow', platform: 'xiaohongshu' },
+  { type: 'facebook.user.follow', platform: 'facebook' },
+  { type: 'xiaohongshu.note.comment', platform: 'xiaohongshu' },
+  { type: 'facebook.note.comment', platform: 'facebook' },
   // 评论点赞（AIDCP_COMMENT_LIKE）：2026-07-03 发现的同类存量缺口——cloud comment_like→
-  // interaction.like_comment 已下发但白名单漏接、browse-session 处理分支永不可达；修复后锁死。
-  'interaction.like_comment',
+  // 评论点赞命令已下发但白名单漏接、browse-session 处理分支永不可达；修复后锁死。
+  { type: 'xiaohongshu.comment.like', platform: 'xiaohongshu' },
 ] as const;
 
-for (const type of INTERACTION_COMMANDS) {
+for (const { type, platform } of INTERACTION_COMMANDS) {
   test(`edge-client: ${type} 路由到 browseHandler（不得静默丢弃）`, async () => {
     const ws = new FakeWebSocket();
-    const client = await connectClient(ws);
+    const client = await connectClient(ws, { platform });
     const calls: Envelope[] = [];
     client.onBrowseCommand((env) => calls.push(env));
 
@@ -740,6 +745,22 @@ for (const type of INTERACTION_COMMANDS) {
 
     assert.equal(calls.length, 1, `${type} 应被路由到 browseHandler 而非在入口丢弃`);
     assert.equal(calls[0].type, type);
+  });
+}
+
+// 词汇批 5：FB 不支持 collect / comment-like 不再靠会话内手抄拒集（已归零删除），
+// 而是结构性的——这两个动作只剩 xiaohongshu.* 名，发往 Facebook 会话在入口平台段闸即拒。
+for (const type of ['xiaohongshu.note.collect', 'xiaohongshu.comment.like'] as const) {
+  test(`edge-client: ${type} 发往 Facebook 会话被平台段闸拒收（结构性取代手抄拒集）`, async () => {
+    const ws = new FakeWebSocket();
+    const logs: string[] = [];
+    const client = await connectClient(ws, { logger: (m: string) => logs.push(m), platform: 'facebook' });
+    const calls: Envelope[] = [];
+    client.onBrowseCommand((env) => calls.push(env));
+    ws.emitMessage(makeEnvelope(type, `pm-${type}`, 2, { noteId: 'n1' }));
+    assert.equal(calls.length, 0, `${type} 不得到达 browseHandler`);
+    assert.ok(logs.some((l) => l.includes('platform_mismatch') && l.includes(type)),
+      `${type} 必须以 platform_mismatch 拒收`);
   });
 }
 

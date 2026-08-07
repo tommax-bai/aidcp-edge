@@ -1388,7 +1388,7 @@ test('T17 重立成功之后收尾步骤抛异常：MUST NOT 报成身份终局�
 test('T18 身份闸：写动作与重绑被拦并如实回执，救援 / 读 / 收尾类照常放行', () => {
   // ── ① 写动作（以页面账号名义动作的那些）在两种未落定态下都 MUST 被拦。
   for (const health of ['invalid', 'reestablishing'] as const) {
-    for (const type of ['publish.command', 'interaction.comment', 'interaction.like', 'edge.task.acquire', 'facebook.group.join'] as const) {
+    for (const type of ['publish.command', 'xiaohongshu.note.comment', 'facebook.note.like', 'edge.task.acquire', 'facebook.group.join'] as const) {
       const verdict = judgeCommandUnderIdentity(health, type);
       assert.equal(verdict.kind, 'refuse', `${health} 下 ${type} MUST 被拦：它会在平台上留下该账号名下的真实痕迹`);
       assert.equal(verdict.kind === 'refuse' ? verdict.reason : '', 'identity_unresolved',
@@ -1834,7 +1834,7 @@ test('T21② 命令闸：身份未落定时页面命令 MUST 不执行且有真�
   const logs: string[] = [];
   const deps = (health: IdentityHealth): IdentityCommandGateDeps => ({
     health: () => health,
-    actionNameFor: (type) => (type === 'interaction.comment' ? 'comment' : type),
+    actionNameFor: (type) => (type === 'xiaohongshu.note.comment' ? 'comment' : type),
     reportActionCompleted: (receipt) => void receipts.push(receipt),
     logger: (line) => void logs.push(line),
   });
@@ -1843,7 +1843,7 @@ test('T21② 命令闸：身份未落定时页面命令 MUST 不执行且有真�
     deps(health),
     (env: { type: string }) => void executed.push(env.type),
   );
-  guarded('invalid')({ type: 'interaction.comment' });
+  guarded('invalid')({ type: 'xiaohongshu.note.comment' });
   assert.deepEqual(executed, [], '被拒的页面命令 MUST NOT 执行——它会以未知身份在平台上留真实痕迹');
   assert.deepEqual(receipts, [{ action: 'comment', ok: false, reason: 'identity_unresolved' }],
     '拒绝 MUST 有回执：静默丢弃会让云端分不清「命令没触达」与「执行了但没结果」，只能等满步超时');
@@ -1852,8 +1852,8 @@ test('T21② 命令闸：身份未落定时页面命令 MUST 不执行且有真�
   guarded('invalid')({ type: 'session.end' });
   assert.deepEqual(executed, ['identity.read_current', 'session.end']);
   // 身份落定 ⇒ 全部放行、不发任何拒绝回执。
-  guarded('healthy')({ type: 'interaction.comment' });
-  assert.deepEqual(executed.at(-1), 'interaction.comment');
+  guarded('healthy')({ type: 'xiaohongshu.note.comment' });
+  assert.deepEqual(executed.at(-1), 'xiaohongshu.note.comment');
   assert.equal(receipts.length, 1);
 });
 

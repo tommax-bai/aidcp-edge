@@ -133,11 +133,11 @@ function createUiEventStream() {
       () => ({ kind: 'presence', type: 'feed', presence: '正在浏览推荐流…', loopStage: 'feed' }),
     ],
     [
-      /命令: page\.scroll/,
+      /命令: (?:xiaohongshu|facebook)\.(?:feed|search|reels)\.scroll/,
       () => ({ kind: 'presence', type: 'scroll', presence: '刷一刷，看看新内容…', loopStage: 'feed' }),
     ],
     [
-      /命令: note\.open/,
+      /命令: (?:xiaohongshu|facebook)\.note\.open/,
       () => ({ kind: 'presence', type: 'note_opening', presence: '挑中一篇笔记，正在打开…', loopStage: 'select' }),
     ],
     [
@@ -177,7 +177,7 @@ function createUiEventStream() {
       }),
     ],
     [
-      /命令: interaction\.comment/,
+      /命令: (?:xiaohongshu|facebook)\.note\.comment/,
       () => ({
         kind: 'presence',
         type: 'comment_composing',
@@ -222,11 +222,11 @@ function createUiEventStream() {
       (m) => ({ kind: 'activity', type: 'images', sentence: `看了 ${m[1]} 张配图`, loopStage: 'read' }),
     ],
     [
-      /命令: note\.scroll_comments/,
+      /命令: xiaohongshu\.note\.scroll_comments/,
       () => ({ kind: 'presence', type: 'comments', presence: '翻看评论区…', loopStage: 'read' }),
     ],
     [
-      /命令: profile\.open/,
+      /命令: xiaohongshu\.profile\.open/,
       () => ({ kind: 'presence', type: 'profile', presence: '顺路去作者主页看看…', loopStage: 'read' }),
     ],
     [

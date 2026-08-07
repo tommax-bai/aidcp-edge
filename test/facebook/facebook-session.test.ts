@@ -292,9 +292,9 @@ test('note.open（浏览，无 url）→ 深读上报 note.detail（collectCount
   assert.equal(h.actions.length, 0, '成功深读不发 action.completed（note.detail 即回执）');
 });
 
-test('interaction.like（mode=on）→ 真点赞 ok:true（云端据此 record）', async () => {
+test('facebook.note.like（mode=on）→ 真点赞 ok:true（云端据此 record）', async () => {
   const h = makeSession({ mode: 'on' });
-  await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'x' }));
+  await h.session.onCloudCommand(makeEnv('facebook.note.like', { noteId: 'x' }));
   assert.deepEqual(h.likeShadowFlags, [false]);
   assert.equal(h.actions.length, 1);
   assert.equal(h.actions[0].action, 'like');
@@ -305,7 +305,7 @@ test('confirmed Facebook session/read/like → structured companion UI events；
   const on = makeSession({ mode: 'on' });
   await on.session.start();
   await on.session.onCloudCommand(makeEnv('facebook.note.open', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
-  await on.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'x' }));
+  await on.session.onCloudCommand(makeEnv('facebook.note.like', { noteId: 'x' }));
   const events = on.logs
     .filter((line) => line.startsWith('[ui-event] '))
     .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as Record<string, unknown>);
@@ -316,7 +316,7 @@ test('confirmed Facebook session/read/like → structured companion UI events；
   assert.deepEqual(events[3].statsDelta, { likes: 1 });
 
   const shadow = makeSession({ mode: 'shadow' });
-  await shadow.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'x' }));
+  await shadow.session.onCloudCommand(makeEnv('facebook.note.like', { noteId: 'x' }));
   assert.equal(shadow.logs.some((line) => line.includes('"type":"like"')), false, 'shadow 不得伪报点赞成功');
 });
 
@@ -334,7 +334,7 @@ test('Facebook like UI event: 使用实际被作用帖子的作者与正文摘�
       },
     }),
   });
-  await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
+  await h.session.onCloudCommand(makeEnv('facebook.note.like', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
   const event = h.logs
     .filter((line) => line.startsWith('[ui-event] '))
     .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as Record<string, unknown>)
@@ -369,7 +369,7 @@ test('Facebook like UI event: 见证字段缺失时部分展示或诚实降级',
       mode: 'on',
       like: () => ({ ok: true, executed: true, ...(item.observation ? { observation: item.observation } : {}) }),
     });
-    await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
+    await h.session.onCloudCommand(makeEnv('facebook.note.like', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
     const event = h.logs
       .filter((line) => line.startsWith('[ui-event] '))
       .map((line) => JSON.parse(line.slice('[ui-event] '.length)) as Record<string, unknown>)
@@ -389,7 +389,7 @@ test('Facebook like UI event: 未确认成功时即使有目标见证也不生�
       observation: { surface: 'feed', author: 'Alice', textPreviewHead: 'the post body' },
     }),
   });
-  await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
+  await h.session.onCloudCommand(makeEnv('facebook.note.like', { noteId: 'https://www.facebook.com/a/posts/pfbid0ONE' }));
   assert.equal(h.logs.some((line) => line.includes('"type":"like"')), false);
 });
 
@@ -488,10 +488,10 @@ test('评论/搜索/加群/按url开帖 → 委托 commentHandler（不走浏览
   const h = makeSession({ mode: 'on' });
   await h.session.onCloudCommand(makeEnv('facebook.search.execute', { container: 'https://www.facebook.com/groups/x' }));
   await h.session.onCloudCommand(makeEnv('facebook.search.execute', { keyword: '咖啡', taskId: 'task-1' }));
-  await h.session.onCloudCommand(makeEnv('interaction.comment', { noteId: 'x', text: 'hi' }));
+  await h.session.onCloudCommand(makeEnv('facebook.note.comment', { noteId: 'x', text: 'hi' }));
   await h.session.onCloudCommand(makeEnv('facebook.group.join', { groupUrl: 'https://www.facebook.com/groups/x' }));
   await h.session.onCloudCommand(makeEnv('facebook.note.open', { url: 'https://www.facebook.com/a/posts/pfbid0URL', taskId: 't1' }));
-  assert.deepEqual(h.delegated.map((e) => e.type), ['facebook.search.execute', 'facebook.search.execute', 'interaction.comment', 'facebook.group.join', 'facebook.note.open']);
+  assert.deepEqual(h.delegated.map((e) => e.type), ['facebook.search.execute', 'facebook.search.execute', 'facebook.note.comment', 'facebook.group.join', 'facebook.note.open']);
   assert.equal(h.details.length, 0, '委托路径不走浏览深读');
 });
 
@@ -500,7 +500,7 @@ test('评论/搜索/加群/按url开帖 → 委托 commentHandler（不走浏览
 test('mode=off：浏览/点赞回 browse_disabled；评论/加群仍委托', async () => {
   const h = makeSession({ mode: 'off' });
   await h.session.onCloudCommand(makeEnv('facebook.feed.scroll', {}));
-  await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'x' }));
+  await h.session.onCloudCommand(makeEnv('facebook.note.like', { noteId: 'x' }));
   await h.session.onCloudCommand(makeEnv('facebook.group.join', { groupUrl: 'https://www.facebook.com/groups/x' }));
   const disabled = h.actions.filter((a) => a.reason === 'browse_disabled');
   assert.equal(disabled.length, 2, 'scroll + like 均 browse_disabled');
@@ -510,7 +510,7 @@ test('mode=off：浏览/点赞回 browse_disabled；评论/加群仍委托', asy
 
 test('mode=shadow：点赞只记不执行 → ok:false reason=shadow（云端不记账）', async () => {
   const h = makeSession({ mode: 'shadow' });
-  await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: 'x' }));
+  await h.session.onCloudCommand(makeEnv('facebook.note.like', { noteId: 'x' }));
   assert.deepEqual(h.likeShadowFlags, [true], 'shadow 传入 like 执行器');
   assert.equal(h.actions[0].ok, false);
   assert.equal(h.actions[0].reason, 'shadow');
@@ -542,8 +542,8 @@ test('profile.open direct 遗留载荷在 Facebook 旧会话也不再解释为�
 
 test('FB v1 不支持的命令 → capability_unsupported（绝不静默丢弃）', async () => {
   const h = makeSession({ mode: 'on' });
-  await h.session.onCloudCommand(makeEnv('interaction.collect', { noteId: 'x' }));
-  await h.session.onCloudCommand(makeEnv('interaction.follow', { authorId: 'a' }));
+  await h.session.onCloudCommand(makeEnv('xiaohongshu.note.collect', { noteId: 'x' }));
+  await h.session.onCloudCommand(makeEnv('facebook.user.follow', { authorId: 'a' }));
   await h.session.onCloudCommand(makeEnv('xiaohongshu.profile.open', { authorId: 'a' }));
   assert.equal(h.actions.length, 3);
   assert.ok(h.actions.every((a) => a.reason === 'capability_unsupported'));
@@ -554,11 +554,12 @@ test('FB 云端命令回执使用规范动作名，深读失败不会退化为�
   const expected: Record<string, string> = {
     'facebook.feed.scroll': 'scroll',
     'facebook.feed.refresh': 'refresh',
-    'interaction.like': 'like',
-    'interaction.collect': 'collect',
-    'interaction.follow': 'follow',
-    'interaction.comment': 'comment',
-    'interaction.like_comment': 'comment_like',
+    'facebook.note.like': 'like',
+    'facebook.video.like': 'like',
+    'xiaohongshu.note.collect': 'collect',
+    'facebook.user.follow': 'follow',
+    'facebook.note.comment': 'comment',
+    'xiaohongshu.comment.like': 'comment_like',
     'facebook.search.execute': 'search',
     'facebook.note.open': 'open_note',
     'facebook.note.close': 'close',
@@ -580,10 +581,10 @@ test('FB 云端命令回执使用规范动作名，深读失败不会退化为�
   }
 
   const h = makeSession({ mode: 'on' });
-  for (const type of ['xiaohongshu.note.browse_images', 'xiaohongshu.note.scroll_comments', 'interaction.collect', 'interaction.follow', 'interaction.like_comment']) {
+  for (const type of ['xiaohongshu.note.browse_images', 'xiaohongshu.note.scroll_comments', 'xiaohongshu.note.collect', 'xiaohongshu.comment.like']) {
     await h.session.onCloudCommand(makeEnv(type, {}));
   }
-  assert.deepEqual(h.actions.map((a) => a.action), ['browse_images', 'scroll_comments', 'collect', 'follow', 'comment_like']);
+  assert.deepEqual(h.actions.map((a) => a.action), ['browse_images', 'scroll_comments', 'collect', 'comment_like']);
   assert.ok(h.actions.every((a) => a.ok === false && a.reason === 'capability_unsupported'));
 });
 
@@ -930,11 +931,11 @@ test('首页明确空态只上报观察；Cloud 专用授权后进入 Reels，�
   assert.equal(uiEvents.filter((event) => event.type === 'reel_view').length, 1);
   assert.equal(uiEvents.filter((event) => event.type === 'note_open').length, 0, '同一 Reel 的后续详情仍上报，但不重复计读');
 
-  await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: first.noteId }));
+  await h.session.onCloudCommand(makeEnv('facebook.video.like', { noteId: first.noteId }));
   assert.equal(h.actions.at(-1)?.ok, true);
   assert.equal(h.actions.at(-1)?.noteId, first.noteId);
 
-  await h.session.onCloudCommand(makeEnv('interaction.follow', { authorId: 'Bao', noteId: first.noteId }));
+  await h.session.onCloudCommand(makeEnv('facebook.user.follow', { authorId: 'Bao', noteId: first.noteId }));
   assert.equal(h.actions.at(-1)?.action, 'follow');
   assert.equal(h.actions.at(-1)?.ok, true);
   assert.deepEqual(h.reelFollowCalls, [{ noteId: first.noteId, shadow: false }]);
@@ -1038,7 +1039,7 @@ test('Reels 关注：shadow 标志与 reader 的真实终态原样回执', async
   });
   await h.session.start();
   await h.session.onCloudCommand(makeEnv('facebook.reels.scroll', { reason: 'empty_feed_reels_fallback' }));
-  await h.session.onCloudCommand(makeEnv('interaction.follow', { authorId: reel.author, noteId: reel.noteId }));
+  await h.session.onCloudCommand(makeEnv('facebook.user.follow', { authorId: reel.author, noteId: reel.noteId }));
 
   assert.deepEqual(h.reelFollowCalls, [{ noteId: reel.noteId, shadow: true }]);
   assert.deepEqual(h.actions.at(-1), { action: 'follow', ok: false, reason: 'shadow' });
@@ -1062,10 +1063,10 @@ test('Reels 关注：already_followed 是已满足的幂等终态，缺 noteId �
   await h.session.start();
   await h.session.onCloudCommand(makeEnv('facebook.reels.scroll', { reason: 'empty_feed_reels_fallback' }));
 
-  await h.session.onCloudCommand(makeEnv('interaction.follow', { authorId: 'Salon de Comolis', noteId: reel.noteId }));
+  await h.session.onCloudCommand(makeEnv('facebook.user.follow', { authorId: 'Salon de Comolis', noteId: reel.noteId }));
   assert.deepEqual(h.actions.at(-1), { action: 'follow', ok: true, reason: 'already_followed' });
   assert.equal(h.logs.some((line) => line.includes('"type":"follow"')), false, 'already_followed 未发生新关注，不得计入今日进展');
-  await h.session.onCloudCommand(makeEnv('interaction.follow', { authorId: 'Salon de Comolis' }));
+  await h.session.onCloudCommand(makeEnv('facebook.user.follow', { authorId: 'Salon de Comolis' }));
   assert.deepEqual(h.actions.at(-1), { action: 'follow', ok: false, reason: 'no_target' });
 });
 
@@ -1312,7 +1313,7 @@ test('让位：FB 评论逐字输入中途被接管 → 清空半截评论 + 回
   sessionRef = h.session;
 
   await h.session.onCloudCommand(
-    makeEnv('interaction.comment', { noteId: 'https://www.facebook.com/groups/123456/posts/999', text: body }),
+    makeEnv('facebook.note.comment', { noteId: 'https://www.facebook.com/groups/123456/posts/999', text: body }),
   );
   assert.equal(await quiesced, 0, '取消点上的命令 MUST 当场收敛，抢占者才拿得到「页面已静默」');
 
@@ -1403,7 +1404,7 @@ test('让位：孤儿写者在评论打字中途结束 → **绝不能**解除�
 
   // ② 孤儿在飞期间下发评论 → 打到第 3 个字符时孤儿结束，随后交接。
   await h.session.onCloudCommand(
-    makeEnv('interaction.comment', { noteId: 'https://www.facebook.com/groups/123456/posts/999', text: body }),
+    makeEnv('facebook.note.comment', { noteId: 'https://www.facebook.com/groups/123456/posts/999', text: body }),
   );
   await quiesced;
 

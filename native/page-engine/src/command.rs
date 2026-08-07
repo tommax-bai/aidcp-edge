@@ -319,6 +319,15 @@ pub struct NotificationParams {
     pub scroll_max: Option<u32>,
 }
 
+/// 词汇批 5：like 的对象由信封名声明（`{p}.note.like` / `facebook.video.like`），TS mapper 解析后下传。
+/// 执行点核对现场，声明与观测不符 ⇒ 诚实失败，MUST NOT 静默改跑另一对象的执行器。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LikeObject {
+    Note,
+    Video,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct NoteInteractionParams {
@@ -327,6 +336,9 @@ pub struct NoteInteractionParams {
     pub reason: Option<String>,
     #[serde(default)]
     pub think_ms: Option<u64>,
+    /// 仅 `interaction_like` 携带（mapper 恒 stamp）；内部构造与 collect 路径缺省 None＝沿用现场探测路由。
+    #[serde(default)]
+    pub object: Option<LikeObject>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

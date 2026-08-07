@@ -214,22 +214,22 @@ test('fb-handler: note.open 评论框催不出 → open_note editor_not_found（
   assert.equal(cap.actions[0].reason, 'editor_not_found');
 });
 
-test('fb-handler: interaction.comment 成功 → action.completed{comment,ok:true}', async () => {
+test('fb-handler: facebook.note.comment 成功 → action.completed{comment,ok:true}', async () => {
   const exec = new FakeExecutor({ submit: { ok: true, submitted: true, serverConfirmed: true } });
   const { handler, cap } = makeHandler(exec);
   await handler.handle(
-    makeEnvelope('interaction.comment', 'c1', 1, { noteId: 'https://www.facebook.com/groups/1/posts/2', text: '很喜欢' } as never),
+    makeEnvelope('facebook.note.comment', 'c1', 1, { noteId: 'https://www.facebook.com/groups/1/posts/2', text: '很喜欢' } as never),
   );
   assert.equal(cap.actions[0].action, 'comment');
   assert.equal(cap.actions[0].ok, true);
   assert.deepEqual(exec.submitArg, { url: 'https://www.facebook.com/groups/1/posts/2', text: '很喜欢' });
 });
 
-test('fb-handler: interaction.comment 带 groupChatCode → 透传给 executor contactInfo', async () => {
+test('fb-handler: facebook.note.comment 带 groupChatCode → 透传给 executor contactInfo', async () => {
   const exec = new FakeExecutor({ submit: { ok: true, submitted: true, serverConfirmed: true } });
   const { handler, cap } = makeHandler(exec);
   await handler.handle(
-    makeEnvelope('interaction.comment', 'c1', 1, {
+    makeEnvelope('facebook.note.comment', 'c1', 1, {
       noteId: 'https://www.facebook.com/groups/1/posts/2',
       text: '正文',
       groupChatCode: 'LINE ID: abc123',
@@ -243,22 +243,22 @@ test('fb-handler: interaction.comment 带 groupChatCode → 透传给 executor c
   });
 });
 
-test('fb-handler: interaction.comment ambiguous → action.completed{comment,ok:false,reason}', async () => {
+test('fb-handler: facebook.note.comment ambiguous → action.completed{comment,ok:false,reason}', async () => {
   const exec = new FakeExecutor({ submit: { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false } });
   const { handler, cap } = makeHandler(exec);
   await handler.handle(
-    makeEnvelope('interaction.comment', 'c1', 1, { noteId: 'https://www.facebook.com/groups/1/posts/2', text: '很喜欢' } as never),
+    makeEnvelope('facebook.note.comment', 'c1', 1, { noteId: 'https://www.facebook.com/groups/1/posts/2', text: '很喜欢' } as never),
   );
   assert.equal(cap.actions[0].action, 'comment');
   assert.equal(cap.actions[0].ok, false);
   assert.equal(cap.actions[0].reason, 'verification_ambiguous');
 });
 
-test('fb-handler: interaction.comment --feed 透传 executor，并用未确认而非失败措辞', async () => {
+test('fb-handler: facebook.note.comment --feed 透传 executor，并用未确认而非失败措辞', async () => {
   const exec = new FakeExecutor({ submit: { ok: false, reason: 'verification_ambiguous', submitted: true, serverConfirmed: false } });
   const { handler, cap } = makeHandler(exec);
   await handler.handle(
-    makeEnvelope('interaction.comment', 'c1', 1, {
+    makeEnvelope('facebook.note.comment', 'c1', 1, {
       noteId: 'https://www.facebook.com/groups/1/posts/2',
       text: '很喜欢',
       fastReturnToFeed: true,
@@ -316,7 +316,7 @@ test('fb-handler: group.join 未装配 join executor → capability_unsupported'
 test('fb-ui: 评论真成功 → comment 条目 + comments:1（唯一计数点）', async () => {
   const exec = new FakeExecutor({ submit: { ok: true, submitted: true, serverConfirmed: true } });
   const { handler, cap } = makeHandler(exec);
-  await handler.handle(makeEnvelope('interaction.comment', 'c1', 1, {
+  await handler.handle(makeEnvelope('facebook.note.comment', 'c1', 1, {
     noteId: 'https://www.facebook.com/groups/1/posts/2',
     text: '这个岗位还招人吗？',
   } as never));
@@ -334,7 +334,7 @@ test('fb-ui【红线】: 评论待群管理员批准 → comment_pending，不�
     submit: { ok: false, reason: 'pending_group_approval', submitted: true, serverConfirmed: false },
   });
   const { handler, cap } = makeHandler(exec);
-  await handler.handle(makeEnvelope('interaction.comment', 'c1', 1, {
+  await handler.handle(makeEnvelope('facebook.note.comment', 'c1', 1, {
     noteId: 'https://www.facebook.com/groups/1/posts/2',
     text: '请问还招人吗',
   } as never));
@@ -353,7 +353,7 @@ test('fb-ui: 评论框没找到 → comment_failed 且吐人话、不吐机器�
     submit: { ok: false, reason: 'editor_not_found', submitted: false, serverConfirmed: false },
   });
   const { handler, cap } = makeHandler(exec);
-  await handler.handle(makeEnvelope('interaction.comment', 'c1', 1, { noteId: 'u', text: 'x' } as never));
+  await handler.handle(makeEnvelope('facebook.note.comment', 'c1', 1, { noteId: 'u', text: 'x' } as never));
   const ev = cap.ui.filter((e) => e.kind === 'activity');
   assert.equal(ev.length, 1);
   assert.equal(ev[0].type, 'comment_failed');
@@ -367,7 +367,7 @@ test('fb-ui【红线】: 未知失败原因默认可见（拒绝集而非白名�
     submit: { ok: false, reason: 'brand_new_reason_nobody_mapped' as never, submitted: false, serverConfirmed: false },
   });
   const { handler, cap } = makeHandler(exec);
-  await handler.handle(makeEnvelope('interaction.comment', 'c1', 1, { noteId: 'u', text: 'x' } as never));
+  await handler.handle(makeEnvelope('facebook.note.comment', 'c1', 1, { noteId: 'u', text: 'x' } as never));
   const ev = cap.ui.filter((e) => e.kind === 'activity');
   // 白名单实现会在这里静默吞掉——那正是本 change 要修的病。
   assert.equal(ev.length, 1);
@@ -379,7 +379,7 @@ test('fb-ui: 被占用 / 被抢占 = 未开始，不产条目也不叙述成失�
   for (const reason of ['busy', 'preempted_by_task', 'session_closing', 'capability_unsupported'] as const) {
     const exec = new FakeExecutor({ submit: { ok: false, reason: reason as never, submitted: false, serverConfirmed: false } });
     const { handler, cap } = makeHandler(exec);
-    await handler.handle(makeEnvelope('interaction.comment', 'c1', 1, { noteId: 'u', text: 'x' } as never));
+    await handler.handle(makeEnvelope('facebook.note.comment', 'c1', 1, { noteId: 'u', text: 'x' } as never));
     assert.equal(cap.ui.filter((e) => e.kind === 'activity').length, 0, `${reason} 不应产条目`);
   }
 });

@@ -12,7 +12,7 @@ test('command diagnostics: active command families produce useful whitelist-only
     { type: 'plan.response', payload: { steps: [{ secret: 'step-secret' }], reason: 'reason-secret' }, expected: /1 个顺序步骤/ },
     { type: 'facebook.note.open', payload: { surface: 'detail', purpose: 'read', url: 'https://secret.test/x?token=1', noteId: 'note-secret' }, expected: /已提供目标地址/ },
     { type: 'xiaohongshu.search.execute', payload: { keyword: '绝密词', source: 'manager', maxResults: 8 }, expected: /搜索词 3 字/ },
-    { type: 'interaction.comment', payload: { text: '不要展示这条评论', groupChatCode: 'chat-secret' }, expected: /评论正文 8 字/ },
+    { type: 'xiaohongshu.note.comment', payload: { text: '不要展示这条评论', groupChatCode: 'chat-secret' }, expected: /评论正文 8 字/ },
     { type: 'facebook.group.join', payload: { click: true, groupUrl: 'https://secret.test/group' }, expected: /申请加入目标群组/ },
     { type: 'publish.command', payload: { kind: 'fill_field', seq: 2, recordId: 9988, taskId: 'task-secret', params: { value: 'body-secret' } }, expected: /发布步骤 fill_field，序号 2/ },
     { type: 'edge.task.acquire', payload: { kind: 'publish', priority: 'human', taskId: 'task-secret' }, expected: /任务 publish，优先级 human/ },

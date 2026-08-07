@@ -225,6 +225,7 @@ fn like_command(id: &str) -> CommandRecord {
             note_id: "https://www.facebook.com/Alice/posts/pfbidTARGET".to_owned(),
             reason: Some("feed_like".to_owned()),
             think_ms: None,
+            object: None,
         }),
     }
 }

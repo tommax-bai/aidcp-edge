@@ -135,23 +135,9 @@ test('Native identity current read injects bound account and reports correlated 
   }]);
 });
 
-test('unsupported Facebook commands are rejected before Native/CDP dispatch', async () => {
-  const h = harness(async () => assert.fail('unsupported command must not reach Native runtime'), {
-    platform: 'facebook',
-  });
-  // 词汇批 4 后 xhs 专属命令（xiaohongshu.*）由 edge-client 入口平台段闸拒收，不再到达本会话；
-  // 本会话的手抄拒集只剩两条共享名互动命令（批 5 对象化后应归零）。
-  await h.session.onCloudCommand(envelope('interaction.collect', { noteId: 'post-1' }));
-  await h.session.onCloudCommand(envelope('interaction.like_comment', {
-    noteId: 'post-1',
-    commentAnchorId: 'comment-1',
-  }));
-  assert.equal(h.executions.length, 0);
-  assert.deepEqual(h.actions, [
-    { action: 'collect', ok: false, reason: 'capability_unsupported' },
-    { action: 'comment_like', ok: false, reason: 'capability_unsupported' },
-  ]);
-});
+// 词汇批 5 起「FB 不支持 collect / comment-like」不再是本会话的手抄拒集：这两个动作只剩
+// xiaohongshu.* 平台段名，发往 Facebook 会话在 edge-client 入口平台段闸即 platform_mismatch 拒收
+//（见 test/client/edge-client.test.ts 的真实新名拒收用例）；引擎侧 Rust 能力账本仍是纵深防线。
 
 test('Native Facebook action receipt logs bounded terminal phase and reason without payload content', async () => {
   const h = harness(async () => ({
@@ -168,7 +154,7 @@ test('Native Facebook action receipt logs bounded terminal phase and reason with
     },
   }), { platform: 'facebook' });
 
-  await h.session.onCloudCommand(envelope('interaction.like', {
+  await h.session.onCloudCommand(envelope('facebook.video.like', {
     noteId: 'https://www.facebook.com/reel/777',
   }));
 
@@ -276,12 +262,12 @@ test('Native Facebook keeps Join, comments, and ordinary refresh on their comman
   await h.session.onCloudCommand(envelope('facebook.group.join', {
     groupUrl: 'https://www.facebook.com/groups/42',
   }));
-  await h.session.onCloudCommand(envelope('interaction.comment', {
+  await h.session.onCloudCommand(envelope('facebook.note.comment', {
     noteId: 'https://www.facebook.com/groups/42/posts/7',
     text: 'x'.repeat(100),
     groupChatCode: 'Zalo:123',
   }));
-  await h.session.onCloudCommand(envelope('interaction.comment', {
+  await h.session.onCloudCommand(envelope('facebook.note.comment', {
     noteId: 'https://www.facebook.com/groups/42/posts/8',
     text: 'x'.repeat(400),
   }));
@@ -539,7 +525,7 @@ test('Native action receipt failure falls back to the execution reason code', as
     output: { kind: 'action_receipt', value: { action: 'like', ok: true } },
   }));
 
-  await h.session.onCloudCommand(envelope('interaction.like', { noteId: 'note-1' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.note.like', { noteId: 'note-1' }));
 
   assert.deepEqual(h.actions, [{ action: 'like', ok: false, reason: 'submitted_unconfirmed' }]);
 });
@@ -1039,7 +1025,7 @@ test('Native command honours the cloud thinkMs before touching the page', async 
     sleep: async (ms) => { waits.push(ms); },
   });
 
-  await h.session.onCloudCommand(envelope('interaction.like', { noteId: 'https://www.facebook.com/A/posts/1', thinkMs: 2_400 }));
+  await h.session.onCloudCommand(envelope('facebook.note.like', { noteId: 'https://www.facebook.com/A/posts/1', thinkMs: 2_400 }));
 
   assert.deepEqual(waits, [2_400]);
   assert.equal(h.executions.length, 1);

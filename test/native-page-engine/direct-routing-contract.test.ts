@@ -3,13 +3,13 @@ import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { nativeCommandForEnvelope, nativePublishCommand } from '../../src/native-page-engine/command-mapper.js';
+import { nativeActionNameForCommand, nativeCommandForEnvelope, nativePublishCommand } from '../../src/native-page-engine/command-mapper.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
 test('projects Edge coordination fields out of the Native command envelope', () => {
   const command = nativeCommandForEnvelope({
-    v: 1, id: 'e1', ts: Date.now(), type: 'interaction.comment',
+    v: 1, id: 'e1', ts: Date.now(), type: 'xiaohongshu.note.comment',
     payload: { taskId: 'lease-secret', noteId: 'n1', text: 'approved', reason: 'commit' },
   }, '61591824155856');
   assert.deepEqual(command, {
@@ -141,4 +141,56 @@ test('main wires every browser-platform page path to Native-only and has no lega
   assert.doesNotMatch(main, /client\.onPublishCommand\(/);
   assert.match(runtime, /AIDCP_NATIVE_PAGE_ENGINE_BINARY is required/);
   assert.doesNotMatch(runtime, /shadow|fallback/i);
+});
+
+test('derives the like object from the platform-segmented envelope name', () => {
+  // 词汇批 5：对象由命令名声明（按对象拆、不按位置拆），mapper 解析为引擎 object 参数；
+  // FB 引擎据此路由视频/帖级执行器，现场不符诚实失败。
+  const video = nativeCommandForEnvelope({
+    v: 2, id: 'video-like', ts: Date.now(), type: 'facebook.video.like',
+    payload: { noteId: 'https://www.facebook.com/reel/1' },
+  } as never);
+  assert.deepEqual(video, {
+    kind: 'interaction_like',
+    params: { noteId: 'https://www.facebook.com/reel/1', object: 'video' },
+  });
+
+  const post = nativeCommandForEnvelope({
+    v: 2, id: 'post-like', ts: Date.now(), type: 'facebook.note.like',
+    payload: { noteId: 'https://www.facebook.com/a/posts/1' },
+  } as never);
+  assert.deepEqual(post, {
+    kind: 'interaction_like',
+    params: { noteId: 'https://www.facebook.com/a/posts/1', object: 'note' },
+  });
+
+  const xhs = nativeCommandForEnvelope({
+    v: 2, id: 'xhs-like', ts: Date.now(), type: 'xiaohongshu.note.like',
+    payload: { noteId: 'n1' },
+  } as never);
+  assert.deepEqual(xhs, {
+    kind: 'interaction_like',
+    params: { noteId: 'n1', object: 'note' },
+  });
+});
+
+test('interaction correlation keys: every platform-object envelope has an explicit table entry with the legacy value', () => {
+  // 词汇批 5 红线（协议第 5 处同步点）：关联键值与协议名脱钩、值不动。
+  // 本断言杀 nativeActionNameForCommand 的 `?? type` 静默回落——漏表项时新命令名会被
+  // 当关联键发出，云端角色永远等不到回执且当未知失败动作处理（CLAUDE.md §2 第 5 处）。
+  const expected: Record<string, string> = {
+    'xiaohongshu.note.like': 'like',
+    'facebook.note.like': 'like',
+    'facebook.video.like': 'like',
+    'xiaohongshu.note.collect': 'collect',
+    'xiaohongshu.user.follow': 'follow',
+    'facebook.user.follow': 'follow',
+    'xiaohongshu.note.comment': 'comment',
+    'facebook.note.comment': 'comment',
+    'xiaohongshu.comment.like': 'comment_like',
+  };
+  for (const [type, action] of Object.entries(expected)) {
+    assert.equal(nativeActionNameForCommand(type), action,
+      `${type} 必须有显式关联键表项（值=${action}），绝不允许回落成命令名`);
+  }
 });

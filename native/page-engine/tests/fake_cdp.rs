@@ -1693,6 +1693,7 @@ fn reel_surface_like_command(command_id: u64) -> CommandRecord {
             note_id: "https://www.facebook.com/watch/?v=9001".to_owned(),
             reason: None,
             think_ms: None,
+            object: None,
         }),
     }
 }
@@ -3224,6 +3225,7 @@ fn facebook_like_command(command_id: u64) -> CommandRecord {
             note_id: "https://www.facebook.com/reel/1".to_owned(),
             reason: None,
             think_ms: None,
+            object: None,
         }),
     }
 }

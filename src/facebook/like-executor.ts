@@ -1,5 +1,5 @@
 /**
- * Facebook 帖级「点赞」原子执行器 + 强制后置校验（浏览闭环 interaction.like 的落地）。
+ * Facebook 帖级「点赞」原子执行器 + 强制后置校验（浏览闭环 facebook.note.like 的落地）。
  *
  * 红线（贯穿本文件，MUST NOT 静默假成功）：
  *  - **按命令携带的帖子身份定位，绝不 DOM 序回落**（change facebook-note-scoped-targeting）：命令里的 noteId

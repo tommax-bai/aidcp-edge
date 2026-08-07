@@ -216,9 +216,9 @@ test('feed.refresh 换批成功 → 重置游标，随后 scroll 重新把换批
 
 // ─────────────────────────── 点赞独立见证按 surface gate ───────────────────────────
 
-test('interaction.like feed 面 → 回执挂 noteId + observation（激活云端仲裁）', async () => {
+test('facebook.note.like feed 面 → 回执挂 noteId + observation（激活云端仲裁）', async () => {
   const h = makeSession({ like: { ok: true, executed: true, observation: { surface: 'feed', noteId: 'fb:pfbidAAA', author: 'iQIYI', articleIndex: 2 } } });
-  await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: A }));
+  await h.session.onCloudCommand(makeEnv('facebook.note.like', { noteId: A }));
   const a = h.actions[0];
   assert.equal(a.action, 'like');
   assert.equal(a.ok, true);
@@ -226,9 +226,9 @@ test('interaction.like feed 面 → 回执挂 noteId + observation（激活云�
   assert.equal((a.observation as { surface?: string })?.surface, 'feed');
 });
 
-test('interaction.like detail 面 → 回执不挂 noteId/observation（逐位等于今天，零回归）', async () => {
+test('facebook.note.like detail 面 → 回执不挂 noteId/observation（逐位等于今天，零回归）', async () => {
   const h = makeSession({ like: { ok: true, executed: true, observation: { surface: 'detail', noteId: 'fb:pfbidAAA' } } });
-  await h.session.onCloudCommand(makeEnv('interaction.like', { noteId: A }));
+  await h.session.onCloudCommand(makeEnv('facebook.note.like', { noteId: A }));
   const a = h.actions[0];
   assert.equal(a.action, 'like');
   assert.equal(a.ok, true);

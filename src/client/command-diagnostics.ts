@@ -45,11 +45,15 @@ const ACTIVE_COMMAND_TYPES = new Set([
   'xiaohongshu.feed.refresh',
   'facebook.feed.refresh',
   'pacing.update',
-  'interaction.like',
-  'interaction.collect',
-  'interaction.follow',
-  'interaction.comment',
-  'interaction.like_comment',
+  'xiaohongshu.note.like',
+  'facebook.note.like',
+  'facebook.video.like',
+  'xiaohongshu.note.collect',
+  'xiaohongshu.user.follow',
+  'facebook.user.follow',
+  'xiaohongshu.note.comment',
+  'facebook.note.comment',
+  'xiaohongshu.comment.like',
   'facebook.group.join',
   'navigation.back',
   'xiaohongshu.note.browse_images',
@@ -89,10 +93,13 @@ const FIXED_SUMMARIES: Readonly<Record<string, string>> = {
   'xiaohongshu.feed.refresh': '刷新当前信息流',
   'facebook.feed.refresh': '刷新当前信息流',
   'pacing.update': '更新自动化节奏',
-  'interaction.like': '点赞当前内容',
-  'interaction.collect': '收藏当前内容',
-  'interaction.follow': '关注当前作者',
-  'interaction.like_comment': '点赞目标评论',
+  'xiaohongshu.note.like': '点赞当前内容',
+  'facebook.note.like': '点赞当前内容',
+  'facebook.video.like': '点赞当前视频',
+  'xiaohongshu.note.collect': '收藏当前内容',
+  'xiaohongshu.user.follow': '关注当前作者',
+  'facebook.user.follow': '关注当前作者',
+  'xiaohongshu.comment.like': '点赞目标评论',
   'navigation.back': '返回上一页面',
   'xiaohongshu.note.browse_images': '浏览当前内容配图',
   'xiaohongshu.note.scroll_comments': '滚动当前评论区',
@@ -221,7 +228,7 @@ export function summarizeCommand(type: unknown, payload: unknown): string {
       typeof data.container === 'string' && data.container.length > 0 ? '已限定搜索容器' : undefined,
     ]);
   }
-  if (commandType === 'interaction.comment') {
+  if (commandType === 'xiaohongshu.note.comment' || commandType === 'facebook.note.comment') {
     const length = textLength(data.text);
     return joinParts([
       length === undefined ? '提交评论' : `评论正文 ${length} 字`,

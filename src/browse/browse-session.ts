@@ -1443,7 +1443,7 @@ export class BrowseSession {
       case 'xiaohongshu.feed.scroll':
       case 'xiaohongshu.search.scroll': {
         const payload = env.payload as PageScrollPayload;
-        this.logger(`[browse] 命令: page.scroll (${payload.reason ?? ''})`);
+        this.logger(`[browse] 命令: ${env.type} (${payload.reason ?? ''})`);
         if (payload.reason === 'resume_redrive') await this.ensureExplore();
         await this.ensureFeedDwell(payload.dwellMs); // 翻页前看完本批新卡（feed-scroll-card-floor）
         await this.deps.scroller.scrollNext();
@@ -1453,13 +1453,13 @@ export class BrowseSession {
       }
       case 'xiaohongshu.feed.refresh': {
         const payload = env.payload as FeedRefreshPayload;
-        this.logger(`[browse] 命令: feed.refresh (${payload.reason ?? ''})`);
+        this.logger(`[browse] 命令: ${env.type} (${payload.reason ?? ''})`);
         await this.refreshFeed(payload.thinkMs);
         break;
       }
       case 'xiaohongshu.note.open': {
         const payload = env.payload as NoteOpenPayload;
-        this.logger(`[browse] 命令: note.open (index=${payload.index}, noteId=${payload.noteId ?? '?'})`);
+        this.logger(`[browse] 命令: ${env.type} (index=${payload.index}, noteId=${payload.noteId ?? '?'})`);
         // 小红书页面模型无「feed 就地读全文」——收到 surface='feed' 绝不静默回落 detail，
         // 诚实 capability_unsupported（change facebook-feed-inline-browse task 4.4 / N7）。
         if (payload.surface === 'feed') {
@@ -1473,36 +1473,36 @@ export class BrowseSession {
       }
       case 'xiaohongshu.note.close': {
         const payload = env.payload as NoteClosePayload;
-        this.logger(`[browse] 命令: note.close`);
+        this.logger(`[browse] 命令: ${env.type}`);
         await this.ensureDetailDwell(payload.dwellMs); // 关闭前确保停留达标
         await this.safeCloseModal();
         this.deps.client.reportActionCompleted?.({ action: 'close', ok: true });
         break;
       }
-      case 'interaction.like': {
+      case 'xiaohongshu.note.like': {
         const payload = env.payload as InteractionLikePayload;
-        this.logger(`[browse] 命令: interaction.like (noteId=${payload.noteId})`);
+        this.logger(`[browse] 命令: xiaohongshu.note.like (noteId=${payload.noteId})`);
         if (!(await this.gateBeforeAction('action', payload.thinkMs))) break; // 最小间隔 + 点赞前犹豫（max）
         await this.executeLikeOrCollect('like');
         break;
       }
-      case 'interaction.collect': {
+      case 'xiaohongshu.note.collect': {
         const payload = env.payload as InteractionCollectPayload;
-        this.logger(`[browse] 命令: interaction.collect (noteId=${payload.noteId})`);
+        this.logger(`[browse] 命令: xiaohongshu.note.collect (noteId=${payload.noteId})`);
         if (!(await this.gateBeforeAction('action', payload.thinkMs))) break; // 最小间隔 + 收藏前犹豫（max）
         await this.executeLikeOrCollect('collect');
         break;
       }
-      case 'interaction.follow': {
+      case 'xiaohongshu.user.follow': {
         const payload = env.payload as InteractionFollowPayload;
-        this.logger(`[browse] 命令: interaction.follow (authorId=${payload.authorId ?? '?'})`);
+        this.logger(`[browse] 命令: xiaohongshu.user.follow (authorId=${payload.authorId ?? '?'})`);
         if (!(await this.gateBeforeAction('action', payload.thinkMs))) break; // 最小间隔 + 关注前犹豫（max）
         await this.executeFollow();
         break;
       }
-      case 'interaction.comment': {
+      case 'xiaohongshu.note.comment': {
         const payload = env.payload as InteractionCommentPayload;
-        this.logger(`[browse] 命令: interaction.comment (noteId=${payload.noteId})`);
+        this.logger(`[browse] 命令: xiaohongshu.note.comment (noteId=${payload.noteId})`);
         if (!(await this.gateBeforeAction('action', payload.thinkMs))) break; // 最小间隔 + 发评论前犹豫（max）
         // 发布前就地核对（change comment-keep-open-through-approval，取舍2）：读当前详情页 URL 的 noteId
         // 与目标核对，明确不符（页面被弹层顶掉/被导航到别的笔记）→ 诚实终止不发；不搜索、不重开。
@@ -1511,7 +1511,7 @@ export class BrowseSession {
         if (payload.noteId) {
           const currentId = this.parseNoteIdFromUrl(await this.evalUrl());
           if (currentId && currentId !== payload.noteId) {
-            this.logger(`[browse] interaction.comment 目标核对失败：当前详情 noteId=${currentId} ≠ 目标 ${payload.noteId} → 诚实终止不发`);
+            this.logger(`[browse] xiaohongshu.note.comment 目标核对失败：当前详情 noteId=${currentId} ≠ 目标 ${payload.noteId} → 诚实终止不发`);
             this.deps.client.reportActionCompleted?.({ action: 'comment', ok: false, reason: 'note_page_mismatch' });
             break;
           }
@@ -1519,9 +1519,9 @@ export class BrowseSession {
         await this.executeComment(payload.text, payload.groupChatCode, payload.fastReturnToFeed === true);
         break;
       }
-      case 'interaction.like_comment': {
+      case 'xiaohongshu.comment.like': {
         const payload = env.payload as InteractionLikeCommentPayload;
-        this.logger(`[browse] 命令: interaction.like_comment (anchor=${payload.commentAnchorId})`);
+        this.logger(`[browse] 命令: xiaohongshu.comment.like (anchor=${payload.commentAnchorId})`);
         if (!(await this.gateBeforeAction('action', payload.thinkMs))) break; // 最小间隔 + 点评论赞前犹豫（max）
         await this.executeLikeComment(payload.commentAnchorId);
         break;
@@ -1640,7 +1640,7 @@ export class BrowseSession {
       case 'xiaohongshu.note.browse_images': {
         const payload = env.payload as NoteBrowseImagesPayload;
         const count = payload.count ?? 3;
-        this.logger(`[browse] 命令: note.browse_images (noteId=${payload.noteId}, count=${count})`);
+        this.logger(`[browse] 命令: ${env.type} (noteId=${payload.noteId}, count=${count})`);
         if (!(await this.gateBeforeAction('card_gap', payload.thinkMs))) break; // 翻图前最小间隔（card_gap 档）
         await this.browseNoteImages(payload.noteId, count);
         break;
@@ -1648,7 +1648,7 @@ export class BrowseSession {
       case 'xiaohongshu.note.scroll_comments': {
         const payload = env.payload as NoteScrollCommentsPayload;
         const count = payload.count ?? 3;
-        this.logger(`[browse] 命令: note.scroll_comments (noteId=${payload.noteId}, count=${count})`);
+        this.logger(`[browse] 命令: ${env.type} (noteId=${payload.noteId}, count=${count})`);
         if (!(await this.gateBeforeAction('scroll', payload.thinkMs))) break; // 滚评论前最小间隔（scroll 档）
         await this.scrollNoteComments(payload.noteId, count);
         break;
@@ -1664,7 +1664,7 @@ export class BrowseSession {
           break;
         }
         const payload = rawPayload as ProfileOpenPayload;
-        this.logger(`[browse] 命令: profile.open (authorId=${payload.authorId ?? '?'})`);
+        this.logger(`[browse] 命令: ${env.type} (authorId=${payload.authorId ?? '?'})`);
         if (!(await this.gateBeforeAction('action', payload.thinkMs))) break; // 开主页前最小间隔（action 档）
         await this.openAuthorProfile(payload.authorId);
         break;

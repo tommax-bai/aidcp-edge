@@ -124,7 +124,7 @@ test('红线：失败行绝不计数（旧 substring 匹配的已知误计全部
   // 旧法 includes('提取内容') → 失败行计浏览
   assert.equal(s.push('[browse] note.open: 提取内容失败：timeout'), null);
   // 旧法 includes('like') → 命令下发（尚未执行）就计赞
-  assert.equal(s.push('[browse] 命令: interaction.like (noteId=n1)'), null);
+  assert.equal(s.push('[browse] 命令: xiaohongshu.note.like (noteId=n1)'), null);
 });
 
 test('page.cards 上报 → 只更新在场感，不再计浏览数（旧法误计）', () => {
@@ -147,9 +147,9 @@ test('风控弹窗如实呈现（不盖住阻断）', () => {
 
 test('浏览循环阶段：scroll→feed / note.open→select / back→return / 结束→null', () => {
   const s = createUiEventStream();
-  assert.equal(s.push('[browse] 命令: page.scroll (continue)')?.loopStage, 'feed');
-  assert.equal(s.push('[browse] 命令: note.open (index=2, noteId=n)')?.loopStage, 'select');
-  assert.equal(s.push('[browse] 命令: interaction.comment (noteId=n1)')?.loopStage, 'comment');
+  assert.equal(s.push('[browse] 命令: xiaohongshu.feed.scroll (continue)')?.loopStage, 'feed');
+  assert.equal(s.push('[browse] 命令: xiaohongshu.note.open (index=2, noteId=n)')?.loopStage, 'select');
+  assert.equal(s.push('[browse] 命令: xiaohongshu.note.comment (noteId=n1)')?.loopStage, 'comment');
   assert.equal(s.push('[browse] 命令: navigation.back (browse_next, target=feed)')?.loopStage, 'return');
   assert.equal(s.push('[browse] 浏览循环结束')?.loopStage, null);
 });

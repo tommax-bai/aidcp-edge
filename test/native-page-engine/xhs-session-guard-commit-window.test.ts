@@ -118,7 +118,7 @@ test('Xiaohongshu browse writes reach the shared coordinator guard without any p
     };
   }, guard);
 
-  await h.session.onCloudCommand(envelope('interaction.comment', { noteId: 'note-1', text: 'hi' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.note.comment', { noteId: 'note-1', text: 'hi' }));
 
   // 窗口内协调器读到「占用中 + 剩余预算」，窗口外才可抢占。
   assert.deepEqual(observed, [{
@@ -192,7 +192,7 @@ test('an unavailable commit window leaves the Xiaohongshu write not started', as
     });
   }, guard);
 
-  await h.session.onCloudCommand(envelope('interaction.comment', { noteId: 'note-1', text: 'hi' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.note.comment', { noteId: 'note-1', text: 'hi' }));
 
   assert.deepEqual(h.actions, [{
     action: 'comment',

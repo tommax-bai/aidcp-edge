@@ -278,7 +278,9 @@
     },
     {
       "edgeTypes": [
-        "interaction.like"
+        "xiaohongshu.note.like",
+        "facebook.note.like",
+        "facebook.video.like"
       ],
       "nativeKind": "interaction_like",
       "family": "interaction",
@@ -291,7 +293,7 @@
     },
     {
       "edgeTypes": [
-        "interaction.collect"
+        "xiaohongshu.note.collect"
       ],
       "nativeKind": "interaction_collect",
       "family": "interaction",
@@ -304,7 +306,8 @@
     },
     {
       "edgeTypes": [
-        "interaction.follow"
+        "xiaohongshu.user.follow",
+        "facebook.user.follow"
       ],
       "nativeKind": "interaction_follow",
       "family": "interaction",
@@ -317,7 +320,8 @@
     },
     {
       "edgeTypes": [
-        "interaction.comment"
+        "xiaohongshu.note.comment",
+        "facebook.note.comment"
       ],
       "nativeKind": "interaction_comment",
       "family": "interaction",
@@ -330,7 +334,7 @@
     },
     {
       "edgeTypes": [
-        "interaction.like_comment"
+        "xiaohongshu.comment.like"
       ],
       "nativeKind": "interaction_like_comment",
       "family": "interaction",

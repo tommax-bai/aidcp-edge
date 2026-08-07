@@ -822,17 +822,22 @@ export class EdgeClient {
       // 中途风控档位刷新（change pacing-fallback-hardening）：独立主动命令，MUST 放行到 browseHandler，
       // 否则在入口被静默丢弃 → 边缘兜底节奏收不到升档（notification-monitor 活锁前车，同 §2 第4处同步点）。
       env.type === 'pacing.update' ||
-      env.type === 'interaction.like' ||
-      env.type === 'interaction.collect' ||
-      env.type === 'interaction.follow' ||
+      // 词汇批 5：互动命令平台段+对象化（对象=note/video/user/comment；关联键值不变）。
+      env.type === 'xiaohongshu.note.like' ||
+      env.type === 'facebook.note.like' ||
+      env.type === 'facebook.video.like' ||
+      env.type === 'xiaohongshu.note.collect' ||
+      env.type === 'xiaohongshu.user.follow' ||
+      env.type === 'facebook.user.follow' ||
       // 浏览闭环「发评论」：与 like/follow 同属互动命令，MUST 放行到 browseHandler，
-      // 否则云端 interaction.comment 在入口被静默丢弃 → 评论永不发出（飞书已审也没用）。
-      // 与 command-bridge 的 comment→interaction.comment 映射对应（同 §2 第4处同步点）。
-      env.type === 'interaction.comment' ||
+      // 否则云端 {p}.note.comment 在入口被静默丢弃 → 评论永不发出（飞书已审也没用）。
+      // 与 command-bridge 的 comment→{p}.note.comment 映射对应（同 §2 第4处同步点）。
+      env.type === 'xiaohongshu.note.comment' ||
+      env.type === 'facebook.note.comment' ||
       // 评论点赞（AIDCP_COMMENT_LIKE 浏览闭环微互动）：与 comment 同理 MUST 放行，
-      // 否则云端 comment_like→interaction.like_comment 在入口被静默丢弃、browse-session
+      // 否则云端 comment_like→xiaohongshu.comment.like 在入口被静默丢弃、browse-session
       // 的处理分支永不可达（2026-07-03 收口 edge-companion-ui 时发现的存量缺口，同 §2 第4处同步点）。
-      env.type === 'interaction.like_comment' ||
+      env.type === 'xiaohongshu.comment.like' ||
       // Facebook 加群原子指令：走 Facebook 命令处理器（不是 xhs BrowseSession）。漏白名单会在入口静默丢弃。
       env.type === 'facebook.group.join' ||
       env.type === 'navigation.back' ||

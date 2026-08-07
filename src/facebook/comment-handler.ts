@@ -1,14 +1,14 @@
 // Facebook 定向评论命令处理器（change facebook-scheduled-comment，task 4.x + 静默丢弃坑修复）。
 //
 // Facebook 边端无 BrowseSession（driver 不声明 'browse'）。云端下发的 search.execute / note.open /
-// interaction.comment 三条命令（均已在 edge-client 主动命令白名单）此前无处理器 → `browseHandler?.()`
+// facebook.note.comment 三条命令（均已在 edge-client 主动命令白名单）此前无处理器 → `browseHandler?.()`
 // 可选链静默吞、零回执 → 云端 sendAndAwait 干等超时（此路径无巡视看门狗，会挂死云端）。
 //
 // 本处理器由 main.ts 按 driver 的 'comment' 能力注册（comment-only 平台，独立于 autoBrowse 的
 // BrowseSession 单槽 browseHandler，杜绝与小红书争抢）。三条命令翻成执行器调用 + 镜像小红书回执契约：
 //   - search.execute → 命中候选回 page.cards（permalink 放 noteId）；阻断/权限/导航失败回 action.completed{action:'search'}
 //   - note.open{url} → 开帖+评论框就绪回 note.detail；失败回 action.completed{action:'open_note'}
-//   - interaction.comment → 一律回 action.completed{action:'comment', ok}
+//   - facebook.note.comment → 一律回 action.completed{action:'comment', ok}
 // 白名单命中但本平台不支持的其他命令 → 显式回 action.completed{ok:false, reason:'capability_unsupported'}，
 // 绝不再落回静默丢弃（红线：MUST NOT 静默假成功/静默丢弃）。
 
@@ -118,7 +118,7 @@ export class FacebookCommentHandler {
         case 'facebook.note.open':
           await this.onOpen(env.payload as NoteOpenPayload);
           return;
-        case 'interaction.comment':
+        case 'facebook.note.comment':
           await this.onComment(env.payload as InteractionCommentPayload, checkpoint);
           return;
         case 'facebook.group.join':
@@ -132,7 +132,7 @@ export class FacebookCommentHandler {
       }
     } catch (err) {
       // 归一到该命令的回执面，让云端 sendAndAwait 不至于干等超时。
-      const action = env.type === 'facebook.search.execute' ? 'search' : env.type === 'facebook.note.open' ? 'open_note' : env.type === 'interaction.comment' ? 'comment' : env.type;
+      const action = env.type === 'facebook.search.execute' ? 'search' : env.type === 'facebook.note.open' ? 'open_note' : env.type === 'facebook.note.comment' ? 'comment' : env.type;
       if (err instanceof TaskTakeoverError) {
         // 被接管 = **未开始 / 已作废**，不是一次业务失败。绝不降级成 handler_error。
         this.log(`[fb-comment] 命令 ${env.type} 在安全取消点被独占任务接管 → 零页面副作用作废`);

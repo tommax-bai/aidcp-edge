@@ -336,14 +336,9 @@ function positiveNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
-// 词汇批 4 起浏览命令带平台段，「FB 没有的 xhs 专属命令」由名表 + 入口平台段闸推导（xiaohongshu.*
-// 发到 FB 会话在 edge-client 即 platform_mismatch 拒收），不再需要手抄。剩下两条互动命令仍是共享名
-// （对象化改名在批 5），批 5 落地后本集合应归零删除。
-export const FACEBOOK_UNSUPPORTED_COMMANDS = new Set<Envelope['type']>([
-  'interaction.collect',
-  'interaction.like_comment',
-]);
-
+// 词汇批 5 起全部浏览/互动命令带平台段：「FB 没有的 xhs 专属命令」（collect / comment.like / 深读 /
+// 巡视 / 主页）由名表 + 入口平台段闸推导（xiaohongshu.* 发到 FB 会话在 edge-client 即 platform_mismatch
+// 拒收），批 4 的手抄拒集 FACEBOOK_UNSUPPORTED_COMMANDS 按其注记归零删除。
 /** 搜索命令的平台段变体（回执特判用；词汇批 4 拆名后同一特判覆盖两平台）。 */
 function isSearchExecuteType(type: string | undefined): boolean {
   return type === 'xiaohongshu.search.execute' || type === 'facebook.search.execute';
@@ -826,10 +821,6 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     const ownedTaskId = this.ownedTaskId(env);
     if (this.closed || (this.blocked && !ownedTaskId)) {
       this.reportFailure(env, 'native_session_quiesced', 'not_started');
-      return;
-    }
-    if (this.options.platform === 'facebook' && FACEBOOK_UNSUPPORTED_COMMANDS.has(env.type)) {
-      this.reportFailure(env, 'capability_unsupported', 'not_started');
       return;
     }
     // 停手闸只拦**普通浏览**。两类命令必须绕过它，否则闸门自己就是死锁的来源：

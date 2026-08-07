@@ -83,11 +83,12 @@ const FB_COMMAND_ACTION_NAMES: Readonly<Record<string, string>> = {
   'facebook.search.scroll': 'scroll',
   'facebook.reels.scroll': 'scroll',
   'facebook.feed.refresh': 'refresh',
-  'interaction.like': 'like',
-  'interaction.collect': 'collect',
-  'interaction.follow': 'follow',
-  'interaction.comment': 'comment',
-  'interaction.like_comment': 'comment_like',
+  'facebook.note.like': 'like',
+  'facebook.video.like': 'like',
+  'xiaohongshu.note.collect': 'collect',
+  'facebook.user.follow': 'follow',
+  'facebook.note.comment': 'comment',
+  'xiaohongshu.comment.like': 'comment_like',
   'facebook.search.execute': 'search',
   'facebook.note.open': 'open_note',
   'facebook.note.close': 'close',
@@ -523,7 +524,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         await this.trackWriter(() => this.commentHandler.handle(env, () => this.throwIfTakeover())); // 委托执行体同样是页面写者：让位必须等它真停
         return;
       }
-      case 'interaction.comment':
+      case 'facebook.note.comment':
       case 'facebook.group.join':
         await this.trackWriter(() => this.commentHandler.handle(env, () => this.throwIfTakeover())); // 委托执行体同样是页面写者：让位必须等它真停
         return;
@@ -570,7 +571,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
       case 'facebook.feed.refresh':
         await this.runBrowseCommand('refresh', () => (this.listMode === 'reels' ? this.scrollReels() : this.refreshFeed()));
         return;
-      case 'interaction.like': {
+      case 'facebook.note.like':
+      case 'facebook.video.like': {
         const payload = env.payload as InteractionLikePayload;
         await this.runBrowseCommand('like', async () => {
           await this.thinkBefore(payload?.thinkMs); // 点赞前犹豫（云端中心值 × tempo + 抖动）
@@ -578,7 +580,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         });
         return;
       }
-      case 'interaction.follow': {
+      case 'facebook.user.follow': {
         if (this.listMode !== 'reels') {
           this.reportUnsupportedCommand(env.type);
           return;
@@ -614,8 +616,8 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         return;
       // FB 还未具备这些原子实现，但它们是云端可下发的正式命令。必须保留规范
       // action 名称，让 DeepReader / CommentReviewer / 通知恢复链能消费失败并退出详情页。
-      case 'interaction.collect':
-      case 'interaction.like_comment':
+      case 'xiaohongshu.note.collect':
+      case 'xiaohongshu.comment.like':
       case 'xiaohongshu.note.browse_images':
       case 'xiaohongshu.note.scroll_comments':
       case 'xiaohongshu.notification.open':

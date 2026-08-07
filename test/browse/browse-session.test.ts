@@ -226,7 +226,7 @@ test('executeComment: 编辑器清空且自己的评论行出现 → ok:true', a
   const h = commentHarness({ verify: { cleared: true, ownRow: true } });
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('interaction.comment', 'c1', 0, { noteId: 'n1', text: '赞' }),
+    makeEnvelope('xiaohongshu.note.comment', 'c1', 0, { noteId: 'n1', text: '赞' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const c = h.completedActions.find((a) => a.action === 'comment');
@@ -238,7 +238,7 @@ test('executeComment: 找不到编辑器 → ok:false reason no_target（不假�
   const h = commentHarness({ editorError: true });
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('interaction.comment', 'c1', 0, { noteId: 'n1', text: '赞' }),
+    makeEnvelope('xiaohongshu.note.comment', 'c1', 0, { noteId: 'n1', text: '赞' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const c = h.completedActions.find((a) => a.action === 'comment');
@@ -251,7 +251,7 @@ test('executeComment: 提交后未确认生效 → ok:false reason submitted_unc
   const h = commentHarness({ verify: { cleared: false, ownRow: false } });
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('interaction.comment', 'c1', 0, { noteId: 'n1', text: '赞' }),
+    makeEnvelope('xiaohongshu.note.comment', 'c1', 0, { noteId: 'n1', text: '赞' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const c = h.completedActions.find((a) => a.action === 'comment');
@@ -269,7 +269,7 @@ test('executeComment --feed: 提交后等 500ms、跳过结果检测、直回首
     sleep: async (ms) => { sleeps.push(ms); },
   });
   await startAndPush(sess, [
-    makeEnvelope('interaction.comment', 'c1', 0, { noteId: 'n1', text: '赞', fastReturnToFeed: true }),
+    makeEnvelope('xiaohongshu.note.comment', 'c1', 0, { noteId: 'n1', text: '赞', fastReturnToFeed: true }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const c = h.completedActions.find((a) => a.action === 'comment');
@@ -283,7 +283,7 @@ test('executeComment 清场：编辑器里有残文且清不掉 → 诚实 edito
   const h = commentHarness({ clearResidual: '上一条被抢占时留下的半截评论' });
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('interaction.comment', 'c1', 0, { noteId: 'n1', text: '这一条' }),
+    makeEnvelope('xiaohongshu.note.comment', 'c1', 0, { noteId: 'n1', text: '这一条' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const c = h.completedActions.find((a) => a.action === 'comment');
@@ -293,11 +293,11 @@ test('executeComment 清场：编辑器里有残文且清不掉 → 诚实 edito
 });
 
 // keep-open 发前就地核对（change comment-keep-open-through-approval，取舍2）
-test('interaction.comment: 当前详情 noteId 与目标不符 → 诚实回 note_page_mismatch、绝不在错笔记上发', async () => {
+test('xiaohongshu.note.comment: 当前详情 noteId 与目标不符 → 诚实回 note_page_mismatch、绝不在错笔记上发', async () => {
   const h = commentHarness({ verify: { cleared: true, ownRow: true }, pageUrl: 'https://www.xiaohongshu.com/explore/other999' });
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('interaction.comment', 'c1', 0, { noteId: 'n1', text: '赞' }),
+    makeEnvelope('xiaohongshu.note.comment', 'c1', 0, { noteId: 'n1', text: '赞' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const c = h.completedActions.find((a) => a.action === 'comment');
@@ -306,11 +306,11 @@ test('interaction.comment: 当前详情 noteId 与目标不符 → 诚实回 not
   assert.equal(c!.reason, 'note_page_mismatch', '页面被动到别的笔记 → 诚实终止不发');
 });
 
-test('interaction.comment: 当前详情 noteId 与目标一致 → 就地核对通过、正常发布', async () => {
+test('xiaohongshu.note.comment: 当前详情 noteId 与目标一致 → 就地核对通过、正常发布', async () => {
   const h = commentHarness({ verify: { cleared: true, ownRow: true }, pageUrl: 'https://www.xiaohongshu.com/explore/n1' });
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('interaction.comment', 'c1', 0, { noteId: 'n1', text: '赞' }),
+    makeEnvelope('xiaohongshu.note.comment', 'c1', 0, { noteId: 'n1', text: '赞' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const c = h.completedActions.find((a) => a.action === 'comment');
@@ -645,7 +645,7 @@ test('browse-session: stop() 从外部停止循环', async () => {
   assert.equal(sess.isRunning(), false);
 });
 
-test('browse-session: interaction.like 命令执行点赞并上报结果', async () => {
+test('browse-session: xiaohongshu.note.like 命令执行点赞并上报结果', async () => {
   const h = makeHarness();
   // Mock CDP 返回按钮坐标（模拟未点赞状态 → 点击 → 变为 #liked）
   let clickCount = 0;
@@ -677,7 +677,7 @@ test('browse-session: interaction.like 命令执行点赞并上报结果', async
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('interaction.like', 'l1', 0, { noteId: 'n1' }),
+    makeEnvelope('xiaohongshu.note.like', 'l1', 0, { noteId: 'n1' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   // 应上报 action.completed
@@ -686,7 +686,7 @@ test('browse-session: interaction.like 命令执行点赞并上报结果', async
   assert.equal(likeResult!.ok, true);
 });
 
-test('browse-session: interaction.like 已点赞时上报 already_liked', async () => {
+test('browse-session: xiaohongshu.note.like 已点赞时上报 already_liked', async () => {
   const h = makeHarness();
   h.deps.cdp = {
     send: async (method: string, params: Record<string, unknown> = {}) => {
@@ -705,7 +705,7 @@ test('browse-session: interaction.like 已点赞时上报 already_liked', async 
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('interaction.like', 'l1', 0, { noteId: 'n1' }),
+    makeEnvelope('xiaohongshu.note.like', 'l1', 0, { noteId: 'n1' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const likeResult = h.completedActions.find(a => a.action === 'like');
@@ -714,7 +714,7 @@ test('browse-session: interaction.like 已点赞时上报 already_liked', async 
   assert.equal(likeResult!.reason, 'already_liked');
 });
 
-test('browse-session: interaction.follow 已关注 → 良性 no-op 成功 ok:true + already_followed（非失败）', async () => {
+test('browse-session: xiaohongshu.user.follow 已关注 → 良性 no-op 成功 ok:true + already_followed（非失败）', async () => {
   const h = makeHarness();
   h.deps.cdp = {
     send: async (method: string, params: Record<string, unknown> = {}) => {
@@ -732,7 +732,7 @@ test('browse-session: interaction.follow 已关注 → 良性 no-op 成功 ok:tr
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('interaction.follow', 'f1', 0, { authorId: 'a1' }),
+    makeEnvelope('xiaohongshu.user.follow', 'f1', 0, { authorId: 'a1' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const followResult = h.completedActions.find(a => a.action === 'follow');
@@ -741,7 +741,7 @@ test('browse-session: interaction.follow 已关注 → 良性 no-op 成功 ok:tr
   assert.equal(followResult!.reason, 'already_followed');
 });
 
-test('browse-session: interaction.follow 找不到按钮 → ok:false + btn_no-btn（真失败仍如实）', async () => {
+test('browse-session: xiaohongshu.user.follow 找不到按钮 → ok:false + btn_no-btn（真失败仍如实）', async () => {
   const h = makeHarness();
   h.deps.cdp = {
     send: async (method: string, params: Record<string, unknown> = {}) => {
@@ -758,7 +758,7 @@ test('browse-session: interaction.follow 找不到按钮 → ok:false + btn_no-b
   };
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('interaction.follow', 'f2', 0, { authorId: 'a1' }),
+    makeEnvelope('xiaohongshu.user.follow', 'f2', 0, { authorId: 'a1' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const followResult = h.completedActions.find(a => a.action === 'follow');
@@ -1260,13 +1260,13 @@ test('pacing: navigation.back 缺 dwellMs（旧云端）仍非零停留（不秒
   assert.ok(sleeps.some((ms) => ms >= 1000), `缺 dwellMs 也应有内置下限兜底，实际: ${sleeps}`);
 });
 
-test('pacing: interaction.like 的 thinkMs → 执行前犹豫等待', async () => {
+test('pacing: xiaohongshu.note.like 的 thinkMs → 执行前犹豫等待', async () => {
   const h = makeHarness();
   const sleeps: number[] = [];
   const sess = new BrowseSession(h.deps, pacingOpts(sleeps, () => 1000));
   await startAndPush(sess, [
     makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0 }),
-    makeEnvelope('interaction.like', 'l', 0, { noteId: 'x', thinkMs: DWELL_SENTINEL }),
+    makeEnvelope('xiaohongshu.note.like', 'l', 0, { noteId: 'x', thinkMs: DWELL_SENTINEL }),
     makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
   ]);
   assert.ok(sleeps.some((ms) => ms > ISOLATE), `点赞前应有 thinkMs 犹豫，实际: ${sleeps}`);
@@ -1655,7 +1655,7 @@ test('overlayMonitor 提交前复检: like 命中 captcha → 放弃点击并上
   h.deps.overlayMonitor = fakeMonitor({ probe: async () => 'captcha' });
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
-    makeEnvelope('interaction.like', 'l1', 0, { noteId: 'n1' }),
+    makeEnvelope('xiaohongshu.note.like', 'l1', 0, { noteId: 'n1' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
   const likeResult = h.completedActions.find((a) => a.action === 'like');
@@ -2373,7 +2373,7 @@ test('取消点: 评论逐字输入中途被接管 → 立刻停手 + 清场 + �
   });
   const running = sess.start();
   await new Promise((r) => setTimeout(r, 10));
-  await sess.onCloudCommand(makeEnvelope('interaction.comment', 'c-mid-typing', 0, { noteId: 'n1', text: body }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.comment', 'c-mid-typing', 0, { noteId: 'n1', text: body }));
   await typingStarted;
   await new Promise((r) => setTimeout(r, 10)); // 让它真正停在「下一个字符前」的那个等待里
 
@@ -2385,7 +2385,7 @@ test('取消点: 评论逐字输入中途被接管 → 立刻停手 + 清场 + �
   assert.equal(h.completedActions.length, 1, '被接管的评论命令只回一条回执（MUST NOT 静默丢弃、也不重复上报）');
   assert.deepEqual(
     h.completedActions[0],
-    { action: 'interaction.comment', ok: false, reason: 'preempted_by_task' },
+    { action: 'xiaohongshu.note.comment', ok: false, reason: 'preempted_by_task' },
     '被接管 = 诚实失败回执，绝不降级成中文 message / engine_error 之类的别的分类',
   );
 
@@ -2424,7 +2424,7 @@ test('🔴 禁区: 提交键点下之后被接管 → 后置校验照跑完，�
   const sess = new BrowseSession(h.deps, noOpts());
   const running = sess.start();
   await new Promise((r) => setTimeout(r, 10));
-  await sess.onCloudCommand(makeEnvelope('interaction.comment', 'c-submitted', 0, { noteId: 'n1', text: '提交之后才被接管' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.comment', 'c-submitted', 0, { noteId: 'n1', text: '提交之后才被接管' }));
   await submitClicked;
 
   const quiesced = sess.quiesceForTask(2_000);
