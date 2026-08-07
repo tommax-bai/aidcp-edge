@@ -661,7 +661,7 @@ AIDCP_CHROME_PROFILE="$HOME/.aidcp-chrome-profile" npm start
 > ⚠️ 原快照说“没有显式登录态校验 / preflight”——**已不成立**。当前已有：
 
 - ✅ **启动即校验是否已登录小红书**：`evaluateLoginState()`（`web_session` cookie + 导航头像/创作入口 DOM 信号），未登录则 `waitForLogin()` 阻塞等待至超时；
-- ✅ **登录弹窗 / 验证码 / 未知阻断检测**：`CdpOverlayMonitor` 后台持续判类（login/captcha/unknown），命中即本地暂停、必要时上报云端（`risk.captcha_detected`）；
+- ✅ **登录弹窗 / 验证码 / 未知阻断检测**：`CdpOverlayMonitor` 后台持续判类（login/captcha/unknown），命中即本地暂停、必要时上报云端（`captcha.detected`，词汇批 7 前旧名 `risk.captcha_detected`）；
 - 仍偏弱：未单独做“正确域名/落地页”硬校验，也未单独识别“草稿恢复 / 实名认证”等具体阻断子类（这部分仍以 `docs/publish-e2e-checklist.md` 的联调 checklist 提醒为主）。
 
 #### 缺口 3：没有 cookie / session 级别的备份与迁移能力
