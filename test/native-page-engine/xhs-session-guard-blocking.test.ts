@@ -278,8 +278,8 @@ test('blocking clearance reaches Cloud before the unread signal and blocked fram
   });
 
   assert.deepEqual(h.sent.map((entry) => entry.type), [
-    'risk.captcha_detected',
-    'risk.captcha_cleared',
+    'captcha.detected',
+    'captcha.cleared',
     'notification.detected',
   ]);
   assert.deepEqual(h.sent.at(-1)?.payload, {
@@ -360,7 +360,7 @@ test('Xiaohongshu captcha page kind reports one detection and exactly one paired
     pageKind: 'captcha',
   });
 
-  const detected = h.sent.filter((entry) => entry.type === 'risk.captcha_detected');
+  const detected = h.sent.filter((entry) => entry.type === 'captcha.detected');
   assert.equal(detected.length, 1);
   assert.deepEqual(detected[0]?.payload, {
     edgeId: 'edge-guard',
@@ -375,7 +375,7 @@ test('Xiaohongshu captcha page kind reports one detection and exactly one paired
     path: '/explore',
     pageKind: 'explore',
   });
-  const cleared = h.sent.filter((entry) => entry.type === 'risk.captcha_cleared');
+  const cleared = h.sent.filter((entry) => entry.type === 'captcha.cleared');
   assert.equal(cleared.length, 1, 'detected/cleared 必须严格配对：一次检出配一次清除');
   assert.deepEqual(cleared[0]?.payload, {
     edgeId: 'edge-guard',

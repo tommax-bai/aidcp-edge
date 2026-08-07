@@ -1399,7 +1399,7 @@ test('T18 身份闸：写动作与重绑被拦并如实回执，救援 / 读 / �
   // ── ② 救援 / 读 / 收尾类 MUST 放行：拦掉它们只会让节点更难救。
   for (const type of [
     'edge.task.release',
-    'identity.read_current',
+    'identity.read_current_page',
     'identity.read_self_profile',
     'captcha.assist.capture',
     'captcha.assist.click',
@@ -1848,9 +1848,9 @@ test('T21② 命令闸：身份未落定时页面命令 MUST 不执行且有真�
   assert.deepEqual(receipts, [{ action: 'comment', ok: false, reason: 'identity_unresolved' }],
     '拒绝 MUST 有回执：静默丢弃会让云端分不清「命令没触达」与「执行了但没结果」，只能等满步超时');
   // 救援 / 读 / 收尾类照常放行（拦掉会把唯一的自救路径也堵死）。
-  guarded('invalid')({ type: 'identity.read_current' });
+  guarded('invalid')({ type: 'identity.read_current_page' });
   guarded('invalid')({ type: 'session.end' });
-  assert.deepEqual(executed, ['identity.read_current', 'session.end']);
+  assert.deepEqual(executed, ['identity.read_current_page', 'session.end']);
   // 身份落定 ⇒ 全部放行、不发任何拒绝回执。
   guarded('healthy')({ type: 'xiaohongshu.note.comment' });
   assert.deepEqual(executed.at(-1), 'xiaohongshu.note.comment');

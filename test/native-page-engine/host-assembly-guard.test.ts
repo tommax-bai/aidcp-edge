@@ -274,12 +274,14 @@ test('host assembly: main.ts 不再引用退役的宿主侧监测体模块', () 
 });
 
 test('host assembly: 阻断上报的活代码只在 Native 会话里，宿主不再自行上报', () => {
+  // 词汇批 7：消息名 risk.captcha_* → captcha.*。doesNotMatch 改名后若仍匹旧名会恒真（闸静默失效），
+  // 四条正则必须与 protocol.ts 现役消息名同步；下方 match(nativeSession) 两条兼作「正则还认得活代码」的自证。
   const mainSource = readFileSync(resolve(srcRoot, 'main.ts'), 'utf8');
-  assert.doesNotMatch(mainSource, /risk\.captcha_detected/);
-  assert.doesNotMatch(mainSource, /risk\.captcha_cleared/);
+  assert.doesNotMatch(mainSource, /captcha\.detected/);
+  assert.doesNotMatch(mainSource, /captcha\.cleared/);
   const nativeSession = readFileSync(resolve(srcRoot, 'native-page-engine/browse-session.ts'), 'utf8');
-  assert.match(nativeSession, /risk\.captcha_detected/);
-  assert.match(nativeSession, /risk\.captcha_cleared/);
+  assert.match(nativeSession, /captcha\.detected/);
+  assert.match(nativeSession, /captcha\.cleared/);
 });
 
 test('host assembly: notification.detected 只有 Native page probe 会话这一个生产者', () => {

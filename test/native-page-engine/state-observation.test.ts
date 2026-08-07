@@ -2,7 +2,7 @@
  * 观察命令「问现状」（change add-state-observation-command，蓝图批 3）——边缘侧行为契约。
  *
  * 守护点：
- *   ① 应答按信封 id 关联回请求（state.report 的 replyTo = 请求 envelope.id）；
+ *   ① 应答按信封 id 关联回请求（state.observed 的 replyTo = 请求 envelope.id）；
  *   ② 两态诚实：读得出 ⇒ confirmed + 穷举面；读不出 ⇒ unconfirmed + 具名原因，
  *      MUST NOT 把「读不出来」伪装成任何具体面 / 任何身份（变异 4.2b 的落点）；
  *   ③ 纯读：整个应答路径只执行引擎 `page_probe` 一种命令（零导航 / 零输入 / 零滚动）；
@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { EdgeClient } from '../../src/client/edge-client.js';
-import type { Envelope, MessageType, StateReportPayload } from '../../src/comm/protocol.js';
+import type { Envelope, MessageType, StateObservedPayload } from '../../src/comm/protocol.js';
 import type { SelfIdentityResult } from '../../src/cdp/self-identity.js';
 import { NativeBrowseSession } from '../../src/native-page-engine/browse-session.js';
 import type { NativePageCommand, NativePageCommandExecution } from '../../src/native-page-engine/client.js';
@@ -85,10 +85,10 @@ test('state.read answers confirmed surface + identity, correlated by envelope id
 
   assert.equal(h.sent.length, 1);
   const reply = h.sent[0]!;
-  assert.equal(reply.type, 'state.report');
+  assert.equal(reply.type, 'state.observed');
   // ① 信封关联：应答必须回填请求 envelope.id，MUST NOT 靠事后回执顺带。
   assert.equal(reply.replyTo, 'req-state-1');
-  const report = reply.payload as StateReportPayload;
+  const report = reply.payload as StateObservedPayload;
   assert.equal(report.captureId, 'cap-1');
   assert.deepEqual(report.surface, { outcome: 'confirmed', kind: 'search' });
   assert.deepEqual(report.identity, { outcome: 'confirmed', accountId: 'acc-observed-1', nickname: '观察昵称' });
@@ -108,7 +108,7 @@ test('unrecognized page kind is reported as unconfirmed, never disguised as a co
 
   await h.session.onCloudCommand(envelope('state.read', 'req-state-2', { captureId: 'cap-2' }));
 
-  const report = h.sent[0]!.payload as StateReportPayload;
+  const report = h.sent[0]!.payload as StateObservedPayload;
   // ② 两态诚实：引擎归不进任何已知面 ⇒ unconfirmed + page_unrecognized（变异 4.2b：
   //    把这里伪装成任何具体面，本断言当场红）。
   assert.deepEqual(report.surface, { outcome: 'unconfirmed', reason: 'page_unrecognized' });
@@ -124,7 +124,7 @@ test('probe failure is honest unconfirmed probe_failed; identity dimension stays
 
   await h.session.onCloudCommand(envelope('state.read', 'req-state-3', { captureId: 'cap-3' }));
 
-  const report = h.sent[0]!.payload as StateReportPayload;
+  const report = h.sent[0]!.payload as StateObservedPayload;
   assert.deepEqual(report.surface, { outcome: 'unconfirmed', reason: 'probe_failed' });
   assert.deepEqual(report.identity, { outcome: 'confirmed', accountId: 'acc-observed-1', nickname: '观察昵称' });
 });
@@ -140,7 +140,7 @@ test('identity read failure is honest unconfirmed read_failed, never the handsha
 
   await h.session.onCloudCommand(envelope('state.read', 'req-state-4', { captureId: 'cap-4' }));
 
-  const report = h.sent[0]!.payload as StateReportPayload;
+  const report = h.sent[0]!.payload as StateObservedPayload;
   assert.deepEqual(report.surface, { outcome: 'confirmed', kind: 'home' });
   assert.deepEqual(report.identity, { outcome: 'unconfirmed', reason: 'read_failed' });
 });
@@ -158,7 +158,7 @@ test('quiesced session answers executor_busy on both dimensions without touching
   await h.session.onCloudCommand(envelope('state.read', 'req-state-5', { captureId: 'cap-5' }));
 
   assert.equal(h.sent.length, 1, 'quiesce 期间仍必须按信封应答，绝不静默');
-  const report = h.sent[0]!.payload as StateReportPayload;
+  const report = h.sent[0]!.payload as StateObservedPayload;
   // ④ 引擎 owner 位是单写位：观察 MUST NOT 抢占在跑任务的引擎会话。
   assert.deepEqual(report.surface, { outcome: 'unconfirmed', reason: 'executor_busy' });
   assert.deepEqual(report.identity, { outcome: 'unconfirmed', reason: 'executor_busy' });

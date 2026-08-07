@@ -113,7 +113,7 @@ test('Native identity current read injects bound account and reports correlated 
     },
   }), { platform: 'facebook', accountId: '61591824155856' });
 
-  await h.session.onCloudCommand(envelope('identity.read_current', {
+  await h.session.onCloudCommand(envelope('identity.read_current_page', {
     captureId: 'capture-fb-1',
     accountId: 'cloud-injected-id',
   }));
@@ -131,7 +131,7 @@ test('Native identity current read injects bound account and reports correlated 
       source: 'current_page',
       pageEffect: 'none',
     },
-    replyTo: 'env-identity.read_current',
+    replyTo: 'env-identity.read_current_page',
   }]);
 });
 
@@ -384,7 +384,7 @@ test('Native Facebook probe reports sustained unknown blockers with same-source 
   });
   await new Promise((resolve) => setTimeout(resolve, 5));
 
-  const detected = h.sent.find((entry) => entry.type === 'risk.captcha_detected');
+  const detected = h.sent.find((entry) => entry.type === 'captcha.detected');
   assert.deepEqual(detected?.payload, {
     edgeId: undefined,
     accountId: '61591824155856',
@@ -406,7 +406,7 @@ test('Native Facebook probe reports sustained unknown blockers with same-source 
     pageKind: 'home',
     blockingKind: 'none',
   });
-  assert.equal(h.sent.filter((entry) => entry.type === 'risk.captcha_cleared').length, 1);
+  assert.equal(h.sent.filter((entry) => entry.type === 'captcha.cleared').length, 1);
 });
 
 test('quiesced Native session admits the coordinator-owned task command', async () => {

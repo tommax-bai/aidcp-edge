@@ -17,7 +17,7 @@ export interface FacebookBlockingSignals {
  *
  * 既有词库只覆盖「封锁 / 不可用」框架（暂时被限制 / 操作被封锁 / 功能暂时不可用…），不认这句真实文案：
  * 「为让社群免受垃圾信息打扰，我们限制了你发帖、评论或执行其他操作的频率。你可以稍后再试。」
- * ⇒ classify='none' ⇒ 连 risk.captcha_detected 都不发 ⇒ 账号已被平台限流、云端风控态仍停 normal 继续按
+ * ⇒ classify='none' ⇒ 连 captcha.detected 都不发 ⇒ 账号已被平台限流、云端风控态仍停 normal 继续按
  * 原节奏发（全静默）。
  *
  * **词条纪律（硬约束，误报代价不对称）**：命中一次 → 云端升 confirmed → restricted → 钉住恢复窗且不自动
@@ -76,7 +76,7 @@ export function classifyFacebookOverlayFromSignals(signals: FacebookBlockingSign
   // FB 软阻断 / 限流信号（change account-nurture-discipline-spine §5.2）：FB 主力限流是 inline
   // 弹窗/toast（"Action Blocked"/"we limit how often you can do this"/"misusing this feature"/
   // "you can't use this feature right now"/"going too fast"）。识别为 'unknown' 阻断态 → 经既有
-  // risk.captcha_detected 带 overlay.text 上报（不改协议）→ 云端 §3 词库匹配把风控迁至 restricted。
+  // captcha.detected 带 overlay.text 上报（不改协议）→ 云端 §3 词库匹配把风控迁至 restricted。
   // 与云端 FB_THROTTLE_PHRASES 语义对齐（两仓各自维护，无共享模块）。
   // 'we restrict certain content and actions'：此前只在云端词库、边缘不认 ⇒ 边缘不分类就永不上报、云端永远
   // 收不到能命中它的文本 ⇒ 该条是**死代码**。本 change 补齐边缘侧使其真正可达（FB 账号受限通知的专属措辞，

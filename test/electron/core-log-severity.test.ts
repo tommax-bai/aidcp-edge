@@ -54,7 +54,7 @@ const BENIGN_STDERR_LINES = [
   // 冷待机期间的后台重连重试 —— 会继续重试，核心照跑
   '[aidcp-edge] 冷待机期间云端后台重连失败：ECONNREFUSED；继续待机并稍后重试',
   // 遥测发送失败 —— 发不出去一条事件而已，引擎照跑
-  '[aidcp-edge] risk.captcha_detected 上报失败: Error: socket hang up',
+  '[aidcp-edge] captcha.detected 上报失败: Error: socket hang up',
   '[aidcp-edge] edge.task.acquired 回传失败: Error: socket hang up',
   // 单次浏览会话异常 —— 浏览循环自己会重来，核心不退出
   '[aidcp-edge] 浏览会话异常: Error: CdpDisconnectedError',
@@ -74,7 +74,7 @@ test('isFailureShapedLine：良性行不得污染失败归因（真出事时归�
   // 回归前这些行全部走 stderr → rememberEdgeFailureCandidate 被 isError 短路 → 全部被采信为
   // lastEdgeFailureLine → 核心真崩时，界面给运营看的「失败原因」是最后那条**无关**的良性 warn。
   assert.equal(fleet.isFailureShapedLine('[publish-submit-diag] after-click: capture failed: Target closed'), false);
-  assert.equal(fleet.isFailureShapedLine('[aidcp-edge] risk.captcha_detected 上报失败: Error: socket hang up'), false);
+  assert.equal(fleet.isFailureShapedLine('[aidcp-edge] captcha.detected 上报失败: Error: socket hang up'), false);
   assert.equal(fleet.isFailureShapedLine('[aidcp-edge] edge.task.acquired 回传失败: Error: socket hang up'), false);
   assert.equal(
     fleet.isFailureShapedLine('[aidcp-edge] 外壳暂时给不出浏览器槽位（no free slot）：本次诚实作答，环境仍在等槽位队列里'),

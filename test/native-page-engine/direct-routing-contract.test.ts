@@ -91,7 +91,7 @@ test('identity commands preserve Cloud correlation but inject only the Edge-boun
     v: 2,
     id: 'identity-current',
     ts: Date.now(),
-    type: 'identity.read_current',
+    type: 'identity.read_current_page',
     payload: { captureId: 'capture-1', accountId: 'cloud-must-not-choose' },
   } as never, 'edge-bound-account');
   assert.deepEqual(current, {

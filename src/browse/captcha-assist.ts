@@ -114,7 +114,7 @@ const LIVE_INTERVAL_MS = { def: 800, min: 600, max: 2000 };
 const LIVE_MAX_DURATION_MS = { def: 30_000, min: 5_000, max: 120_000 };
 const LIVE_MAX_FRAMES = { min: 1, max: 400 };
 // 自主判"验证码已清除"需连续 K 次探测都无遮罩才成立——多步验证码在旧挑战消失、新挑战未绘出之间
-// 有瞬时无遮罩窗口，单次没看到就发 risk.captcha_cleared 会提前解 restricted（自残）。
+// 有瞬时无遮罩窗口，单次没看到就发 captcha.cleared 会提前解 restricted（自残）。
 const LIVE_CLEAR_CONFIRMATIONS = 3;
 // 最小推帧间隔硬地板：带倒计时/动画的页每帧字节都变、内容去重永不命中时，用它兜住带宽/成本。
 const LIVE_MIN_PUSH_INTERVAL_MS = 600;
@@ -198,7 +198,7 @@ export class CaptchaAssistHandler {
     const kind = await this.probeBlockingKind();
     if (!kind) {
       this.stopLive(payload.incidentId);
-      // 只回 not_blocked 回执，**绝不发 risk.captcha_cleared**。
+      // 只回 not_blocked 回执，**绝不发 captcha.cleared**。
       // 手动刷新与实时循环共用同一个「旧挑战已消失、新挑战未绘出」的瞬时无遮罩窗口——
       // 单次 probe 在这里与在 liveTick 里同样不可信。liveTick 为此立了 K=3 连续确认，
       // 而这条路径曾绕过它直接上报清除 = 提前解 restricted（自残）。清除的发出权只归两处：
@@ -714,7 +714,7 @@ export class CaptchaAssistHandler {
       state.clearStreak += 1;
       if (state.clearStreak >= LIVE_CLEAR_CONFIRMATIONS) {
         this.stopLive(incidentId);
-        // 自主清除只发 risk.captcha_cleared（走 onCleared），绝不发 click_result——否则把非运营
+        // 自主清除只发 captcha.cleared（走 onCleared），绝不发 click_result——否则把非运营
         // 发起的探测记进 incident.lastResult，污染前端"上次复检"与审计。
         this.sendRiskCleared();
         this.logger(`[captcha-assist] 实时循环自主判清除 incident=${incidentId}（连续${state.clearStreak}次无遮罩）`);
@@ -827,7 +827,7 @@ export class CaptchaAssistHandler {
       this.sendRiskCleared();
     } catch (err) {
       // 吞异常但绝不静默：这条丢了 = 云端不知道验证码已解、该 edge 一直暗停，必须留痕。
-      this.logger(`[captcha-assist] risk.captcha_cleared 发送失败（该 edge 可能仍被暂停）：${(err as Error).message}`);
+      this.logger(`[captcha-assist] captcha.cleared 发送失败（该 edge 可能仍被暂停）：${(err as Error).message}`);
     }
   }
 
@@ -841,7 +841,7 @@ export class CaptchaAssistHandler {
   }
 
   private sendRiskCleared(): void {
-    this.deps.client.send('risk.captcha_cleared', {
+    this.deps.client.send('captcha.cleared', {
       edgeId: this.deps.edgeId,
       ...(this.deps.getAccountId?.() ? { accountId: this.deps.getAccountId?.() } : {}),
     });
@@ -873,7 +873,7 @@ export class CaptchaAssistHandler {
       return true;
     }
     // (a) 阻断已自行消失：页面上已无验证码 → 绝不在其上盲点（那可能已经导航到别的页面）。
-    // 只回 not_blocked，**绝不由这一次单次 probe 发 risk.captcha_cleared**：此处既没 settle
+    // 只回 not_blocked，**绝不由这一次单次 probe 发 captcha.cleared**：此处既没 settle
     // 也没连续确认，与手动刷新同属「未经注入的单次 probe」，同样会撞上多步验证码的瞬时无遮罩窗口。
     // 清除交由旁路监测体的翻转闸（它独立轮询，遮罩真消失时会发配对 cleared）——不发不会滞留暂停态。
     if (!kind) {

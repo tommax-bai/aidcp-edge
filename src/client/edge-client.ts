@@ -127,7 +127,7 @@ export type EdgeTaskCommandHandler = (env: Envelope<EdgeTaskAcquirePayload | Edg
 export type CaptchaAssistCommandHandler = (
   env: Envelope<CaptchaAssistCapturePayload | CaptchaAssistClickPayload>,
 ) => void;
-/** 陪伴界面数据快照处理器（ui.snapshot，cloud 主动推送；核心转 [ui-event] 行给桌面壳）。 */
+/** 陪伴界面数据快照处理器（ui.push_snapshot，cloud 主动推送；核心转 [ui-event] 行给桌面壳）。 */
 export type UiSnapshotHandler = (env: Envelope<UiSnapshotPayload>) => void;
 export type InteractionCommandHandler = (
   env: Envelope<
@@ -485,7 +485,7 @@ export class EdgeClient {
     };
   }
 
-  /** 注册陪伴界面数据快照处理器（ui.snapshot，change edge-companion-ui 8.1）。 */
+  /** 注册陪伴界面数据快照处理器（ui.push_snapshot，change edge-companion-ui 8.1）。 */
   onUiSnapshot(handler: UiSnapshotHandler): () => void {
     this.uiSnapshotHandler = handler;
     return () => {
@@ -851,10 +851,10 @@ export class EdgeClient {
       // 这两条是身份落到「不知道浏览器里登着谁」终局时**唯一**能问出当前登录身份、解开该终局的
       // 事实来源；漏放行等于把那条自救通道在边缘这一侧也堵死（同 §2 第4处同步点）。
       // 2026-08-05 实测：云端补齐登记表后 sent=1，边缘仍静默 20s，根因即本白名单缺这两条。
-      env.type === 'identity.read_current' ||
+      env.type === 'identity.read_current_page' ||
       env.type === 'identity.read_self_profile' ||
       // 观察命令「问现状」（change add-state-observation-command）：独立主动命令，MUST 放行到
-      // browseHandler，否则在入口被静默丢弃 → 云端按信封 id 等 state.report 只会等到超时——
+      // browseHandler，否则在入口被静默丢弃 → 云端按信封 id 等 state.observed 只会等到超时——
       // 与「边缘没装到」「页面读不出来」同形不可区分（§2 第 4 处同步点）。它是三段对账第③段
       // 唯一的真相探针：报错之后云端靠它问「现在到底在哪个面、登着谁」，漏放行等于把出路堵死。
       env.type === 'state.read' ||
@@ -911,7 +911,7 @@ export class EdgeClient {
     }
 
     // 陪伴界面数据快照（cloud 主动推送）：转给 main.ts 落成 [ui-event] 行
-    if (env.type === 'ui.snapshot') {
+    if (env.type === 'ui.push_snapshot') {
       this.uiSnapshotHandler?.(env as Envelope<UiSnapshotPayload>);
       return;
     }

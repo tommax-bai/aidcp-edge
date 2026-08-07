@@ -79,7 +79,7 @@ import type {
   EdgeTaskReleasePayload,
   Envelope,
   StandbyDecisionPayload,
-  StateReportPayload,
+  StateObservedPayload,
 } from './comm/protocol.js';
 import { HOST_STANDBY_DECISION_TELEMETRY_CAPABILITY } from './comm/protocol.js';
 import type { EdgeBrowseSession } from './browse/edge-browse-session.js';
@@ -1174,7 +1174,7 @@ async function main(): Promise<void> {
   for (const request of pendingCloudRebindRequests.splice(0)) dispatchCloudRebind(request);
 
   // 红线（edge-companion-ui 8.1 评审修正）：全部云端主动消息处理器 MUST 在 connect() 之前注册。
-  // 云端在 welcome 回发后立刻推 hello 快照（ui.snapshot）——若 welcome 与快照同一批 socket 读到达，
+  // 云端在 welcome 回发后立刻推 hello 快照（ui.push_snapshot）——若 welcome 与快照同一批 socket 读到达，
   // 两帧在同一宏任务内派发，connect() 的续体（微任务）还没来得及跑注册代码，后注册的处理器
   // 会静默漏掉首帧。注册本身不需要活连接，先注册零成本。
   // 认领要过身份闸（认领＝接下来会以这个账号的名义动作 + 记账）；释放永远放行（拦掉只会让租约挂着）。
@@ -1295,7 +1295,7 @@ async function main(): Promise<void> {
     inFlightPublishCancels.set(env.id, { abort: () => abortForTakeover(abort), settled });
   }));
 
-  // ui.snapshot 在新能力下只承载自动化运行投影。旧 Cloud 可能仍夹带 persona/publish/account 数据，
+  // ui.push_snapshot 在新能力下只承载自动化运行投影。旧 Cloud 可能仍夹带 persona/publish/account 数据，
   // 必须在引擎边界丢弃；客户端的数据管理真态由 Electron main 通过 customer-auth HTTP 主动拉取。
   client.onUiSnapshot((env) => {
     for (const uiLine of uiSnapshotToLines(automationUiSnapshot(env.payload))) console.log(uiLine);
@@ -1520,7 +1520,7 @@ async function main(): Promise<void> {
         const taskId = (env.payload as { taskId?: unknown } | undefined)?.taskId;
         const ownedTaskId = typeof taskId === 'string' ? taskId : undefined;
         // state.read（观察命令「问现状」，change add-state-observation-command）豁免租约抑制：
-        // 它按信封 id 等 state.report，action.completed 兜底回执对它就是静默超时；任务在跑时
+        // 它按信封 id 等 state.observed，action.completed 兜底回执对它就是静默超时；任务在跑时
         // 会话自身的 quiesce 态会把两维如实折成 unconfirmed executor_busy、零引擎触碰。
         if (env.type !== 'pacing.update' && env.type !== 'state.read' && !taskCoordinator.canExecute(ownedTaskId)) {
           reportLeaseSuppressed(env, ownedTaskId, 'Native');
@@ -1536,7 +1536,7 @@ async function main(): Promise<void> {
      * 冷待机（浏览器被收起）期间的「问现状」应答（change add-state-observation-command）：
      * 两维一并如实回「没能确认 browser_unavailable」。观察 MUST NOT 为一次纯读唤醒浏览器
      * （唤醒占槽位、有真实代价），也 MUST NOT 落进 action.completed 兜底回执——
-     * 云端按信封 id 等 state.report，回错形状对它就是静默超时。
+     * 云端按信封 id 等 state.observed，回错形状对它就是静默超时。
      */
     const answerStateReadWhileBrowserAbsent = (env: Envelope): void => {
       const captureId = (env.payload as { captureId?: unknown } | undefined)?.captureId;
@@ -1548,17 +1548,17 @@ async function main(): Promise<void> {
       const unavailable = { outcome: 'unconfirmed', reason: 'browser_unavailable' } as const;
       try {
         client.send(
-          'state.report',
-          { captureId, surface: unavailable, identity: unavailable, observedAt: Date.now() } satisfies StateReportPayload,
+          'state.observed',
+          { captureId, surface: unavailable, identity: unavailable, observedAt: Date.now() } satisfies StateObservedPayload,
           env.id,
         );
       } catch (err) {
-        console.warn(`[aidcp-edge] state.report 未送出（连接不可用）: ${(err as Error).message}`);
+        console.warn(`[aidcp-edge] state.observed 未送出（连接不可用）: ${(err as Error).message}`);
       }
     };
     const routeNativeCommand = (env: Envelope): void => {
       // 观察命令「问现状」在冷待机时就地作答：MUST NOT 走 handleBrowserAbsentCommand——
-      // 那条路会为它唤醒浏览器 + 回 action.completed，而云端按信封 id 等 state.report。
+      // 那条路会为它唤醒浏览器 + 回 action.completed，而云端按信封 id 等 state.observed。
       // 非冷待机时照常走身份闸包裹的唯一执行入口（闸按登记表 identity 维放行观察命令；
       // 任务在跑时的「读不到现场」由会话 quiesce 态折成 unconfirmed executor_busy）。
       if (env.type === 'state.read' && coldStandbyActive) {

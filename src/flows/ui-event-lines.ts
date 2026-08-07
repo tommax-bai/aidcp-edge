@@ -7,7 +7,7 @@
  *  - 宁缺毋假：标题未知就不带 title、昵称为空就不发 identity；
  *  - `submit_publish` 成功只表示当前页面已接受提交 → submitted；同页 `capture_postId` 成功才是 published。
  *    已 submitted 的在途被回收不改口为 failed，避免把用户已看到的提交成功倒写成失败。
- *    其余审批态（pending/approved/rejected）与云端终判 failed 由云端经 `ui.snapshot` 推送、
+ *    其余审批态（pending/approved/rejected）与云端终判 failed 由云端经 `ui.push_snapshot` 推送、
  *    经 uiSnapshotToLines 转发——单条指令 ok:false 不在边缘判 failed（云端序列可能对
  *    best-effort 步骤容错继续，边缘抢判会虚报失败）。
  */
@@ -310,7 +310,7 @@ export class PublishUiEventTracker {
 }
 
 /**
- * 云端 ui.snapshot → [ui-event] 行（按实际存在字段逐行转发）。
+ * 云端 ui.push_snapshot → [ui-event] 行（按实际存在字段逐行转发）。
  * 缺失字段即不发对应行；昵称为空绝不发 identity（壳有环境名/尾4位兜底链，空名会顶掉兜底）。
  */
 export function uiSnapshotToLines(p: UiSnapshotPayload): string[] {

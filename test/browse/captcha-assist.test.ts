@@ -127,10 +127,10 @@ test('captcha assist capture: fresh blocking overlay → cropped screenshot snap
   assert.deepEqual((screenshotCall?.params?.clip as Record<string, unknown>), { x: 76, y: 76, width: 248, height: 148, scale: 1 });
 });
 
-// 手动刷新的单次 probe 未见遮罩 → 只回 not_blocked，**绝不发 risk.captcha_cleared**。
+// 手动刷新的单次 probe 未见遮罩 → 只回 not_blocked，**绝不发 captcha.cleared**。
 // 它与实时循环共用「旧挑战已消失、新挑战未绘出」的瞬时无遮罩窗口，却既无 settle 也无连续确认；
 // 据此上报即提前解 restricted（自残）。恢复交由 liveTick 的 K=3 或旁路监测体的翻转闸。
-test('captcha assist capture: fresh probe says not blocked → 只回 not_blocked，绝不发 risk.captcha_cleared', async () => {
+test('captcha assist capture: fresh probe says not blocked → 只回 not_blocked，绝不发 captcha.cleared', async () => {
   const client = new FakeClient();
   const handler = new CaptchaAssistHandler({
     cdp: new FakeCdp(),
@@ -198,7 +198,7 @@ test('captcha assist capture: 注入进行中 → 跳过抓帧，绝不回传半
   assert.equal((client.sent[0].payload as { status: string }).status, 'still_blocked');
 });
 
-test('captcha assist click: normalized points map to viewport coordinates and cleared emits risk.captcha_cleared', async () => {
+test('captcha assist click: normalized points map to viewport coordinates and cleared emits captcha.cleared', async () => {
   const cdp = new FakeCdp({ overlayRect: { x: 100, y: 100, width: 200, height: 100 } });
   const client = new FakeClient();
   const handler = new CaptchaAssistHandler({
@@ -231,12 +231,12 @@ test('captcha assist click: normalized points map to viewport coordinates and cl
   assert.equal(pressed?.params?.y, 150);
   // 顺序不可换：cleared 承重（解除该 edge 暂停），click_result 只驱动面板。断连时 client.send 会抛，
   // 把承重的排在装饰性的之后 = 「验证码已解开」永远到不了云端、账号无限期暗停。
-  assert.deepEqual(client.sent.map((item) => item.type), ['risk.captcha_cleared', 'captcha.assist.click_result']);
+  assert.deepEqual(client.sent.map((item) => item.type), ['captcha.cleared', 'captcha.assist.click_result']);
   assert.equal((client.sent[1].payload as { status: string }).status, 'cleared');
 });
 
 // cleared 与 click_result MUST 互不牵连：后者抛错不该让前者白发，前者抛错也不该让后者不发。
-test('captcha assist click: click_result 发送抛错不影响已送达的 risk.captcha_cleared', async () => {
+test('captcha assist click: click_result 发送抛错不影响已送达的 captcha.cleared', async () => {
   const cdp = new FakeCdp({ overlayRect: { x: 100, y: 100, width: 200, height: 100 } });
   const client = new FakeClient();
   const handler = new CaptchaAssistHandler({
@@ -269,7 +269,7 @@ test('captcha assist click: click_result 发送抛错不影响已送达的 risk.
   });
 
   // cleared 已经出去了 —— 这才是解除暂停的那一条。
-  assert.deepEqual(client.sent.map((item) => item.type), ['risk.captcha_cleared']);
+  assert.deepEqual(client.sent.map((item) => item.type), ['captcha.cleared']);
 });
 
 // ── 实时抓帧循环（change captcha-assist-live-snapshot）─────────────────────────
@@ -332,7 +332,7 @@ test('live capture: 画面变化时推新帧（新 snapshotId）', async () => {
   assert.equal(new Set(ids).size, 4);
 });
 
-test('live capture: 自主判清除需连续 K 次无遮罩，且只发 risk.captcha_cleared（不发 click_result）', async () => {
+test('live capture: 自主判清除需连续 K 次无遮罩，且只发 captcha.cleared（不发 click_result）', async () => {
   const client = new FakeClient();
   const handler = new CaptchaAssistHandler({
     cdp: new FakeCdp({ screenshots: ['x'] }),
@@ -354,8 +354,8 @@ test('live capture: 自主判清除需连续 K 次无遮罩，且只发 risk.cap
   await drainLiveLoop();
 
   const types = client.sent.map((s) => s.type);
-  // 首帧 snapshot + 自主清除 risk.captcha_cleared；绝无 click_result（自主探测不污染运营复检记录）。
-  assert.deepEqual(types, ['captcha.assist.snapshot', 'risk.captcha_cleared']);
+  // 首帧 snapshot + 自主清除 captcha.cleared；绝无 click_result（自主探测不污染运营复检记录）。
+  assert.deepEqual(types, ['captcha.assist.snapshot', 'captcha.cleared']);
   assert.equal(types.filter((t) => t === 'captcha.assist.click_result').length, 0);
 });
 
@@ -380,7 +380,7 @@ test('live capture: 连续无遮罩不足 K 次不清除', async () => {
   });
   await drainLiveLoop();
 
-  assert.equal(client.sent.filter((s) => s.type === 'risk.captcha_cleared').length, 0);
+  assert.equal(client.sent.filter((s) => s.type === 'captcha.cleared').length, 0);
 });
 
 test('帧环：点击稍旧但仍在环内的 snapshotId 被接受；不在环内的判 stale_snapshot', async () => {
@@ -741,7 +741,7 @@ function makeTypeHandler(cdp: TypeCdp, client: FakeClient, monitor: OverlayMonit
   });
 }
 
-test('键入：可编辑焦点 → 打字 + 回车 → 遮罩清除 ⇒ cleared + risk.captcha_cleared + typeReport 齐全', async () => {
+test('键入：可编辑焦点 → 打字 + 回车 → 遮罩清除 ⇒ cleared + captcha.cleared + typeReport 齐全', async () => {
   const cdp = new TypeCdp();
   const client = new FakeClient();
   // capture / stale / recheck#1 / recheck#2 = captcha；提交后复检 = none。
@@ -760,7 +760,7 @@ test('键入：可编辑焦点 → 打字 + 回车 → 遮罩清除 ⇒ cleared 
   assert.equal(cdp.typedChars(), 4, '恰好派发 4 个可见字符');
   assert.ok(cdp.enterPressed(), '带 submit=enter 应按回车');
   const types = client.sent.map((s) => s.type);
-  assert.ok(types.includes('risk.captcha_cleared'), '解开后必须发 risk.captcha_cleared');
+  assert.ok(types.includes('captcha.cleared'), '解开后必须发 captcha.cleared');
   const result = client.sent.find((s) => s.type === 'captcha.assist.click_result')!.payload as {
     status: string; inputMode: string; typeReport: { focus: string; typed: number; verified: string; submitted: boolean };
   };
@@ -807,7 +807,7 @@ test('键入：中途复检 #1 遮罩已不在 ⇒ cleared_mid_sequence，零字
 
   assert.equal(cdp.typedChars(), 0, '复检 #1 触发即零字符');
   const types = client.sent.map((s) => s.type);
-  assert.ok(types.includes('risk.captcha_cleared'));
+  assert.ok(types.includes('captcha.cleared'));
   const result = client.sent.find((s) => s.type === 'captcha.assist.click_result')!.payload as { status: string; reason: string };
   assert.equal(result.status, 'cleared');
   assert.equal(result.reason, 'cleared_mid_sequence');

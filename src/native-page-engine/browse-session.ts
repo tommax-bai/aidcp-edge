@@ -21,7 +21,7 @@ import type {
   PacingOp,
   ProfileDetailPayload,
   StateIdentityObservation,
-  StateReportPayload,
+  StateObservedPayload,
   StateSurfaceKind,
   StateSurfaceObservation,
 } from '../comm/protocol.js';
@@ -919,11 +919,11 @@ export class NativeBrowseSession implements EdgeBrowseSession {
       identity: identity.outcome === 'confirmed' ? 'confirmed' : `unconfirmed:${identity.reason}`,
     });
     try {
-      this.options.client.send('state.report', { captureId, surface, identity, observedAt } satisfies StateReportPayload, env.id);
+      this.options.client.send('state.observed', { captureId, surface, identity, observedAt } satisfies StateObservedPayload, env.id);
     } catch (error) {
       // 连接已断时发不出去：云端那侧的 pending 会如实超时（有自己的具名结局），这里只留证据。
       this.logger(
-        `[native-page] state.report 未送出（连接不可用）：${error instanceof Error ? error.message : String(error)}`,
+        `[native-page] state.observed 未送出（连接不可用）：${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -1736,7 +1736,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
     const cleared = this.reportedBlockingKind;
     this.reportedBlockingKind = undefined;
     this.blockingEpisode += 1;
-    this.options.client.send('risk.captcha_cleared', {
+    this.options.client.send('captcha.cleared', {
       edgeId: this.options.edgeId,
       accountId: this.options.getAccountId?.(),
       ...(url ? { url } : {}),
@@ -1843,7 +1843,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
           : {}),
       }
       : undefined;
-    this.options.client.send('risk.captcha_detected', {
+    this.options.client.send('captcha.detected', {
       edgeId: this.options.edgeId,
       accountId: this.options.getAccountId?.(),
       kind,

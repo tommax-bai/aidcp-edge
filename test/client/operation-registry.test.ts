@@ -33,7 +33,7 @@ import type { MessageType } from '../../src/comm/protocol.js';
  * 反向结构断言：登记表说「这条可下发」，EdgeClient 入口就必须真能路由到它。
  *
  * 上面那张 `routedActiveCommands` 是**手抄的**——它只证明「我抄进来的这些登记表里有」，
- * 而漏抄一条时它恰好什么都不说。2026-08-05 实测：`identity.read_current` 同时缺席于
+ * 而漏抄一条时它恰好什么都不说。2026-08-05 实测：`identity.read_current_page` 同时缺席于
  * 云端登记表、EdgeClient 白名单、以及这张手抄清单，三处一起漏、全部闸门绿。
  *
  * 所以这条改成**读真源码**：以登记表为事实源，逐条去 edge-client.ts 里找它的分派点。
@@ -184,7 +184,7 @@ test('unknown active messages have no implicit fallback classification', () => {
   assert.equal(clientOperationDescriptorFor('future.renderer.action'), null);
 });
 
-test('new client strips cloud_data fields from legacy ui.snapshot and keeps only automation projection', () => {
+test('new client strips cloud_data fields from legacy ui.push_snapshot and keeps only automation projection', () => {
   const dailyUsage = { asOf: 1, totals: {}, quotas: {}, saturated: [], windows: {} } as never;
   const browserStandby = { eligible: true, reason: 'wait', waitMs: 10, wakeAt: 20, generatedAt: 10, source: 'risk', minWaitMs: 1, warmupMs: 1 } as never;
   assert.deepEqual(automationUiSnapshot({

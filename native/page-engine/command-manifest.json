@@ -184,7 +184,7 @@
     },
     {
       "edgeTypes": [
-        "identity.read_current"
+        "identity.read_current_page"
       ],
       "nativeKind": "identity_read_current",
       "family": "identity",

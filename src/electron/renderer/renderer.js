@@ -5630,7 +5630,7 @@ async function submitSlowStart(enabled) {
       return;
     }
 
-    // 成功回执本身就是云端写后真态：立即收敛，不再傻等下一次 ui.snapshot（最长 60s）。
+    // 成功回执本身就是云端写后真态：立即收敛，不再傻等下一次 ui.push_snapshot（最长 60s）。
     // 只转交 slowStart / dayQuotas，绝不本地推算 day、binding 或计划量。
     const receipt = res.data && res.data.data;
     if (!receipt || !receipt.slowStart || typeof receipt.slowStart !== 'object') {

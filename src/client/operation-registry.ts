@@ -113,7 +113,7 @@ export const CLIENT_OPERATION_REGISTRY = {
  */
 export const CLOUD_OPERATION_REGISTRY = {
   // —— 控制与心跳：只动本地投影 / 节奏 / outbox 确认，不触任何平台对象 ——
-  'ui.snapshot': automationControl('bound_account', 'none'),
+  'ui.push_snapshot': automationControl('bound_account', 'none'),
   'pacing.update': automationControl('bound_account', 'none'),
   'interaction.sync.ack': automationControl('bound_account', 'none'),
   'interaction.reply.result.ack': automationControl('bound_account', 'none'),
@@ -167,7 +167,7 @@ export const CLOUD_OPERATION_REGISTRY = {
   'xiaohongshu.note.browse_images': pageAutomation('none'),
   'xiaohongshu.note.scroll_comments': pageAutomation('none'),
   'xiaohongshu.profile.open': pageAutomation('none'),
-  'identity.read_current': pageObservation(),
+  'identity.read_current_page': pageObservation(),
   'identity.read_self_profile': pageObservation(),
   // 观察命令「问现状」（change add-state-observation-command）：纯读探针，一次带回当前面 + 登录身份。
   'state.read': pageObservation(),
@@ -199,7 +199,7 @@ export function operationDescriptorFor(type: MessageType): CloudOperationDescrip
   return (CLOUD_OPERATION_REGISTRY as Partial<Record<MessageType, CloudOperationDescriptor>>)[type] ?? null;
 }
 
-/** Legacy Clouds may still mix client-owned data into ui.snapshot. New clients consume only the
+/** Legacy Clouds may still mix client-owned data into ui.push_snapshot. New clients consume only the
  * automation projection and refetch persona/publish/account data over customer-auth HTTP. */
 export function automationUiSnapshot(payload: UiSnapshotPayload): UiSnapshotPayload {
   const safe: UiSnapshotPayload = {};

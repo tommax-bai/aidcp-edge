@@ -1,7 +1,7 @@
 /**
  * 旁路遮罩「云端上报」纯决策闸（change avoid-return-nav-token-loss-flash）。
  *
- * 把「何时向云端发 risk.captcha_detected / risk.captcha_cleared」的判定从 main.ts bootstrap 里抽出为
+ * 把「何时向云端发 captcha.detected / captcha.cleared」的判定从 main.ts bootstrap 里抽出为
  * 纯状态机，便于单测；不触碰旁路监测体（BackgroundWatcher / CdpOverlayMonitor）本身、不改其定时器/接口。
  *
  * 不变量：
@@ -18,9 +18,9 @@
 export type OverlayReportKind = 'captcha' | 'unknown';
 
 export interface OverlayReportGateDeps {
-  /** 真正下发 risk.captcha_detected（含取 URL、client.send、日志）。 */
+  /** 真正下发 captcha.detected（含取 URL、client.send、日志）。 */
   sendDetected: (kind: OverlayReportKind) => void;
-  /** 真正下发 risk.captcha_cleared。 */
+  /** 真正下发 captcha.cleared。 */
   sendCleared: () => void;
   /** 确认窗到点时复核：旁路监测当前仍为 unknown 吗（读 overlayMonitor.state）。 */
   isStillUnknown: () => boolean;
