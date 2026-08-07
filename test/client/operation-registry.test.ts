@@ -83,11 +83,16 @@ test('operation registry keeps browser acquisition outside automation control an
     category: 'browser_lifecycle', transport: 'automation_ws', identity: 'bound_account', browser: 'on_demand',
     platformFootprint: 'none',
   });
-  assert.deepEqual(CLOUD_OPERATION_REGISTRY['publish.command'], {
+  // 批 6b：发布平台段化——两个平台形消息共用同一编址描述。
+  assert.deepEqual(CLOUD_OPERATION_REGISTRY['xiaohongshu.publish.command'], {
     category: 'page_automation', transport: 'automation_ws', identity: 'page_account', browser: 'required',
     platformFootprint: 'account_visible',
   });
-  assert.deepEqual(CLOUD_OPERATION_REGISTRY['edge.task.acquire'], {
+  assert.deepEqual(CLOUD_OPERATION_REGISTRY['facebook.publish.command'], {
+    category: 'page_automation', transport: 'automation_ws', identity: 'page_account', browser: 'required',
+    platformFootprint: 'account_visible',
+  });
+  assert.deepEqual(CLOUD_OPERATION_REGISTRY['task.acquire'], {
     category: 'page_automation', transport: 'automation_ws', identity: 'page_account', browser: 'required',
     platformFootprint: 'none',
   });
@@ -102,7 +107,7 @@ test('operation registry keeps browser acquisition outside automation control an
  * 本断言按引用从登记表推导被拦集合（零手抄），并锁两条硬性质：
  *   ① 全部会留痕的命令（platformFootprint === 'account_visible'）MUST 在被拦集合内——
  *      身份未落定时绝不允许任何可能在平台留痕的动作；
- *   ② `edge.task.acquire` MUST 在被拦集合内——它不留痕，但认领租约＝即将以该账号名义
+ *   ② `task.acquire` MUST 在被拦集合内——它不留痕，但认领租约＝即将以该账号名义
  *      动作的准入（「留痕维 MUST NOT 单独决定放行」的常驻反例，机械化在此）。
  * 变异校准：把 acquire 或任一留痕命令的 identity 改为非 page_account ⇒ 本断言当场红并点名。
  */
@@ -127,8 +132,8 @@ test('identity gate blocked set is derived from the registry and covers every fo
   );
 
   assert.ok(
-    blockedSet.has('edge.task.acquire'),
-    'edge.task.acquire 必须在被拦集合内：不留痕但属账号动作准入（身份都不知道是谁，谈不上以谁的名义认领）',
+    blockedSet.has('task.acquire'),
+    'task.acquire 必须在被拦集合内：不留痕但属账号动作准入（身份都不知道是谁，谈不上以谁的名义认领）',
   );
 });
 

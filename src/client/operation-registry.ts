@@ -32,9 +32,9 @@ export interface OperationDescriptor {
  *   - **按消息类型取最坏一档**：`publish.command` 一个类型下有填标题 / 选图 / 点提交多种原子，
  *     只有最后一个真留痕，但本表按消息类型编址 ⇒ 整条判 `account_visible`。
  *     错在保守侧只是少一次自动重试；错在激进侧就是重复对外写入（本仓代价最高的错误）。
- *   - **只算直接后果，不算间接触发**：`edge.task.acquire` 会让后续留痕动作成为可能，但它自己
+ *   - **只算直接后果，不算间接触发**：`task.acquire` 会让后续留痕动作成为可能，但它自己
  *     不产生任何对象 ⇒ `none`。算间接则一切操作最终都留痕，本维退化成恒真、失去全部区分力。
- *   - **本维 MUST NOT 单独决定放行**。反例常驻：`edge.task.acquire` 是 `none`，但身份未落定时
+ *   - **本维 MUST NOT 单独决定放行**。反例常驻：`task.acquire` 是 `none`，但身份未落定时
  *     照拦——认领租约＝马上要以该账号名义动作，拦它的理由是**准入**，不是留痕。
  *
  * 当前消费方只有测试断言（身份救援清单成员资格 ⊆ 声明为 `none` 的命令）；将来消费方是
@@ -140,8 +140,6 @@ export const CLOUD_OPERATION_REGISTRY = {
   'session.end': automationControl('local_environment', 'none'),
   'xiaohongshu.note.open': pageAutomation('none'),
   'facebook.note.open': pageAutomation('none'),
-  'xiaohongshu.note.close': pageAutomation('none'),
-  'facebook.note.close': pageAutomation('none'),
   // 搜索只产生账号自见的隐式行为记录，不产生平台上可归因的新对象。
   'xiaohongshu.search.execute': pageAutomation('none'),
   'facebook.search.execute': pageAutomation('none'),
@@ -163,7 +161,8 @@ export const CLOUD_OPERATION_REGISTRY = {
   'facebook.note.comment': pageAutomation(),
   'xiaohongshu.comment.like': pageAutomation(),
   'facebook.group.join': pageAutomation(),
-  'navigation.back': pageAutomation('none'),
+  'xiaohongshu.navigation.back': pageAutomation('none'),
+  'facebook.navigation.back': pageAutomation('none'),
   'xiaohongshu.note.browse_images': pageAutomation('none'),
   'xiaohongshu.note.scroll_comments': pageAutomation('none'),
   'xiaohongshu.profile.open': pageAutomation('none'),
@@ -177,12 +176,13 @@ export const CLOUD_OPERATION_REGISTRY = {
   'xiaohongshu.notification.browse_follows': pageAutomation('none'),
   'xiaohongshu.notification.back_home': pageAutomation('none'),
   // 按最坏一档：多种原子里只有「点提交」真留痕，但本表按消息类型编址。
-  'publish.command': pageAutomation(),
+  'xiaohongshu.publish.command': pageAutomation(),
+  'facebook.publish.command': pageAutomation(),
   // 租约属准入不属留痕：acquire 不产生对象，但 identity 保持 page_account——认领＝即将以该账号
   // 名义动作的准入，身份未落定时 MUST 仍被身份闸拦（留痕 none 与身份 page_account 并存，各答各的问题）。
-  'edge.task.acquire': pageAutomation('none'),
+  'task.acquire': pageAutomation('none'),
   // 释放租约永远安全：不代表账号动作，身份未落定时放行（旧救援清单第一条的机械化）。
-  'edge.task.release': automationControl('local_environment', 'none'),
+  'task.release': automationControl('local_environment', 'none'),
   'captcha.assist.capture': environmentAssist(),
   // 人工点位只作用于验证码浮层，解开阻断不产生该账号名下的新对象。
   'captcha.assist.click': environmentAssist(),

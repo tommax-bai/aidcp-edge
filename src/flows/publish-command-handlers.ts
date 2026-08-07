@@ -1,9 +1,9 @@
 /**
  * PublishCommandDispatcher — A 阶段1 边缘「指令运行时」。
  *
- * 云端 CommandSequencer 逐条下发 `publish.command {recordId, seq, kind, params}`；
+ * 云端 CommandSequencer 逐条下发 `{p}.publish.command {recordId, seq, kind, params}`（平台在消息名里）；
  * 边缘按 `kind` 路由到处理器，复用 `LocatingEngine` 五层编排 + 三道闸（守卫→定位→执行→后置校验→晋升）
- * 做「定位 + 原子操作 + 后置校验」，逐条回 `publish.command.result {recordId, seq, kind, ok, value?, error?, details?}`。
+ * 做「定位 + 原子操作 + 后置校验」，逐条回 `{p}.publish.command.result {recordId, seq, kind, ok, value?, error?, details?}`。
  *
  * 红线（MUST NOT 静默假成功）：定位失败 / 后置校验失败 / 抓不到目标 → `ok:false` + 真实 error，绝不伪造 `ok:true`、绝不兜底凑值。
  * 边轻云重：本运行时只做原子操作 + 就地校验；编排（序列/重试/人审闸）在云端。
@@ -453,10 +453,11 @@ export class PublishCommandDispatcher {
    */
   async dispatch(
     payload: PublishCommandPayload,
+    platform: 'xiaohongshu' | 'facebook',
     takeover?: TakeoverCtx,
   ): Promise<PublishCommandResultPayload> {
     try {
-      return await this.route(payload, takeover);
+      return await this.route(payload, platform, takeover);
     } catch (err) {
       if (err instanceof TaskTakeoverError) {
         return {
@@ -473,9 +474,11 @@ export class PublishCommandDispatcher {
 
   private async route(
     payload: PublishCommandPayload,
+    // 批 6b：平台维在消息名里；调用方从命令名前缀解析后显式传入，载荷不再携平台字段。
+    platform: 'xiaohongshu' | 'facebook',
     takeover?: TakeoverCtx,
   ): Promise<PublishCommandResultPayload> {
-    if (payload.platform === 'facebook') {
+    if (platform === 'facebook') {
       if (!this.facebookPublisher) return this.notImplemented(payload);
       return this.facebookPublisher.dispatch(payload, takeover);
     }

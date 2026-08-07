@@ -28,7 +28,6 @@ import type {
   FeedRefreshPayload,
   PacingUpdatePayload,
   NoteOpenPayload,
-  NoteClosePayload,
   InteractionLikePayload,
   InteractionCollectPayload,
   InteractionFollowPayload,
@@ -950,7 +949,7 @@ export class BrowseSession {
   /**
    * 独占任务接管：先封住普通浏览准入、丢弃尚未开始的旧命令，唤醒所有安全取消点上的纯等待，
    * 再**有界**等待真正在改写页面的动作收敛。
-   * 返回被取消的旧命令数，供 edge.task.acquired 可观测上报。
+   * 返回被取消的旧命令数，供 task.acquired 可观测上报。
    *
    * change lease-strict-preemption —— 这里过去是硬死锁的锁体，两处错：
    * ① 无界等待「命令处理函数还没返回」，而不是「页面正在被改写」：一条停在验证码浮层闸里的命令
@@ -1471,14 +1470,8 @@ export class BrowseSession {
         await this.openAndReportNote(payload.index ?? 0, payload.noteId);
         break;
       }
-      case 'xiaohongshu.note.close': {
-        const payload = env.payload as NoteClosePayload;
-        this.logger(`[browse] 命令: ${env.type}`);
-        await this.ensureDetailDwell(payload.dwellMs); // 关闭前确保停留达标
-        await this.safeCloseModal();
-        this.deps.client.reportActionCompleted?.({ action: 'close', ok: true });
-        break;
-      }
+      // 批 6b：xiaohongshu.note.close 已从协议删除（云端零发送点）；
+      // 关弹层（safeCloseModal）保留为 navigation.back 的引擎内部子步骤。
       case 'xiaohongshu.note.like': {
         const payload = env.payload as InteractionLikePayload;
         this.logger(`[browse] 命令: xiaohongshu.note.like (noteId=${payload.noteId})`);
@@ -1629,9 +1622,16 @@ export class BrowseSession {
         }
         break;
       }
-      case 'navigation.back': {
+      case 'xiaohongshu.navigation.back': {
         const payload = env.payload as NavigationBackPayload;
-        this.logger(`[browse] 命令: navigation.back (${payload.reason ?? ''}, target=${payload.targetPage ?? ''})`);
+        // 批 6b：targetPage 必填——回哪张来源列表是云端决策，缺字段按格式错误 fail-closed 拒收，
+        // 边缘绝不替云端补默认值（补空即决策，决策归上层）。
+        if (payload.targetPage !== 'feed' && payload.targetPage !== 'search') {
+          this.logger(`[browse] xiaohongshu.navigation.back 缺 targetPage，格式错误拒收（fail-closed）`);
+          this.deps.client.reportActionCompleted?.({ action: 'back', ok: false, reason: 'target_page_missing' });
+          break;
+        }
+        this.logger(`[browse] 命令: xiaohongshu.navigation.back (${payload.reason ?? ''}, target=${payload.targetPage})`);
         // 返回前确保详情页实际停留达标（治秒退）；须在关 modal 前完成。
         await this.ensureDetailDwell(payload.dwellMs);
         await this.navigateBack(payload.targetPage, payload.reason);
@@ -1945,7 +1945,7 @@ export class BrowseSession {
       'body_ready',
       () => this.waitForNoteBody(Math.min(card.isVideo ? 2500 : 3500, this.remainingNoteOpenMs(deadlineAt, 'body_ready'))),
     );
-    // 记录详情页打开时刻：后续 navigation.back / note.close 据此判定实际停留是否达标（治秒退）。
+    // 记录详情页打开时刻：后续 xiaohongshu.navigation.back 据此判定实际停留是否达标（治秒退）。
     this.noteOpenedAt = this.now();
 
     let content: import('./note-extractor.js').NoteContent;
@@ -2718,7 +2718,7 @@ export class BrowseSession {
   }
 
   private async navigateBack(targetPage?: 'feed' | 'search', reason?: string): Promise<void> {
-    // navigation.back 的协议名保留，但边缘语义改为「回到来源列表」：
+    // xiaohongshu.navigation.back：边缘语义＝「回到来源列表」（关弹层是它的内部子步骤）：
     // 默认用 Page.navigate 直连 feed/search 来源页，避免 history.back 回踩过期详情路由并触发
     // 小红书 access-limit-app 弹窗；只有搜索来源 URL 缺失且当前仍像笔记浮层时，才允许历史兜底。
     const modalWasOpen = await this.deps.modalCtrl.isModalOpen();

@@ -1388,7 +1388,7 @@ test('T17 重立成功之后收尾步骤抛异常：MUST NOT 报成身份终局�
 test('T18 身份闸：写动作与重绑被拦并如实回执，救援 / 读 / 收尾类照常放行', () => {
   // ── ① 写动作（以页面账号名义动作的那些）在两种未落定态下都 MUST 被拦。
   for (const health of ['invalid', 'reestablishing'] as const) {
-    for (const type of ['publish.command', 'xiaohongshu.note.comment', 'facebook.note.like', 'edge.task.acquire', 'facebook.group.join'] as const) {
+    for (const type of ['xiaohongshu.publish.command', 'facebook.publish.command', 'xiaohongshu.note.comment', 'facebook.note.like', 'task.acquire', 'facebook.group.join'] as const) {
       const verdict = judgeCommandUnderIdentity(health, type);
       assert.equal(verdict.kind, 'refuse', `${health} 下 ${type} MUST 被拦：它会在平台上留下该账号名下的真实痕迹`);
       assert.equal(verdict.kind === 'refuse' ? verdict.reason : '', 'identity_unresolved',
@@ -1398,7 +1398,7 @@ test('T18 身份闸：写动作与重绑被拦并如实回执，救援 / 读 / �
 
   // ── ② 救援 / 读 / 收尾类 MUST 放行：拦掉它们只会让节点更难救。
   for (const type of [
-    'edge.task.release',
+    'task.release',
     'identity.read_current_page',
     'identity.read_self_profile',
     'captcha.assist.capture',
@@ -1413,8 +1413,8 @@ test('T18 身份闸：写动作与重绑被拦并如实回执，救援 / 读 / �
   assert.deepEqual(judgeCommandUnderIdentity('invalid', 'ping'), { kind: 'allow' });
 
   // ── ③ 身份健康时一律放行（这道闸只在身份未落定时存在）。
-  assert.deepEqual(judgeCommandUnderIdentity('healthy', 'publish.command'), { kind: 'allow' });
-  assert.deepEqual(judgeCommandUnderIdentity(undefined, 'publish.command'), { kind: 'allow' },
+  assert.deepEqual(judgeCommandUnderIdentity('healthy', 'xiaohongshu.publish.command'), { kind: 'allow' });
+  assert.deepEqual(judgeCommandUnderIdentity(undefined, 'xiaohongshu.publish.command'), { kind: 'allow' },
     '没有装配校验体（无浏览 / 无身份闭环）时 MUST NOT 凭空拦——那会把一台正常机器停掉');
 
   // ── ④ 重绑：终局 / 重立中 MUST 拒绝，且理由里带处理办法。
@@ -1779,7 +1779,7 @@ test('T20 自查表：八条路径逐条核对「外面看到的 = 里面发生�
     assert.equal(view.status.edge, 'warning');
     assert.equal(view.status.cloud, 'disconnected', '⑧ 重绑被拒 ⇒ 节点对任何云端都不在场，界面 MUST NOT 说「已连接」');
     // 而且此刻云端就算把发布派下来，也不许执行。
-    assert.equal(judgeCommandUnderIdentity('invalid', 'publish.command').kind, 'refuse');
+    assert.equal(judgeCommandUnderIdentity('invalid', 'facebook.publish.command').kind, 'refuse');
   }
 });
 
@@ -1868,7 +1868,7 @@ test('T21③ 发布闸：身份未落定时 MUST 不执行且按发布回执形�
     },
     (env: { id: string }) => void executed.push(env.id),
   );
-  const env = { id: 'env-1', type: 'publish.command' as const, payload: { recordId: 7, seq: 2, kind: 'fill_title' } };
+  const env = { id: 'env-1', type: 'xiaohongshu.publish.command' as const, payload: { recordId: 7, seq: 2, kind: 'fill_title' } };
   guarded('invalid')(env);
   assert.deepEqual(executed, [], '被拒的发布 MUST NOT 执行——发布是在平台上留真实痕迹的动作');
   assert.equal(sent.length, 1, '拒绝 MUST 回执，否则云端挂起等一个不会来的结果');
@@ -2104,21 +2104,21 @@ test('T24 任务租约通道被身份闸拒绝时 MUST NOT 伪造一条云端收
     },
     (env: { type: string }) => void executed.push(env.type),
   );
-  guarded({ type: 'edge.task.acquire' });
+  guarded({ type: 'task.acquire' });
   assert.deepEqual(executed, [], '认领＝接下来会以这个账号的名义动作 + 记账，身份未落定时 MUST 拦');
   assert.deepEqual(receipts, [],
-    '负向应答的形状（edge.task.released + reason）存在，但「身份未落定」这个 reason 还没接线；'
+    '负向应答的形状（task.released + reason）存在，但「身份未落定」这个 reason 还没接线；'
     + '发一条云端不认识的 action.completed 比不发更坏——它让人以为已经兑现了');
   assert.equal(logs.length, 1, '不发回执 ≠ 静默丢弃：本地必须响亮记一笔');
   // 缺口的**陈述必须是真的**，且必须带落点：只说「没有路」会让下一个人以为无路可走、从而永远不去补。
-  assert.match(logs[0]!, /edge\.task\.released/, '必须点名那条本来就存在的负向应答形状');
+  assert.match(logs[0]!, /task\.released/, '必须点名那条本来就存在的负向应答形状');
   assert.match(logs[0]!, /reason 枚举值/, '必须说清缺的只是一个枚举值，而不是「没有形状」');
   assert.match(logs[0]!, /protocol\.ts/, '必须给出补齐的落点');
   assert.match(logs[0]!, /acquire_timeout/, '必须说清不补的代价（云端空等满自己的超时）');
   assert.doesNotMatch(logs[0]!, /没有负向应答形状/, '这句话是假的，MUST NOT 再出现');
   // 释放永远放行（拦掉只会让租约挂着不放、云端一直以为任务在跑）。
-  guarded({ type: 'edge.task.release' });
-  assert.deepEqual(executed, ['edge.task.release']);
+  guarded({ type: 'task.release' });
+  assert.deepEqual(executed, ['task.release']);
 });
 
 // ── 1.9① 宿主侧接线（**弱断言**：源码文本扫描，不计入行为覆盖）──────────────────
@@ -2312,7 +2312,7 @@ test('宿主装配契约（源码扫描）：闸的接线还在、且没有被�
 
   // ⑦ 那句被坐实为假的话 MUST NOT 活在任何一处源码里。
   //
-  // 「协议上没有负向应答形状」是错的：形状就是 `edge.task.released` + `reason`，云端 onReleased 对已知
+  // 「协议上没有负向应答形状」是错的：形状就是 `task.released` + `reason`，云端 onReleased 对已知
   // 原因即刻 reject、不等 acquire 超时，边缘协调器本身就在用它。缺的只是「身份未落定」这一档 reason。
   // 之所以要为一句注释写断言：读代码的人先到接线现场，被那句话告知「无路可走」，就永远不会去补那一档
   // ——这正是本批工作在追的那族病（写着有、其实没有；说没路、其实有路），只是落在了文字上。

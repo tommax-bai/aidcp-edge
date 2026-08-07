@@ -26,12 +26,6 @@
       "unconsumed": []
     },
     {
-      "nativeKind": "note_close",
-      "declares": ["dwellMs"],
-      "consumes": ["dwellMs"],
-      "unconsumed": []
-    },
-    {
       "nativeKind": "navigation_back",
       "declares": ["dwellMs"],
       "consumes": ["dwellMs"],

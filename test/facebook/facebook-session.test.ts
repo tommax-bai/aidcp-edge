@@ -447,9 +447,9 @@ test('page.scroll 带 dwellMs → FB 翻页前先按卡片停留兜底等待', a
   assert.equal(h.cards[1].cards[0].noteId, 'https://www.facebook.com/b/posts/pfbidTWO', '滚动报的是新卡 B');
 });
 
-test('navigation.back → 回 feed 重报 page.cards（驱动下一轮 feed.entered）', async () => {
+test('facebook.navigation.back → 回 feed 重报 page.cards（驱动下一轮 feed.entered）', async () => {
   const h = makeSession({ mode: 'on' });
-  await h.session.onCloudCommand(makeEnv('navigation.back', { targetPage: 'feed' }));
+  await h.session.onCloudCommand(makeEnv('facebook.navigation.back', {}));
   assert.equal(h.cards.length, 1);
 });
 
@@ -562,10 +562,10 @@ test('FB 云端命令回执使用规范动作名，深读失败不会退化为�
     'xiaohongshu.comment.like': 'comment_like',
     'facebook.search.execute': 'search',
     'facebook.note.open': 'open_note',
-    'facebook.note.close': 'close',
     'xiaohongshu.note.browse_images': 'browse_images',
     'xiaohongshu.note.scroll_comments': 'scroll_comments',
-    'navigation.back': 'back',
+    'facebook.navigation.back': 'back',
+    'xiaohongshu.navigation.back': 'back',
     'xiaohongshu.profile.open': 'profile_open',
     'facebook.group.join': 'join_group',
     'xiaohongshu.notification.open': 'open_notifications',
@@ -1144,11 +1144,11 @@ test('首页从未出现真卡时 page.scroll 不得误报 feed_exhausted，并�
 
 // ─────────────────────────── split-brain：返回落回当前列表面（task 1.4/1.5）───────────────────────────
 
-test('navigation.back 从搜索结果开帖后回落搜索页而非会话初始首页（修 split-brain）', async () => {
+test('facebook.navigation.back 从搜索结果开帖后回落搜索页而非会话初始首页（修 split-brain）', async () => {
   const h = makeSession({ mode: 'on' });
   await h.session.onCloudCommand(makeEnv('facebook.search.execute', { keyword: 'Puerto Rico' }));
   await h.session.onCloudCommand(makeEnv('facebook.note.open', { noteId: 'https://www.facebook.com/x/posts/pfbid0Z' }));
-  await h.session.onCloudCommand(makeEnv('navigation.back', {}));
+  await h.session.onCloudCommand(makeEnv('facebook.navigation.back', {}));
   assert.equal(h.ensureUrls.at(-1), 'https://www.facebook.com/search/posts/?q=Puerto+Rico', 'back 回搜索页而非首页');
 });
 

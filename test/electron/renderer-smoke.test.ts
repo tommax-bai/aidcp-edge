@@ -363,7 +363,7 @@ test('开发者详情：命令按当前环境隔离，非法或过期状态不�
     envName: `环境 ${envId}`,
     commandDiagnostics: [{
       key,
-      type: envId === 'A' ? 'browse.next' : 'publish.command',
+      type: envId === 'A' ? 'browse.next' : 'xiaohongshu.publish.command',
       stage: envId === 'A' ? 'dispatched' : 'rejected',
       summary,
       receivedAt: now - 1_000,

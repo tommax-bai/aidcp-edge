@@ -609,16 +609,7 @@ test('edge-client: xiaohongshu.note.open 路由到 browseHandler', async () => {
   assert.equal((calls[0].payload as any).index, 3);
 });
 
-test('edge-client: xiaohongshu.note.close 路由到 browseHandler', async () => {
-  const ws = new FakeWebSocket();
-  const client = await connectClient(ws, { platform: 'xiaohongshu' });
-  const calls: Envelope[] = [];
-  client.onBrowseCommand((env) => calls.push(env));
-
-  ws.emitMessage(makeEnvelope('xiaohongshu.note.close', 'cmd-3', 2, { reason: 'close' }));
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].type, 'xiaohongshu.note.close');
-});
+// 批 6b：{p}.note.close 已从协议删除（云端零发送点）；关弹层是 {p}.navigation.back 的引擎内部子步骤。
 
 // change facebook-browse-and-like-loop（task 4.4）：FB 浏览/点赞独立命令 MUST 放行到 browseHandler，
 // 绝不落入「其他主动消息暂忽略」被静默丢弃（typecheck 抓不到白名单遗漏）。词汇批 4 起 FB 浏览命令
@@ -630,9 +621,8 @@ const FB_BROWSE_COMMANDS = [
   'facebook.feed.refresh',
   'facebook.search.execute',
   'facebook.note.open',
-  'facebook.note.close',
   'facebook.note.like',
-  'navigation.back',
+  'facebook.navigation.back',
 ] as const;
 for (const type of FB_BROWSE_COMMANDS) {
   test(`edge-client: Facebook 浏览命令 ${type} 路由到 browseHandler（不得静默丢弃）`, async () => {
@@ -674,7 +664,7 @@ const XHS_BROWSE_COMMANDS = [
   'xiaohongshu.feed.refresh',
   'xiaohongshu.search.execute',
   'xiaohongshu.note.open',
-  'xiaohongshu.note.close',
+  'xiaohongshu.navigation.back',
   'xiaohongshu.note.browse_images',
   'xiaohongshu.note.scroll_comments',
   'xiaohongshu.profile.open',
@@ -799,18 +789,37 @@ for (const [type, payload] of IDENTITY_AND_STATE_OBSERVATION_COMMANDS) {
   });
 }
 
-test('edge-client: edge.task.acquire/release 路由到任务控制处理器', async () => {
+// 批 6b：发布平台段化——两个平台形命令都必须到达 publishAtomHandler（入口 if 按名等值判断，
+// 漏加任何一形即被静默拒为 unclassified/丢弃，typecheck 抓不到）。
+test('edge-client: {p}.publish.command 双平台形都路由到 publishAtomHandler', async () => {
+  for (const [platform, type] of [
+    ['xiaohongshu', 'xiaohongshu.publish.command'],
+    ['facebook', 'facebook.publish.command'],
+  ] as const) {
+    const ws = new FakeWebSocket();
+    const client = await connectClient(ws, { platform });
+    const calls: Envelope[] = [];
+    client.onPublishAtomCommand((env) => calls.push(env));
+    ws.emitMessage(makeEnvelope(type, `pub-${type}`, 2, {
+      taskId: 'task-1', recordId: 1, seq: 0, kind: 'navigate_entry', params: {},
+    }));
+    assert.equal(calls.length, 1, `${type} 应被路由到 publishAtomHandler 而非在入口丢弃`);
+    assert.equal(calls[0].type, type);
+  }
+});
+
+test('edge-client: task.acquire/release 路由到任务控制处理器', async () => {
   const ws = new FakeWebSocket();
   const client = await connectClient(ws);
   const calls: Envelope[] = [];
   client.onEdgeTaskCommand((env) => calls.push(env));
-  ws.emitMessage(makeEnvelope('edge.task.acquire', 'task-acquire', 2, {
+  ws.emitMessage(makeEnvelope('task.acquire', 'task-acquire', 2, {
     taskId: 'task-1', kind: 'publish', priority: 'human', leaseMs: 60_000,
   }));
-  ws.emitMessage(makeEnvelope('edge.task.release', 'task-release', 3, {
+  ws.emitMessage(makeEnvelope('task.release', 'task-release', 3, {
     taskId: 'task-1', outcome: 'completed',
   }));
-  assert.deepEqual(calls.map((env) => env.type), ['edge.task.acquire', 'edge.task.release']);
+  assert.deepEqual(calls.map((env) => env.type), ['task.acquire', 'task.release']);
 });
 // 回归：陪伴界面数据快照（ui.push_snapshot，cloud 主动推送）MUST 路由到 onUiSnapshot 处理器，
 // 不得在入口静默丢弃（§2 第4处同步点；edge-companion-ui 8.1）。

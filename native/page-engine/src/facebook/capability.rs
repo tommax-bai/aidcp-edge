@@ -430,19 +430,6 @@ pub const FACEBOOK_PARITY_LEDGER: &[FacebookParityEntry] = &[
         None
     ),
     entry!(
-        "note_close",
-        Feed,
-        "retired Facebook browse session",
-        "current list provenance",
-        "active list identity",
-        "history or home navigation",
-        1,
-        "Feed/Reels cards",
-        "confirmed or navigation failure",
-        30_000,
-        None
-    ),
-    entry!(
         "navigation_back",
         Feed,
         "retired Facebook browse session",
@@ -643,7 +630,6 @@ pub fn parity(command: &NativeCommand) -> Option<&'static FacebookParityEntry> {
         FeedRefresh(_) => "feed_refresh",
         SearchExecute(_) => "search_execute",
         NoteOpen(_) => "note_open",
-        NoteClose(_) => "note_close",
         NavigationBack(_) => "navigation_back",
         InteractionLike(_) => "interaction_like",
         InteractionFollow(_) => "interaction_follow",

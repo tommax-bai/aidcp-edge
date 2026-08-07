@@ -33,8 +33,6 @@ const ACTIVE_COMMAND_TYPES = new Set([
   'session.end',
   'xiaohongshu.note.open',
   'facebook.note.open',
-  'xiaohongshu.note.close',
-  'facebook.note.close',
   'xiaohongshu.search.execute',
   'facebook.search.execute',
   'xiaohongshu.feed.scroll',
@@ -55,7 +53,8 @@ const ACTIVE_COMMAND_TYPES = new Set([
   'facebook.note.comment',
   'xiaohongshu.comment.like',
   'facebook.group.join',
-  'navigation.back',
+  'xiaohongshu.navigation.back',
+  'facebook.navigation.back',
   'xiaohongshu.note.browse_images',
   'xiaohongshu.note.scroll_comments',
   'xiaohongshu.profile.open',
@@ -64,9 +63,10 @@ const ACTIVE_COMMAND_TYPES = new Set([
   'xiaohongshu.notification.browse_likes',
   'xiaohongshu.notification.browse_follows',
   'xiaohongshu.notification.back_home',
-  'publish.command',
-  'edge.task.acquire',
-  'edge.task.release',
+  'xiaohongshu.publish.command',
+  'facebook.publish.command',
+  'task.acquire',
+  'task.release',
   'captcha.assist.capture',
   'captcha.assist.click',
   'wechat_channels.inbox.sync.ack',
@@ -83,8 +83,6 @@ const ACTIVE_COMMAND_TYPES = new Set([
 
 const FIXED_SUMMARIES: Readonly<Record<string, string>> = {
   'session.end': '结束当前浏览会话',
-  'xiaohongshu.note.close': '关闭当前内容',
-  'facebook.note.close': '关闭当前内容',
   'xiaohongshu.feed.scroll': '滚动当前信息流',
   'xiaohongshu.search.scroll': '滚动搜索结果页',
   'facebook.feed.scroll': '滚动当前信息流',
@@ -100,7 +98,8 @@ const FIXED_SUMMARIES: Readonly<Record<string, string>> = {
   'xiaohongshu.user.follow': '关注当前作者',
   'facebook.user.follow': '关注当前作者',
   'xiaohongshu.comment.like': '点赞目标评论',
-  'navigation.back': '返回上一页面',
+  'xiaohongshu.navigation.back': '返回上一页面',
+  'facebook.navigation.back': '返回上一页面',
   'xiaohongshu.note.browse_images': '浏览当前内容配图',
   'xiaohongshu.note.scroll_comments': '滚动当前评论区',
   'xiaohongshu.profile.open': '打开作者主页',
@@ -241,7 +240,7 @@ export function summarizeCommand(type: unknown, payload: unknown): string {
       typeof data.groupUrl === 'string' && data.groupUrl.length > 0 ? '已提供目标地址' : undefined,
     ]);
   }
-  if (commandType === 'publish.command') {
+  if (commandType === 'xiaohongshu.publish.command' || commandType === 'facebook.publish.command') {
     const kind = safeEnum(data.kind, PUBLISH_KINDS);
     const seq = safeCount(data.seq, 9_999);
     return joinParts([
@@ -249,7 +248,7 @@ export function summarizeCommand(type: unknown, payload: unknown): string {
       seq === undefined ? undefined : `序号 ${seq}`,
     ]);
   }
-  if (commandType === 'edge.task.acquire') {
+  if (commandType === 'task.acquire') {
     const kind = safeEnum(data.kind, EDGE_TASK_KINDS);
     const priority = safeEnum(data.priority, EDGE_TASK_PRIORITIES);
     return joinParts([
@@ -258,7 +257,7 @@ export function summarizeCommand(type: unknown, payload: unknown): string {
       priority ? `优先级 ${priority}` : undefined,
     ]);
   }
-  if (commandType === 'edge.task.release') {
+  if (commandType === 'task.release') {
     const outcome = safeEnum(data.outcome, RELEASE_OUTCOMES);
     return joinParts(['释放页面写租约', outcome ? `结果 ${outcome}` : undefined]);
   }

@@ -18,7 +18,12 @@ export class NativePublishExecutor {
     private readonly commitWindow?: CommitWindowGuard,
   ) {}
 
-  async dispatch(payload: PublishCommandPayload, signal?: AbortSignal): Promise<PublishCommandResultPayload> {
+  /** `platform` 由调用方从消息名前缀解析传入（批 6b：载荷不再携平台字段）。 */
+  async dispatch(
+    payload: PublishCommandPayload,
+    platform: 'xiaohongshu' | 'facebook',
+    signal?: AbortSignal,
+  ): Promise<PublishCommandResultPayload> {
     let tempDir: string | undefined;
     let commandDispatched = false;
     try {
@@ -41,7 +46,7 @@ export class NativePublishExecutor {
         imageIndex = imageUrl ? draft.imageIndexes.get(imageUrl) : undefined;
         if (imageIndex === undefined) return this.failed(payload, 'cover_source_not_uploaded');
       }
-      const maxTimeoutMs = payload.platform === 'facebook'
+      const maxTimeoutMs = platform === 'facebook'
         ? payload.kind === 'fill_field'
           ? FACEBOOK_PUBLISH_FILL_MAX_TIMEOUT_MS
           : payload.kind === 'select_mode'

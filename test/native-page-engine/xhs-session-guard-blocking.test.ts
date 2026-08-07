@@ -687,7 +687,7 @@ test('Xiaohongshu browse loop leaves per-command receipt evidence carrying no pa
   await h.session.onCloudCommand(envelope('xiaohongshu.feed.scroll', { reason: 'feed_scroll' }));
   await h.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1' }));
   await h.session.onCloudCommand(envelope('xiaohongshu.note.like', { noteId: 'note-1' }));
-  await h.session.onCloudCommand(envelope('navigation.back', { reason: 'return_feed' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.navigation.back', { reason: 'return_feed', targetPage: 'feed' }));
 
   const receiptLogs = h.logs.filter((line) => line.includes('action.completed'));
   assert.deepEqual(receiptLogs, [

@@ -35,7 +35,6 @@ const NOT_AN_IMAGE = Buffer.from('#!/bin/sh\necho hi\n', 'utf8');
 
 function uploadCommand(imageUrl: string, seq = 1): PublishCommandPayload {
   return {
-    platform: 'xiaohongshu',
     taskId: 'task-acceptance',
     recordId: 1,
     seq,
@@ -102,7 +101,7 @@ describe('AC-PUB-N Native 发布配图取材完整性（edge）', () => {
         },
         async () => {
           const executor = new NativePublishExecutor(refusingRuntime(dispatched), 'aidcp-ac-pub-n-');
-          return executor.dispatch(uploadCommand(imageUrl));
+          return executor.dispatch(uploadCommand(imageUrl), 'xiaohongshu');
         },
       );
       assert.equal(result.ok, false, `${imageUrl} 必须被拒`);
@@ -117,7 +116,7 @@ describe('AC-PUB-N Native 发布配图取材完整性（edge）', () => {
     const result = await withFetch(
       async () => { throw new Error('must not fetch'); },
       async () => new NativePublishExecutor(refusingRuntime(dispatched), 'aidcp-ac-pub-n-')
-        .dispatch(uploadCommand('not a url at all')),
+        .dispatch(uploadCommand('not a url at all'), 'xiaohongshu'),
     );
     assert.equal(result.ok, false);
     assert.equal(result.error, 'image_url_rejected');
@@ -136,7 +135,7 @@ describe('AC-PUB-N Native 发布配图取材完整性（edge）', () => {
         throw new TypeError('redirect not allowed');
       },
       async () => new NativePublishExecutor(refusingRuntime(dispatched), 'aidcp-ac-pub-n-')
-        .dispatch(uploadCommand('https://cdn.test/redirects.png')),
+        .dispatch(uploadCommand('https://cdn.test/redirects.png'), 'xiaohongshu'),
     );
     assert.equal(sawRedirectError, true);
     assert.equal(result.ok, false);
@@ -151,7 +150,7 @@ describe('AC-PUB-N Native 发布配图取材完整性（edge）', () => {
     const result = await withFetch(
       async () => respond(NOT_AN_IMAGE),
       async () => new NativePublishExecutor(refusingRuntime(dispatched), 'aidcp-ac-pub-n-')
-        .dispatch(uploadCommand('https://cdn.test/script.png')),
+        .dispatch(uploadCommand('https://cdn.test/script.png'), 'xiaohongshu'),
     );
     assert.equal(result.ok, false);
     assert.equal(result.error, 'image_format_unsupported');
@@ -163,7 +162,7 @@ describe('AC-PUB-N Native 发布配图取材完整性（edge）', () => {
     const result = await withFetch(
       async () => respond(JPG),
       async () => new NativePublishExecutor(refusingRuntime(dispatched), 'aidcp-ac-pub-n-')
-        .dispatch(uploadCommand('https://cdn.test/lies-about-being.png')),
+        .dispatch(uploadCommand('https://cdn.test/lies-about-being.png'), 'xiaohongshu'),
     );
     assert.equal(result.ok, true);
     assert.equal(dispatched.length, 1);
@@ -186,7 +185,7 @@ describe('AC-PUB-N Native 发布配图取材完整性（edge）', () => {
         headers: { 'content-length': String(64 * 1024 * 1024) },
       }),
       async () => new NativePublishExecutor(refusingRuntime(declaredOnly), 'aidcp-ac-pub-n-')
-        .dispatch(uploadCommand('https://cdn.test/huge.png')),
+        .dispatch(uploadCommand('https://cdn.test/huge.png'), 'xiaohongshu'),
     );
     assert.equal(byDeclared.ok, false);
     assert.equal(byDeclared.error, 'image_too_large');
@@ -200,7 +199,7 @@ describe('AC-PUB-N Native 发布配图取材完整性（edge）', () => {
         headers: { 'content-length': '10' },
       }),
       async () => new NativePublishExecutor(refusingRuntime(dispatched), 'aidcp-ac-pub-n-')
-        .dispatch(uploadCommand('https://cdn.test/lies-about-size.png')),
+        .dispatch(uploadCommand('https://cdn.test/lies-about-size.png'), 'xiaohongshu'),
     );
     assert.equal(byActual.ok, false, '声明值撒谎时必须按实际流量拦下');
     assert.equal(byActual.error, 'image_too_large');
@@ -213,7 +212,7 @@ describe('AC-PUB-N Native 发布配图取材完整性（edge）', () => {
     const notOk = await withFetch(
       async () => new Response('nope', { status: 404 }),
       async () => new NativePublishExecutor(refusingRuntime(dispatched), 'aidcp-ac-pub-n-')
-        .dispatch(uploadCommand('https://cdn.test/missing.png')),
+        .dispatch(uploadCommand('https://cdn.test/missing.png'), 'xiaohongshu'),
     );
     assert.equal(notOk.ok, false);
     assert.equal(notOk.error, 'image_fetch_failed');

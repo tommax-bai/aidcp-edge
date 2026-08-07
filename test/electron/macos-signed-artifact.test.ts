@@ -120,7 +120,7 @@ async function writeSignedLikeApp() {
       { platform: 'facebook', adapterVersion: 'facebook-v1' },
       { platform: 'wechat_channels', adapterVersion: 'wechat-channels-v1' },
     ],
-    capabilityDigest: '42c5a2b7c9fb19a2e4c7c99b013187ee007236bba7ce771f5b30f1a7632c2dff',
+    capabilityDigest: '936375a80b97370dbe495b8bc5b17838bdbf516341c7f552d710cbd46ec5f186',
     sourceDigest: '1'.repeat(64),
     platform: 'darwin',
     arch: 'arm64',

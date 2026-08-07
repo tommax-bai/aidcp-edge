@@ -756,7 +756,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
    */
   private lastCardsAt = 0;
   /**
-   * 内容开始展示的时刻（详情停留的锚点）。`{p}.note.close` / `navigation.back` 据此只补差额，
+   * 内容开始展示的时刻（详情停留的锚点）。`{p}.navigation.back` 据此只补差额，
    * 把云端评估耗时天然吸收掉。锚点缺席（没有打开中的内容）时**不补一段等待**——
    * 「读不到锚点」与「停留不足」是两态，压成一态就会在 feed 上凭空补停留。
    */
@@ -1189,7 +1189,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
    *
    *  - 翻页（`page_scroll`）锚在**本批卡到达时刻**：云端按新卡数算出中心值，边缘只补差额；
    *    同时与就地读的阅读地板**取 max 不相加**——就地读比进详情页快得多，只认云端那一支会让长帖读完立刻秒滚。
-   *  - 关帖 / 返回（`note_close` / `navigation_back`）锚在**内容开始展示的时刻**：确有打开中的内容才生效；
+   *  - 返回（`navigation_back`；批 6b 起为唯一离页载体）锚在**内容开始展示的时刻**：确有打开中的内容才生效；
    *    云端没给中心值（旧云端 / 断连）时从本地区间采样并**按档位放大**，仍然非零。
    *
    * 三条一起守：① 已达标不再叠加（云端评估耗时被天然吸收，绝不产生双重延迟）；
@@ -1231,7 +1231,7 @@ export class NativeBrowseSession implements EdgeBrowseSession {
         sampling ??= 'inline_read_floor';
         remainingMs = Math.max(remainingMs, this.inlineReadFloorMs - Math.max(0, now - this.inlineReadStartedAt));
       }
-    } else if (command.kind === 'note_close' || command.kind === 'navigation_back') {
+    } else if (command.kind === 'navigation_back') {
       anchor = 'content_shown';
       // 锚点缺席 = 此刻并没有打开中的内容（例如就停在列表面）。这时**不补一段停留**：
       // 凭空补等于把「读不到」当成「停留不足」，两态不得压成一态。

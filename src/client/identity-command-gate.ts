@@ -15,10 +15,10 @@
  * 读身份 / 验证码协助 / 释放租约 / 会话收尾七条命令当年全被登记成 page_automation/page_account
  * （唯一共同点是「都需要浏览器」），身份闸按类别一拦全拦，只好手工挖洞放行。
  * 类别按「在编址什么」重归之后（观察 / 环境处置 / 编排收尾的 identity 都是 local_environment），
- * 被拦集合自然收敛为「真页面动作 + edge.task.acquire」，清单失去存在理由。
+ * 被拦集合自然收敛为「真页面动作 + task.acquire」，清单失去存在理由。
  *
  * ── acquire 为什么仍被拦 ──
- * `edge.task.acquire` 平台留痕维是 none（它自己不产生对象），但 identity 保持 page_account：
+ * `task.acquire` 平台留痕维是 none（它自己不产生对象），但 identity 保持 page_account：
  * 认领租约＝即将以该账号名义动作的**准入**。身份都不知道是谁，谈不上以谁的名义认领。
  * 这正是「留痕维 MUST NOT 单独决定放行」的机械落点。
  */
@@ -105,7 +105,7 @@ export function judgeCloudRebindUnderIdentity(health: IdentityHealth | undefined
  * 一条云端命令通道的**负向应答形状**。
  *
  * `action_completed`       —— 云端会消费 `action.completed`（浏览 / 页面动作通道）。
- * `publish_command_result` —— 云端按信封 id 关联 `publish.command.result`（发布原子通道）。
+ * `publish_command_result` —— 云端按信封 id 关联 `{p}.publish.command.result`（发布原子通道）。
  * `unwired`                —— 形状**存在**，但本次拒绝的原因还没有可用的取值，因此这一条现在发不出去。
  *                             此时唯一诚实的做法是：不发、响亮记一笔、并把缺口连同**可执行的配方**
  *                             登记下来。伪造一条云端根本不认识的回执比不发更坏——它让人以为
@@ -135,7 +135,7 @@ export const NATIVE_COMMAND_LANE: CommandLane = { label: 'Native', ack: 'action_
  *
  * 上一轮这里写的是「协议 v2 上任务租约没有负向应答形状，真兑现要跨仓加一条消息」。**那是错的**，
  * 复验读云端坐实：
- *   - 形状就是 `edge.task.released` + `reason`。云端 `comm/handler.ts` 把它路由到
+ *   - 形状就是 `task.released` + `reason`。云端 `comm/handler.ts` 把它路由到
  *     `comm/edge-task-lease-client.ts` 的 `onReleased()`，其中四段针对**仍在认领中**的任务直接
  *     `clearTimeout` + reject（`cdp_unhealthy`→`edge_unhealthy` / `browser_wake_failed` /
  *     `window_busy` / `yield_timeout`），**不等超时**。
@@ -160,7 +160,7 @@ export const NATIVE_COMMAND_LANE: CommandLane = { label: 'Native', ack: 'action_
 export const EDGE_TASK_LANE: CommandLane = {
   label: '任务',
   ack: 'unwired',
-  ackGap: '任务租约的负向应答形状已经存在（edge.task.released + reason；云端 onReleased 对 cdp_unhealthy /'
+  ackGap: '任务租约的负向应答形状已经存在（task.released + reason；云端 onReleased 对 cdp_unhealthy /'
     + ' browser_wake_failed / window_busy / yield_timeout 四种原因当场 reject 掉在认领中的任务、不等超时），'
     + '缺的只是「身份未落定」这一个 reason 枚举值：补齐＝两份 protocol.ts 的 EdgeTaskReleasedPayload.reason'
     + ' 各加一个值 + 云端 onReleased 加一个 if，不新增消息类型、不动动作映射、不进主动命令白名单。'
@@ -209,8 +209,11 @@ export function guardCommandsUnderIdentity<E extends { type: MessageType }>(
 
 export interface PublishCommandIdentityGateDeps {
   health: () => IdentityHealth | undefined;
-  /** 发布原子的应答按信封 id 关联；宿主只提供发送出口，载荷由本模块拼。 */
-  sendResult: (payload: Record<string, unknown>, correlationId: string) => void;
+  /**
+   * 发布原子的应答按信封 id 关联；宿主只提供发送出口，载荷由本模块拼。
+   * `commandType` 是被拒命令的消息名（批 6b：平台在名字里）——宿主据此选对应平台形结果名。
+   */
+  sendResult: (payload: Record<string, unknown>, correlationId: string, commandType: MessageType) => void;
   logger: (line: string) => void;
 }
 
@@ -243,6 +246,7 @@ export function guardPublishCommandsUnderIdentity<E extends PublishAtomEnvelopeL
         error: verdict.reason,
       },
       env.id,
+      env.type,
     );
     deps.logger(`[aidcp-edge] 发布命令被身份闸拒绝：${verdict.detail}`);
   };

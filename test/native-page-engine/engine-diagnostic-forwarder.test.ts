@@ -90,7 +90,7 @@ test('keeps the earliest lines at the bound and announces how many it suppressed
 test('emits no suppression notice when the volume stays under the bound', () => {
   const written: string[] = [];
   const forwarder = createEngineDiagnosticForwarder((line) => written.push(line), 3);
-  forwarder.beginCommand('note_close');
+  forwarder.beginCommand('navigation_back');
   forwarder.sink(engineLine(1));
   forwarder.sink(engineLine(2));
   forwarder.endCommand();
@@ -104,11 +104,11 @@ test('gives each command its own budget and settles a dangling one on flush', ()
   forwarder.beginCommand('note_open');
   forwarder.sink(engineLine(1));
   forwarder.sink(engineLine(2));
-  forwarder.beginCommand('note_close');
+  forwarder.beginCommand('navigation_back');
   forwarder.sink(engineLine(3));
   forwarder.flush();
   assert.ok(written.some((line) => line.includes('cmd=note_open class=host suppressed=1')));
-  assert.ok(written.some((line) => / cmd=note_close seq=3 /.test(line)));
+  assert.ok(written.some((line) => / cmd=navigation_back seq=3 /.test(line)));
 });
 
 test('production runtime supplies the diagnostic sink it built, by reference', () => {

@@ -726,7 +726,6 @@ pub(crate) fn facebook_action_name(command: &NativeCommand) -> &'static str {
         NativeCommand::FeedRefresh(_) => "refresh",
         NativeCommand::SearchExecute(_) => "search",
         NativeCommand::NoteOpen(_) => "open_note",
-        NativeCommand::NoteClose(_) => "close",
         NativeCommand::NavigationBack(_) => "back",
         NativeCommand::InteractionLike(_) => "like",
         NativeCommand::InteractionFollow(_) => "follow",

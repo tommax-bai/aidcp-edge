@@ -61,14 +61,22 @@ test('freezes every registered page-automation route across platforms', async ()
   );
 });
 
-test('freezes every publish.command kind exactly once', async () => {
+// 批 6b：发布平台段化。kind 冻结表按平台拆两份：XHS 名承载 12 全集、FB 名只承载 6 子集
+// （FacebookPublishCommandKind）；任何一侧多挂/漏挂一个 kind 此处必须红。
+const PUBLISH_EDGE_TYPES = ['xiaohongshu.publish.command', 'facebook.publish.command'];
+
+function isPublishCommandEntry(command: ManifestCommand): boolean {
+  return command.edgeTypes.some((edgeType) => PUBLISH_EDGE_TYPES.includes(edgeType));
+}
+
+test('freezes every publish command kind exactly once per platform', async () => {
   const manifest = await loadManifest();
-  const kinds = manifest.commands
-    .filter((command) => command.edgeTypes.includes('publish.command'))
+  const kindsFor = (edgeType: string): Array<string | undefined> => manifest.commands
+    .filter((command) => command.edgeTypes.includes(edgeType))
     .map((command) => command.publishKind)
     .sort();
 
-  assert.deepEqual(kinds, [
+  assert.deepEqual(kindsFor('xiaohongshu.publish.command'), [
     'add_with_candidate',
     'capture_postId',
     'capture_scheduled',
@@ -82,6 +90,22 @@ test('freezes every publish.command kind exactly once', async () => {
     'submit_publish',
     'upload_image',
   ]);
+  assert.deepEqual(kindsFor('facebook.publish.command'), [
+    'capture_postId',
+    'fill_field',
+    'navigate_entry',
+    'select_mode',
+    'submit_publish',
+    'upload_image',
+  ]);
+  // 发布回执名必须与命令名同平台形：共享 kind 双回执、XHS 专属 kind 单回执。
+  for (const command of manifest.commands.filter(isPublishCommandEntry)) {
+    assert.deepEqual(
+      command.receipts,
+      command.edgeTypes.map((edgeType) => `${edgeType}.result`),
+      `publish kind ${command.publishKind} 的 receipts 必须与 edgeTypes 平台形一一对应`,
+    );
+  }
 });
 
 test('manifest route and Native command identities are unique and bounded', async () => {
@@ -105,10 +129,10 @@ test('manifest route and Native command identities are unique and bounded', asyn
     },
   ]);
 
-  // publish.command 一个信封类型承载多个原子 kind（publishKind 区分）是唯一合法复用；
+  // {p}.publish.command 一个信封类型承载多个原子 kind（publishKind 区分）是唯一合法复用；
   // 其余 edgeTypes 不得在两个条目间重复——同一信封映射两个 kind 就是路由歧义。
   const nonPublishEdgeTypes = manifest.commands
-    .filter((command) => !command.edgeTypes.includes('publish.command'))
+    .filter((command) => !isPublishCommandEntry(command))
     .flatMap((command) => command.edgeTypes);
   const nativeKinds = [
     ...manifest.commands.map((command) => command.nativeKind),
@@ -135,8 +159,8 @@ test('manifest edgeTypes stay bound to the live cloud routes and mapper (rename 
   const mapper = nativeCommandKindByEnvelopeType as Record<string, string>;
   const registered = new Set(Object.keys(CLOUD_OPERATION_REGISTRY));
   for (const command of manifest.commands) {
-    // publish.command 的原子按 publishKind 走独立派发面，不经 envelope->kind mapper。
-    if (command.edgeTypes.includes('publish.command')) continue;
+    // {p}.publish.command 的原子按 publishKind 走独立派发面，不经 envelope->kind mapper。
+    if (isPublishCommandEntry(command)) continue;
     for (const edgeType of command.edgeTypes) {
       if (edgeType.startsWith('internal.')) continue; // 边缘本地命令，永远不是云端信封
       assert.ok(

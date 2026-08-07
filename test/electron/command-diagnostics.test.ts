@@ -45,10 +45,10 @@ test('electron command diagnostics: parser accepts only bounded structured event
 
 test('electron command diagnostics: stages upsert one row and preserve first receive time', () => {
   const received = diagnostics.parseCommandDiagnosticLine(line({
-    key: '1234abcd', type: 'publish.command', stage: 'received', summary: '发布步骤 fill_field',
+    key: '1234abcd', type: 'xiaohongshu.publish.command', stage: 'received', summary: '发布步骤 fill_field',
   }), 1_000);
   const dispatched = diagnostics.parseCommandDiagnosticLine(line({
-    key: '1234abcd', type: 'publish.command', stage: 'dispatched', summary: '发布步骤 fill_field',
+    key: '1234abcd', type: 'xiaohongshu.publish.command', stage: 'dispatched', summary: '发布步骤 fill_field',
   }), 2_000);
   let entries = diagnostics.mergeCommandDiagnostic([], received, 1_000);
   entries = diagnostics.mergeCommandDiagnostic(entries, dispatched, 2_000);

@@ -13,7 +13,7 @@ import { nativeCommandKindByEnvelopeType } from '../../src/native-page-engine/co
  *
  * 判据（两条都不可省，否则对账会退化成恒真）：
  * ① **跨平台取并集**——一次执行只产出一个输出，同一条命令在小红书与 Facebook 上的成功输出
- *    可以不同（`note_close` 在小红书回动作回执、在 Facebook 回列表卡片）。
+ *    可以不同（`navigation_back` 在小红书回动作回执、在 Facebook 回列表卡片）。
  * ② **排除失败路径**——`reportFailure` 对任何命令都会发一条 ok:false 的动作完成；
  *    把它算进来，`action.completed` 对每条命令都成立，对账就没有意义了。
  */
@@ -297,10 +297,6 @@ const BROWSE_SUCCESS_OUTPUTS: Readonly<Record<string, readonly SuccessOutput[]>>
   note_open: [
     { output: 'note_detail', platform: 'xiaohongshu', source: 'xhs-command-router.js kind===note_open (confirmedDetail)' },
     { output: 'note_detail', platform: 'facebook', source: 'facebook/feed.rs execute_facebook_note_navigation / 20-feed.js currentDetail' },
-  ],
-  note_close: [
-    { output: 'action_receipt', platform: 'xiaohongshu', source: 'xhs-command-router.js kind===note_close' },
-    { output: 'page_cards', platform: 'facebook', source: 'facebook/feed.rs execute_facebook_back_to_list' },
   ],
   navigation_back: [
     { output: 'action_receipt', platform: 'xiaohongshu', source: 'xhs-command-router.js kind===navigation_back' },
@@ -677,7 +673,8 @@ test('清单里的回执名只能出自一个封闭集合', () => {
     'identity.observed',
     'notification.home',
     'notification.items',
-    'publish.command.result',
+    'xiaohongshu.publish.command.result',
+    'facebook.publish.command.result',
     // 引擎内部读取的两条：不是云端消息类型，由宿主就地消费。
     'wechat_session_candidate',
     'identity_receipt',

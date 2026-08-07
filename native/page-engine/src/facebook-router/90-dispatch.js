@@ -117,7 +117,7 @@
     if(p.purpose==='navigate')return fail('open','target_not_found');
     return done(currentDetail());
   }
-  if(kind==='note_close'||kind==='navigation_back'){
+  if(kind==='navigation_back'){
     history.back();
     return done(action('back',true));
   }

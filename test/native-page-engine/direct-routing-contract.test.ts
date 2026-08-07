@@ -120,7 +120,7 @@ test('maps every publish atom to one fixed Native command without a fallback sur
   ] as const;
   for (const kind of kinds) {
     const command = nativePublishCommand({
-      platform: 'xiaohongshu', taskId: 'task-1', recordId: 7, seq: 1, kind,
+      taskId: 'task-1', recordId: 7, seq: 1, kind,
       params: { fieldType: 'title', value: 'x', candidateKind: 'topic', candidates: [], imageUrl: 'https://example.test/a.jpg', optionKind: 'visibility', optionValue: 'public', publishTime: Date.now() + 60_000 },
     }, { localImagePath: '/tmp/authorized.jpg', imageIndex: 0 });
     assert.match(command.kind, /^publish_/);

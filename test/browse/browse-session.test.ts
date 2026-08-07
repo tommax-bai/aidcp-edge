@@ -1226,7 +1226,7 @@ test('pacing: navigation.back 带 dwellMs 且停留不足 → 兜底停留（治
   const sess = new BrowseSession(h.deps, pacingOpts(sleeps, () => 1000)); // 时钟恒定 → 已停留≈0
   await startAndPush(sess, [
     makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0 }),
-    makeEnvelope('navigation.back', 'b', 0, { reason: 'quality_rejected', targetPage: 'feed', dwellMs: DWELL_SENTINEL }),
+    makeEnvelope('xiaohongshu.navigation.back', 'b', 0, { reason: 'quality_rejected', targetPage: 'feed', dwellMs: DWELL_SENTINEL }),
     makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
   ]);
   assert.ok(sleeps.some((ms) => ms > ISOLATE), `应有一次≈dwellMs的兜底停留，实际: ${sleeps}`);
@@ -1241,7 +1241,7 @@ test('pacing: 真实阅读已超过 dwellMs → 不叠加等待（无双重延�
   const sess = new BrowseSession(h.deps, pacingOpts(sleeps, now));
   await startAndPush(sess, [
     makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0 }),
-    makeEnvelope('navigation.back', 'b', 0, { reason: 'quality_rejected', targetPage: 'feed', dwellMs: DWELL_SENTINEL }),
+    makeEnvelope('xiaohongshu.navigation.back', 'b', 0, { reason: 'quality_rejected', targetPage: 'feed', dwellMs: DWELL_SENTINEL }),
     makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
   ]);
   assert.ok(!sleeps.some((ms) => ms > ISOLATE), `已读够不应再兜底停留，实际: ${sleeps}`);
@@ -1253,7 +1253,7 @@ test('pacing: navigation.back 缺 dwellMs（旧云端）仍非零停留（不秒
   const sess = new BrowseSession(h.deps, pacingOpts(sleeps, () => 1000));
   await startAndPush(sess, [
     makeEnvelope('xiaohongshu.note.open', 'n1', 0, { index: 0 }),
-    makeEnvelope('navigation.back', 'b', 0, { reason: 'quality_rejected', targetPage: 'feed' }), // 无 dwellMs
+    makeEnvelope('xiaohongshu.navigation.back', 'b', 0, { reason: 'quality_rejected', targetPage: 'feed' }), // 无 dwellMs
     makeEnvelope('session.end', 'e', 0, { reason: 'end' }),
   ]);
   // 内置下限 [1200,2600] 采样后抖动 → 必有一次落在该量级的兜底停留（> 1000ms）。
@@ -1272,11 +1272,10 @@ test('pacing: xiaohongshu.note.like 的 thinkMs → 执行前犹豫等待', asyn
   assert.ok(sleeps.some((ms) => ms > ISOLATE), `点赞前应有 thinkMs 犹豫，实际: ${sleeps}`);
 });
 
-// 回归：云端 back_to_feed 实际下发的 navigation.back【不带 targetPage】（生产路径）。
-// 修复前 undefined 落进 else 分支（裸 history.back / 固定 sleep + 瞬时扫描），feed 未水合即扫到
-// 0 卡 → reportVisibleCards 静默不发 page.cards → 边端死等命令、云端死等上报 → 边-云互等死锁。
-// 修复后 undefined 等同 'feed'：直连 explore feed，并走 waitForVisibleCards 轮询，等水合出卡再上报。
-test('browse-session: navigation.back 无 targetPage（back_to_feed 生产路径）轮询等水合再上报，不静默死锁', async () => {
+// 批 6b 回归（fail-closed）：xiaohongshu.navigation.back 的 targetPage 转必填——回哪张来源列表
+// 是云端决策，边缘绝不替云端补 'feed'。缺 targetPage 按格式错误拒收：诚实回
+// action.completed{back, ok:false, reason:'target_page_missing'}，零页面动作（不导航、不上报卡片）。
+test('browse-session: xiaohongshu.navigation.back 缺 targetPage → 格式错误 fail-closed 拒收（批 6b 回归）', async () => {
   const h = makeHarness();
   let url = 'https://www.xiaohongshu.com/explore';
   let returnStarted = false;
@@ -1310,20 +1309,15 @@ test('browse-session: navigation.back 无 targetPage（back_to_feed 生产路径
   const done = sess.start();
   await new Promise((r) => setTimeout(r, 15)); // 启动在 explore 完成首扫
   url = 'https://www.xiaohongshu.com/notification';
-  await sess.onCloudCommand(makeEnvelope('navigation.back', 'b', 0, { reason: 'back_to_feed' })); // 无 targetPage：复刻云端实际报文
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.navigation.back', 'b', 0, { reason: 'back_to_feed' } as never)); // 无 targetPage：格式错误
   await new Promise((r) => setTimeout(r, 5));
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }));
   await done;
-  assert.ok(
-    h.completedActions.some((a) => a.action === 'back' && a.ok),
-    'navigation.back 应回报 action.completed{back, ok:true}',
-  );
-  // 关键断言：back 后必须等水合再上报 page.cards（初始 1 次 + back 后 1 次）。
-  // 修复前 else 分支瞬时扫到 0 卡会静默 → 只会有 1 次 → 此断言失败。
-  assert.ok(
-    h.reportedCards.length >= 2,
-    `back 后应轮询等水合再上报 page.cards（不静默），实际上报 ${h.reportedCards.length} 次`,
-  );
+  const backReceipt = h.completedActions.find((a) => a.action === 'back');
+  assert.ok(backReceipt, '缺 targetPage 也必须有回执（静默丢弃=边-云互等死锁）');
+  assert.equal(backReceipt!.ok, false, '缺 targetPage MUST 拒收，绝不替云端补默认列表');
+  assert.equal((backReceipt as { reason?: string }).reason, 'target_page_missing');
+  assert.ok(!returnStarted, '拒收后 MUST NOT 发起任何返回导航（零页面动作）');
 });
 
 // 回归：启动时若 Chrome 停在【笔记详情页 /explore/<noteId>】（上一会话残留），
@@ -1829,7 +1823,7 @@ test('navigateBack: 看笔记→开通知→返回（无浮层整页离页）→
   await driveNavBack(
     nb,
     'https://www.xiaohongshu.com/notification', // 巡视后停在通知页、头上无浮层
-    makeEnvelope('navigation.back', 'b', 0, { reason: 'back_to_feed', targetPage: 'feed' }),
+    makeEnvelope('xiaohongshu.navigation.back', 'b', 0, { reason: 'back_to_feed', targetPage: 'feed' }),
   );
   assert.equal(nb.calls.historyBack, 0, '无浮层整页返回 MUST NOT history.back 回踩失效笔记详情');
   assert.ok(
@@ -1848,7 +1842,7 @@ test('navigateBack: 笔记浮层盖在列表上返回 → 直接 Page.navigate �
   await driveNavBack(
     nb,
     'https://www.xiaohongshu.com/explore/abc123?xsec_token=tok', // 详情态、头上有浮层
-    makeEnvelope('navigation.back', 'b', 0, { reason: 'back_to_feed', targetPage: 'feed' }),
+    makeEnvelope('xiaohongshu.navigation.back', 'b', 0, { reason: 'back_to_feed', targetPage: 'feed' }),
   );
   assert.equal(nb.calls.historyBack, 0, 'feed 来源即便有浮层也 MUST NOT history.back 回踩详情历史');
   assert.ok(
@@ -1899,7 +1893,7 @@ test('navigateBack: 搜索来源记录 URL → 直接 Page.navigate 回搜索结
   const sess = new BrowseSession(h.deps, noOpts());
   await startAndPush(sess, [
     makeEnvelope('xiaohongshu.note.open', 'n', 0, { index: 0, noteId: 'abc123' }),
-    makeEnvelope('navigation.back', 'b', 0, { reason: 'back_to_feed', targetPage: 'search' }),
+    makeEnvelope('xiaohongshu.navigation.back', 'b', 0, { reason: 'back_to_feed', targetPage: 'search' }),
     makeEnvelope('session.end', 'e', 0, { reason: 'test_end' }),
   ]);
 
@@ -1917,7 +1911,7 @@ test('navigateBack: 搜索来源 URL 缺失时 history.back 落坏页 → 兜底
   await driveNavBack(
     nb,
     'https://www.xiaohongshu.com/explore/abc123?xsec_token=tok',
-    makeEnvelope('navigation.back', 'b', 0, { reason: 'back_to_feed', targetPage: 'search' }),
+    makeEnvelope('xiaohongshu.navigation.back', 'b', 0, { reason: 'back_to_feed', targetPage: 'search' }),
   );
   assert.equal(nb.calls.historyBack, 1, '搜索来源 URL 缺失的边界情形可用 history.back 健康校验兜底');
   assert.ok(
@@ -1985,7 +1979,7 @@ test('task quiesce: 等当前浏览原子动作完成、取消未开始旧命令
   await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.scroll', 'active-scroll', 0, { reason: 'active' }));
   await started;
   // 当前 scroll 执行中，把一个旧 back 排进队列；quiesce 必须丢它而不是先排空。
-  await sess.onCloudCommand(makeEnvelope('navigation.back', 'stale-back', 0, { reason: 'stale' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.navigation.back', 'stale-back', 0, { reason: 'stale', targetPage: 'feed' }));
   let settled = false;
   const quiesced = sess.quiesceForTask().then((count) => { settled = true; return count; });
   await new Promise((resolve) => setImmediate(resolve));
@@ -2026,7 +2020,7 @@ test('task quiesce regression: 在途 navigation.back 完成后才允许发布 a
   const running = sess.start();
   await new Promise((resolve) => setTimeout(resolve, 10));
   detailMode = true;
-  await sess.onCloudCommand(makeEnvelope('navigation.back', 'active-back', 0, { reason: 'back_to_feed' }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.navigation.back', 'active-back', 0, { reason: 'back_to_feed', targetPage: 'feed' }));
   await navigateStarted;
   await sess.onCloudCommand(makeEnvelope('xiaohongshu.feed.scroll', 'stale-scroll', 0, { reason: 'old_page_decision' }));
   let acquired = false;

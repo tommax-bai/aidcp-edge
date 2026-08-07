@@ -167,14 +167,13 @@ test('Xiaohongshu publish submit consumes the platform-neutral publish guard inj
   const executor = new NativePublishExecutor(runtime, 'aidcp-native-publish-guard-', guard);
 
   const payload: PublishCommandPayload = {
-    platform: 'xiaohongshu',
     taskId: 'task-publish',
     recordId: 9,
     seq: 1,
     kind: 'submit_publish',
     params: {},
   };
-  const result = await executor.dispatch(payload);
+  const result = await executor.dispatch(payload, 'xiaohongshu');
 
   assert.equal(result.ok, true);
   assert.equal(observedLabel, 'xhs_publish_submit');

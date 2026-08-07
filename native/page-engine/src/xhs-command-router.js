@@ -632,13 +632,11 @@ async function(input){
     const opened=confirmedDetail();
     return opened?done(opened):ambiguous('open_note','detail_evidence_missing');
   }
-  if(kind==='note_close'){
-    const root=detailRoot();if(!root)return fail('close','detail_not_open');
-    const close=first(['[class*="close"]','button[aria-label*="关闭"]','button[title*="关闭"]'],root)||findByWords(['关闭','close'],root);
-    if(!close)return fail('close','close_control_not_found');
-    click(close);await sleep(350);return detailRoot()?ambiguous('close','detail_still_open'):done(action('close',true));
-  }
+  // 批 6b：note_close kind 已退役（云端零发送点）——关弹层只作为 navigation_back 的内部子步骤存在（见下）。
   if(kind==='navigation_back'){
+    // 批 6b：targetPage 必填（xiaohongshu.navigation.back）。回哪张来源列表是云端决策，
+    // 缺字段按格式错误 fail-closed 拒收，引擎绝不替云端补默认列表。
+    if(p.targetPage!=='feed'&&p.targetPage!=='search')return fail('back','target_page_missing');
     // 「返回」的语义是回到来源列表并确认列表真可用，不是按浏览器后退键
     // （后退会回踩过期的详情路由并触发平台的访问限制弹窗）。
     // 严格的 feed 判据：`/explore` 本身算列表，`/explore/<笔记 id>` 是详情页，不算

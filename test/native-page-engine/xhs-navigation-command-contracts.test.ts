@@ -1,11 +1,11 @@
 // 小红书**退出类命令**的行为契约测试：通知中心返回首页（`notification_back_home`）
-// 与关闭详情浮层（`note_close`）。（change native-page-engine-production-cutover 任务 4.6）
+// 与返回来源列表（`navigation_back`，批 6b 起关弹层为其内部前奏）。（change native-page-engine-production-cutover 任务 4.6）
 //
 // 立项理由：这两条此前**都没有任何行为测试**。实测覆盖：
 //   · `notification_back_home` —— Rust 侧 `NativeCommand::` 变体统计零命中；TS 侧唯一提到它的是
 //     `runtime-contracts-command-receipts.test.ts`，那是「声明的回执与可达发出点对账」、不碰行为。
 //     既有的 `xhs-notification-parity.test.ts` 覆盖了开通知中心与三个分类栏，唯独没覆盖「回去」那一步。
-//   · `note_close` —— 两侧**全仓零命中**，连声明对账里都没有。
+//   · `note_close` —— 批 6b 已退役（fail-closed 拒收，见下）；关弹层行为并入 `navigation_back`。
 //
 // 两条为什么归在一起、又为什么值得单独设防：它们都是**出口**，而出口的假成功不体现在自己身上，
 // 体现在它之后的每一条命令上 —— 会话以为自己回到了列表，实际还停在通知页 / 还开着详情浮层，
@@ -279,26 +279,20 @@ test('用文字识别到的通知入口走同一条三态判据', async () => {
   assert.equal(receipt(result).reason, 'notification_navigation_unconfirmed');
 });
 
-// ── note_close：关闭详情浮层 ───────────────────────────────────────────────
+// ── note_close 已退役（批 6b）＋ navigation_back 的关弹层前奏 ─────────────────
 //
-// 三态与返回首页同构：没开 / 找不到关闭控件 / 点了但浮层还在。
-// 额外锁一件 CLAUDE.md §2 点名过的事：**回执里的动作名是云端角色等待的规范名 `close`**，
-// 不是协议消息名 `note.close`、也不是引擎命令名 `note_close`。名字对不上的后果不是报错，
-// 是角色永远等不到回执、调度器把它当未知失败动作继续下发。
+// 批 6b 裁决：`{p}.note.close` 从协议删除、引擎 `note_close` kind 一并清退——关闭详情浮层
+// 降回 `navigation_back` 的引擎内部子步骤。这里锁三件事：
+//   ① 路由器对 `note_close` fail-closed（unsupported_command、零点击），绝不静默装作关成；
+//   ② `navigation_back` 的前奏仍会真把开着的浮层关掉（行为面零缩水）；
+//   ③ `targetPage` 必填：缺字段按格式错误拒收（`target_page_missing`、零页面动作）——
+//      回哪张来源列表是云端决策，引擎绝不替云端补默认列表。
 
 const DETAIL_URL = 'https://www.xiaohongshu.com/explore/65f1a2b3c4d5e6f708192a3b';
 
-/** 详情浮层夹具。`removeOnClick` 为真时，点击关闭控件会真把浮层摘掉（＝关成了）。 */
-function detailHtml(options: { closeControl?: 'class' | 'aria' | 'words' | 'none' } = {}): string {
-  const kind = options.closeControl ?? 'class';
-  const control = kind === 'none'
-    ? ''
-    : kind === 'class'
-      ? '<div class="close-box" id="close">×</div>'
-      : kind === 'aria'
-        ? '<button aria-label="关闭当前笔记" id="close"></button>'
-        : '<div role="button" id="close">关闭</div>';
-  return `<div class="note-detail-mask" id="detail">${control}<div class="content">正文</div></div>`;
+/** 详情浮层夹具（关闭控件走 class 判据；点击后真把浮层摘掉＝关成了）。 */
+function detailHtml(): string {
+  return '<div class="note-detail-mask" id="detail"><div class="close-box" id="close">×</div><div class="content">正文</div></div>';
 }
 
 function removeDetailOnClick(dom: JSDOM): { clicks: number } {
@@ -310,71 +304,44 @@ function removeDetailOnClick(dom: JSDOM): { clicks: number } {
   return counter;
 }
 
-test('详情浮层根本没开时诚实回未开始，且一次都没点', async () => {
-  const dom = install('<body><section class="note-item">列表</section></body>', DETAIL_URL);
-  const counter = countClicks(dom);
-
-  const result = await runRouter({ kind: 'note_close', params: {} });
-
-  assert.equal(result.effectPhase, 'not_started');
-  const value = receipt(result);
-  assert.equal(value.action, 'close', '动作名必须是云端角色等待的规范名 close');
-  assert.equal(value.ok, false);
-  assert.equal(value.reason, 'detail_not_open');
-  assert.equal(counter.clicks, 0);
-});
-
-test('浮层开着但找不到关闭控件时诚实回未开始，不乱点浮层里别的东西', async () => {
-  const dom = install(`<body>${detailHtml({ closeControl: 'none' })}</body>`, DETAIL_URL);
-  const counter = countClicks(dom);
-
-  const result = await runRouter({ kind: 'note_close', params: {} });
-
-  assert.equal(result.effectPhase, 'not_started');
-  assert.equal(receipt(result).reason, 'close_control_not_found');
-  // 关不掉时**不许**退而求其次点点别的：那正是「不认识的浮层被破坏性关闭」那类事故。
-  assert.equal(counter.clicks, 0);
-});
-
-test('点中关闭控件且浮层真消失才算确认', async () => {
+test('note_close 已退役：路由器 fail-closed 拒收且一次都没点', async () => {
   const dom = install(`<body>${detailHtml()}</body>`, DETAIL_URL);
+  const counter = countClicks(dom);
+
+  const result = await runRouter({ kind: 'note_close', params: {} });
+
+  assert.equal(result.effectPhase, 'not_started');
+  assert.equal(receipt(result).reason, 'unsupported_command');
+  assert.equal(counter.clicks, 0, '退役 kind 绝不许再碰页面');
+});
+
+test('navigation_back 的前奏仍会关掉开着的详情浮层（close 行为面零缩水）', async () => {
+  // 列表 URL 上盖着详情浮层：back 应先点关闭控件（浮层真消失），再确认列表可用。
+  const dom = install(`<body>${detailHtml()}<section class="note-item">列表</section></body>`, FEED_URL);
   const counter = removeDetailOnClick(dom);
 
-  const result = await runRouter({ kind: 'note_close', params: {} });
+  const result = await runRouter({ kind: 'navigation_back', params: { targetPage: 'feed' } });
 
-  assert.equal(counter.clicks, 1);
+  assert.equal(counter.clicks, 1, '开着的浮层必须被真点关一次');
   assert.equal(result.effectPhase, 'confirmed');
   const value = receipt(result);
-  assert.equal(value.action, 'close');
+  assert.equal(value.action, 'back', '动作名必须是云端角色等待的规范名 back');
   assert.equal(value.ok, true);
+  assert.equal(value.reason, 'list_ready');
 });
 
-test('★ 点了但浮层还在时是 ambiguous，绝不回确认', async () => {
-  // 红线：点击派发成功 ≠ 浮层关掉了。写成成功的话，后续 feed 扫描会在还开着的浮层背后跑。
-  const dom = install(`<body>${detailHtml()}</body>`, DETAIL_URL);
+test('★ 批 6b 回归：navigation_back 缺 targetPage → 格式错误 fail-closed 拒收（零页面动作）', async () => {
+  const dom = install(`<body>${detailHtml()}<section class="note-item">列表</section></body>`, FEED_URL);
   const counter = countClicks(dom);
 
-  const result = await runRouter({ kind: 'note_close', params: {} });
+  const result = await runRouter({ kind: 'navigation_back', params: {} });
 
-  assert.equal(counter.clicks, 1, '控件可见时必须真的点一次');
-  assert.equal(result.effectPhase, 'ambiguous');
-  assert.notEqual(result.effectPhase, 'confirmed');
+  assert.equal(result.effectPhase, 'not_started');
   const value = receipt(result);
-  assert.equal(value.action, 'close');
+  assert.equal(value.action, 'back');
   assert.equal(value.ok, false);
-  assert.equal(value.reason, 'detail_still_open');
-});
-
-test('aria 与纯文案两种关闭控件走同一条三态判据', async () => {
-  for (const closeControl of ['aria', 'words'] as const) {
-    const dom = install(`<body>${detailHtml({ closeControl })}</body>`, DETAIL_URL);
-    const counter = removeDetailOnClick(dom);
-
-    const result = await runRouter({ kind: 'note_close', params: {} });
-
-    assert.equal(counter.clicks, 1, `${closeControl} 控件应被点到`);
-    assert.equal(result.effectPhase, 'confirmed', `${closeControl} 控件关成后应确认`);
-  }
+  assert.equal(value.reason, 'target_page_missing');
+  assert.equal(counter.clicks, 0, '拒收后 MUST NOT 触碰页面（连关弹层前奏都不许跑）');
 });
 
 // ── profile_open：打开作者主页 ────────────────────────────────────────────

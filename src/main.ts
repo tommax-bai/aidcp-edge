@@ -74,6 +74,7 @@ import { PublishUiEventTracker, uiSnapshotToLines, writeNoteStageLine } from './
 import { imageTempPrefixFor, sweepImageTempDirs } from './flows/image-uploader.js';
 import type {
   PublishCommandPayload,
+  FacebookPublishCommandPayload,
   PublishCommandResultPayload,
   EdgeTaskAcquirePayload,
   EdgeTaskReleasePayload,
@@ -1036,16 +1037,16 @@ async function main(): Promise<void> {
     requestWake: (deadlineAt) => ensureBrowserAwake('edge_task', deadlineAt),
     onAcquired: (payload) => {
       try {
-        client.send('edge.task.acquired', payload);
+        client.send('task.acquired', payload);
       } catch (err) {
-        console.error('[aidcp-edge] edge.task.acquired 回传失败:', err);
+        console.error('[aidcp-edge] task.acquired 回传失败:', err);
       }
     },
     onReleased: (payload) => {
       try {
-        client.send('edge.task.released', payload);
+        client.send('task.released', payload);
       } catch (err) {
-        console.error('[aidcp-edge] edge.task.released 回传失败:', err);
+        console.error('[aidcp-edge] task.released 回传失败:', err);
       }
     },
     // 任务与发布写者都已收敛、浏览恢复到安全边界后，只通知 Electron 重新应用最新待机提示。
@@ -1178,35 +1179,50 @@ async function main(): Promise<void> {
   // 两帧在同一宏任务内派发，connect() 的续体（微任务）还没来得及跑注册代码，后注册的处理器
   // 会静默漏掉首帧。注册本身不需要活连接，先注册零成本。
   // 认领要过身份闸（认领＝接下来会以这个账号的名义动作 + 记账）；释放永远放行（拦掉只会让租约挂着）。
-  // 本通道 `ack:'unwired'`：负向应答形状**已经存在**（`edge.task.released` + `reason`，云端 `onReleased`
+  // 本通道 `ack:'unwired'`：负向应答形状**已经存在**（`task.released` + `reason`，云端 `onReleased`
   // 对已知原因即刻 reject、不等 acquire 超时），缺的只是「身份未落定」这一档 reason 取值还没接线。
   // 在它接上之前，拒绝只响亮记日志、不伪造一条云端收不到的回执——但 MUST NOT 把这说成「没有路可走」，
   // 补齐配方（两份 protocol.ts 各加一个 reason 值 + 云端 onReleased 一个 if）见 `EDGE_TASK_LANE.ackGap`。
   client.onEdgeTaskCommand(guardCommandsUnderIdentity(EDGE_TASK_LANE, identityGateDeps, (env) => {
-    if (env.type === 'edge.task.acquire') {
+    if (env.type === 'task.acquire') {
       taskCoordinator.acquire(env.payload as EdgeTaskAcquirePayload);
-    } else if (env.type === 'edge.task.release') {
+    } else if (env.type === 'task.release') {
       taskCoordinator.release(env.payload as EdgeTaskReleasePayload);
     }
   }));
 
-  // 指令驱动发布：云端逐条下发 publish.command，边缘逐条执行 + 后置校验 + 如实回报（onPublishAtomCommand，见下）。
+  // 指令驱动发布：云端逐条下发 {p}.publish.command，边缘逐条执行 + 后置校验 + 如实回报（onPublishAtomCommand，见下）。
   // 遗留整页发布处理器已删除（change lease-strict-preemption 5.8；其消息类型 publish.request 已随 drop-dead-cloud-edge-commands 从协议移除）：
-  //   全程不过租约闸、云端已无发送方（只发 publish.command），保留只会绕过抢占/租约在途发布假成功修复链。
+  //   全程不过租约闸、云端已无发送方（只发 {p}.publish.command），保留只会绕过抢占/租约在途发布假成功修复链。
   // 陪伴界面事件（edge-companion-ui 6.4）：发布终态的本地事实经 [ui-event] 行直达桌面壳。
   const publishUiEvents = new PublishUiEventTracker();
   // 身份闸（S9）先于租约闸：租约说的是「该不该由这条任务来做」，身份说的是「这台机器现在到底代表谁」。
   // 后者不成立时，发布是**在平台上留真实痕迹**的动作，必须拒绝并按发布回执形状如实回（否则云端挂起等结果）。
   // 判据 + 回执 + 「不调用下面这个处理器」整段在 guardPublishCommandsUnderIdentity 里
   // （上一轮条件写在这里，改成 `false && …` 全套用例零红）。
-  client.onPublishAtomCommand(guardPublishCommandsUnderIdentity<Envelope<PublishCommandPayload>>({
+  // 词汇批 6b：平台维从载荷字段迁进消息名。平台严格从命令名前缀解析（不再有 ?? 'xiaohongshu' 静默缺省）；
+  // 应答用对应平台形结果名（{p}.publish.command.result），云端仍按信封 id 关联。
+  const publishPlatformFor = (type: string): 'xiaohongshu' | 'facebook' | undefined =>
+    type === 'xiaohongshu.publish.command' ? 'xiaohongshu'
+      : type === 'facebook.publish.command' ? 'facebook'
+        : undefined;
+  const publishResultTypeFor = (type: string): 'xiaohongshu.publish.command.result' | 'facebook.publish.command.result' =>
+    type === 'facebook.publish.command' ? 'facebook.publish.command.result' : 'xiaohongshu.publish.command.result';
+  // Facebook 发布合法 kind 子集（协议 FacebookPublishCommandKind 的运行时镜像）：
+  // 云端类型面已不可表示非法组合；边缘仍 fail-closed 拒收，绝不把 XHS 专属 kind 派进 FB 执行链。
+  const FACEBOOK_PUBLISH_KINDS: ReadonlySet<string> = new Set([
+    'navigate_entry', 'select_mode', 'upload_image', 'fill_field', 'submit_publish', 'capture_postId',
+  ]);
+  client.onPublishAtomCommand(guardPublishCommandsUnderIdentity<Envelope<PublishCommandPayload | FacebookPublishCommandPayload>>({
     health: () => identityGuard?.health,
-    sendResult: (payload, correlationId) => client.send('publish.command.result', payload, correlationId),
+    sendResult: (payload, correlationId, commandType) =>
+      client.send(publishResultTypeFor(commandType), payload, correlationId),
     logger: (line) => console.warn(line),
   }, (env) => {
+    const resultType = publishResultTypeFor(env.type);
     if (!taskCoordinator.canExecute(env.payload.taskId)) {
       client.send(
-        'publish.command.result',
+        resultType,
         {
           recordId: env.payload.recordId,
           seq: env.payload.seq,
@@ -1233,12 +1249,12 @@ async function main(): Promise<void> {
     const settled = (async () => {
       console.log(writeNoteStageLine());
       publishUiEvents.observe(env.payload);
-      // §7 在途登记：按 publish.command.result 形状诚实判失败（带 recordId/seq/kind，同 env.id 回执）。
+      // §7 在途登记：按 {p}.publish.command.result 形状诚实判失败（带 recordId/seq/kind，同 env.id 回执）。
       // 同一次调用把「写者踏上页面」也记上——与下面的 finally: settle() 严格配对，中间无可抛语句。
       inFlightPublishes.begin(env.id, (reason) => {
         try {
           client.send(
-            'publish.command.result',
+            resultType,
             {
               recordId: env.payload.recordId,
               seq: env.payload.seq,
@@ -1256,9 +1272,18 @@ async function main(): Promise<void> {
       });
       let result: PublishCommandResultPayload;
       try {
-        const publishPlatform = env.payload.platform ?? 'xiaohongshu';
-        if (publishPlatform === platformDriver.platform) {
-          result = await nativePublishExecutor.dispatch(env.payload, takeoverCtx.signal);
+        const publishPlatform = publishPlatformFor(env.type);
+        if (publishPlatform === 'facebook' && !FACEBOOK_PUBLISH_KINDS.has(env.payload.kind)) {
+          // fail-closed：FB 非法 kind（XHS 专属原子）绝不进执行链；带独立原因诚实回报。
+          result = {
+            recordId: env.payload.recordId,
+            seq: env.payload.seq,
+            kind: env.payload.kind,
+            ok: false,
+            error: 'kind_not_supported_on_platform',
+          };
+        } else if (publishPlatform !== undefined && publishPlatform === platformDriver.platform) {
+          result = await nativePublishExecutor.dispatch(env.payload, publishPlatform, takeoverCtx.signal);
         } else {
           result = {
             recordId: env.payload.recordId,
@@ -1286,9 +1311,9 @@ async function main(): Promise<void> {
       const uiLine = publishUiEvents.onResult(env.payload, result);
       if (uiLine) console.log(uiLine);
       try {
-        client.send('publish.command.result', result, env.id);
+        client.send(resultType, result, env.id);
       } catch (sendErr) {
-        console.error('[aidcp-edge] publish.command.result 回传失败:', sendErr);
+        console.error(`[aidcp-edge] ${resultType} 回传失败:`, sendErr);
       }
     })();
     settled.catch(() => {}); // IIFE 自包含（内部已 try/catch）不应抛；防御性避免意外 unhandledRejection

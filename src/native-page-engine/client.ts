@@ -143,7 +143,7 @@ export interface NativePagePlatformAdapter {
 
 export type NativePageCommandKind =
   | 'page_probe' | 'plan_execute' | 'session_stop' | 'browse_next' | 'browse_scroll' | 'page_scroll'
-  | 'feed_refresh' | 'search_execute' | 'note_open' | 'note_close' | 'navigation_back'
+  | 'feed_refresh' | 'search_execute' | 'note_open' | 'navigation_back'
   | 'note_browse_images' | 'note_scroll_comments' | 'profile_open' | 'notification_open'
   | 'notification_browse_comments' | 'notification_browse_likes' | 'notification_browse_follows'
   | 'notification_back_home' | 'interaction_like' | 'interaction_collect' | 'interaction_follow'

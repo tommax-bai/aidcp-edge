@@ -271,7 +271,7 @@ test('每条登记为消费停留的命令，都以内容开始展示的时刻�
   const kinds = timingContract.commands
     .filter((entry) => entry.consumes.includes('dwellMs'))
     .map((entry) => entry.nativeKind);
-  assert.deepEqual(kinds.sort(), ['navigation_back', 'note_close', 'page_scroll']);
+  assert.deepEqual(kinds.sort(), ['navigation_back', 'page_scroll']);
 
   for (const kind of kinds) {
     const type = envelopeTypeForKind(kind);
@@ -283,7 +283,7 @@ test('每条登记为消费停留的命令，都以内容开始展示的时刻�
       await h.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1' })); // ⇒ 立下详情展示锚点
     }
     waits.length = 0;
-    await h.session.onCloudCommand(envelope(type, { reason: 'r', dwellMs: 6_000 }));
+    await h.session.onCloudCommand(envelope(type, { reason: 'r', targetPage: 'feed', dwellMs: 6_000 }));
     assert.deepEqual(waits, [6_000], `${kind} 收下了云端停留却没有补足`);
   }
 });
@@ -362,7 +362,7 @@ test('登记为不消费停留的命令确实一步都不等，而同一锚点�
     await h.session.onCloudCommand(envelope(envelopeTypeForKind(kind), { noteId: 'note-1', dwellMs: 6_000 }));
     assert.deepEqual(waits, [], `${kind} 不该消费停留`);
     // 锚点确实是活的——否则上面那条断言只是「锚点缺席」的空跑。
-    await h.session.onCloudCommand(envelope('xiaohongshu.note.close', { reason: 'r', dwellMs: 6_000 }));
+    await h.session.onCloudCommand(envelope('xiaohongshu.navigation.back', { reason: 'r', targetPage: 'feed', dwellMs: 6_000 }));
     assert.deepEqual(waits, [6_000], `${kind} 之后详情停留锚点必须仍然可用`);
   }
 });
@@ -376,12 +376,12 @@ test('改变风控档位不改变云端已下发时长的等待中心值，只�
     const cloud = harness({ platform: 'xiaohongshu', sleep: async (ms) => { cloudWaits.push(ms); } });
     cloud.session.applyPacingSnapshot(undefined, tempo);
     await cloud.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1', thinkMs: 2_400 }));
-    await cloud.session.onCloudCommand(envelope('navigation.back', { reason: 'r', dwellMs: 6_000 }));
+    await cloud.session.onCloudCommand(envelope('xiaohongshu.navigation.back', { reason: 'r', targetPage: 'feed', dwellMs: 6_000 }));
 
     const fallback = harness({ platform: 'xiaohongshu', sleep: async (ms) => { fallbackWaits.push(ms); } });
     fallback.session.applyPacingSnapshot(undefined, tempo);
     await fallback.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1' }));
-    await fallback.session.onCloudCommand(envelope('navigation.back', { reason: 'r' })); // 旧云端 / 断连：无 dwellMs
+    await fallback.session.onCloudCommand(envelope('xiaohongshu.navigation.back', { reason: 'r', targetPage: 'feed' })); // 旧云端 / 断连：无 dwellMs
   }
 
   // 云端值：两档完全一致（退役 Facebook 会话把 tempo 又乘了一遍，照抄即 double-count）。
@@ -401,7 +401,7 @@ test('中途档位刷新只改档位、绝不清掉离页停留锚点', async ()
     await h.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1' }));
     waits.length = 0;
     if (update !== undefined) await h.session.onCloudCommand(envelope('pacing.update', { tempo: update }));
-    await h.session.onCloudCommand(envelope('navigation.back', { reason: 'r' })); // 无 dwellMs ⇒ 走本地兜底
+    await h.session.onCloudCommand(envelope('xiaohongshu.navigation.back', { reason: 'r', targetPage: 'feed' })); // 无 dwellMs ⇒ 走本地兜底
     return waits;
   }
 
@@ -421,7 +421,7 @@ test('重连重注入的每类操作 floor 区间真的被本地兜底采纳', a
   await h.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1' }));
   waits.length = 0;
 
-  await h.session.onCloudCommand(envelope('xiaohongshu.note.close', { reason: 'r' }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.navigation.back', { reason: 'r', targetPage: 'feed' }));
 
   assert.deepEqual(waits, [8_000]);
 });
@@ -443,8 +443,8 @@ test('离页停留等待被接管时当场让路，且零执行器派发', async
   await h.session.onCloudCommand(envelope('xiaohongshu.note.open', { noteId: 'note-1' }));
   const dispatched = h.executions.length;
 
-  const pending = h.session.onCloudCommand(envelope('navigation.back', { reason: 'r', dwellMs: 60_000 }));
-  await within(enteredWait, 1_000, 'navigation.back 从未进入离页停留等待');
+  const pending = h.session.onCloudCommand(envelope('xiaohongshu.navigation.back', { reason: 'r', targetPage: 'feed', dwellMs: 60_000 }));
+  await within(enteredWait, 1_000, 'xiaohongshu.navigation.back 从未进入离页停留等待');
   h.session.discardQueuedCloudCommands();
   await within(pending, 1_000, '停留等待未在接管到达时让路');
 
@@ -470,7 +470,7 @@ test('被接管掐断的停留不消费锚点：重下的返回命令仍然补�
   waits.length = 0;
 
   await within(
-    h.session.onCloudCommand(envelope('navigation.back', { reason: 'r', dwellMs: 6_000 })),
+    h.session.onCloudCommand(envelope('xiaohongshu.navigation.back', { reason: 'r', targetPage: 'feed', dwellMs: 6_000 })),
     1_000,
     '被接管的停留未让路',
   );
@@ -478,11 +478,11 @@ test('被接管掐断的停留不消费锚点：重下的返回命令仍然补�
 
   // 云端重下同一条命令：锚点还在（时钟未推进 ⇒ 欠额未变），停留必须原样补足。
   takeover = false;
-  await h.session.onCloudCommand(envelope('navigation.back', { reason: 'r', dwellMs: 6_000 }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.navigation.back', { reason: 'r', targetPage: 'feed', dwellMs: 6_000 }));
   assert.deepEqual(waits, [6_000, 6_000], '接管把锚点吃掉了 ⇒ 重下的返回直接秒退');
 
   // 而真正等完的那一次确实消费掉了锚点：再下一条不再重复补一段停留。
-  await h.session.onCloudCommand(envelope('navigation.back', { reason: 'r', dwellMs: 6_000 }));
+  await h.session.onCloudCommand(envelope('xiaohongshu.navigation.back', { reason: 'r', targetPage: 'feed', dwellMs: 6_000 }));
   assert.deepEqual(waits, [6_000, 6_000], '锚点已消费，不得再补一段');
 });
 
@@ -503,8 +503,7 @@ test('节奏等待期间被接管：零派发的命令报「未开始」，绝�
   // 犹豫面与停留面各取一条：两条腿都在派发之前等，两条都必须收窄。
   const cases: Array<{ type: MessageType; payload: Record<string, unknown>; anchor?: MessageType }> = [
     { type: 'xiaohongshu.note.like', payload: { noteId: 'note-1', thinkMs: 2_400 } },
-    { type: 'xiaohongshu.note.close', payload: { reason: 'r', dwellMs: 6_000 }, anchor: 'xiaohongshu.note.open' },
-    { type: 'navigation.back', payload: { reason: 'r', dwellMs: 6_000 }, anchor: 'xiaohongshu.note.open' },
+    { type: 'xiaohongshu.navigation.back', payload: { reason: 'r', targetPage: 'feed', dwellMs: 6_000 }, anchor: 'xiaohongshu.note.open' },
   ];
 
   for (const item of cases) {

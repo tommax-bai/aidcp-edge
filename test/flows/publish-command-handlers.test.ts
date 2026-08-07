@@ -126,7 +126,7 @@ function mk(
 test('AC-CMD fill_field(title) 成功 → ok:true，DOM 真写入，回报带 recordId+seq+kind', async () => {
   const doc = buildDom(publishPageHtml());
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'title', value: '测试标题' }, 3));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'title', value: '测试标题' }, 3), 'xiaohongshu');
   assert.equal(res.ok, true);
   assert.equal(res.recordId, 100);
   assert.equal(res.seq, 3);
@@ -138,7 +138,7 @@ test('AC-CMD fill_field 后置校验失败（点了没生效）→ ok:false，�
   const doc = buildDom(publishPageHtml());
   // noopInput：执行器点击但不真写入 → 校验读不到内容 → engine 重试到顶仍失败。
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc, true)), { maxAttempts: 2 });
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'title', value: '没写进去的标题' }));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'title', value: '没写进去的标题' }), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.ok(res.error, '失败必须带真实 error');
   assert.notEqual(res.error, undefined);
@@ -147,7 +147,7 @@ test('AC-CMD fill_field 后置校验失败（点了没生效）→ ok:false，�
 test('AC-CMD capture_postId 抓到 → ok:true value=真实 postId', async () => {
   const doc = buildDom(publishPageHtml('<a href="/explore/post_abc123">查看笔记</a>'));
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
-  const res = await dispatcher.dispatch(cmd('capture_postId'));
+  const res = await dispatcher.dispatch(cmd('capture_postId'), 'xiaohongshu');
   assert.equal(res.ok, true);
   assert.equal(res.value, 'post_abc123');
 });
@@ -155,7 +155,7 @@ test('AC-CMD capture_postId 抓到 → ok:true value=真实 postId', async () =>
 test('AC-CMD capture_postId 抓不到 → ok:false error=no_target（红线：MUST NOT postId||fake）', async () => {
   const doc = buildDom(publishPageHtml());
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
-  const res = await dispatcher.dispatch(cmd('capture_postId'));
+  const res = await dispatcher.dispatch(cmd('capture_postId'), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.equal(res.error, 'no_target');
   assert.equal(res.value, undefined);
@@ -167,7 +167,7 @@ test('AC-CMD capture_postId 抓到带 xsec_token 的完整分享 URL → 回报 
     publishPageHtml('<a href="https://www.xiaohongshu.com/explore/post_abc123?xsec_token=ABCTOKEN&xsec_source=pc_feed">查看笔记</a>'),
   );
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
-  const res = await dispatcher.dispatch(cmd('capture_postId'));
+  const res = await dispatcher.dispatch(cmd('capture_postId'), 'xiaohongshu');
   assert.equal(res.ok, true);
   assert.equal(res.value, 'post_abc123');
   assert.ok(res.postUrl?.includes('xsec_token=ABCTOKEN'), '应回报带 token 的完整分享 URL');
@@ -176,7 +176,7 @@ test('AC-CMD capture_postId 抓到带 xsec_token 的完整分享 URL → 回报 
 test('AC-CMD capture_postId 只有裸 id（缺 xsec_token）→ postUrl 诚实置空（红线：不拼打不开的假链接）', async () => {
   const doc = buildDom(publishPageHtml('<a href="/explore/post_bare">查看笔记</a>'));
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
-  const res = await dispatcher.dispatch(cmd('capture_postId'));
+  const res = await dispatcher.dispatch(cmd('capture_postId'), 'xiaohongshu');
   assert.equal(res.ok, true);
   assert.equal(res.value, 'post_bare', 'postId 仍抓得到');
   assert.equal(res.postUrl, undefined, '缺 token → 不回 postUrl（诚实置空，绝不裸 id 拼假链接）');
@@ -185,7 +185,7 @@ test('AC-CMD capture_postId 只有裸 id（缺 xsec_token）→ postUrl 诚实�
 test('AC-MEDIA upload_image 未注入 uploader → kind_not_implemented（诚实，不假成功）', async () => {
   const doc = buildDom(publishPageHtml());
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
-  const res = await dispatcher.dispatch(cmd('upload_image', { imageUrl: 'https://cdn/x.jpg' }));
+  const res = await dispatcher.dispatch(cmd('upload_image', { imageUrl: 'https://cdn/x.jpg' }), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.equal(res.error, 'kind_not_implemented');
 });
@@ -195,13 +195,13 @@ test('AC-MEDIA upload_image 经注入 uploader → 成功透传 ok:true / 失败
   let calledWith = '';
   const okUploader = { upload: async (url: string) => { calledWith = url; return { ok: true }; } } as any;
   const okDisp = mk(depsFor(doc, new FakeExecutor(doc)), {}, Date.now, okUploader);
-  const ok = await okDisp.dispatch(cmd('upload_image', { imageUrl: 'https://cdn/a.png' }));
+  const ok = await okDisp.dispatch(cmd('upload_image', { imageUrl: 'https://cdn/a.png' }), 'xiaohongshu');
   assert.equal(ok.ok, true);
   assert.equal(calledWith, 'https://cdn/a.png', 'imageUrl 透传给 uploader');
 
   const failUploader = { upload: async () => ({ ok: false, error: 'image_not_attached' }) } as any;
   const failDisp = mk(depsFor(doc, new FakeExecutor(doc)), {}, Date.now, failUploader);
-  const fail = await failDisp.dispatch(cmd('upload_image', { imageUrl: 'https://cdn/a.png' }));
+  const fail = await failDisp.dispatch(cmd('upload_image', { imageUrl: 'https://cdn/a.png' }), 'xiaohongshu');
   assert.equal(fail.ok, false);
   assert.equal(fail.error, 'image_not_attached', '上传失败如实回报，绝不翻成 ok:true');
 });
@@ -210,7 +210,7 @@ test('AC-MEDIA upload_image 缺 imageUrl（有 uploader）→ no_target', async 
   const doc = buildDom(publishPageHtml());
   const uploader = { upload: async () => ({ ok: true }) } as any;
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)), {}, Date.now, uploader);
-  const res = await dispatcher.dispatch(cmd('upload_image', {}));
+  const res = await dispatcher.dispatch(cmd('upload_image', {}), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.equal(res.error, 'no_target');
 });
@@ -233,17 +233,17 @@ test('FB-PUBLISH platform=facebook → 交给 Facebook executor，绝不走 XHS 
     { sleep: instantSleep },
     facebookPublisher,
   );
-  const res = await dispatcher.dispatch({ ...cmd('fill_field', { fieldType: 'content', value: 'FB正文' }, 9), platform: 'facebook' });
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value: 'FB正文' }, 9), 'facebook');
   assert.equal(res.ok, true);
   assert.equal(seen.length, 1);
-  assert.equal(seen[0].platform, 'facebook');
+  assert.equal(seen[0].kind, 'fill_field');
   assert.equal((doc.querySelector('[data-action-id="note.publish_content"]') as HTMLTextAreaElement).value, '');
 });
 
 test('FB-PUBLISH platform=facebook 但未注入 executor → kind_not_implemented（诚实失败）', async () => {
   const doc = buildDom(publishPageHtml());
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
-  const res = await dispatcher.dispatch({ ...cmd('fill_field', { fieldType: 'content', value: 'FB正文' }), platform: 'facebook' });
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value: 'FB正文' }), 'facebook');
   assert.equal(res.ok, false);
   assert.equal(res.error, 'kind_not_implemented');
 });
@@ -253,7 +253,7 @@ test('AC-MEDIA set_cover → 定位封面入口 + 封面激活态后置校验通
   const extra = `<button data-action-id="note.publish_set_cover">设为封面</button><div data-action-id="note.publish_cover_active"></div>`;
   const doc = buildDom(publishPageHtml(extra));
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
-  const res = await dispatcher.dispatch(cmd('set_cover', { imageUrl: 'https://cdn/a.png' }));
+  const res = await dispatcher.dispatch(cmd('set_cover', { imageUrl: 'https://cdn/a.png' }), 'xiaohongshu');
   assert.equal(res.ok, true);
   assert.equal(res.kind, 'set_cover');
 });
@@ -261,7 +261,7 @@ test('AC-MEDIA set_cover → 定位封面入口 + 封面激活态后置校验通
 test('AC-MEDIA set_cover 封面入口缺失 → ok:false（诚实 no_target，不假成功）', async () => {
   const doc = buildDom(publishPageHtml()); // 无封面入口
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)), { maxAttempts: 2 });
-  const res = await dispatcher.dispatch(cmd('set_cover', { imageUrl: 'https://cdn/a.png' }));
+  const res = await dispatcher.dispatch(cmd('set_cover', { imageUrl: 'https://cdn/a.png' }), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.ok(res.error, '失败必须带真实 error');
 });
@@ -275,22 +275,22 @@ test('AC-CMD-S4 add_with_candidate 按 candidateKind 路由：mention/location/c
   const doc = buildDom(publishPageHtml(extra));
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
 
-  const mention = await dispatcher.dispatch(cmd('add_with_candidate', { candidateKind: 'mention', value: '老王' }));
+  const mention = await dispatcher.dispatch(cmd('add_with_candidate', { candidateKind: 'mention', value: '老王' }), 'xiaohongshu');
   assert.equal(mention.ok, true, 'mention 应成功');
   assert.equal((doc.querySelector('[data-action-id="note.publish_mention"]') as HTMLInputElement).value, '老王');
 
-  const location = await dispatcher.dispatch(cmd('add_with_candidate', { candidateKind: 'location', value: '上海' }));
+  const location = await dispatcher.dispatch(cmd('add_with_candidate', { candidateKind: 'location', value: '上海' }), 'xiaohongshu');
   assert.equal(location.ok, true, 'location 应成功');
   assert.equal((doc.querySelector('[data-action-id="note.publish_location"]') as HTMLInputElement).value, '上海');
 
-  const collection = await dispatcher.dispatch(cmd('add_with_candidate', { candidateKind: 'collection', value: '技术札记' }));
+  const collection = await dispatcher.dispatch(cmd('add_with_candidate', { candidateKind: 'collection', value: '技术札记' }), 'xiaohongshu');
   assert.equal(collection.ok, true, 'collection 应成功');
 });
 
 test('AC-CMD-S4 add_with_candidate(mention) 控件缺失 → ok:false（诚实 no_target，不假成功）', async () => {
   const doc = buildDom(publishPageHtml()); // 无 mention 控件
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)), { maxAttempts: 2 });
-  const res = await dispatcher.dispatch(cmd('add_with_candidate', { candidateKind: 'mention', value: '查无此控件' }));
+  const res = await dispatcher.dispatch(cmd('add_with_candidate', { candidateKind: 'mention', value: '查无此控件' }), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.ok(res.error, '失败必须带真实 error');
 });
@@ -299,7 +299,7 @@ test('AC-CMD-S4 set_option(visibility) → 定位选项控件 + 值校验通过'
   const extra = `<button data-action-id="note.publish_set_option.visibility">公开</button>`;
   const doc = buildDom(publishPageHtml(extra));
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)));
-  const res = await dispatcher.dispatch(cmd('set_option', { optionKind: 'visibility', optionValue: '公开' }));
+  const res = await dispatcher.dispatch(cmd('set_option', { optionKind: 'visibility', optionValue: '公开' }), 'xiaohongshu');
   assert.equal(res.ok, true);
   assert.equal(res.kind, 'set_option');
 });
@@ -348,7 +348,7 @@ test('XHS-SCHEDULE set_schedule 写入 1h–14d 内时间并以三项正证据�
   const publishTime = now + 2 * 60 * 60 * 1000;
   const cdp = new FakeScheduleCdp();
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)), {}, () => now, undefined, cdp as any);
-  const res = await dispatcher.dispatch(cmd('set_schedule', { publishTime }));
+  const res = await dispatcher.dispatch(cmd('set_schedule', { publishTime }), 'xiaohongshu');
   assert.equal(res.ok, true);
   assert.equal(res.kind, 'set_schedule');
   assert.equal(res.value, formatXhsScheduleTime(publishTime));
@@ -360,7 +360,7 @@ test('XHS-SCHEDULE 缺“定时发布”提交按钮正证据时 fail closed', a
   const now = 1_800_000_000_000;
   const cdp = new FakeScheduleCdp(false);
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)), {}, () => now, undefined, cdp as any);
-  const res = await dispatcher.dispatch(cmd('set_schedule', { publishTime: now + 2 * 60 * 60 * 1000 }));
+  const res = await dispatcher.dispatch(cmd('set_schedule', { publishTime: now + 2 * 60 * 60 * 1000 }), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.equal(res.error, 'post_validation_failed');
 });
@@ -370,7 +370,7 @@ test('XHS-SCHEDULE 边缘再挡 1h–14d 时间窗，越界不触碰页面', asy
   const now = 1_800_000_000_000;
   const cdp = new FakeScheduleCdp();
   const dispatcher = mk(depsFor(doc, new FakeExecutor(doc)), {}, () => now, undefined, cdp as any);
-  const res = await dispatcher.dispatch(cmd('set_schedule', { publishTime: now + 60 * 60 * 1000 - 1 }));
+  const res = await dispatcher.dispatch(cmd('set_schedule', { publishTime: now + 60 * 60 * 1000 - 1 }), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.equal(res.error, 'schedule_time_out_of_range');
   assert.equal(cdp.calls.length, 0);
@@ -414,7 +414,7 @@ test('XHS-SCHEDULE capture_scheduled 只回平台内部句柄，不伪装公开�
   const res = await dispatcher.dispatch(cmd('capture_scheduled', {
     scheduledTitle: '冻结标题',
     publishTime: Date.now() + 2 * 60 * 60 * 1000,
-  }));
+  }), 'xiaohongshu');
   assert.equal(res.ok, true);
   assert.equal(res.value, '6a5b3b98000000000301f011');
   assert.equal(res.postUrl, undefined);
@@ -433,7 +433,7 @@ test('XHS-SCHEDULE 定时筛选短暂空集时仅凭“全部”中的定时状�
   const res = await dispatcher.dispatch(cmd('capture_scheduled', {
     scheduledTitle: '定时筛选延迟',
     publishTime: now + 2 * 60 * 60 * 1000,
-  }));
+  }), 'xiaohongshu');
   assert.equal(res.ok, true);
   assert.equal(res.value, '6a5b50d30000000005038f98');
   assert.deepEqual(cdp.tabs, ['scheduled', 'all']);
@@ -455,7 +455,7 @@ test('XHS-SCHEDULE reconcile_scheduled 只有公开 id 与平台 URL 同时存�
     scheduledTitle: '冻结标题',
     publishTime: Date.now() - 10 * 60 * 1000,
     scheduledPlatformId: '6a5b3b98000000000301f011',
-  }));
+  }), 'xiaohongshu');
   assert.equal(res.ok, true);
   assert.equal(res.value, 'public1234567890abcd');
   assert.ok(res.postUrl?.includes('xsec_token=token'));
@@ -470,7 +470,7 @@ test('XHS-SCHEDULE reconcile_scheduled 仍在定时列表时诚实 pending', asy
     scheduledTitle: '冻结标题',
     publishTime: Date.now() - 10 * 60 * 1000,
     scheduledPlatformId: '6a5b3b98000000000301f011',
-  }));
+  }), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.equal(res.error, 'scheduled_pending');
   assert.deepEqual(cdp.tabs, ['scheduled']);
@@ -598,7 +598,7 @@ test('拟人填写：CDP 路径标题/正文逐字打字（多次 insertText，�
   const cdp = new FakeCdp();
   const dispatcher = dispatcherWithCdp(cdp);
   const value = '大模型选型避坑';
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }), 'xiaohongshu');
   assert.equal(res.ok, true);
   const inserts = cdp.inserts();
   assert.equal(inserts.length, Array.from(value).length, '应逐字 insertText（每字符一次）');
@@ -609,7 +609,7 @@ test('拟人填写：pacing 关 → 回退一次性 insertText（旧快路径，
   const cdp = new FakeCdp();
   const dispatcher = dispatcherWithCdp(cdp, false);
   const value = '大模型选型避坑';
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'title', value }));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'title', value }), 'xiaohongshu');
   assert.equal(res.ok, true);
   const inserts = cdp.inserts();
   assert.equal(inserts.length, 1, 'pacing 关时一次性灌入');
@@ -621,7 +621,7 @@ test('多段正文：换行独立 Enter + selection 归尾，尾字不再被后�
   const dispatcher = dispatcherWithCdp(cdp);
   const value = '第一段尾字甲\r\n第二段尾字乙\n\n第三段尾字丙';
   const normalized = value.replace(/\r\n?/g, '\n');
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }), 'xiaohongshu');
   assert.equal(res.ok, true);
   assert.equal(cdp.text, normalized, '即使 Enter 后 caret 回退，下一段也必须归尾后再写，正文顺序保持不变');
   assert.ok(cdp.inserts().every((part) => !/[\r\n]/.test(part)), '任何 Input.insertText 都不得携带换行');
@@ -681,7 +681,7 @@ test('ProseMirror 真实段落边界：前段 caret 先归到末段内部，下�
 test('换行确认持续不稳定：清空正文并诚实失败，不留下逐渐积累的文末尾字', async () => {
   const cdp = new FakeCdp({ neverStabilizeCaret: true });
   const dispatcher = dispatcherWithCdp(cdp);
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value: '第一段尾字甲\n第二段' }));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value: '第一段尾字甲\n第二段' }), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.match(String(res.error), /^engine_error: content_newline_unstable/);
   assert.equal(cdp.text, '', 'Enter 后 selection 无法稳定时 MUST 清场，绝不把半篇正文留给后续步骤');
@@ -690,7 +690,7 @@ test('换行确认持续不稳定：清空正文并诚实失败，不留下逐�
 test('Enter 被页面吞掉：即使 caret 在末端也不能放行，必须清场并诚实失败', async () => {
   const cdp = new FakeCdp({ swallowEnter: true });
   const dispatcher = dispatcherWithCdp(cdp);
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value: '第一段\n第二段' }));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value: '第一段\n第二段' }), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.match(String(res.error), /^engine_error: content_newline_unstable/);
   assert.equal(cdp.text, '', '未建出段落时 MUST 清场，绝不把丢失换行的正文当成功');
@@ -704,7 +704,7 @@ test('清场：编辑器里有上一篇的残文 → 先清空再填，正文 MU
   const cdp = new FakeCdp({ initialText: '上一篇被抢占时留下的半截正文' });
   const dispatcher = dispatcherWithCdp(cdp);
   const value = '这一篇的正文';
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }), 'xiaohongshu');
   assert.equal(res.ok, true);
   assert.equal(cdp.text, value, '编辑器里 MUST 只剩这一篇的正文，绝不与残文拼接');
 });
@@ -712,7 +712,7 @@ test('清场：编辑器里有上一篇的残文 → 先清空再填，正文 MU
 test('清场：残文清不掉（选区被框架吃掉）→ 诚实 editor_not_clean，绝不带着残文往下发', async () => {
   const cdp = new FakeCdp({ initialText: '清不掉的残文', unclearable: true });
   const dispatcher = dispatcherWithCdp(cdp);
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value: '新正文' }));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value: '新正文' }), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.match(String(res.error), /^editor_not_clean/);
   assert.equal(cdp.inserts().length, 0, '清不干净就 MUST NOT 往里打字');
@@ -724,7 +724,7 @@ test('全文回读：编辑器只吃进前 8 个字 → post_validate_failed（�
   const value = '一二三四五六七八九十甲乙丙丁戊己庚辛壬癸';
   const cdp = new FakeCdp({ swallowAfter: 8 });
   const dispatcher = dispatcherWithCdp(cdp);
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.match(String(res.error), /^post_validate_failed/);
   assert.equal(cdp.text, '', '放弃这一步 MUST 清场，绝不把半截正文留在活着的编辑器里');
@@ -742,7 +742,7 @@ test('全文回读：正文被塞入大量额外文字（相似度低于 90%）�
     if (method === 'Input.insertText' && ++typed === Array.from(value).length) cdp.text += '被话题联想塞进来的一长串脏东西';
     return r as never;
   };
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.match(String(res.error), /^field_polluted/);
   assert.equal(cdp.text, '', '同样 MUST 清场');
@@ -764,7 +764,7 @@ test('语义文字：正文 URL/emoji 被编辑器改写但中文英文数字齐
     }
     return r as never;
   };
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }), 'xiaohongshu');
   assert.equal(res.ok, true, 'URL/emoji 改写不参与比较，中文英文数字语义文字完整即可成功');
   assert.equal(cdp.text, '给Agent做长期记忆看仓库就够了', '测试必须真实执行 URL/emoji 改写，而不是原文原样通过');
 });
@@ -773,7 +773,7 @@ test('语义文字：纯英文正文吞字超过 10% → post_validate_failed', 
   const value = 'Agent memory tool';
   const cdp = new FakeCdp({ swallowAfter: 5 }); // 只吃进前 5 字符 'Agent'，其余被吞
   const dispatcher = dispatcherWithCdp(cdp);
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.match(String(res.error), /^post_validate_failed/, '英文是语义文字，超过容差的丢失绝不假成功');
 });
@@ -788,7 +788,7 @@ test('语义文字：中文完整但英文模型名和数字大量丢失 → pos
     if (method === 'Input.insertText' && cdp.text === value) cdp.text = '商汤科技视觉模型';
     return result as never;
   };
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.match(String(res.error), /^post_validate_failed/, '不能因汉字仍完整就忽略英文和数字丢失');
 });
@@ -803,7 +803,7 @@ test('语义文字：最终回读恰好保留 90% → 保底放行', async () =>
     if (method === 'Input.insertText' && cdp.text === value) cdp.text = '甲'.repeat(90);
     return result as never;
   };
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }), 'xiaohongshu');
   assert.equal(res.ok, true, '相似度 >= 0.90 必须放行');
   assert.equal(cdp.text.length, 90);
 });
@@ -818,7 +818,7 @@ test('语义文字：最终回读仅保留 89% → 拒绝并清场', async () =>
     if (method === 'Input.insertText' && cdp.text === value) cdp.text = '甲'.repeat(89);
     return result as never;
   };
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.match(String(res.error), /^post_validate_failed/);
   assert.equal(cdp.text, '', '低于阈值必须清场');
@@ -828,7 +828,7 @@ test('语义文字为空：仅 URL/emoji 的正文仍走精确兜底，不能空
   const value = 'https://example.com/only 🛠️';
   const cdp = new FakeCdp({ swallowAfter: 0 });
   const dispatcher = dispatcherWithCdp(cdp);
-  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }));
+  const res = await dispatcher.dispatch(cmd('fill_field', { fieldType: 'content', value }), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.match(String(res.error), /^post_validate_failed/);
 });
@@ -892,7 +892,7 @@ test('runAddTopic happy：#→下拉→真实鼠标点→正文出现 a.tiptap-t
       `<div class="tiptap ProseMirror"><p><a class="tiptap-topic" data-topic='{"id":"1","name":"大模型"}' contenteditable="false">#大模型</a></p></div>`,
     );
     const cdp = new TopicFakeCdp({ focus: true, center: { x: 120, y: 200 } });
-    const res = await mkTopicCdp(doc, cdp).dispatch(cmd('add_with_candidate', { candidateKind: 'topic', value: '大模型' }));
+    const res = await mkTopicCdp(doc, cdp).dispatch(cmd('add_with_candidate', { candidateKind: 'topic', value: '大模型' }), 'xiaohongshu');
     assert.equal(res.ok, true);
     // 逐字打字：各 insertText 拼接应含 #大模型（治静默假成功——确实在正文打了 #关键词）。
     const typed = cdp.calls.filter((c) => c.method === 'Input.insertText').map((c) => String((c.params as { text?: string })?.text ?? '')).join('');
@@ -908,7 +908,7 @@ test('runAddTopic 下拉未出现 → 诚实 no_target', async () => {
   try {
     const doc = buildDom(`<div class="tiptap ProseMirror"><p></p></div>`);
     const cdp = new TopicFakeCdp({ focus: true, center: null });
-    const res = await mkTopicCdp(doc, cdp, fastClock()).dispatch(cmd('add_with_candidate', { candidateKind: 'topic', value: '大模型' }));
+    const res = await mkTopicCdp(doc, cdp, fastClock()).dispatch(cmd('add_with_candidate', { candidateKind: 'topic', value: '大模型' }), 'xiaohongshu');
     assert.equal(res.ok, false);
     assert.equal(res.error, 'no_target');
   } finally {
@@ -922,7 +922,7 @@ test('runAddTopic 点了但未生成真 token → post_validate_failed（fail-cl
     // 正文只有纯文本、无 a.tiptap-topic（模拟未真正提交）。
     const doc = buildDom(`<div class="tiptap ProseMirror"><p>#大模型</p></div>`);
     const cdp = new TopicFakeCdp({ focus: true, center: { x: 120, y: 200 } });
-    const res = await mkTopicCdp(doc, cdp, fastClock()).dispatch(cmd('add_with_candidate', { candidateKind: 'topic', value: '大模型' }));
+    const res = await mkTopicCdp(doc, cdp, fastClock()).dispatch(cmd('add_with_candidate', { candidateKind: 'topic', value: '大模型' }), 'xiaohongshu');
     assert.equal(res.ok, false);
     assert.equal(res.error, 'post_validate_failed');
   } finally {
@@ -936,7 +936,7 @@ test('runAddTopic kill-switch(=0) → 走旧兜底路径、绝不碰 CDP 直驱'
   try {
     const doc = buildDom(publishPageHtml());
     const cdp = new TopicFakeCdp({ focus: true, center: { x: 1, y: 1 } });
-    await mkTopicCdp(doc, cdp).dispatch(cmd('add_with_candidate', { candidateKind: 'topic', value: '大模型' }));
+    await mkTopicCdp(doc, cdp).dispatch(cmd('add_with_candidate', { candidateKind: 'topic', value: '大模型' }), 'xiaohongshu');
     assert.equal(cdp.calls.length, 0, '兜底路径不走 CDP 直驱（无任何 cdp 调用）');
   } finally {
     delete process.env.AIDCP_PUBLISH_TOPIC_CDP;
@@ -1024,7 +1024,7 @@ function mkSelectMode(cdp: SelectModeFakeCdp, clock: () => number): PublishComma
 
 test('select_mode 幂等早退：进入时已在图文模式（state=image）→ ok:true 且不点击（治「本已在模式却报 no_target」）', async () => {
   const cdp = new SelectModeFakeCdp({ stateFromStart: 'image' });
-  const res = await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1));
+  const res = await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1), 'xiaohongshu');
   assert.equal(res.ok, true);
   assert.equal(res.kind, 'select_mode');
   assert.equal(cdp.clickEvalCount(), 0, '已在图文模式应幂等早退、绝不点击');
@@ -1032,35 +1032,35 @@ test('select_mode 幂等早退：进入时已在图文模式（state=image）→
 
 test('select_mode happy：视频起步 → 点中可见 tab → 激活 tab 变图文（state=image）→ ok:true', async () => {
   const cdp = new SelectModeFakeCdp({ clickSucceedsAtAttempt: 0, stateAfterClick: 'image' });
-  const res = await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1));
+  const res = await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1), 'xiaohongshu');
   assert.equal(res.ok, true);
   assert.ok(cdp.clickEvalCount() >= 1, '视频模式起步应真的点了图文 tab');
 });
 
 test('select_mode happy（辅助信号兜底）：点击后激活态未识别（state=""）但 IMG_MODE_ACTIVE 转真 → ok:true（不回归旧验证信号）', async () => {
   const cdp = new SelectModeFakeCdp({ clickSucceedsAtAttempt: 0, stateAfterClick: '', imgActiveAfterClick: true });
-  const res = await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1));
+  const res = await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1), 'xiaohongshu');
   assert.equal(res.ok, true, '激活态识别不出时点击后 IMG 信号（文件输入 accept 变图片类）应兜底确认成功');
 });
 
 test('select_mode 冷加载：tab 晚渲染（前若干次点击 miss，稍后命中）→ 有界重试点中 → ok:true', async () => {
   // 前 2 次 CLICK_TAB miss（clicked:false），第 3 次起命中；命中后激活 tab 变图文。
   const cdp = new SelectModeFakeCdp({ clickSucceedsAtAttempt: 2, stateAfterClick: 'image' });
-  const res = await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1));
+  const res = await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1), 'xiaohongshu');
   assert.equal(res.ok, true);
   assert.ok(cdp.clickEvalCount() >= 3, '应重试点击直到命中（冷加载容忍）');
 });
 
 test('select_mode 始终无可见 tab 且未在图文模式 → 诚实 no_target（红线：绝不假成功）', async () => {
   const cdp = new SelectModeFakeCdp({ clickSucceedsAtAttempt: Number.POSITIVE_INFINITY });
-  const res = await mkSelectMode(cdp, selectStepClock(5000)).dispatch(cmd('select_mode', {}, 1));
+  const res = await mkSelectMode(cdp, selectStepClock(5000)).dispatch(cmd('select_mode', {}, 1), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.equal(res.error, 'no_target');
 });
 
 test('select_mode 点了但模式始终未激活（点到隐藏副本/点击无效）→ 诚实 post_validate_failed', async () => {
   const cdp = new SelectModeFakeCdp({ clickSucceedsAtAttempt: 0, stateAfterClick: '', imgActiveAfterClick: false });
-  const res = await mkSelectMode(cdp, selectStepClock(5000)).dispatch(cmd('select_mode', {}, 1));
+  const res = await mkSelectMode(cdp, selectStepClock(5000)).dispatch(cmd('select_mode', {}, 1), 'xiaohongshu');
   assert.equal(res.ok, false);
   assert.equal(res.error, 'post_validate_failed', '点了没切上模式必须诚实报，绝不谎报已切');
 });
@@ -1071,7 +1071,7 @@ test('select_mode 硬化：点了但仍确认在视频模式（state=video）+ �
   // 关键：imgActiveFromStart=true（视频模式下就存在图片信号）+ 点击后 state 仍 'video'。
   // 旧「电平或」会因 IMG 为真而假成功；硬化后 state==='video' 否决 IMG → 诚实失败。
   const cdp = new SelectModeFakeCdp({ clickSucceedsAtAttempt: 0, stateAfterClick: 'video', imgActiveFromStart: true });
-  const res = await mkSelectMode(cdp, selectStepClock(5000)).dispatch(cmd('select_mode', {}, 1));
+  const res = await mkSelectMode(cdp, selectStepClock(5000)).dispatch(cmd('select_mode', {}, 1), 'xiaohongshu');
   assert.equal(res.ok, false, '仍在视频模式绝不因残留图片信号谎报成功（红线：不假成功）');
   assert.equal(res.error, 'post_validate_failed');
 });
@@ -1079,14 +1079,14 @@ test('select_mode 硬化：点了但仍确认在视频模式（state=video）+ �
 test('select_mode 硬化：点击前存在残留图片信号但未点中任何 tab → 只认权威 state、诚实 no_target（不盲信 IMG）', async () => {
   // 点击前只认权威 MODE_STATE（'video'），IMG 残留信号不参与点击前判定 → 从未点中 → no_target（非假成功）。
   const cdp = new SelectModeFakeCdp({ clickSucceedsAtAttempt: Number.POSITIVE_INFINITY, stateFromStart: 'video', imgActiveFromStart: true });
-  const res = await mkSelectMode(cdp, selectStepClock(5000)).dispatch(cmd('select_mode', {}, 1));
+  const res = await mkSelectMode(cdp, selectStepClock(5000)).dispatch(cmd('select_mode', {}, 1), 'xiaohongshu');
   assert.equal(res.ok, false, '点击前残留图片信号绝不当作已在图文模式');
   assert.equal(res.error, 'no_target');
 });
 
 test('select_mode 红线：下发的点击 JS 含可见性判据（取可见非取首个，躲隐藏副本）', async () => {
   const cdp = new SelectModeFakeCdp({ clickSucceedsAtAttempt: 0, stateAfterClick: 'image' });
-  await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1));
+  await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1), 'xiaohongshu');
   const clickJs = cdp.exprContaining('/*CLICK_TAB*/');
   assert.ok(clickJs, '应有 CLICK_TAB 表达式被下发');
   // 可见性判据须按「与视口相交」过滤（真机标定：隐藏副本被移到屏幕外 x≈-9758，offsetParent 判据会误判其可见）。
@@ -1095,7 +1095,7 @@ test('select_mode 红线：下发的点击 JS 含可见性判据（取可见非�
 
 test('select_mode 红线：模式判据保守（激活 tab 文本含「图文」与「视频」两侧约束，绝不视频模式谎报）', async () => {
   const cdp = new SelectModeFakeCdp({ stateFromStart: 'image' });
-  await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1));
+  await mkSelectMode(cdp, selectStepClock(1000)).dispatch(cmd('select_mode', {}, 1), 'xiaohongshu');
   const modeJs = cdp.exprContaining('/*MODE_STATE*/');
   assert.ok(modeJs, '应有 MODE_STATE 表达式被下发');
   assert.ok(modeJs!.includes('图文') && modeJs!.includes('视频'), '模式判据须同时约束「图文」与「视频」两侧');
@@ -1192,7 +1192,7 @@ test('取消点：fill_field 打字中途被接管 → 插入停在半途 + 让�
       if (cdp.inserts().length >= 3) throw new TaskTakeoverError();
     },
   };
-  const res = await dispatcherWithCdp(cdp).dispatch(cmd('fill_field', { fieldType: 'content', value }), takeover);
+  const res = await dispatcherWithCdp(cdp).dispatch(cmd('fill_field', { fieldType: 'content', value }), 'xiaohongshu', takeover);
 
   const typed = cdp.inserts().join('');
   assert.ok(typed.length > 0 && typed.length < Array.from(value).length, '插入 MUST 停在半途（既不是零字，也不是整篇打完）');
@@ -1209,7 +1209,7 @@ test('取消点：submit_publish 在「通读停留」期间被接管 → 零 mo
       if (cdp.countOf('DOM.getBoxModel') > 0) throw new TaskTakeoverError();
     },
   };
-  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 7), takeover);
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 7), 'xiaohongshu', takeover);
 
   assert.equal(cdp.pressed(), 0, '提交点之前让位 MUST 零 mousePressed：帖子一个字节都没提交出去');
   assert.equal(res.ok, false);
@@ -1227,7 +1227,7 @@ test('🔴 禁区：submit_publish 点击已发出后被接管 → 15s 后置校
       if (cdp.pressed() > 0) throw new TaskTakeoverError();
     },
   };
-  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 8), takeover);
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 8), 'xiaohongshu', takeover);
 
   assert.equal(cdp.pressed(), 1, '确实点了发布（提交点已跨过）');
   assert.equal(res.ok, true, '提交点之后 MUST NOT 取消：后置校验照跑到底、按页面真实成功态回报');
@@ -1243,7 +1243,7 @@ test('🔴 6.2 已派发提交位：点击已发出但后置校验超时未确�
   // 关键：点击已经发出去了，帖子可能已发出。此回执必须携 submitDispatched=true，区别于「压根没点」的
   // no_target/engine_error（那些保持假）——否则云端把一篇可能已发出的稿判成提交前失败、重投 = 双发。
   const cdp = new SubmitFakeCdp({ successAtProbe: Number.POSITIVE_INFINITY });
-  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 9));
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 9), 'xiaohongshu');
 
   assert.equal(cdp.pressed(), 1, '确实点了发布');
   assert.equal(res.ok, false);
@@ -1255,7 +1255,7 @@ test('🔴 5.9 收紧假成功 CHECK：后置校验只认成功文案，绝不�
   // 成功文案在第 2 次探到 → ok:true。关键回归：下发的 CHECK 表达式**不得**含 location.href / URL 判据——
   // 否则抢占方/恢复导航在 15s 窗口内把发布页导走 → 一篇可能没发出的稿被判已发布（5.9 根治点）。
   const cdp = new SubmitFakeCdp({ successAtProbe: 2 });
-  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 11));
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 11), 'xiaohongshu');
   assert.equal(res.ok, true, '成功文案命中 → ok:true');
   const expr = cdp.checkExpr();
   assert.ok(expr.length > 0 && expr.includes('发布成功'), '确实下发了 CHECK 表达式');
@@ -1265,7 +1265,7 @@ test('🔴 5.9 收紧假成功 CHECK：后置校验只认成功文案，绝不�
 test('🔴 6.2 已派发提交位：发布按钮找不到（no_target，压根没点）→ submitDispatched 保持假', async () => {
   // center 查找类失败在点击之前返回，MUST NOT 携 submitDispatched（否则一篇从未提交的稿被记成已提交待确认、永久丢失）。
   const cdp = new SubmitFakeCdp({ noButton: true });
-  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 10));
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 10), 'xiaohongshu');
 
   assert.equal(cdp.pressed(), 0, '没找到发布按钮 → 一次点击都没发出');
   assert.equal(res.ok, false);
@@ -1277,7 +1277,7 @@ test('🔴 复核 wf_1657e89b MEDIUM：mousePressed 已发出但其响应抛错�
   // 修前：submitDispatched 在 dispatchClick 整体返回后才置真 → press 已注入但 send 抛错 → 回执 submitDispatched=false
   //       → 云端按提交前失败重投 → 双发。修后：onPressDispatched 在 commitLeftClick 之前触发，press 一派发即置真。
   const cdp = new SubmitFakeCdp({ throwOnMousePressed: true });
-  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 12));
+  const res = await mkSubmit(cdp).dispatch(cmd('submit_publish', {}, 12), 'xiaohongshu');
   assert.equal(cdp.pressed(), 1, 'mousePressed 确实发往浏览器（mousedown 已触发）');
   assert.equal(res.ok, false);
   assert.match(String(res.error), /^engine_error/, 'press 响应抛错 → 诚实 engine_error');

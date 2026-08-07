@@ -355,7 +355,9 @@ export class FacebookPublishExecutor {
       case 'capture_postId':
         return this.capturePostId(payload);
       default:
-        return { ...base(payload), ok: false, error: 'kind_not_implemented' };
+        // fail-closed（批 6b）：显式六臂即 Facebook 合法 kind 全集（FacebookPublishCommandKind），
+        // 落到 default 的都是 XHS 专属 kind——云端类型面已不可表示，运行时仍拒收、绝不静默改道。
+        return { ...base(payload), ok: false, error: 'kind_not_supported_on_platform' };
     }
   }
 

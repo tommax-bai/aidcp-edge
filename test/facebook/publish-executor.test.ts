@@ -208,7 +208,6 @@ const instantSleep = async (_ms: number): Promise<void> => {};
 
 function command(kind: PublishCommandPayload['kind'], params: PublishCommandPayload['params'] = {}, seq = 0): PublishCommandPayload {
   return {
-    platform: 'facebook',
     taskId: 'task-fb',
     recordId: 77,
     seq,

@@ -14,8 +14,9 @@ test('command diagnostics: active command families produce useful whitelist-only
     { type: 'xiaohongshu.search.execute', payload: { keyword: '绝密词', source: 'manager', maxResults: 8 }, expected: /搜索词 3 字/ },
     { type: 'xiaohongshu.note.comment', payload: { text: '不要展示这条评论', groupChatCode: 'chat-secret' }, expected: /评论正文 8 字/ },
     { type: 'facebook.group.join', payload: { click: true, groupUrl: 'https://secret.test/group' }, expected: /申请加入目标群组/ },
-    { type: 'publish.command', payload: { kind: 'fill_field', seq: 2, recordId: 9988, taskId: 'task-secret', params: { value: 'body-secret' } }, expected: /发布步骤 fill_field，序号 2/ },
-    { type: 'edge.task.acquire', payload: { kind: 'publish', priority: 'human', taskId: 'task-secret' }, expected: /任务 publish，优先级 human/ },
+    { type: 'xiaohongshu.publish.command', payload: { kind: 'fill_field', seq: 2, recordId: 9988, taskId: 'task-secret', params: { value: 'body-secret' } }, expected: /发布步骤 fill_field，序号 2/ },
+    { type: 'facebook.publish.command', payload: { kind: 'fill_field', seq: 3, recordId: 9989, taskId: 'task-secret', params: { value: 'body-secret' } }, expected: /发布步骤 fill_field，序号 3/ },
+    { type: 'task.acquire', payload: { kind: 'publish', priority: 'human', taskId: 'task-secret' }, expected: /任务 publish，优先级 human/ },
     { type: 'captcha.assist.click', payload: { points: [{ x: 0.2, y: 0.3 }], text: '答案秘密', snapshotId: 'snapshot-secret', submit: 'enter' }, expected: /1 个点击点，输入 4 字，包含回车提交/ },
     { type: 'wechat_channels.inbox.reply.send', payload: { channel: 'dm', content: { type: 'text', text: '私信秘密' }, accountId: 'account-secret' }, expected: /渠道 dm，回复正文 4 字/ },
   ];
@@ -63,7 +64,7 @@ test('command diagnostics: malformed enums and unknown command payload fall back
   assert.equal(summary, '载荷内容未展示');
   assert.equal(summary.includes('secret'), false);
 
-  const malformed = summarizeCommand('publish.command', { kind: 'secret-kind', seq: -20, params: { value: 'secret' } });
+  const malformed = summarizeCommand('xiaohongshu.publish.command', { kind: 'secret-kind', seq: -20, params: { value: 'secret' } });
   assert.equal(malformed, '发布原子步骤，序号 0');
   assert.equal(malformed.includes('secret'), false);
 });

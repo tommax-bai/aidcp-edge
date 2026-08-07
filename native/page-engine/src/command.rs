@@ -111,18 +111,8 @@ pub struct ReasonParams {
     pub reason: Option<String>,
 }
 
-/// `note_close` 的参数。**只有离页停留、没有动作前犹豫**：转发面（宿主 command-mapper）
-/// 从来只投影 `reason` / `dwellMs`，曾经多声明的 `thinkMs` 是一个云端永远不会下发、
-/// 引擎也永远读不到的**死字段**——它的唯一作用是把任何按「声明面」计数的检查喂绿。
-/// 声明面与转发面的相等性由 `native_timing_declarations_match_the_declared_contract` 钉死。
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct TimingParams {
-    #[serde(default)]
-    pub reason: Option<String>,
-    #[serde(default)]
-    pub dwell_ms: Option<u64>,
-}
+// 批 6b：`TimingParams`（原 `note_close` 参数）随 note_close kind 一并删除——
+// 关弹层是 navigation_back 的引擎内部子步骤，离页停留由 NavigationBackParams.dwell_ms 承载。
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -269,6 +259,11 @@ pub enum NavigationTarget {
     Search,
 }
 
+/// `navigation_back` 的参数。批 6b 分层裁定：`target_page` 在 Rust 侧保持 `Option`
+/// （同一 kind 同时承载 `xiaohongshu.navigation.back`（targetPage 必填）与
+/// `facebook.navigation.back`（无 targetPage——来源列表是引擎记录的会话事实）），
+/// XHS 路由入口（`xhs-command-router.js` 的 navigation_back 规则）对缺失值 fail-closed
+/// 拒收（`target_page_missing`）；FB 路由从不读该字段。
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct NavigationBackParams {
@@ -561,7 +556,6 @@ native_commands! {
     FeedRefresh(FeedRefreshParams) => "feed_refresh",
     SearchExecute(SearchExecuteParams) => "search_execute",
     NoteOpen(NoteOpenParams) => "note_open",
-    NoteClose(TimingParams) => "note_close",
     NavigationBack(NavigationBackParams) => "navigation_back",
     NoteBrowseImages(NoteTraverseParams) => "note_browse_images",
     NoteScrollComments(NoteTraverseParams) => "note_scroll_comments",
@@ -773,11 +767,6 @@ impl NativeCommand {
                 }
                 Ok(())
             }
-            Self::NoteClose(params) => validate_optional(
-                &params.reason,
-                MAX_REASON_BYTES,
-                "reason exceeds protocol limit",
-            ),
             Self::NavigationBack(params) => validate_optional(
                 &params.reason,
                 MAX_REASON_BYTES,
@@ -1613,10 +1602,10 @@ mod tests {
         );
 
         let mut extra = accepted.clone();
-        extra.insert(("note_close".to_owned(), "thinkMs".to_owned()));
+        extra.insert(("navigation_back".to_owned(), "thinkMs".to_owned()));
         assert_eq!(
             timing_drift(&extra, &declared),
-            vec!["undeclared:note_close:thinkMs".to_owned()],
+            vec!["undeclared:navigation_back:thinkMs".to_owned()],
         );
 
         // 未被改动的那一对必须仍然对得上，否则上面两条只是「反正都红」。

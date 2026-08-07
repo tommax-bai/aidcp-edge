@@ -10,7 +10,7 @@
  *  - 自动浏览：把笔记内容以 note.content 作为请求发给云端，等回一个决策信封
  *    （{p}.feed.scroll / {p}.search.execute / session.end 等），交由 BrowseSession 编排。
  *  - 异步命令推送：云端通过 CommandSink 异步推送控制命令（{p}.feed.scroll /
- *    {p}.note.open / {p}.note.close / {p}.search.execute / session.end / xiaohongshu.notification.*），由 browseHandler 统一分发。
+ *    {p}.note.open / {p}.navigation.back / {p}.search.execute / session.end / xiaohongshu.notification.*），由 browseHandler 统一分发。
  *
  * 设计：
  *  - WebSocket 通过工厂注入（默认用运行时全局 WebSocket，Node>=22），便于单测打桩；
@@ -28,6 +28,7 @@ import {
   type RemoteAnchor,
   type NoteContentPayload,
   type PublishCommandPayload,
+  type FacebookPublishCommandPayload,
   type CaptchaAssistCapturePayload,
   type CaptchaAssistClickPayload,
   type UiSnapshotPayload,
@@ -119,8 +120,8 @@ export interface StepRunner {
  */
 export type BrowseCommandHandler = (env: Envelope) => void;
 export type PlanCommandHandler = (env: Envelope<PlanResponsePayload>) => void;
-/** A 阶段1 指令驱动发布：单条参数化原子指令处理器（publish.command）。 */
-export type PublishAtomCommandHandler = (env: Envelope<PublishCommandPayload>) => void;
+/** A 阶段1 指令驱动发布：单条参数化原子指令处理器（{p}.publish.command）。 */
+export type PublishAtomCommandHandler = (env: Envelope<PublishCommandPayload | FacebookPublishCommandPayload>) => void;
 /** 同一 edge/CDP 页面写任务租约控制（acquire/release）。 */
 export type EdgeTaskCommandHandler = (env: Envelope<EdgeTaskAcquirePayload | EdgeTaskReleasePayload>) => void;
 /** 验证码云端协助指令处理器（captcha.assist.capture/click）。 */
@@ -806,8 +807,6 @@ export class EdgeClient {
       // 漏加任何一条新名即在入口被静默丢弃（同 §2 第4处同步点，notification-monitor 活锁前车之鉴）。
       env.type === 'xiaohongshu.note.open' ||
       env.type === 'facebook.note.open' ||
-      env.type === 'xiaohongshu.note.close' ||
-      env.type === 'facebook.note.close' ||
       env.type === 'xiaohongshu.search.execute' ||
       env.type === 'facebook.search.execute' ||
       env.type === 'xiaohongshu.feed.scroll' ||
@@ -840,7 +839,9 @@ export class EdgeClient {
       env.type === 'xiaohongshu.comment.like' ||
       // Facebook 加群原子指令：走 Facebook 命令处理器（不是 xhs BrowseSession）。漏白名单会在入口静默丢弃。
       env.type === 'facebook.group.join' ||
-      env.type === 'navigation.back' ||
+      // 词汇批 6b：navigation.back 平台段化（XHS 形 targetPage 必填、FB 形无 targetPage）。
+      env.type === 'xiaohongshu.navigation.back' ||
+      env.type === 'facebook.navigation.back' ||
       env.type === 'xiaohongshu.note.browse_images' ||
       env.type === 'xiaohongshu.note.scroll_comments' ||
       env.type === 'xiaohongshu.profile.open' ||
@@ -877,18 +878,18 @@ export class EdgeClient {
       return;
     }
 
-    if (env.type === 'publish.command') {
+    if (env.type === 'xiaohongshu.publish.command' || env.type === 'facebook.publish.command') {
       this.emitCommandDiagnostic(env, 'received');
       if (!this.publishAtomHandler) {
         this.emitCommandDiagnostic(env, 'rejected', 'handler_unavailable');
         return;
       }
       this.emitCommandDiagnostic(env, 'dispatched');
-      this.publishAtomHandler(env as Envelope<PublishCommandPayload>);
+      this.publishAtomHandler(env as Envelope<PublishCommandPayload | FacebookPublishCommandPayload>);
       return;
     }
 
-    if (env.type === 'edge.task.acquire' || env.type === 'edge.task.release') {
+    if (env.type === 'task.acquire' || env.type === 'task.release') {
       this.emitCommandDiagnostic(env, 'received');
       if (!this.edgeTaskHandler) {
         this.emitCommandDiagnostic(env, 'rejected', 'handler_unavailable');

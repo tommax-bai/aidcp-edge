@@ -114,22 +114,8 @@
     },
     {
       "edgeTypes": [
-        "xiaohongshu.note.close",
-        "facebook.note.close"
-      ],
-      "nativeKind": "note_close",
-      "family": "note",
-      "requestContract": "NoteClosePayload",
-      "receipts": [
-        "action.completed",
-        "page.cards"
-      ],
-      "effect": "navigation",
-      "cancellation": "atomic_input_then_safe_point"
-    },
-    {
-      "edgeTypes": [
-        "navigation.back"
+        "xiaohongshu.navigation.back",
+        "facebook.navigation.back"
       ],
       "nativeKind": "navigation_back",
       "family": "note",
@@ -413,168 +399,180 @@
     },
     {
       "edgeTypes": [
-        "publish.command"
+        "xiaohongshu.publish.command",
+        "facebook.publish.command"
       ],
       "publishKind": "navigate_entry",
       "nativeKind": "publish_navigate_entry",
       "family": "publish",
       "requestContract": "PublishCommandPayload",
       "receipts": [
-        "publish.command.result"
+        "xiaohongshu.publish.command.result",
+        "facebook.publish.command.result"
       ],
       "effect": "navigation",
       "cancellation": "safe_points"
     },
     {
       "edgeTypes": [
-        "publish.command"
+        "xiaohongshu.publish.command",
+        "facebook.publish.command"
       ],
       "publishKind": "select_mode",
       "nativeKind": "publish_select_mode",
       "family": "publish",
       "requestContract": "PublishCommandPayload",
       "receipts": [
-        "publish.command.result"
+        "xiaohongshu.publish.command.result",
+        "facebook.publish.command.result"
       ],
       "effect": "navigation",
       "cancellation": "atomic_input_then_safe_point"
     },
     {
       "edgeTypes": [
-        "publish.command"
+        "xiaohongshu.publish.command",
+        "facebook.publish.command"
       ],
       "publishKind": "upload_image",
       "nativeKind": "publish_upload_image",
       "family": "publish",
       "requestContract": "PublishCommandPayload",
       "receipts": [
-        "publish.command.result"
+        "xiaohongshu.publish.command.result",
+        "facebook.publish.command.result"
       ],
       "effect": "draft_write",
       "cancellation": "atomic_input_then_safe_point"
     },
     {
       "edgeTypes": [
-        "publish.command"
+        "xiaohongshu.publish.command"
       ],
       "publishKind": "set_cover",
       "nativeKind": "publish_set_cover",
       "family": "publish",
       "requestContract": "PublishCommandPayload",
       "receipts": [
-        "publish.command.result"
+        "xiaohongshu.publish.command.result"
       ],
       "effect": "draft_write",
       "cancellation": "atomic_input_then_safe_point"
     },
     {
       "edgeTypes": [
-        "publish.command"
+        "xiaohongshu.publish.command",
+        "facebook.publish.command"
       ],
       "publishKind": "fill_field",
       "nativeKind": "publish_fill_field",
       "family": "publish",
       "requestContract": "PublishCommandPayload",
       "receipts": [
-        "publish.command.result"
+        "xiaohongshu.publish.command.result",
+        "facebook.publish.command.result"
       ],
       "effect": "draft_write",
       "cancellation": "atomic_input_then_safe_point"
     },
     {
       "edgeTypes": [
-        "publish.command"
+        "xiaohongshu.publish.command"
       ],
       "publishKind": "add_with_candidate",
       "nativeKind": "publish_add_with_candidate",
       "family": "publish",
       "requestContract": "PublishCommandPayload",
       "receipts": [
-        "publish.command.result"
+        "xiaohongshu.publish.command.result"
       ],
       "effect": "draft_write",
       "cancellation": "atomic_input_then_safe_point"
     },
     {
       "edgeTypes": [
-        "publish.command"
+        "xiaohongshu.publish.command"
       ],
       "publishKind": "set_option",
       "nativeKind": "publish_set_option",
       "family": "publish",
       "requestContract": "PublishCommandPayload",
       "receipts": [
-        "publish.command.result"
+        "xiaohongshu.publish.command.result"
       ],
       "effect": "draft_write",
       "cancellation": "atomic_input_then_safe_point"
     },
     {
       "edgeTypes": [
-        "publish.command"
+        "xiaohongshu.publish.command"
       ],
       "publishKind": "set_schedule",
       "nativeKind": "publish_set_schedule",
       "family": "publish",
       "requestContract": "PublishCommandPayload",
       "receipts": [
-        "publish.command.result"
+        "xiaohongshu.publish.command.result"
       ],
       "effect": "draft_write",
       "cancellation": "atomic_input_then_safe_point"
     },
     {
       "edgeTypes": [
-        "publish.command"
+        "xiaohongshu.publish.command",
+        "facebook.publish.command"
       ],
       "publishKind": "submit_publish",
       "nativeKind": "publish_submit",
       "family": "publish",
       "requestContract": "PublishCommandPayload",
       "receipts": [
-        "publish.command.result"
+        "xiaohongshu.publish.command.result",
+        "facebook.publish.command.result"
       ],
       "effect": "platform_write",
       "cancellation": "atomic_dispatch_then_verify"
     },
     {
       "edgeTypes": [
-        "publish.command"
+        "xiaohongshu.publish.command",
+        "facebook.publish.command"
       ],
       "publishKind": "capture_postId",
       "nativeKind": "publish_capture_post_id",
       "family": "publish",
       "requestContract": "PublishCommandPayload",
       "receipts": [
-        "publish.command.result"
+        "xiaohongshu.publish.command.result",
+        "facebook.publish.command.result"
       ],
       "effect": "read",
       "cancellation": "safe_points"
     },
     {
       "edgeTypes": [
-        "publish.command"
+        "xiaohongshu.publish.command"
       ],
       "publishKind": "capture_scheduled",
       "nativeKind": "publish_capture_scheduled",
       "family": "publish",
       "requestContract": "PublishCommandPayload",
       "receipts": [
-        "publish.command.result"
+        "xiaohongshu.publish.command.result"
       ],
       "effect": "read",
       "cancellation": "safe_points"
     },
     {
       "edgeTypes": [
-        "publish.command"
+        "xiaohongshu.publish.command"
       ],
       "publishKind": "reconcile_scheduled",
       "nativeKind": "publish_reconcile_scheduled",
       "family": "publish",
       "requestContract": "PublishCommandPayload",
       "receipts": [
-        "publish.command.result"
+        "xiaohongshu.publish.command.result"
       ],
       "effect": "read",
       "cancellation": "safe_points"
@@ -582,16 +580,16 @@
   ],
   "sessionControls": [
     {
-      "edgeType": "edge.task.acquire",
+      "edgeType": "task.acquire",
       "nativeKind": "task_bind",
       "requestContract": "EdgeTaskAcquirePayload",
-      "receipt": "edge.task.acquired"
+      "receipt": "task.acquired"
     },
     {
-      "edgeType": "edge.task.release",
+      "edgeType": "task.release",
       "nativeKind": "task_unbind",
       "requestContract": "EdgeTaskReleasePayload",
-      "receipt": "edge.task.released"
+      "receipt": "task.released"
     },
     {
       "edgeType": "pacing.update",

@@ -91,10 +91,10 @@ const FB_COMMAND_ACTION_NAMES: Readonly<Record<string, string>> = {
   'xiaohongshu.comment.like': 'comment_like',
   'facebook.search.execute': 'search',
   'facebook.note.open': 'open_note',
-  'facebook.note.close': 'close',
   'xiaohongshu.note.browse_images': 'browse_images',
   'xiaohongshu.note.scroll_comments': 'scroll_comments',
-  'navigation.back': 'back',
+  'facebook.navigation.back': 'back',
+  'xiaohongshu.navigation.back': 'back',
   'xiaohongshu.profile.open': 'profile_open',
   'facebook.group.join': 'join_group',
   'xiaohongshu.notification.open': 'open_notifications',
@@ -592,11 +592,9 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
         });
         return;
       }
-      case 'navigation.back':
+      // 批 6b：facebook.note.close 已删除（FB 侧 close 与 back 本就同一路径）；back 平台段化、FB 形无 targetPage。
+      case 'facebook.navigation.back':
         await this.runBrowseCommand('back', () => this.backToFeed());
-        return;
-      case 'facebook.note.close':
-        await this.runBrowseCommand('close', () => this.closeNote());
         return;
       case 'xiaohongshu.profile.open': {
         this.log('[fb-session] profile.open 在 Facebook runtime 不支持，回 capability_unsupported');
@@ -1255,11 +1253,7 @@ export class FacebookBrowseSession implements EdgeBrowseSession {
     return { type: 'cards', payload: this.toPageCards(this.seedCursor(settle.cards)) };
   }
 
-  /** 关闭当前帖（详情态 dialog）：导航回 feed 关闭 dialog，诚实回 close ok。 */
-  private async closeNote(): Promise<TerminalReport> {
-    await this.navigateFeedBestEffort();
-    return { type: 'action', payload: { action: 'close', ok: true } };
-  }
+  // 批 6b：closeNote 已删除——facebook.note.close 退役，关 dialog 就是 backToFeed 的一部分。
 
   /**
    * feed.refresh 实装：页内点顶栏首页图标换批（SPA、不整页重载），后置校验「首卡 permalink 变更且非空」。

@@ -257,7 +257,7 @@ export class PublishUiEventTracker {
   private readonly submitted = new Set<number>();
   private readonly terminal = new Set<number>();
 
-  /** 每条 publish.command 下发执行前调用：截获标题。 */
+  /** 每条 {p}.publish.command 下发执行前调用：截获标题。 */
   observe(payload: PublishCommandPayload): void {
     if (payload.kind !== 'fill_field') return;
     const params = payload.params as { fieldType?: string; value?: string } | undefined;

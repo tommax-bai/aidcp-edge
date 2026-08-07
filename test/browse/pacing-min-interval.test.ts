@@ -353,7 +353,7 @@ test('pacing.update: 中途升档放大最小间隔且不重置锚点', async ()
   assert.ok(!gate.includes(6000), `锚点不应被 pacing.update 推进（否则 elapsed=0 → 6000），实际: ${gate}`);
 });
 
-/** 驱动 note.open → note.close，返回 note.close 期间新增的最大 sleep（= ensureDetailDwell 兜底停留）。 */
+/** 驱动 note.open → navigation.back，返回 back 期间新增的最大 sleep（= ensureDetailDwell 兜底停留）。 */
 async function driveOpenClose(
   h: Harness,
   sleeps: number[],
@@ -368,7 +368,7 @@ async function driveOpenClose(
   await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o1', 0, { index: 0 }));
   await waitDetails(h, 1);
   const before = sleeps.length;
-  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.close', 'c1', 0, dwellMs === undefined ? {} : { dwellMs }));
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.navigation.back', 'c1', 0, dwellMs === undefined ? { targetPage: 'feed' } : { targetPage: 'feed', dwellMs }));
   const start = Date.now();
   while (sleeps.length === before) { if (Date.now() - start > 2000) break; await tick(5); }
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));
@@ -426,7 +426,7 @@ test('applyTempoUpdate: 越界 tempo（>上限）被忽略、兜底停留不失�
   await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.open', 'o1', 0, { index: 0 }));
   await waitDetails(h, 1);
   const before = sleeps.length;
-  await sess.onCloudCommand(makeEnvelope('xiaohongshu.note.close', 'c1', 0, {})); // 缺 dwellMs → 兜底停留 = sample×tempo
+  await sess.onCloudCommand(makeEnvelope('xiaohongshu.navigation.back', 'c1', 0, { targetPage: 'feed' })); // 缺 dwellMs → 兜底停留 = sample×tempo
   const start = Date.now();
   while (sleeps.length === before) { if (Date.now() - start > 2000) break; await tick(5); }
   await sess.onCloudCommand(makeEnvelope('session.end', 'e', 0, { reason: 'end' }));

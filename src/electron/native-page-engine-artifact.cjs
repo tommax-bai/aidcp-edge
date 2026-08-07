@@ -16,7 +16,7 @@ const EXPECTED_PLATFORM_ADAPTERS = Object.freeze([
   Object.freeze({ platform: 'facebook', adapterVersion: 'facebook-v1' }),
   Object.freeze({ platform: 'wechat_channels', adapterVersion: 'wechat-channels-v1' }),
 ]);
-const EXPECTED_CAPABILITY_DIGEST = '42c5a2b7c9fb19a2e4c7c99b013187ee007236bba7ce771f5b30f1a7632c2dff';
+const EXPECTED_CAPABILITY_DIGEST = '936375a80b97370dbe495b8bc5b17838bdbf516341c7f552d710cbd46ec5f186';
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
 
 /**

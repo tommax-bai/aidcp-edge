@@ -11,9 +11,9 @@ function command(
   kind: PublishCommandPayload['kind'],
   seq: number,
   params: PublishCommandPayload['params'] = {},
-  platform: PublishCommandPayload['platform'] = 'xiaohongshu',
 ): PublishCommandPayload {
-  return { platform, taskId: 'task-native', recordId: 9, seq, kind, params };
+  // 批 6b：载荷不再携平台字段——平台由 dispatch 的显式实参（从消息名前缀解析）传入。
+  return { taskId: 'task-native', recordId: 9, seq, kind, params };
 }
 
 test('tracks confirmed upload order and selects cover by its already-uploaded source', async () => {
@@ -35,10 +35,10 @@ test('tracks confirmed upload order and selects cover by its already-uploaded so
   };
   try {
     const executor = new NativePublishExecutor(runtime, 'aidcp-native-publish-test-');
-    assert.equal((await executor.dispatch(command('navigate_entry', 1))).ok, true);
-    assert.equal((await executor.dispatch(command('upload_image', 2, { imageUrl: 'https://cdn.test/one.png' }))).ok, true);
-    assert.equal((await executor.dispatch(command('upload_image', 3, { imageUrl: 'https://cdn.test/two.png' }))).ok, true);
-    assert.equal((await executor.dispatch(command('set_cover', 4, { imageUrl: 'https://cdn.test/two.png' }))).ok, true);
+    assert.equal((await executor.dispatch(command('navigate_entry', 1), 'xiaohongshu')).ok, true);
+    assert.equal((await executor.dispatch(command('upload_image', 2, { imageUrl: 'https://cdn.test/one.png' }), 'xiaohongshu')).ok, true);
+    assert.equal((await executor.dispatch(command('upload_image', 3, { imageUrl: 'https://cdn.test/two.png' }), 'xiaohongshu')).ok, true);
+    assert.equal((await executor.dispatch(command('set_cover', 4, { imageUrl: 'https://cdn.test/two.png' }), 'xiaohongshu')).ok, true);
     assert.equal(fetches, 2, 'set_cover must select an uploaded preview instead of downloading/uploading again');
     assert.deepEqual(nativeCommands.map((item) => [item.kind, item.params.imageIndex]), [
       ['publish_navigate_entry', undefined],
@@ -54,7 +54,7 @@ test('tracks confirmed upload order and selects cover by its already-uploaded so
 test('fails closed when the requested cover was never confirmed as uploaded', async () => {
   const runtime = { execute: async () => { throw new Error('must not dispatch'); } } as unknown as NativePageRuntime;
   const executor = new NativePublishExecutor(runtime, 'aidcp-native-publish-test-');
-  const result = await executor.dispatch(command('set_cover', 1, { imageUrl: 'https://cdn.test/missing.png' }));
+  const result = await executor.dispatch(command('set_cover', 1, { imageUrl: 'https://cdn.test/missing.png' }), 'xiaohongshu');
   assert.equal(result.ok, false);
   assert.equal(result.error, 'cover_source_not_uploaded');
 });
@@ -80,34 +80,34 @@ test('passes through the Facebook composer and fill deadlines without widening o
     ...command('select_mode', 1, {
       optionKind: 'target',
       optionValue: 'facebook_personal_timeline',
-    }, 'facebook'),
+    }),
     timeoutMs: 40_000,
-  });
+  }, 'facebook');
   await executor.dispatch({
     ...command('select_mode', 2, {
       optionKind: 'target',
       optionValue: 'xiaohongshu_note',
     }),
     timeoutMs: 40_000,
-  });
+  }, 'xiaohongshu');
   await executor.dispatch(command('select_mode', 3, {
     optionKind: 'target',
     optionValue: 'facebook_personal_timeline',
-  }, 'facebook'));
+  }), 'facebook');
   await executor.dispatch({
     ...command('fill_field', 4, {
       fieldType: 'content',
       value: 'Vietnamese body',
-    }, 'facebook'),
+    }),
     timeoutMs: 400_000,
-  });
+  }, 'facebook');
   await executor.dispatch({
     ...command('fill_field', 5, {
       fieldType: 'content',
       value: 'XHS body',
     }),
     timeoutMs: 400_000,
-  });
+  }, 'xiaohongshu');
 
   assert.deepEqual(timeouts, [40_000, 30_000, 30_000, 400_000, 30_000]);
 });
@@ -126,7 +126,7 @@ test('keeps the Native publish failure reason instead of replacing it with the e
   } as unknown as NativePageRuntime;
   const executor = new NativePublishExecutor(runtime, 'aidcp-native-publish-test-');
 
-  const result = await executor.dispatch(command('submit_publish', 1));
+  const result = await executor.dispatch(command('submit_publish', 1), 'xiaohongshu');
 
   assert.equal(result.ok, false);
   assert.equal(result.error, 'draft_success_signal_missing');
@@ -152,7 +152,7 @@ test('a dispatched submit that loses the engine stays non-retryable and preserve
   } as unknown as NativePageRuntime;
   const executor = new NativePublishExecutor(runtime, 'aidcp-native-publish-test-');
 
-  const result = await executor.dispatch(command('submit_publish', 1));
+  const result = await executor.dispatch(command('submit_publish', 1), 'xiaohongshu');
 
   assert.equal(result.ok, false);
   assert.equal(result.error, 'publish_result_lost');
@@ -167,7 +167,7 @@ test('a submit rejected while acquiring its Native session remains pre-dispatch'
   } as unknown as NativePageRuntime;
   const executor = new NativePublishExecutor(runtime, 'aidcp-native-publish-test-');
 
-  const result = await executor.dispatch(command('submit_publish', 1));
+  const result = await executor.dispatch(command('submit_publish', 1), 'xiaohongshu');
 
   assert.equal(result.ok, false);
   assert.equal(result.error, 'engine_exited');

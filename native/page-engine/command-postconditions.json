@@ -94,14 +94,9 @@
       "evidence": "详情容器 + 笔记 id 一致；错误页 / 访问限制词库先行否决，地址解析得出 id 不算打开成功"
     },
     {
-      "nativeKind": "note_close",
-      "status": "confirmed",
-      "evidence": "有界轮询确认浮层已关"
-    },
-    {
       "nativeKind": "navigation_back",
       "status": "confirmed",
-      "evidence": "有界轮询确认已回到列表面"
+      "evidence": "有界轮询确认已回到列表面（批 6b：note_close 退役，关弹层为本命令内部前奏）"
     },
     {
       "nativeKind": "note_browse_images",
