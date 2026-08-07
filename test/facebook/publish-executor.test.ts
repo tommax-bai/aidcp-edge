@@ -747,3 +747,20 @@ test('🔴 6.2：FB submit press 已派发但确认超时未命中 → post_vali
   assert.equal(res.error, 'post_validate_failed');
   assert.equal(res.submitDispatched, true, 'press 派发那一刻即置真（onPressDispatched）——即便确认失败，云端 MUST NOT 当提交前失败重投');
 });
+
+// 批 6b 集成变异④实测：main.ts 运行时闸与本默认臂当时均零覆盖（关闸后全绿）。
+// 钉住 fail-closed 默认臂：XHS 专属 kind 到 FB 执行器必须拒收，绝不静默改道执行。
+test('publish-executor: XHS 专属 kind 落 default 臂拒收 kind_not_supported_on_platform', async () => {
+  const cdp = new FakeFacebookPublishCdp();
+  const executor = new FacebookPublishExecutor({ cdp });
+  for (const kind of ['set_schedule', 'set_cover', 'add_with_candidate'] as const) {
+    const result = await executor.dispatch({
+      recordId: 1,
+      seq: 1,
+      kind,
+      params: {},
+    } as unknown as PublishCommandPayload);
+    assert.equal(result.ok, false, kind);
+    assert.equal(result.error, 'kind_not_supported_on_platform', kind);
+  }
+});
