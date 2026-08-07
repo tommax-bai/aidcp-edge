@@ -6,7 +6,10 @@ const { SocksProxyAgent } = require('socks-proxy-agent');
 const { normalizeProxyInput } = require('./ads-proxy-config.cjs');
 
 const DEFAULT_TARGET_URL = 'https://www.facebook.com/';
-const DEFAULT_TIMEOUT_MS = 8_000;
+// 探测只发一次、不重试，所以这个窗口就是「抖动能不能被熬过去」的唯一余量：窗口内恢复 = 本次启动照常，
+// 窗口不够 = 一次抖动直接判成一次启动失败。放宽到 25s 换的就是这个——代价只落在**失败**路径上
+// （链路正常时首字节 1~2s 就回来了，成功不会因此变慢），且串行启动队列里一个卡满的环境会挡住后面的。
+const DEFAULT_TIMEOUT_MS = 25_000;
 const DEFAULT_TTL_MS = 2 * 60_000;
 
 function proxyUrlForConfig(proxy) {
