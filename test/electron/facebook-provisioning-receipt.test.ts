@@ -16,7 +16,7 @@ function policyFor(mode: Mode, revision = 7) {
   return {
     primarySurface: 'reels',
     surfaceRevision: 1,
-    baseMode: mode === 'slow_start' ? 'persona' : mode,
+    baseMode: mode === 'slow_start' ? 'consumption' : mode,
     effectiveMode: null,
     policyRevision: revision,
     slowStart: { state: mode === 'slow_start' ? 'active' : 'off' },
@@ -122,6 +122,15 @@ test('mode matching validates base, lifecycle and effective-mode consistency', (
   assert.equal(provisioningOperationModeMatches(policyFor('slow_start'), 'slow_start'), true);
   assert.equal(provisioningOperationModeMatches(policyFor('consumption'), 'consumption'), true);
   assert.equal(provisioningOperationModeMatches(policyFor('rule'), 'consumption'), false);
+
+  // 旧版云端对 slow_start 写 persona 基线：混版期客户端仍须认为配置成功。
+  const legacySlowStart: any = policyFor('slow_start');
+  legacySlowStart.baseMode = 'persona';
+  assert.equal(provisioningOperationModeMatches(legacySlowStart, 'slow_start'), true);
+
+  const ruleBasedSlowStart: any = policyFor('slow_start');
+  ruleBasedSlowStart.baseMode = 'rule';
+  assert.equal(provisioningOperationModeMatches(ruleBasedSlowStart, 'slow_start'), false);
 
   const inconsistent: any = policyFor('rule');
   inconsistent.effectiveMode = 'consumption';

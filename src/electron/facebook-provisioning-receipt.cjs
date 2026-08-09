@@ -124,7 +124,11 @@ function provisioningCommittedFacebookOperationPolicy(response, expectedEnvKey) 
 function provisioningOperationModeMatches(policy, requestedMode) {
   if (!policy || !FACEBOOK_OPERATION_MODES.has(requestedMode)) return false;
   if (requestedMode === 'slow_start') {
-    return policy.baseMode === 'persona'
+    // 服务端对 slow_start 的可恢复基础模式：新版写 consumption（change
+    // default-consumption-after-slow-start），旧版写 persona。客户端可能面对
+    // 任一版本的云端（dev/ol 跟版节奏不同），两个值都证明「慢启动已激活 +
+    // 合法基线已落库」，故都算配置成功；其余不匹配仍如实报未配置。
+    return (policy.baseMode === 'consumption' || policy.baseMode === 'persona')
       && policy.slowStart.state === 'active'
       && (
         policy.effectiveMode === null
