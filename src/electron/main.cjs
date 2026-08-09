@@ -1825,6 +1825,13 @@ async function readAuthoritativeProfileProxy(profileId, {
     cacheCloudProxyAuthority(normalized);
     return normalized;
   }
+  // status 0 + error ＝ 请求根本没送达云端（断网 / DNS / 超时，clientAuthFetch 的 catch 出口；
+  // 「未配置 base」的早退同为 status 0 但不带 error，仍按配置类处理）。跨服务暂时读不到恒非
+  // 结构性失败：与「云端答复了但给不出记录」分开命名，绝不折进 proxy_authority_unavailable——
+  // 那个名字在预检不可恢复清单里，折进去就是把一次断网当场判成配置错误终局。
+  if (response.status === 0 && response.error) {
+    return { ok: false, blocking: true, reason: 'proxy_authority_unreachable' };
+  }
   const reason = String((response.data && response.data.error) || '');
   if (response.status !== 404 || reason !== 'uninitialized' || !allowMigration) {
     return {
@@ -2134,6 +2141,7 @@ function proxyPreflightFailureText(reason) {
     case 'authentication_failed': return '代理账号或密码未通过认证';
     case 'timeout': return '代理连接超时';
     case 'proxy_authority_unavailable': return '原环境代理安全记录不可用';
+    case 'proxy_authority_unreachable': return '暂时联系不上云端，代理配置读取不到';
     case 'proxy_authority_uninitialized': return 'Cloud 尚未保存该环境的原代理，请重新保存代理配置';
     case 'proxy_authority_revision_changed': return '代理配置已更新，请关闭并重新启动该环境';
     case 'local_proxy_authority_unavailable': return '本机旧代理记录不可用，请重新保存原代理';
@@ -4809,7 +4817,9 @@ async function spawnEdgeChild(handle, {
         // Inactive/无法确认时走既有准备：读取当前权威、必要时建立双跳，并验证 Facebook 可达。
         const network = await ensureNetworkPreparation(handle);
         if (network.state === 'unavailable') {
-          stopStartForProxyFailure(handle, network);
+          // 与主启动流同一分流：排队通过后网络才断掉的，会在这道晚验上现形——可恢复的
+          // 链路失败必须进有界重排，不得在这里绕过分流直接判死。
+          handleProxyPreflightFailure(handle, network, generation);
           return false;
         }
       }

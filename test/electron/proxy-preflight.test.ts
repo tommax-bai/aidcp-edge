@@ -336,6 +336,9 @@ test('链路瞬时失败进重排通道，配置类失败当场终结', () => {
     'timeout', 'connection_refused', 'host_unresolved', 'proxy_connect_failed', 'request_failed',
     'proxy_chain_port_unavailable', 'proxy_chain_spawn_failed', 'proxy_chain_exited',
     'proxy_chain_ready_timeout', 'system_proxy_read_failed',
+    // 云端代理权威读取的传输失败（请求没送达）：与 unavailable（云端答复了但给不出）分开命名，
+    // 恒可恢复。谁把它加进不可恢复清单，这里当场红。
+    'proxy_authority_unreachable',
   ];
   for (const reason of recoverable) {
     const decision = decideProxyPreflightFailure({ reason, requeuesUsed: 0 });

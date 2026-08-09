@@ -70,7 +70,10 @@ const NON_RECOVERABLE_PREFLIGHT_REASONS = new Set([
   'system_proxy_platform_unsupported',
   'system_proxy_config_invalid',
   'proxy_chain_duplicate_hop',
-  // 环境代理权威
+  // 环境代理权威——这几条都是「云端答复了，但记录给不出 / 对不上」。
+  // 注意 proxy_authority_unreachable（HTTP 请求根本没送达云端：断网 / DNS / 超时）**刻意不在此列**：
+  // 跨服务暂时读不到恒非结构性失败，必须走重排；把它加进来＝把一次断网当场判成配置错误终局
+  //（2026-08-09 dev 断网实证过这个误判的代价）。
   'proxy_authority_unavailable',
   'proxy_authority_uninitialized',
   'proxy_authority_revision_changed',

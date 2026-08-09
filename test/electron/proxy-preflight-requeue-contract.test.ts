@@ -75,3 +75,23 @@ test('用户显式启动清空机器用掉的重排预算', () => {
   assert.match(queueStart, /resetProxyRequeueBudget\(handle\)/,
     '人的重试意图不该继承上一轮机器用掉的额度');
 });
+
+test('云端代理权威读取的传输失败拆出独立原因，不折进不可恢复的 unavailable', () => {
+  const read = functionSource('readAuthoritativeProfileProxy');
+  // 整网断掉时启动准备死在这一步（走不到探测），拆名与否直接决定挪不挪队尾：
+  // 折进 proxy_authority_unavailable ＝ 断网被当场判成配置错误终局（2026-08-09 dev 实证）。
+  assert.match(read, /response\.status === 0 && response\.error[\s\S]{0,320}?proxy_authority_unreachable/,
+    '请求没送达云端（status 0 + error）必须返回独立的 proxy_authority_unreachable');
+  const text = functionSource('proxyPreflightFailureText');
+  assert.match(text, /proxy_authority_unreachable/,
+    '新原因必须有明确文案，不得落进「代理当前不可用」默认桶');
+});
+
+test('startEdge 的启动前晚验同样走分流，不绕过重排通道直接判死', () => {
+  const edge = functionSource('startEdge');
+  // 排队通过后网络才断掉的窗口落在这道晚验上；可恢复原因（含 unreachable）必须进有界重排。
+  assert.match(edge, /network\.state === 'unavailable'[\s\S]{0,320}?handleProxyPreflightFailure\(handle, network, generation\)/,
+    '晚验确定失败必须进分流；直接调 stopStartForProxyFailure 就是把可恢复失败判死');
+  assert.doesNotMatch(edge, /network\.state === 'unavailable'[\s\S]{0,320}?stopStartForProxyFailure\(handle, network\)/,
+    '晚验不得保留绕过分流的直接终结');
+});
