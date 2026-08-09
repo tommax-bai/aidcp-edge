@@ -37,6 +37,65 @@ export const FB_THROTTLE_ZH_FREQUENCY_PHRASES: readonly string[] = [
   '执行其他操作的频率',
 ];
 
+/**
+ * FB 法语界面的软阻断文案（change fb-throttle-popup-fr-copy）。
+ *
+ * 真实文案：「Cette fonctionnalité n'est pas disponible. / Un contrôle de sécurité est requis pour
+ * continuer. / Si vous pensez que ceci ne va pas à l'encontre des Standards de la communauté,
+ * dites-le nous.」
+ *
+ * 该弹窗的**英文版**今天已被下方既有正则命中（`this feature is( ?n.?t| not) available`）⇒ 判阻断态、
+ * 上报、云端一次刹车到 restricted；法语版零命中 ⇒ classify='none' ⇒ 连上报都不发 ⇒ 云端风控停 normal
+ * 继续按原节奏下发动作。**同一平台阻断因界面语言不同得到截然不同的处置，是覆盖面缺陷，不是设计意图。**
+ *
+ * **词条纪律（硬约束，误报代价不对称，同中文那份）**：
+ *  - 只用**长专属句片段**；`est requis` 是必需限定，绝不可省——裸的「contrôle de sécurité」在 FB 法语
+ *    安全设置页里是功能名、遍地都是，加上「是必需的」后语义才从「这里有个功能」变为「平台要求你现在做」；
+ *  - **显式不收第三句**「ne va pas à l'encontre des Standards de la communauté」——那是违规**申诉入口
+ *    话术**，附在一切违规告知之后、包括通知中心里的**陈年**内容删除通知 ⇒ 一条旧通知就能把账号打进
+ *    restricted。与云端删除 'we removed your' 的理由完全同源；
+ *  - **不凭空扩充未见过的变体**（不预填其他拉丁语种，见 change Non-Goals）。
+ *
+ * 词条以 `normalizeLatin()` 的**归一后形式**书写（小写 / 去撇号 / 去变音符 / 折空白）。
+ * 与云端 FB_THROTTLE_PHRASES 的法语段**逐条一致**（两仓无共享模块；两侧单测各锁一份集合，任一侧漂移即失败）。
+ */
+export const FB_THROTTLE_FR_PHRASES: readonly string[] = [
+  'controle de securite est requis',
+  'cette fonctionnalite nest pas disponible',
+];
+
+/**
+ * 拉丁语系文本归一：小写 → 去撇号/智能引号 → **去变音符** → 折叠空白。
+ *
+ * 与云端 facebook-throttle-signals.ts 的 normalize() 行为一致（两仓无共享模块）。去变音符消解三条
+ * **无法在代码评审中看出来**、命中任一条都会使判据静默空转的失配路径：
+ *  ① Unicode 等价形式——'é' 可以是预组合的 U+00E9，也可以是 'e' + U+0301 的组合序列，页面 innerText
+ *     用哪种不受我们控制，两者字面比较不相等；
+ *  ② 转录损耗——文案取证多经截图转录，变音符在这一步丢失；
+ *  ③ 地区变体——同一措辞在不同地区可能标注不同。
+ *
+ * **刻意只服务于新增的拉丁语系集合，不施加于下方既有正则**：那条正则跑在未做撇号 / 变音符归一的
+ * textLower 上，把归一引入它会改变全部既有英文与中文判据的输入面，风险远超收益。
+ */
+function normalizeLatin(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[’'`]/g, '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * 拉丁语系限流词条匹配。归一只做一次（整页文本可达 4000 字、遮罩监测体每秒轮询一次），且刻意保持惰性
+ * ——调用点排在既有正则之后，前面任一条命中即短路、根本不会走到这里。
+ */
+function matchesLatinThrottlePhrase(text: string): boolean {
+  const normalized = normalizeLatin(text);
+  return FB_THROTTLE_FR_PHRASES.some((phrase) => normalized.includes(phrase));
+}
+
 export function classifyFacebookOverlayFromSignals(signals: FacebookBlockingSignals): OverlayKind {
   const href = String(signals.href || '').toLowerCase();
   const text = String(signals.text || '').replace(/\s+/g, ' ');
@@ -84,7 +143,8 @@ export function classifyFacebookOverlayFromSignals(signals: FacebookBlockingSign
   if (
     href.includes('/help/contact') ||
     /temporarily blocked|action blocked|we limit how often you can do this|misusing this feature|you can.?t use this feature right now|going too fast|this feature is( ?n.?t| not) available|your account is restricted|we restrict certain content and actions|暂时被限制|功能暂时不可用|此功能暂时无法使用|你暂时无法使用|操作被封锁/i.test(textLower) ||
-    FB_THROTTLE_ZH_FREQUENCY_PHRASES.some((phrase) => text.includes(phrase))
+    FB_THROTTLE_ZH_FREQUENCY_PHRASES.some((phrase) => text.includes(phrase)) ||
+    matchesLatinThrottlePhrase(text)
   ) {
     return 'unknown';
   }

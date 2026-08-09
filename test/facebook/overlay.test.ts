@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  FB_THROTTLE_FR_PHRASES,
   FB_THROTTLE_ZH_FREQUENCY_PHRASES,
   FacebookOverlayMonitor,
   OVERLAY_EVIDENCE_MAX_CHARS,
@@ -170,6 +171,120 @@ test('词条集合锁：与云端 FB_THROTTLE_PHRASES 逐条对齐（任一侧�
     '我们限制了您发帖',
     '执行其他操作的频率',
   ]);
+});
+
+// ——— change fb-throttle-popup-fr-copy ———
+
+/** FB 法语软阻断弹窗的真实文案（带完整重音与撇号），本 change 的主因缺口。 */
+const FR_SECURITY_CHECK_POPUP = [
+  "Cette fonctionnalité n'est pas disponible.",
+  'Un contrôle de sécurité est requis pour continuer.',
+  "Si vous pensez que ceci ne va pas à l'encontre des Standards de la communauté, dites-le nous.",
+  'OK',
+].join(' ');
+
+test('法语软阻断弹窗被判为阻断态（本 change 的主因缺口）', () => {
+  // 本 change 之前这里返回 'none' ⇒ 连 captcha.detected 都不发 ⇒ 云端风控停 normal 继续按原节奏下发。
+  assert.equal(
+    classifyFacebookOverlayFromSignals({
+      href: 'https://www.facebook.com/groups/123/',
+      text: FR_SECURITY_CHECK_POPUP,
+    }),
+    'unknown',
+  );
+});
+
+test('法语与英语同一弹窗判定等价（不因界面语言分叉）', () => {
+  const en = [
+    "This feature isn't available.",
+    'A security check is required to continue.',
+    "If you think this doesn't go against our Community Standards, let us know.",
+    'OK',
+  ].join(' ');
+  const href = 'https://www.facebook.com/groups/123/';
+  assert.equal(classifyFacebookOverlayFromSignals({ href, text: en }), 'unknown', '英文版今天已命中（回归护栏）');
+  assert.equal(
+    classifyFacebookOverlayFromSignals({ href, text: FR_SECURITY_CHECK_POPUP }),
+    classifyFacebookOverlayFromSignals({ href, text: en }),
+  );
+});
+
+test('变音符归一：预组合 / 组合序列 / 重音丢失三种形式判定一致', () => {
+  const href = 'https://www.facebook.com/groups/123/';
+  // ① 预组合形式（U+00E9 等）
+  assert.equal(
+    classifyFacebookOverlayFromSignals({ href, text: FR_SECURITY_CHECK_POPUP.normalize('NFC') }),
+    'unknown',
+  );
+  // ② 组合序列形式（'e' + U+0301）：页面 innerText 用哪种不受我们控制，字面比较不相等
+  assert.equal(
+    classifyFacebookOverlayFromSignals({ href, text: FR_SECURITY_CHECK_POPUP.normalize('NFD') }),
+    'unknown',
+  );
+  // ③ 重音整体丢失（文案取证经截图转录的典型损耗）
+  assert.equal(
+    classifyFacebookOverlayFromSignals({ href, text: 'Un controle de securite est requis pour continuer.' }),
+    'unknown',
+  );
+  assert.equal(
+    classifyFacebookOverlayFromSignals({ href, text: "Cette fonctionnalite n'est pas disponible." }),
+    'unknown',
+  );
+  // 注：OCR 把 ô 误认成别的字母（contrale）属**字符识别错误**、非变音符丢失，不在本归一的承诺范围内。
+});
+
+test('词条纪律：法语申诉话术绝不命中（陈年违规通知会误把账号打进 restricted）', () => {
+  // 「如果你认为这不违反社群规范，请告知我们」附在一切违规告知之后，包括通知中心里的陈年内容删除通知。
+  // 与云端删除 'we removed your' 的理由完全同源。
+  for (const phrase of FB_THROTTLE_FR_PHRASES) {
+    assert.ok(!phrase.includes('standards'), `词条不得含申诉话术: ${phrase}`);
+    assert.ok(!phrase.includes('communaute'), `词条不得含申诉话术: ${phrase}`);
+  }
+  const benign = [
+    "Si vous pensez que ceci ne va pas à l'encontre des Standards de la communauté, dites-le nous.",
+    'Nous avons supprimé votre publication car elle ne respecte pas nos Standards de la communauté.',
+  ];
+  for (const text of benign) {
+    assert.equal(
+      classifyFacebookOverlayFromSignals({ href: 'https://www.facebook.com/groups/x/', text }),
+      'none',
+      `申诉话术不得判为限流: ${text}`,
+    );
+  }
+});
+
+test('词条纪律：不带「est requis」限定的裸短语绝不命中（设置页里是功能名）', () => {
+  const benign = [
+    'Contrôle de sécurité',
+    'Contrôle de sécurité — vérifiez les paramètres de sécurité de votre compte.',
+    'Cette option est disponible dans vos paramètres.',
+  ];
+  for (const text of benign) {
+    assert.equal(
+      classifyFacebookOverlayFromSignals({ href: 'https://www.facebook.com/settings/', text }),
+      'none',
+      `设置页措辞不得判为限流: ${text}`,
+    );
+  }
+});
+
+test('词条集合锁：法语两条须与云端 FB_THROTTLE_PHRASES 逐条对齐（任一侧漂移即失败）', () => {
+  // 两仓各自维护、无共享模块 ⇒ 本断言是唯一防漂移手段（云端同名测试镜像本表）。
+  assert.deepEqual([...FB_THROTTLE_FR_PHRASES], [
+    'controle de securite est requis',
+    'cette fonctionnalite nest pas disponible',
+  ]);
+  // 词条不经归一、靠人工保证已归一 ⇒ 一条带变音符或撇号的词条会**永不命中**且无任何报错。
+  for (const phrase of FB_THROTTLE_FR_PHRASES) {
+    assert.equal(phrase, phrase.toLowerCase());
+    assert.ok(!phrase.includes("'"), `词条含撇号未归一（将永不命中）: ${phrase}`);
+    assert.equal(
+      phrase.normalize('NFD').replace(/[\u0300-\u036f]/g, ''),
+      phrase,
+      `词条含变音符未归一（将永不命中）: ${phrase}`,
+    );
+    assert.ok(phrase.length >= 12, `词条须为长专属句片段，过短易误报: ${phrase}`);
+  }
 });
 
 test('此前只在云端的 we restrict certain content and actions 现已可达（消除死代码）', () => {
