@@ -171,9 +171,7 @@ pub(crate) async fn execute(
         }
         NativeCommand::FeedRefresh(_) => execute_facebook_feed_refresh(session).await,
         // 批 6b：note_close 已退役——FB 侧「关帖」与「回列表」本就同一路径，唯一形态是 navigation_back。
-        NativeCommand::NavigationBack(_) => {
-            execute_facebook_back_to_list(session).await
-        }
+        NativeCommand::NavigationBack(_) => execute_facebook_back_to_list(session).await,
         NativeCommand::BrowseScroll(_)
         | NativeCommand::SearchExecute(_)
         | NativeCommand::NoteOpen(_) => evaluate_facebook_router(session, command).await,
