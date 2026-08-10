@@ -57,9 +57,11 @@ test('子进程对象等待 close 时不再虚占 OS 已退出的浏览器槽位
   assert.equal(fleet.childProcessIsRunning({ exitCode: null, signalCode: 'SIGTERM' }), false);
   assert.equal(fleet.childProcessIsRunning(undefined), false);
 
+  // 单环境判据已抽成 handleOccupiesBrowserSlot，供槽位计数与阻塞滞留终止共用
+  // （change release-browser-slot-on-stalled-blocker）。不变量不变，只是换了落点。
   const occupied = mainSource.slice(
-    mainSource.indexOf('function occupiedSlots()'),
-    mainSource.indexOf('\nfunction queuedStartCount()', mainSource.indexOf('function occupiedSlots()')),
+    mainSource.indexOf('function handleOccupiesBrowserSlot('),
+    mainSource.indexOf('\nfunction occupiedSlots()', mainSource.indexOf('function handleOccupiesBrowserSlot(')),
   );
   assert.match(occupied, /fleet\.childProcessIsRunning\(h\.child\)/);
 
@@ -171,9 +173,11 @@ test('主进程从权威调度器结构化投影位次，不解析状态文案',
 });
 
 test('视频号临时通道与公共槽位分池，并投影容量 1 与精确 FIFO 位次', () => {
+  // 单环境判据已抽成 handleOccupiesBrowserSlot，供槽位计数与阻塞滞留终止共用
+  // （change release-browser-slot-on-stalled-blocker）。不变量不变，只是换了落点。
   const occupied = mainSource.slice(
-    mainSource.indexOf('function occupiedSlots()'),
-    mainSource.indexOf('\nfunction queuedStartCount()', mainSource.indexOf('function occupiedSlots()')),
+    mainSource.indexOf('function handleOccupiesBrowserSlot('),
+    mainSource.indexOf('\nfunction occupiedSlots()', mainSource.indexOf('function handleOccupiesBrowserSlot(')),
   );
   assert.match(occupied, /!usesTransientBrowserLane\(h\)/, '视频号/API-only 核心不得占公共浏览器槽位');
 

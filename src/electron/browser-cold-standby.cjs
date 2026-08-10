@@ -17,6 +17,50 @@ const LEGACY_BROWSER_COLD_STANDBY_MIN_WAIT_SETTING = 'browserColdStandbyMinWaitM
  */
 const DEFAULT_BROWSER_COLD_STANDBY_MIN_HOLD_MS = 3 * 60_000;
 
+/**
+ * 需人介入的阻塞可以攥住一格浏览器执行槽多久（change release-browser-slot-on-stalled-blocker）。
+ *
+ * 云端对「解除这个阻塞需要浏览器」的情形刻意不产出可让位提示——那条红线是对的，关掉一个正等着
+ * 运营去解验证码的浏览器等于自残。但红线此前只写了「不许关」，没写「人一直不来该怎么办」：一个
+ * 零工作量的环境可以**无限期**占住一格（按内存计，约 700MB），而且这类滞留连持续时长都看不到
+ *（既有的连续拒绝记账只记「云端说可以让、本地却拒了」，云端说不该让时计数被清零）。
+ *
+ * 本门槛就是那缺失的另一半。它 MUST 显著大于待机提示的到达节拍（约 60s），否则一两跳抖动就能
+ * 触发终止。
+ */
+const DEFAULT_STALLED_BLOCKER_EVICTION_MS = 15 * 60_000;
+const MIN_VALID_STALLED_BLOCKER_EVICTION_MS = 5 * 60_000;
+const DEFAULT_STALLED_BLOCKER_EVICTION_ENABLED = true;
+
+/**
+ * **可终止**的具名阻塞原因白名单（逐字对应云端 `browser-standby.ts` 的具名取值）。
+ *
+ * 只有同时满足「人来了就能解决」与「此刻确实在白占一格槽」的原因才配进这张表：
+ *
+ * - `hard_blocker:overlay_pause`——该分身卡在阻断浮层上（**验证码与认不出的弹窗共用这一条通道**，
+ *   两类载荷都会让云端把它置为暂停）。人不来，它就一直占着。
+ * - `not_ready:persona_unbound`——运营去绑一下人设就好。云端对这一支另挂了一条 2s→60s 的自动
+ *   复判链，因此走到 15 分钟门槛意味着自动补齐确实没发生。
+ *
+ * **这是白名单，MUST NOT 改写成黑名单。** 别的原因各有各的理由绝不能终止：两种副本陈旧会自己
+ * 追上（无人可「处理」）；平台不具备浏览能力是该平台常态、而该账号很可能正在跑排期发帖或评论；
+ * 运营显式全局停机与「该部署没开续场特性」是**全体环境共有**的状态，照单终止即整机清场，而且
+ * 没有任何受益人——所有环境都停了，腾出的槽位无人可用，运营恢复时反倒要逐个手动重启。
+ *
+ * 上面这份分类是逐条读云端实现才得出的，初稿曾把其中三种误判为「该关」。这类判断出错是常态，
+ * **所以默认后果必须安全**：黑名单对新增原因的默认后果是终止，白名单的默认后果只是多占一会儿
+ * 槽位。云端将来新增任何原因，在有人显式把它加进这张表之前，一律不终止。
+ */
+const EVICTABLE_STALLED_BLOCKER_REASONS = Object.freeze([
+  'hard_blocker:overlay_pause',
+  'not_ready:persona_unbound',
+]);
+
+/** 该原因是否在可终止白名单内。非字符串 / 未收录 → false（保守方向）。 */
+function isEvictableStalledBlocker(reason) {
+  return typeof reason === 'string' && EVICTABLE_STALLED_BLOCKER_REASONS.includes(reason);
+}
+
 function normalizeColdStandbySettings(settings = {}, env = process.env) {
   const settingEnabled = typeof settings.browserColdStandbyEnabled === 'boolean'
     ? settings.browserColdStandbyEnabled
@@ -34,7 +78,23 @@ function normalizeColdStandbySettings(settings = {}, env = process.env) {
       env.AIDCP_BROWSER_COLD_STANDBY_MIN_HOLD_MS,
       DEFAULT_BROWSER_COLD_STANDBY_MIN_HOLD_MS,
     ),
+    evictionEnabled: resolveStalledBlockerEvictionEnabled(settings, env),
+    // 低于下限的配置值一律回落默认：门槛小于提示节拍的若干倍时，一两跳抖动就能关掉环境。
+    evictionMs: parseMsAtLeast(
+      settings.stalledBlockerEvictionMs,
+      env.AIDCP_STALLED_BLOCKER_EVICTION_MS,
+      DEFAULT_STALLED_BLOCKER_EVICTION_MS,
+      MIN_VALID_STALLED_BLOCKER_EVICTION_MS,
+    ),
   };
+}
+
+function resolveStalledBlockerEvictionEnabled(settings, env) {
+  const fromEnv = parseBooleanOverride(env.AIDCP_STALLED_BLOCKER_EVICTION);
+  if (fromEnv != null) return fromEnv;
+  return typeof settings.stalledBlockerEvictionEnabled === 'boolean'
+    ? settings.stalledBlockerEvictionEnabled
+    : DEFAULT_STALLED_BLOCKER_EVICTION_ENABLED;
 }
 
 function omitLegacyColdStandbyMinWaitSetting(input = {}) {
@@ -148,6 +208,66 @@ function skip(reason, hint) {
 }
 
 /**
+ * 需人介入阻塞的**滞留计时**记账（change release-browser-slot-on-stalled-blocker）。
+ *
+ * 纯函数：调用方持有上一次的记账值，这里只算下一个。返回 `null` 表示**计时归零**。
+ *
+ * 归零的三种情形，每一种都有代价明确的理由：
+ *
+ * 1. **原因不在可终止白名单内**——包括云端说「这会儿可以让位」、以及任何我们没显式收录的原因。
+ *    与既有连续拒绝记账「换因即复位」同口径。
+ * 2. **换了原因**——原因变了说明情况变了，MUST NOT 继承上一段的时长。
+ * 3. **调用方在断连时显式清零**（见下面 `shouldEvictStalledBlocker` 的说明）。
+ *
+ * @param previous 上一次的记账值 `{ reason, since }`；从未记过传 `null`。
+ */
+function noteStalledBlocker(previous, reason, now = Date.now()) {
+  if (!isEvictableStalledBlocker(reason)) return null;
+  if (previous && previous.reason === reason && Number.isFinite(previous.since)) return previous;
+  return { reason, since: now };
+}
+
+/**
+ * 判「这个环境是不是该因阻塞滞留超限而被终止」（change release-browser-slot-on-stalled-blocker）。
+ *
+ * **终止不是冷待机的一个分支**：冷待机保留核心与云端连接、到点自动醒，前提是阻塞会自行解除；
+ * 这里的阻塞不会自行解除，所以走的是终态——关掉自动化、还回槽位、**绝不自动重启**，等运营处理。
+ * 两者若共用一条路径，「可恢复的等待」与「需要人处理的阻塞」在状态与呈现上又会长得一样。
+ *
+ * 四条护栏**全部成立**才终止，缺一不可：
+ *
+ * 1. 原因在**可终止白名单**内（见 `EVICTABLE_STALLED_BLOCKER_REASONS`）；
+ * 2. 该环境**此刻真的占着一格执行槽**——由调用方传入，且 MUST 复用槽位记账的同一判据（两份判据
+ *    漂移的现形方式，是关掉一个本来就不占槽、关了也腾不出位子的环境）；
+ * 3. 自动化意图为**已启用**——运营手动暂停 / 关闭的环境走别的路，不归本机制管；
+ * 4. **与云端处于连接态**。这一条不只是「提示新鲜」那么简单：断连期间收不到提示，**不等于阻塞
+ *    仍在**。若按首次出现时刻直接算差值，断连 20 分钟后重连的第一跳就会立刻越过门槛——那等于让
+ *    断连时长替阻塞背书。调用方 MUST 在断连时把记账清零，重连后从头计满。
+ *
+ * @returns `{ evict: true, reason, stalledMs, since }` 或 `{ evict: false, reason: <具名拒绝原因> }`
+ */
+function shouldEvictStalledBlocker({ hint, flags = {}, status = {}, stall, settings, now = Date.now() }) {
+  const config = settings || normalizeColdStandbySettings();
+  const deny = (reason, extra) => ({ evict: false, reason, ...(extra || {}) });
+
+  if (!config.evictionEnabled) return deny('disabled');
+  const normalizedHint = normalizeBrowserStandbyHint(hint);
+  if (!normalizedHint) return deny('invalid_hint');
+  // 云端说「可以让位」→ 这是冷待机的活，不归本机制。它同时也是滞留的**结束**。
+  if (normalizedHint.eligible) return deny('eligible');
+  if (!isEvictableStalledBlocker(normalizedHint.reason)) return deny('not_evictable');
+  if (status.cloud !== 'connected') return deny('cloud_not_connected');
+  if (!flags.occupiesSlot) return deny('no_slot');
+  if (flags.automationPaused || flags.automationIntent !== 'enabled') return deny('automation_not_enabled');
+  // 记账缺失或与当前原因对不上 ⇒ 这一跳才刚开始计时，不能拿别的原因的时长顶数。
+  if (!stall || stall.reason !== normalizedHint.reason || !Number.isFinite(stall.since)) return deny('no_stall');
+
+  const stalledMs = Math.max(0, now - stall.since);
+  if (stalledMs < config.evictionMs) return deny('stall_too_short', { stalledMs });
+  return { evict: true, reason: normalizedHint.reason, stalledMs, since: stall.since };
+}
+
+/**
  * 连续拒绝的日志节流：首次一条、原因变化一条（计数复位到 1），此后每 N 次一条。
  *
  * 不能每次都写——提示每 60s 一跳，一个卡住的环境会把日志淹掉，反而看不见别的；也不能只写首次——
@@ -251,6 +371,15 @@ function parsePositiveMs(settingValue, envValue, fallback) {
   return fallback;
 }
 
+/** 同 parsePositiveMs，但下限可指定：低于下限的配置值视作无效、回落 fallback（绝不按危险的小值跑）。 */
+function parseMsAtLeast(settingValue, envValue, fallback, minMs) {
+  const fromEnv = Number(envValue);
+  if (Number.isFinite(fromEnv) && fromEnv >= minMs) return Math.floor(fromEnv);
+  const fromSetting = Number(settingValue);
+  if (Number.isFinite(fromSetting) && fromSetting >= minMs) return Math.floor(fromSetting);
+  return fallback;
+}
+
 /** 同 parsePositiveMs，但接受 0（= 关闭最短持有时长这道闸）。 */
 function parseNonNegativeMs(settingValue, envValue, fallback) {
   const fromEnv = Number(envValue);
@@ -270,6 +399,12 @@ module.exports = {
   DEFAULT_BROWSER_COLD_STANDBY_WARMUP_MS,
   DEFAULT_BROWSER_COLD_STANDBY_MIN_HOLD_MS,
   MIN_VALID_BROWSER_STANDBY_WAIT_MS,
+  DEFAULT_STALLED_BLOCKER_EVICTION_MS,
+  MIN_VALID_STALLED_BLOCKER_EVICTION_MS,
+  EVICTABLE_STALLED_BLOCKER_REASONS,
+  isEvictableStalledBlocker,
+  noteStalledBlocker,
+  shouldEvictStalledBlocker,
   STANDBY_REFUSAL_LOG_EVERY,
   noteStandbyRefusal,
   shouldLogStandbyRefusal,

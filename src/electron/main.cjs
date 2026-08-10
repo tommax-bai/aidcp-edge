@@ -112,6 +112,8 @@ const {
   normalizeBrowserStandbyHint,
   classifyBrowserStandbyHintUpdate,
   noteStandbyRefusal,
+  noteStalledBlocker,
+  shouldEvictStalledBlocker,
   shouldLogStandbyRefusal,
   shouldReportStandbyDecision,
   standbyDecisionFact,
@@ -1687,6 +1689,9 @@ function makeStatus(provider) {
     lastMessage: '客户端已就绪；自动化尚未启动。',
     commandDiagnostics: [],
     edgeFailure: null,
+    // 因需人介入的阻塞滞留超限而被系统关闭时留下的持久卡片（change release-browser-slot-on-stalled-blocker）。
+    // 它是运营判断「要不要重新启动这个号」的唯一依据，只在运营重新启动该环境时清除。
+    stalledEviction: null,
     updatedAt: new Date().toISOString(),
     account: null,
     presence: { text: '数据管理可用，等待开始自动化', at: new Date().toISOString() },
@@ -2311,6 +2316,8 @@ function makeEnvHandle({ envId, kind, profileId, name, systemName, nameSource, n
     automationPaused: false,
     automationIntent: 'stopped', // 'stopped' | 'enabled' | 'paused'
     engineStopReason: '',
+    // 需人介入阻塞的滞留计时 `{ reason, since }`；换因 / 断连 / 云端改口即归零。
+    stalledBlocker: null,
     resumeAfterStop: false,
     // Resume and browser wake are serialized: when automation is paused in browser standby,
     // first clear the core's pause latch, then open the browser through the normal slot queue.
@@ -2945,14 +2952,26 @@ function slotCapacity() {
 function maxQueuedStarts() {
   return slotSettingsView().maxQueuedStarts;
 }
-/** 当前真正占着浏览器的环境数：活核心持有的浏览器，或核心退出后仍未确认关闭的浏览器。 */
+/**
+ * 这个环境此刻是否**真的占着一格浏览器执行槽**：活核心持有的浏览器，或核心退出后仍未确认关闭的浏览器。
+ *
+ * 抽成具名函数是因为它有第二个消费者——滞留终止判定（change release-browser-slot-on-stalled-blocker）
+ * 要据它确认「关掉这个环境确实能腾出位子」。**两处 MUST 同源**：各写一份判据，漂移的现形方式是
+ * 关掉一个本来就不占槽的环境（关了也腾不出位子，纯亏）。
+ */
+function handleOccupiesBrowserSlot(h) {
+  if (!h || h.removed) return false;
+  // 专用离场清理核心从未打开浏览器；coldStandbyPending 期间也不能虚占一个执行槽。
+  const liveCoreBrowser = fleet.childProcessIsRunning(h.child) && !usesTransientBrowserLane(h)
+    && !h.coldStandbyActive && !h.controlPlaneOnly;
+  return Boolean(liveCoreBrowser || h.browserStateUnconfirmed);
+}
+
+/** 当前真正占着浏览器的环境数。 */
 function occupiedSlots() {
   let n = 0;
   for (const h of envs.values()) {
-    // 专用离场清理核心从未打开浏览器；coldStandbyPending 期间也不能虚占一个执行槽。
-    const liveCoreBrowser = fleet.childProcessIsRunning(h.child) && !usesTransientBrowserLane(h)
-      && !h.coldStandbyActive && !h.controlPlaneOnly;
-    if (!h.removed && (liveCoreBrowser || h.browserStateUnconfirmed)) n += 1;
+    if (handleOccupiesBrowserSlot(h)) n += 1;
   }
   return n;
 }
@@ -3338,6 +3357,17 @@ function updateStatus(handle, patch) {
   let full = patch.stats ? { ...patch, stats: mergeStats(handle.status.stats, patch.stats) } : patch;
   if (full.loopStage === null && full.loopStageBrowserIndependent === undefined) {
     full = { ...full, loopStageBrowserIndependent: false };
+  }
+  // 断连即清滞留计时（change release-browser-slot-on-stalled-blocker）。**收口在这一处**、不在
+  // 那十几个写 `cloud: 'disconnected'` 的调用点上——逐点武装迟早漏掉新加的那个，而漏掉的后果是
+  // 断连 20 分钟后重连的第一跳提示直接越过门槛：等于让断连时长替阻塞背书，凭空关掉一个环境。
+  if (full.cloud !== undefined && full.cloud !== 'connected' && handle.status.cloud === 'connected') {
+    handle.stalledBlocker = null;
+  }
+  // 环境重新跑起来了 ⇒ 滞留终止的持久卡片使命结束。同样收口在这一处而不是各个启动入口：
+  // 入口有四个且还会再增，逐个清必然漏掉新加的那个，漏掉的后果是一张永远撕不掉的旧卡片。
+  if (full.edge === 'running' && handle.status.stalledEviction) {
+    full = { ...full, stalledEviction: null };
   }
   Object.assign(handle.status, full, { updatedAt: new Date().toISOString() });
   syncBrowserPersonaNotice(handle);
@@ -4049,6 +4079,78 @@ function clearColdStandbyTimer(handle) {
   clearColdStandbyHoldTimer(handle);
 }
 
+/**
+ * 可终止阻塞原因 → 运营看得懂的说法（change release-browser-slot-on-stalled-blocker）。
+ *
+ * 持久卡片是运营判断「要不要重新启动这个号」的唯一依据，那里 MUST NOT 只印一个内部原因串。
+ */
+const STALLED_BLOCKER_LABELS = {
+  'hard_blocker:overlay_pause': '页面被弹窗挡住（验证码或其它需要人处理的弹窗）',
+  'not_ready:persona_unbound': '尚未绑定人设',
+};
+
+function stalledBlockerLabel(reason) {
+  return STALLED_BLOCKER_LABELS[reason] || reason || '未知阻塞';
+}
+
+/**
+ * 滞留终止（change release-browser-slot-on-stalled-blocker）。
+ *
+ * **每一跳待机提示都要经过这里**——它既推进计时，也负责归零（原因换了、或云端改口说可以让位，
+ * 这段滞留就结束了）。挂在冷待机判定的某个分支里必然漏：那一支下面有若干条提前 return。
+ *
+ * 终止本身**复用运营手动关闭那条路径**，不新造：那条路已经处理了生命周期代次推进、启动队列
+ * 释放、等槽位队列清理、槽位记账收敛与界面四轴收敛，新写一条必然漏项，而漏项在这里的形态是
+ * 「关了但槽位没还」或「关了却又被自动拉起」。
+ *
+ * 归因**不改 `engineStopReason`**：那个字段驱动关闭流程本身的机械行为，有多处硬匹配
+ * `user_close`，换值会让关闭流程的分支走不到——复用一条路径却改掉它的路牌，等于没复用。
+ * 「这次是系统关的、不是人关的」记在独立的 `stalledEviction` 上，它同时就是持久卡片的数据源。
+ *
+ * @returns true = 已终止该环境；调用方 MUST 立即返回（对一个已关掉的环境再判冷待机没有意义）
+ */
+function evictStalledBlockerIfDue(handle, hint, settingsView) {
+  const now = Date.now();
+  handle.stalledBlocker = noteStalledBlocker(handle.stalledBlocker, hint && hint.reason, now);
+  const verdict = shouldEvictStalledBlocker({
+    hint,
+    status: handle.status,
+    flags: {
+      // 与槽位记账同源：确认关掉它确实能腾出位子（见 handleOccupiesBrowserSlot）。
+      occupiesSlot: handleOccupiesBrowserSlot(handle),
+      automationIntent: handle.automationIntent,
+      automationPaused: Boolean(handle.automationPaused),
+    },
+    stall: handle.stalledBlocker,
+    settings: settingsView,
+    now,
+  });
+  if (!verdict.evict) return false;
+
+  const minutes = Math.round(verdict.stalledMs / 60_000);
+  const label = stalledBlockerLabel(verdict.reason);
+  handle.stalledBlocker = null;
+  appendEdgeLog(
+    handle.envId,
+    `「${label}」已滞留约 ${minutes} 分钟仍未处理：关闭自动化并让出浏览器槽位，需人工处理后手动重新启动。`,
+    true,
+  );
+  stopAutomation(handle);
+  // 写在 stopAutomation 之后：那条路径内部会多次刷状态，先写会被冲掉。
+  updateStatus(handle, {
+    stalledEviction: {
+      reason: verdict.reason,
+      label,
+      stalledMs: verdict.stalledMs,
+      since: new Date(verdict.since).toISOString(),
+      at: new Date(now).toISOString(),
+    },
+    lastMessage: `${label}：已滞留约 ${minutes} 分钟，自动化已关闭、浏览器槽位已让出。处理完请手动重新启动。`,
+    ...presencePatch(`${label} 长时间未处理，已让出浏览器槽位`),
+  });
+  return true;
+}
+
 /** 清掉「最短持有时长满足后重新判定」的定时器。不清 coldStandbyLastWokenAt——那是唤醒时刻的事实、不是定时器。 */
 function clearColdStandbyHoldTimer(handle) {
   if (!handle) return;
@@ -4179,6 +4281,10 @@ function applyBrowserStandbyHint(handle, rawHint) {
   const settingsView = normalizeColdStandbySettings(settings, process.env);
   // 重新判定 → 先撤掉上一次 min_hold 排的重判定时器（本次会按最新提示重排）。
   clearColdStandbyHoldTimer(handle);
+  // 滞留计时（change release-browser-slot-on-stalled-blocker）：**每一跳提示都要过这里**，因为
+  // 归零同样是它的职责——原因换了、或云端改口说可以让位，这段滞留就结束了。放在冷待机判定之前，
+  // 是因为「云端说不该让位」那一支下面有若干条提前 return，挂在后面必然漏掉其中几条。
+  if (evictStalledBlockerIfDue(handle, hint, settingsView)) return;
   const decision = shouldEnterColdStandby({
     status: handle.status,
     flags: coldStandbyFlags(handle),

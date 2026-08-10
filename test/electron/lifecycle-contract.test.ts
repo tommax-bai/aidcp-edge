@@ -301,9 +301,15 @@ test('startup-auth close requires generation-bound browser death evidence before
   assert.match(spawn, /lastMessage: closeEvidenceMissing[\s\S]*?浏览器关闭状态未能确认[\s\S]*?stopReason === 'user_close'[\s\S]*?引擎和浏览器已关闭/,
     'missing evidence must win over the normal user-close success projection');
 
-  const occupied = functionSource('occupiedSlots', 'queuedStartCount');
-  assert.match(occupied, /liveCoreBrowser \|\| h\.browserStateUnconfirmed/,
+  // The per-environment predicate moved into its own function so stalled-blocker eviction can ask
+  // the same question (change release-browser-slot-on-stalled-blocker). The invariant is unchanged;
+  // both readers must keep sharing it, or one will free a slot the other still counts as occupied.
+  const occupancy = functionSource('handleOccupiesBrowserSlot', 'occupiedSlots');
+  assert.match(occupancy, /liveCoreBrowser \|\| h\.browserStateUnconfirmed/,
     'an orphaned browser must retain its concurrency slot');
+  const occupied = functionSource('occupiedSlots', 'queuedStartCount');
+  assert.match(occupied, /handleOccupiesBrowserSlot\(h\)/,
+    'slot accounting must go through the shared predicate, not a second copy of it');
   const admit = functionSource('admitBrowserSlot', 'slotWaiters');
   assert.match(admit, /occupiedSlots\(\) - \(handle\.browserStateUnconfirmed \? 1 : 0\)/,
     'the same profile may reacquire its retained slot to recover and close the browser');

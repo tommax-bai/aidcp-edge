@@ -71,8 +71,12 @@ test('browser-absent page commands request a wake and return an explicit failure
 });
 
 test('browser-absent core does not consume a browser slot and real wake clears the marker', () => {
+  // 判据已抽成独立函数，供槽位计数与阻塞滞留终止共用（change release-browser-slot-on-stalled-blocker）。
+  // 不变量不变：从未开过浏览器的控制面环境不占槽——终止它同样腾不出任何位子。
+  const occupancy = blockBetween(electronMain, 'function handleOccupiesBrowserSlot(', 'function occupiedSlots(');
+  assert.match(occupancy, /!h\.controlPlaneOnly/);
   const occupied = blockBetween(electronMain, 'function occupiedSlots(', 'function queuedStartCount(');
-  assert.match(occupied, /!h\.controlPlaneOnly/);
+  assert.match(occupied, /handleOccupiesBrowserSlot\(h\)/, '槽位计数必须走同一个判据，不得再写一份');
   const woken = blockBetween(electronMain, 'function onColdStandbyWoken(', 'function onColdStandbyWakeFailed(');
   assert.match(woken, /handle\.controlPlaneOnly = false/);
   const wakeFailed = blockBetween(electronMain, 'function onColdStandbyWakeFailed(', 'async function startRestrictedOffboardCleanupCore(');

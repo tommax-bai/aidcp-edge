@@ -205,6 +205,16 @@
         </div>
       </section>
 
+      <!-- 阻塞滞留超限被系统关闭（change release-browser-slot-on-stalled-blocker）。
+           它是运营判断「要不要重新启动这个号」的唯一依据，只在该环境重新跑起来时消失。 -->
+      <section id="stalled-eviction" class="edge-failure hidden" aria-live="polite">
+        <span class="ef-mark">!</span>
+        <div class="ef-main">
+          <strong>已让出浏览器槽位</strong>
+          <span id="stalled-eviction-text"></span>
+        </div>
+      </section>
+
       <!-- 首个环境的启动引导由环境页持有；XHS 模式会同时高亮价值首页里的可见代理按钮。 -->
       <div id="first-environment-start-guide" class="first-environment-start-guide hidden" role="status" aria-live="polite">
         <button id="first-environment-start-guide-close" class="first-environment-start-guide-close" type="button" aria-label="关闭启动引导">×</button>

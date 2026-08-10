@@ -108,6 +108,8 @@ const fields = {
   noticeAction: document.querySelector('#notice-action'),
   edgeFailure: document.querySelector('#edge-failure'),
   edgeFailureText: document.querySelector('#edge-failure-text'),
+  stalledEviction: document.querySelector('#stalled-eviction'),
+  stalledEvictionText: document.querySelector('#stalled-eviction-text'),
   subtitle: document.querySelector('#subtitle'),
   // 陪伴式新增
   titlebar: document.querySelector('#titlebar'),
@@ -2958,6 +2960,30 @@ function renderEdgeFailure(status) {
   const show = Boolean(summary) && (status.edge === 'warning' || status.auth === 'chrome missing');
   fields.edgeFailure.classList.toggle('hidden', !show);
   fields.edgeFailureText.textContent = show ? summary : '';
+}
+
+/**
+ * 阻塞滞留超限被系统关闭的持久卡片（change release-browser-slot-on-stalled-blocker）。
+ *
+ * 它与运行状态**解耦**：只要主进程还挂着这条归因就一直显示，不随日志刷新或状态心跳消失。
+ * 主进程在该环境重新跑起来时撕掉它——一个被系统关掉的号，在有人处理之前必须一直看得见。
+ */
+function renderStalledEviction(status) {
+  const info = status && status.stalledEviction;
+  const show = Boolean(info && info.label);
+  fields.stalledEviction.classList.toggle('hidden', !show);
+  if (!show) {
+    fields.stalledEvictionText.textContent = '';
+    return;
+  }
+  const minutes = Math.max(1, Math.round(Number(info.stalledMs || 0) / 60000));
+  const since = info.since ? new Date(info.since) : null;
+  const sinceText = since && !Number.isNaN(since.getTime())
+    ? `${String(since.getHours()).padStart(2, '0')}:${String(since.getMinutes()).padStart(2, '0')} 起`
+    : '';
+  fields.stalledEvictionText.textContent =
+    `${info.label}${sinceText ? `（${sinceText}）` : ''}已持续约 ${minutes} 分钟无人处理，`
+    + '自动化已关闭、浏览器槽位已让出。处理完请手动重新启动这个环境。';
 }
 
 // ─── 标题带：账号身份 + 平台标识（随选中环境）+ 健康合成 + 风控染色 ───
@@ -6037,6 +6063,7 @@ function render(status) {
   renderLog();
   renderCommandDiagnostics(status, now);
   renderEdgeFailure(status);
+  renderStalledEviction(status);
   renderTitlebar(status);
   renderRuntimeGuidance(status, now);
   renderPresence(status, now);

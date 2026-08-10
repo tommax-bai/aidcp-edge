@@ -33,6 +33,23 @@ const standby = require('../../src/electron/browser-cold-standby.cjs') as {
     now?: number,
   ) => { reason: string; count: number; since: number };
   shouldLogStandbyRefusal: (streak: { reason: string; count: number; since: number } | null) => boolean;
+  DEFAULT_STALLED_BLOCKER_EVICTION_MS: number;
+  MIN_VALID_STALLED_BLOCKER_EVICTION_MS: number;
+  EVICTABLE_STALLED_BLOCKER_REASONS: readonly string[];
+  isEvictableStalledBlocker: (reason: unknown) => boolean;
+  noteStalledBlocker: (
+    previous: { reason: string; since: number } | null,
+    reason: unknown,
+    now?: number,
+  ) => { reason: string; since: number } | null;
+  shouldEvictStalledBlocker: (input: {
+    hint: unknown;
+    flags?: Record<string, unknown>;
+    status?: Record<string, unknown>;
+    stall?: { reason: string; since: number } | null;
+    settings?: Record<string, unknown>;
+    now?: number;
+  }) => { evict: boolean; reason: string; stalledMs?: number; since?: number };
 };
 
 const now = 1_700_000_000_000;
@@ -448,4 +465,214 @@ test('browser-cold-standby: 每一条本地拒绝都要留痕（不许静默 ret
   const eligibleGuardAt = refusalBlock.indexOf('hint.eligible === false');
   assert.ok(eligibleGuardAt !== -1 && eligibleGuardAt < noteAt, '「云端说还有活干」不是拒绝，必须先复位再记账');
   assert.ok(refusalBlock.slice(noteAt).includes('refusalPatch(streak)'), '记账必须写进待机状态供界面呈现');
+});
+
+// ─── 阻塞滞留终止（change release-browser-slot-on-stalled-blocker）────────────────────────
+//
+// 需人介入的阻塞（卡在弹窗上 / 没绑人设）此前可以**无限期**攥住一格浏览器执行槽：云端刻意不产出
+// 可让位提示（对的——绝不能关掉运营正要去解验证码的浏览器），而红线只写了「不许关」、没写「人一直
+// 不来怎么办」。这批测试守的是那个补上的上限，以及它**绝不能误伤**的四条护栏。
+
+const EVICT_CFG = {
+  enabled: true,
+  warmupMs: 90_000,
+  minHoldMs: 3 * 60_000,
+  evictionEnabled: true,
+  evictionMs: 15 * 60_000,
+};
+const OVERLAY = 'hard_blocker:overlay_pause';
+const STALLED = { reason: OVERLAY, since: now - 20 * 60_000 };
+
+function blockedHint(overrides: Record<string, unknown> = {}) {
+  return hint({ eligible: false, reason: OVERLAY, waitMs: 0, wakeAt: now, ...overrides });
+}
+
+function evictInput(overrides: {
+  hint?: unknown;
+  flags?: Record<string, unknown>;
+  status?: Record<string, unknown>;
+  stall?: { reason: string; since: number } | null;
+  settings?: Record<string, unknown>;
+} = {}) {
+  return {
+    hint: overrides.hint ?? blockedHint(),
+    status: { cloud: 'connected', ...(overrides.status || {}) },
+    flags: { occupiesSlot: true, automationIntent: 'enabled', automationPaused: false, ...(overrides.flags || {}) },
+    stall: overrides.stall === undefined ? STALLED : overrides.stall,
+    settings: { ...EVICT_CFG, ...(overrides.settings || {}) },
+    now,
+  };
+}
+
+test('滞留终止: 四条护栏齐备且超门槛 → 终止并给出已滞留时长', () => {
+  const v = standby.shouldEvictStalledBlocker(evictInput());
+  assert.equal(v.evict, true);
+  assert.equal(v.reason, OVERLAY);
+  assert.equal(v.stalledMs, 20 * 60_000);
+});
+
+test('滞留终止: 四条护栏逐条证伪——只差一条就绝不终止', () => {
+  const cases: [string, Parameters<typeof standby.shouldEvictStalledBlocker>[0], string][] = [
+    // ① 原因不在白名单：全局停机 / 特性未开 / 副本陈旧都会走到这里，照关即整机清场。
+    ['原因不可终止', evictInput({ hint: blockedHint({ reason: 'not_ready:dispatch_halted' }) }), 'not_evictable'],
+    // ② 不占槽：关掉它腾不出任何位子，纯亏。
+    ['不占执行槽', evictInput({ flags: { occupiesSlot: false } }), 'no_slot'],
+    // ③ 运营已手动暂停/关闭：那是另一条路，不归本机制管。
+    ['自动化未启用', evictInput({ flags: { automationIntent: 'paused' } }), 'automation_not_enabled'],
+    // ④ 断连：收不到提示 ≠ 阻塞仍在。
+    ['云端未连接', evictInput({ status: { cloud: 'disconnected' } }), 'cloud_not_connected'],
+  ];
+  for (const [label, input, expected] of cases) {
+    const v = standby.shouldEvictStalledBlocker(input);
+    assert.equal(v.evict, false, `${label}：绝不能终止`);
+    assert.equal(v.reason, expected, `${label}：拒绝原因必须具名可诊断`);
+  }
+});
+
+test('滞留终止: 全局性原因（停机 / 特性未开）与会自愈原因一律不在白名单内', () => {
+  // 这四种此前与「人设未绑」共用裸 not_ready 一个名字。若照单终止：前两种每个环境都报，
+  // 一次误配清空整机且无受益人；后两种副本追上就自愈，根本没有人可以去「处理」。
+  for (const reason of [
+    'not_ready:dispatch_halted',
+    'not_ready:feature_off',
+    'not_ready:persona_unavailable',
+    'not_ready:config_stale',
+    'not_ready:platform_no_browse',
+    'not_ready:unclassified',
+    'hard_blocker:risk_unclassified',
+  ]) {
+    assert.equal(standby.isEvictableStalledBlocker(reason), false, `${reason} 绝不可终止`);
+  }
+  assert.deepEqual([...standby.EVICTABLE_STALLED_BLOCKER_REASONS], [OVERLAY, 'not_ready:persona_unbound']);
+});
+
+test('滞留终止: 云端没见过的新原因默认不终止（白名单而非黑名单）', () => {
+  // 黑名单对新增原因的默认后果是「关掉它」，白名单的默认后果是「多占一会儿槽位」。
+  // 云端将来新增任何原因，在有人显式收录之前都必须落在安全的那一侧。
+  const v = standby.shouldEvictStalledBlocker(
+    evictInput({ hint: blockedHint({ reason: 'hard_blocker:some_future_reason' }), stall: null }),
+  );
+  assert.equal(v.evict, false);
+  assert.equal(v.reason, 'not_evictable');
+  assert.equal(standby.noteStalledBlocker(null, 'hard_blocker:some_future_reason', now), null, '未收录的原因连计时都不该起');
+});
+
+test('滞留终止: 云端改口说可以让位 → 不归本机制，且滞留计时归零', () => {
+  const v = standby.shouldEvictStalledBlocker(evictInput({ hint: hint({ eligible: true }) }));
+  assert.equal(v.evict, false);
+  assert.equal(v.reason, 'eligible');
+  assert.equal(standby.noteStalledBlocker(STALLED, 'view_quota:hour', now), null, '可让位的等待不是滞留');
+});
+
+test('滞留终止: 未到门槛不终止，且如实回报已滞留多久', () => {
+  const v = standby.shouldEvictStalledBlocker(
+    evictInput({ stall: { reason: OVERLAY, since: now - 14 * 60_000 } }),
+  );
+  assert.equal(v.evict, false);
+  assert.equal(v.reason, 'stall_too_short');
+  assert.equal(v.stalledMs, 14 * 60_000);
+});
+
+test('滞留计时: 换原因即归零，同原因持续累计', () => {
+  const first = standby.noteStalledBlocker(null, OVERLAY, now);
+  assert.deepEqual(first, { reason: OVERLAY, since: now });
+  const same = standby.noteStalledBlocker(first, OVERLAY, now + 60_000);
+  assert.equal(same?.since, now, '同一原因必须继续用最初那个起点，否则永远攒不满门槛');
+  const changed = standby.noteStalledBlocker(same, 'not_ready:persona_unbound', now + 120_000);
+  assert.equal(changed?.since, now + 120_000, '换了原因 = 情况变了，MUST NOT 继承上一段时长');
+});
+
+test('滞留计时: 断连期间不得推进——重连后必须从头计满门槛', () => {
+  // 若只按「首次出现时刻」算差值，断连 20 分钟后重连的第一跳就越过门槛：
+  // 那等于让断连时长替阻塞背书，凭空关掉一个环境。清零由 updateStatus 在断连时收口执行。
+  const reconnected = standby.noteStalledBlocker(null, OVERLAY, now);
+  const v = standby.shouldEvictStalledBlocker(
+    evictInput({ stall: reconnected, settings: { evictionMs: 15 * 60_000 } }),
+  );
+  assert.equal(v.evict, false, '重连后第一跳绝不能立刻终止');
+  assert.equal(v.reason, 'stall_too_short');
+});
+
+test('滞留终止: 记账与当前原因对不上时不拿别人的时长顶数', () => {
+  const v = standby.shouldEvictStalledBlocker(
+    evictInput({ stall: { reason: 'not_ready:persona_unbound', since: now - 60 * 60_000 } }),
+  );
+  assert.equal(v.evict, false);
+  assert.equal(v.reason, 'no_stall');
+});
+
+test('滞留终止: 开关关闭 → 完全回到本 change 之前的行为', () => {
+  const v = standby.shouldEvictStalledBlocker(evictInput({ settings: { evictionEnabled: false } }));
+  assert.equal(v.evict, false);
+  assert.equal(v.reason, 'disabled');
+});
+
+test('滞留终止: 门槛低于下限的配置一律回落默认（一两跳抖动不得关掉环境）', () => {
+  const tooSmall = standby.normalizeColdStandbySettings({ stalledBlockerEvictionMs: 30_000 }, {}) as unknown as {
+    evictionMs: number; evictionEnabled: boolean;
+  };
+  assert.equal(tooSmall.evictionMs, standby.DEFAULT_STALLED_BLOCKER_EVICTION_MS);
+  assert.ok(
+    standby.MIN_VALID_STALLED_BLOCKER_EVICTION_MS >= 5 * 60_000,
+    '下限必须显著大于待机提示约 60s 的到达节拍',
+  );
+  const ok = standby.normalizeColdStandbySettings({ stalledBlockerEvictionMs: 30 * 60_000 }, {}) as unknown as {
+    evictionMs: number;
+  };
+  assert.equal(ok.evictionMs, 30 * 60_000, '合法配置必须生效，MUST NOT 使用另一份内置门槛');
+});
+
+test('滞留终止: 环境变量可秒级回滚', () => {
+  const off = standby.normalizeColdStandbySettings({}, { AIDCP_STALLED_BLOCKER_EVICTION: 'false' }) as unknown as {
+    evictionEnabled: boolean;
+  };
+  assert.equal(off.evictionEnabled, false);
+});
+
+test('滞留终止: 判定必经每一跳提示，且排在冷待机判定之前', () => {
+  // 挂在「云端说不该让位」那一支里必然漏：那支下面有若干条提前 return，漏掉的形态是
+  // 某些原因下计时永远不归零、或永远不推进，两个方向都错。
+  const body = functionBody(electronMainSource, 'applyBrowserStandbyHint');
+  const evictAt = body.indexOf('evictStalledBlockerIfDue(');
+  const standbyAt = body.indexOf('shouldEnterColdStandby(');
+  assert.ok(evictAt !== -1, '提示应用路径必须调用滞留判定');
+  assert.ok(evictAt < standbyAt, '滞留判定必须在冷待机判定之前，不能挂在某个分支里');
+});
+
+test('滞留终止: 占槽判据与槽位记账同源', () => {
+  // 各写一份判据，漂移的现形方式是关掉一个本来就不占槽的环境——关了也腾不出位子，纯亏。
+  assert.ok(
+    functionBody(electronMainSource, 'occupiedSlots').includes('handleOccupiesBrowserSlot('),
+    '槽位计数必须走同一个判据',
+  );
+  assert.ok(
+    functionBody(electronMainSource, 'evictStalledBlockerIfDue').includes('handleOccupiesBrowserSlot('),
+    '滞留终止必须走同一个判据',
+  );
+});
+
+test('滞留终止: 复用运营关闭那条路径，但归因必须可分辨', () => {
+  const body = functionBody(electronMainSource, 'evictStalledBlockerIfDue');
+  assert.ok(body.includes('stopAutomation(handle)'), '必须复用既有关闭路径，不新造终止路径');
+  assert.ok(body.includes('stalledEviction:'), '必须写下可分辨的系统终止归因，否则事后分不清是人关的还是系统关的');
+  assert.equal(body.includes('queueStartEnv('), false, '终止是终态：绝不自动重启');
+  assert.equal(body.includes('enqueueStartFlow('), false, '终止是终态：绝不进启动队列');
+});
+
+test('滞留终止: 断连清零与卡片清除都收口在状态出口上', () => {
+  const body = functionBody(electronMainSource, 'updateStatus');
+  assert.ok(body.includes('handle.stalledBlocker = null'), '断连必须清滞留计时');
+  assert.ok(body.includes('stalledEviction: null'), '环境重新跑起来后必须撕掉旧卡片');
+});
+
+test('滞留终止: 持久卡片与运行状态解耦，只随主进程归因存亡', () => {
+  // 与 edgeFailure 那张卡片不同，这一张 MUST NOT 挂在任何瞬时状态轴上：一个被系统关掉的号，
+  // 在有人处理之前必须一直看得见。撕卡由主进程在环境重新跑起来时统一执行。
+  const rendererSource = readFileSync(new URL('../../src/electron/renderer/renderer.js', import.meta.url), 'utf8');
+  const body = functionBody(rendererSource, 'renderStalledEviction');
+  assert.ok(body.includes('status.stalledEviction'), '卡片必须直接读主进程的归因');
+  for (const axis of ['status.edge', 'status.session', 'status.cloud', 'status.auth']) {
+    assert.equal(body.includes(axis), false, `卡片 MUST NOT 挂在 ${axis} 上——那会让它被一次状态刷新冲掉`);
+  }
+  assert.ok(body.includes('手动重新启动'), '卡片必须写明需要人做什么');
 });
